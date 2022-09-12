@@ -5,8 +5,8 @@ import ase.io
 import numpy as np
 import torch
 
-from mace import data, tools
-from mace.tools import torch_geometric
+from mace_jax import data, tools
+from mace_jax.tools import torch_geometric
 
 
 def parse_args() -> argparse.Namespace:

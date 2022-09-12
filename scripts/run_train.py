@@ -10,9 +10,9 @@ from torch.optim.swa_utils import SWALR, AveragedModel
 from torch_ema import ExponentialMovingAverage
 from utils import create_error_table, get_dataset_from_xyz
 
-import mace
-from mace import data, modules, tools
-from mace.tools import torch_geometric
+import mace_jax
+from mace_jax import data, modules, tools
+from mace_jax.tools import torch_geometric
 
 
 def main() -> None:
@@ -23,7 +23,7 @@ def main() -> None:
     tools.set_seeds(args.seed)
     tools.setup_logger(level=args.log_level, tag=tag, directory=args.log_dir)
     try:
-        logging.info(f"MACE version: {mace.__version__}")
+        logging.info(f"MACE version: {mace_jax.__version__}")
     except AttributeError:
         logging.info("Cannot find MACE version, please install MACE via pip")
     logging.info(f"Configuration: {args}")

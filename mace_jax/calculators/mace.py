@@ -1,8 +1,8 @@
 import torch
 from ase.calculators.calculator import Calculator, all_changes
 
-from mace import data
-from mace.tools import torch_geometric, torch_tools, utils
+from mace_jax import data
+from mace_jax.tools import torch_geometric, torch_tools, utils
 
 
 class MACECalculator(Calculator):

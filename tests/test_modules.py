@@ -3,15 +3,15 @@ import torch
 import torch.nn.functional
 from e3nn import o3
 
-from mace.data import AtomicData, Configuration
-from mace.modules import (
+from mace_jax.data import AtomicData, Configuration
+from mace_jax.modules import (
     AtomicEnergiesBlock,
     BesselBasis,
     PolynomialCutoff,
     SymmetricContraction,
     WeightedEnergyForcesLoss,
 )
-from mace.tools import AtomicNumberTable, scatter, to_numpy, torch_geometric
+from mace_jax.tools import AtomicNumberTable, scatter, to_numpy, torch_geometric
 
 config = Configuration(
     atomic_numbers=np.array([8, 1, 1]),

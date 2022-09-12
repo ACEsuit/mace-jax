@@ -4,8 +4,8 @@ import numpy as np
 import torch
 from e3nn import o3
 
-from mace.data import AtomicData
-from mace.tools.scatter import scatter_sum
+from mace_jax.data import AtomicData
+from mace_jax.tools.scatter import scatter_sum
 
 from .blocks import (
     AtomicEnergiesBlock,

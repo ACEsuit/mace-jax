@@ -4,8 +4,8 @@ import torch.nn.functional
 from e3nn import o3
 from scipy.spatial.transform import Rotation as R
 
-from mace import data, modules, tools
-from mace.tools import torch_geometric
+from mace_jax import data, modules, tools
+from mace_jax.tools import torch_geometric
 
 torch.set_default_dtype(torch.float64)
 config = data.Configuration(

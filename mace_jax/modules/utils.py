@@ -6,8 +6,8 @@ import torch
 import torch.nn
 import torch.utils.data
 
-from mace.tools import to_numpy
-from mace.tools.scatter import scatter_sum
+from mace_jax.tools import to_numpy
+from mace_jax.tools.scatter import scatter_sum
 
 from .blocks import AtomicEnergiesBlock
 
