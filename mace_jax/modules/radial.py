@@ -1,81 +1,49 @@
-import numpy as np
-import torch
+import e3nn_jax as e3nn
+import haiku as hk
+import jax.numpy as jnp
 
 
-class BesselBasis(torch.nn.Module):
+class BesselBasis(hk.Module):
     """
     Klicpera, J.; Groß, J.; Günnemann, S. Directional Message Passing for Molecular Graphs; ICLR 2020.
     Equation (7)
     """
 
-    def __init__(self, r_max: float, num_basis=8, trainable=False):
+    def __init__(self, r_max: float, num_basis: int = 8):
         super().__init__()
 
-        bessel_weights = (
-            np.pi
-            / r_max
-            * torch.linspace(
-                start=1.0,
-                end=num_basis,
-                steps=num_basis,
-                dtype=torch.get_default_dtype(),
-            )
-        )
-        if trainable:
-            self.bessel_weights = torch.nn.Parameter(bessel_weights)
-        else:
-            self.register_buffer("bessel_weights", bessel_weights)
+        self.r_max = r_max
+        self.num_basis = num_basis
 
-        self.register_buffer(
-            "r_max", torch.tensor(r_max, dtype=torch.get_default_dtype())
+    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:  # [..., 1]
+        n = jnp.arange(1, self.num_basis + 1)
+        x = x[..., None]
+        x_nonzero = jnp.where(x == 0, 1, x)
+        return jnp.sqrt(2 / self.r_max) * jnp.where(
+            x == 0,
+            n * jnp.pi / self.r_max,
+            jnp.sin(n * jnp.pi / self.r_max * x_nonzero) / x_nonzero,
         )
-        self.register_buffer(
-            "prefactor",
-            torch.tensor(np.sqrt(2.0 / r_max), dtype=torch.get_default_dtype()),
-        )
-
-    def forward(
-        self,
-        x: torch.Tensor,
-    ) -> torch.Tensor:  # [..., 1]
-        numerator = torch.sin(self.bessel_weights * x)  # [..., num_basis]
-        return self.prefactor * (numerator / x)
 
     def __repr__(self):
         return (
-            f"{self.__class__.__name__}(r_max={self.r_max}, num_basis={len(self.bessel_weights)}, "
-            f"trainable={self.bessel_weights.requires_grad})"
+            f"{self.__class__.__name__}(r_max={self.r_max}, num_basis={self.num_basis}"
         )
 
 
-class PolynomialCutoff(torch.nn.Module):
+class PolynomialCutoff(hk.Module):
     """
     Klicpera, J.; Groß, J.; Günnemann, S. Directional Message Passing for Molecular Graphs; ICLR 2020.
     Equation (8)
     """
 
-    p: torch.Tensor
-    r_max: torch.Tensor
-
-    def __init__(self, r_max: float, p=6):
+    def __init__(self, r_max: float, p: int = 6):
         super().__init__()
-        self.register_buffer("p", torch.tensor(p, dtype=torch.get_default_dtype()))
-        self.register_buffer(
-            "r_max", torch.tensor(r_max, dtype=torch.get_default_dtype())
-        )
+        self.r_max = r_max
+        self.p = p
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # yapf: disable
-        envelope = (
-                1.0
-                - ((self.p + 1.0) * (self.p + 2.0) / 2.0) * torch.pow(x / self.r_max, self.p)
-                + self.p * (self.p + 2.0) * torch.pow(x / self.r_max, self.p + 1)
-                - (self.p * (self.p + 1.0) / 2) * torch.pow(x / self.r_max, self.p + 2)
-        )
-        # yapf: enable
-
-        # noinspection PyUnresolvedReferences
-        return envelope * (x < self.r_max).type(torch.get_default_dtype())
+    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+        return e3nn.poly_envelope(self.p - 1, 2)(x / self.r_max) * (x < self.r_max)
 
     def __repr__(self):
         return f"{self.__class__.__name__}(p={self.p}, r_max={self.r_max})"
