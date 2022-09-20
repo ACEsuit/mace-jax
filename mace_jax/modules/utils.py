@@ -2,9 +2,7 @@ import logging
 from typing import Tuple
 
 import numpy as np
-import torch
-import torch.nn
-import torch.utils.data
+import jax.numpy as jnp
 
 from mace_jax.tools import to_numpy
 from mace_jax.tools.scatter import scatter_sum
@@ -12,49 +10,19 @@ from mace_jax.tools.scatter import scatter_sum
 from .blocks import AtomicEnergiesBlock
 
 
-def compute_forces(
-    energy: torch.Tensor, positions: torch.Tensor, training=True
-) -> torch.Tensor:
-    gradient = torch.autograd.grad(
-        outputs=energy,  # [n_graphs, ]
-        inputs=positions,  # [n_nodes, 3]
-        grad_outputs=torch.ones_like(energy),
-        retain_graph=training,  # Make sure the graph is not destroyed during training
-        create_graph=training,  # Create graph for second derivative
-        only_inputs=True,  # Diff only w.r.t. inputs
-        allow_unused=True,
-    )[
-        0
-    ]  # [n_nodes, 3]
-    if gradient is None:
-        logging.warning("Gradient is None, padded with zeros")
-        return torch.zeros_like(positions)
-    return -1 * gradient
-
-
 def get_edge_vectors_and_lengths(
-    positions: torch.Tensor,  # [n_nodes, 3]
-    edge_index: torch.Tensor,  # [2, n_edges]
-    shifts: torch.Tensor,  # [n_edges, 3]
-    normalize: bool = False,
-    eps: float = 1e-9,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    sender, receiver = edge_index
-    # From ase.neighborlist:
-    # D = positions[j]-positions[i]+S.dot(cell)
-    # where shifts = S.dot(cell)
-    vectors = positions[receiver] - positions[sender] + shifts  # [n_edges, 3]
-    lengths = torch.linalg.norm(vectors, dim=-1, keepdim=True)  # [n_edges, 1]
-    if normalize:
-        vectors_normed = vectors / (lengths + eps)
-        return vectors_normed, lengths
-
+    positions: np.ndarray,  # [n_nodes, 3]
+    receivers: np.ndarray,  # [n_edges]
+    senders: np.ndarray,  # [n_edges]
+    shifts: np.ndarray,  # [n_edges, 3]
+) -> Tuple[np.ndarray, np.ndarray]:
+    vectors = positions[receivers] - positions[senders] + shifts  # [n_edges, 3]
+    lengths = jnp.linalg.norm(vectors, axis=-1, keepdim=True)  # [n_edges, 1]
     return vectors, lengths
 
 
 def compute_mean_std_atomic_inter_energy(
-    data_loader: torch.utils.data.DataLoader,
-    atomic_energies: np.ndarray,
+    data_loader: torch.utils.data.DataLoader, atomic_energies: np.ndarray,
 ) -> Tuple[float, float]:
     atomic_energies_fn = AtomicEnergiesBlock(atomic_energies=atomic_energies)
 
@@ -78,8 +46,7 @@ def compute_mean_std_atomic_inter_energy(
 
 
 def compute_mean_rms_energy_forces(
-    data_loader: torch.utils.data.DataLoader,
-    atomic_energies: np.ndarray,
+    data_loader: torch.utils.data.DataLoader, atomic_energies: np.ndarray,
 ) -> Tuple[float, float]:
     atomic_energies_fn = AtomicEnergiesBlock(atomic_energies=atomic_energies)
 
