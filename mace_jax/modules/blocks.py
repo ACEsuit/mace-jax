@@ -20,7 +20,8 @@ class LinearNodeEmbeddingBlock(hk.Module):
         self.linear = e3nn.Linear(irreps_out=irreps_out)
 
     def __call__(
-        self, node_attrs: e3nn.IrrepsArray,  # [n_nodes, irreps]
+        self,
+        node_attrs: e3nn.IrrepsArray,  # [n_nodes, irreps]
     ) -> e3nn.IrrepsArray:
         return self.linear(node_attrs)
 
@@ -32,7 +33,7 @@ class LinearReadoutBlock(hk.Module):
         return e3nn.Linear(e3nn.Irreps("0e"))(x)  # [n_nodes, 1]
 
 
-class NonLinearReadoutBlock(hk.nn.Module):
+class NonLinearReadoutBlock(hk.Module):
     def __init__(self, MLP_irreps: e3nn.Irreps, gate: Optional[Callable]):
         super().__init__()
         assert len(MLP_irreps) == 1
@@ -43,7 +44,7 @@ class NonLinearReadoutBlock(hk.nn.Module):
         self, x: e3nn.IrrepsArray
     ) -> e3nn.IrrepsArray:  # [n_nodes, irreps]  # [..., ]
         x = e3nn.Linear(self.hidden_irreps)(x)
-        x = e3nn.scalar_activation(x)([self.gate])
+        x = e3nn.scalar_activation(x, [self.gate])
         return e3nn.Linear(e3nn.Irreps("0e"))(x)  # [n_nodes, 1]
 
 
@@ -72,7 +73,8 @@ class RadialEmbeddingBlock(hk.Module):
         self.cutoff_fn = PolynomialCutoff(r_max=r_max, p=num_polynomial_cutoff)
 
     def __call__(
-        self, edge_lengths: e3nn.IrrepsArray,  # [n_edges, 1]
+        self,
+        edge_lengths: e3nn.IrrepsArray,  # [n_edges, 1]
     ):
         bessel = self.bessel_fn(edge_lengths)  # [n_edges, n_basis]
         cutoff = self.cutoff_fn(edge_lengths)  # [n_edges, 1]
@@ -80,11 +82,16 @@ class RadialEmbeddingBlock(hk.Module):
 
 
 class EquivariantProductBasisBlock(hk.Module):
-    def __init__(self, target_irreps: e3nn.Irreps, correlation: int,) -> None:
+    def __init__(
+        self,
+        target_irreps: e3nn.Irreps,
+        correlation: int,
+    ) -> None:
         super().__init__()
-
+        target_irreps = e3nn.Irreps(target_irreps)
         self.symmetric_contractions = SymmetricContraction(
-            keep_irrep_out=target_irreps, correlation=correlation,
+            keep_irrep_out={ir for _, ir in target_irreps},
+            correlation=correlation,
         )
 
     def __call__(
@@ -93,9 +100,10 @@ class EquivariantProductBasisBlock(hk.Module):
         node_attrs: e3nn.IrrepsArray,
         sc: Optional[e3nn.IrrepsArray],
     ) -> e3nn.IrrepsArray:
+        assert {ir for _, ir in node_attrs.irreps} == {e3nn.Irrep("0e")}
         node_feats = self.symmetric_contractions(
-            node_feats.factor_mul_to_last_axis(), node_attrs
-        )
+            node_feats.factor_mul_to_last_axis(), node_attrs.array
+        ).repeat_mul_by_last_axis()
         node_feats = e3nn.Linear(node_feats.irreps)(node_feats)
         return node_feats + sc if sc is not None else node_feats
 
@@ -111,12 +119,6 @@ class InteractionBlock(ABC, hk.Module):
         self.target_irreps = target_irreps
         self.hidden_irreps = hidden_irreps
         self.avg_num_neighbors = avg_num_neighbors
-
-        self._setup()
-
-    @abstractmethod
-    def _setup(self) -> None:
-        raise NotImplementedError
 
     @abstractmethod
     def __call__(
@@ -148,32 +150,37 @@ class AgnosticResidualInteractionBlock(InteractionBlock):
         node_feats = e3nn.Linear(node_feats.irreps)(node_feats)
         # Tensor product
         irreps_mid, instructions = tp_out_irreps_with_instructions(
-            node_feats.irreps, edge_attrs.irreps, self.target_irreps,
+            node_feats.irreps,
+            edge_attrs.irreps,
+            self.target_irreps,
         )
-        self.conv_tp = e3nn.FunctionalTensorProduct(
-            node_feats.irreps, edge_attrs.irreps, irreps_mid, instructions=instructions,
+        # assert irreps_mid.simplify() == self.target_irreps.simplify()
+        conv_tp = e3nn.FunctionalTensorProduct(
+            node_feats.irreps,
+            edge_attrs.irreps,
+            irreps_mid,
+            instructions=instructions,
         )
+        del irreps_mid
+        weight_numel = sum(
+            np.prod(i.path_shape) for i in conv_tp.instructions if i.has_weight
+        )
+
         # Learnable Radial
-        tp_weights = self.e3nn.MultiLayerPerceptron(
-            3 * [64] + [self.conv_tp.weight_numel], jax.nn.silu
-        )(
-            edge_feats
+        tp_weights = e3nn.MultiLayerPerceptron(3 * [64] + [weight_numel], jax.nn.silu)(
+            edge_feats.array
         )  # [n_edges, n_basis, 1]
 
         # Convolution weights
-        mji = self.conv_tp(
-            node_feats[senders], edge_attrs, tp_weights
+        mji = jax.vmap(conv_tp.left_right)(
+            tp_weights, node_feats[senders], edge_attrs
         )  # [n_edges, irreps]
+        mji = mji.simplify()
 
         # Scatter sum
-        message = jnp.zeros(
-            (node_feats.shape[0], self.target_irreps.dim)
-        )  # [n_nodes, irreps]
-        message = e3nn.IrrepsArray(
-            self.target_irreps, message.at[receivers].add(mji.array)
-        )
+        message = jnp.zeros((node_feats.shape[0], mji.shape[1]))  # [n_nodes, irreps]
+        message = e3nn.IrrepsArray(mji.irreps, message.at[receivers].add(mji.array))
         # Linear
-        self.irreps_out = self.target_irreps
         message = e3nn.Linear(self.target_irreps)(message) / self.avg_num_neighbors
 
         return (

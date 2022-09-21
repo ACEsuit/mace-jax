@@ -10,7 +10,7 @@ def tp_out_irreps_with_instructions(
     trainable = True
 
     # Collect possible irreps and their instructions
-    irreps_out_list: List[Tuple[int, e3nn.Irreps]] = []
+    irreps_out_list: List[Tuple[int, e3nn.Irrep]] = []
     instructions = []
     for i, (mul, ir_in) in enumerate(irreps1):
         for j, (_, ir_edge) in enumerate(irreps2):

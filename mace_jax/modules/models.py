@@ -1,11 +1,11 @@
 from typing import Any, Callable, Dict, List, Optional, Type
 
-import numpy as np
-import jax
-import jax.numpy as jnp
 import e3nn_jax as e3nn
 import haiku as hk
+import jax
+import jax.numpy as jnp
 import jraph
+import numpy as np
 
 from mace_jax.data import AtomicData
 from mace_jax.tools.scatter import scatter_sum
@@ -20,7 +20,7 @@ from .blocks import (
     RadialEmbeddingBlock,
     ScaleShiftBlock,
 )
-from .utils import compute_forces, get_edge_vectors_and_lengths
+from .utils import get_edge_vectors_and_lengths
 
 
 class MACE(hk.Module):
@@ -68,7 +68,7 @@ class MACE(hk.Module):
         # Interactions and readout
         self.atomic_energies_fn = AtomicEnergiesBlock(atomic_energies)
 
-    def __call__(self, graph: jraph.GraphTuple) -> Dict[str, Any]:
+    def __call__(self, graph: jraph.GraphsTuple) -> Dict[str, Any]:
         def energy_fn(positions):
             # Setup
             num_graphs = graph.n_node.shape[0]
@@ -135,14 +135,14 @@ class MACE(hk.Module):
                     senders=graph.senders,
                 )
                 prod = EquivariantProductBasisBlock(
-                    target_irreps=hidden_irreps_out, correlation=self.correlation,
+                    target_irreps=hidden_irreps_out, correlation=self.correlation
                 )
                 node_feats = prod(node_feats=node_feats, sc=sc, node_attrs=node_attrs)
                 if i == self.num_interactions - 1:
                     readout = NonLinearReadoutBlock(self.MLP_irreps, self.gate)
                     node_energies = readout(node_feats).array.squeeze(-1)  # [n_nodes, ]
                 else:
-                    readout = LinearReadoutBlock(self.hidden_irreps)
+                    readout = LinearReadoutBlock()
                     node_energies = readout(node_feats).array.squeeze(-1)  # [n_nodes, ]
                 energy = e3nn.index_add(
                     indices=graph_index, input=node_energies, out_dim=num_graphs
@@ -152,11 +152,11 @@ class MACE(hk.Module):
             # Sum over energy contributions
             contributions = jnp.stack(energies, axis=0)  # [num_layers, n_graphs]
             total_energy = jnp.sum(contributions, axis=0)  # [n_graphs, ]
-            return jnp.sum(total_energy), total_energy, contributions
+            return jnp.sum(total_energy), (total_energy, contributions)
 
-        (_, (total_energy, contributions)), minus_forces = jax.value_and_grad(
-            energy_fn, has_aux=True
-        )(graph.nodes.positions)
+        minus_forces, (total_energy, contributions) = jax.grad(energy_fn, has_aux=True)(
+            graph.nodes.positions
+        )
 
         return {
             "energy": total_energy,
@@ -167,7 +167,10 @@ class MACE(hk.Module):
 
 class ScaleShiftMACE(MACE):
     def __init__(
-        self, atomic_inter_scale: float, atomic_inter_shift: float, **kwargs,
+        self,
+        atomic_inter_scale: float,
+        atomic_inter_shift: float,
+        **kwargs,
     ):
         super().__init__(**kwargs)
         self.scale_shift = ScaleShiftBlock(

@@ -1,10 +1,8 @@
 from typing import Callable, Dict, Optional, Type
 
-import torch
+import jax
 
 from .blocks import (
-    AgnosticNonlinearInteractionBlock,
-    AgnosticResidualNonlinearInteractionBlock,
     AtomicEnergiesBlock,
     EquivariantProductBasisBlock,
     InteractionBlock,
@@ -12,61 +10,59 @@ from .blocks import (
     LinearReadoutBlock,
     NonLinearReadoutBlock,
     RadialEmbeddingBlock,
-    RealAgnosticInteractionBlock,
-    RealAgnosticResidualInteractionBlock,
-    ResidualElementDependentInteractionBlock,
+    AgnosticInteractionBlock,
+    AgnosticResidualInteractionBlock,
     ScaleShiftBlock,
 )
-from .loss import EnergyForcesLoss, WeightedEnergyForcesLoss, WeightedForcesLoss
-from .models import MACE, BOTNet, ScaleShiftBOTNet, ScaleShiftMACE
+
+# from .loss import EnergyForcesLoss, WeightedEnergyForcesLoss, WeightedForcesLoss
+from .models import MACE, ScaleShiftMACE
 from .radial import BesselBasis, PolynomialCutoff
 from .symmetric_contraction import SymmetricContraction
-from .utils import (
-    compute_avg_num_neighbors,
-    compute_mean_rms_energy_forces,
-    compute_mean_std_atomic_inter_energy,
-)
+
+# from .utils import (
+#     compute_avg_num_neighbors,
+#     compute_mean_rms_energy_forces,
+#     compute_mean_std_atomic_inter_energy,
+# )
 
 interaction_classes: Dict[str, Type[InteractionBlock]] = {
-    "AgnosticNonlinearInteractionBlock": AgnosticNonlinearInteractionBlock,
-    "ResidualElementDependentInteractionBlock": ResidualElementDependentInteractionBlock,
-    "AgnosticResidualNonlinearInteractionBlock": AgnosticResidualNonlinearInteractionBlock,
-    "RealAgnosticResidualInteractionBlock": RealAgnosticResidualInteractionBlock,
-    "RealAgnosticInteractionBlock": RealAgnosticInteractionBlock,
+    "AgnosticResidualInteractionBlock": AgnosticResidualInteractionBlock,
+    "AgnosticInteractionBlock": AgnosticInteractionBlock,
 }
 
-scaling_classes: Dict[str, Callable] = {
-    "std_scaling": compute_mean_std_atomic_inter_energy,
-    "rms_forces_scaling": compute_mean_rms_energy_forces,
-}
+# scaling_classes: Dict[str, Callable] = {
+#     "std_scaling": compute_mean_std_atomic_inter_energy,
+#     "rms_forces_scaling": compute_mean_rms_energy_forces,
+# }
 
 gate_dict: Dict[str, Optional[Callable]] = {
-    "abs": torch.abs,
-    "tanh": torch.tanh,
-    "silu": torch.nn.functional.silu,
+    "abs": jax.numpy.abs,
+    "tanh": jax.numpy.tanh,
+    "silu": jax.nn.silu,
     "None": None,
 }
 
 __all__ = [
-    "AtomicEnergiesBlock",
-    "RadialEmbeddingBlock",
-    "LinearNodeEmbeddingBlock",
-    "LinearReadoutBlock",
-    "EquivariantProductBasisBlock",
-    "ScaleShiftBlock",
-    "InteractionBlock",
-    "NonLinearReadoutBlock",
-    "PolynomialCutoff",
-    "BesselBasis",
     "MACE",
     "ScaleShiftMACE",
-    "BOTNet",
-    "ScaleShiftBOTNet",
     "EnergyForcesLoss",
     "WeightedEnergyForcesLoss",
     "WeightedForcesLoss",
+    "RadialEmbeddingBlock",
+    "LinearNodeEmbeddingBlock",
+    "LinearReadoutBlock",
+    "NonLinearReadoutBlock",
+    "EquivariantProductBasisBlock",
+    "AtomicEnergiesBlock",
+    "ScaleShiftBlock",
     "SymmetricContraction",
-    "interaction_classes",
-    "compute_mean_std_atomic_inter_energy",
+    "BesselBasis",
+    "PolynomialCutoff",
     "compute_avg_num_neighbors",
+    "compute_mean_rms_energy_forces",
+    "compute_mean_std_atomic_inter_energy",
+    "interaction_classes",
+    "scaling_classes",
+    "gate_dict",
 ]

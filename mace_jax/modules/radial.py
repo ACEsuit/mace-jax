@@ -17,7 +17,6 @@ class BesselBasis(hk.Module):
 
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:  # [..., 1]
         n = jnp.arange(1, self.num_basis + 1)
-        x = x[..., None]
         x_nonzero = jnp.where(x == 0, 1, x)
         return jnp.sqrt(2 / self.r_max) * jnp.where(
             x == 0,

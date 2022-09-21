@@ -5,6 +5,9 @@ requires = [
 ]
 build-backend = "setuptools.build_meta"
 
+[tool.black]
+max-line-length = 128
+
 # Make isort compatible with black
 [tool.isort]
 profile = "black"
