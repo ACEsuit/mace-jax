@@ -71,7 +71,6 @@ def test_mace():
 
     w = model.init(jax.random.PRNGKey(0), graph)
     out = model.apply(w, graph)
-    print(out)
 
     def wrapper(positions):
         graph = jraph.GraphsTuple(
