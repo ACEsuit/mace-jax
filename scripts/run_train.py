@@ -246,32 +246,6 @@ def main() -> None:
         if opt_start_epoch is not None:
             start_epoch = opt_start_epoch
 
-    swa: Optional[tools.SWAContainer] = None
-    if args.swa:
-        if args.start_swa is None:
-            args.start_swa = (
-                args.max_num_epochs // 4 * 3
-            )  # if not set start swa at 75% of training
-        if args.loss == "forces_only":
-            logging.info("Can not select swa with forces only loss.")
-        loss_fn_energy = modules.WeightedEnergyForcesLoss(
-            energy_weight=args.swa_energy_weight, forces_weight=args.swa_forces_weight
-        )
-        swa = tools.SWAContainer(
-            model=AveragedModel(model),
-            scheduler=SWALR(
-                optimizer=optimizer,
-                swa_lr=args.swa_lr,
-                anneal_epochs=1,
-                anneal_strategy="linear",
-            ),
-            start=args.start_swa,
-            loss_fn=loss_fn_energy,
-        )
-        logging.info(
-            f"Using stochastic weight averaging (after {swa.start} epochs) with energy weight : {args.swa_energy_weight}, forces weight : {args.swa_forces_weight} and learning rate : {args.swa_lr}"
-        )
-
     ema: Optional[ExponentialMovingAverage] = None
     if args.ema:
         ema = ExponentialMovingAverage(model.parameters(), decay=args.ema_decay)
@@ -294,7 +268,7 @@ def main() -> None:
         logger=logger,
         patience=args.patience,
         device=device,
-        swa=swa,
+        swa=None,
         ema=ema,
         max_grad_norm=args.clip_grad,
         log_errors=args.error_table,
