@@ -1,5 +1,5 @@
 from collections.abc import Mapping, Sequence
-from typing import List, Optional, Union
+from typing import Callable, List, Optional, Union
 
 import torch.utils.data
 from torch.utils.data.dataloader import default_collate
@@ -10,18 +10,28 @@ from .dataset import Dataset
 
 
 class Collater:
-    def __init__(self, follow_batch, exclude_keys):
+    def __init__(self, follow_batch, exclude_keys, overwrapper):
         self.follow_batch = follow_batch
         self.exclude_keys = exclude_keys
+        self.overwrapper = overwrapper
 
     def __call__(self, batch):
         elem = batch[0]
         if isinstance(elem, Data):
-            return Batch.from_data_list(
-                batch,
-                follow_batch=self.follow_batch,
-                exclude_keys=self.exclude_keys,
-            )
+            if self.overwrapper is None:
+                return Batch.from_data_list(
+                    batch,
+                    follow_batch=self.follow_batch,
+                    exclude_keys=self.exclude_keys,
+                )
+            else:
+                return self.overwrapper(
+                    Batch.from_data_list(
+                        batch,
+                        follow_batch=self.follow_batch,
+                        exclude_keys=self.exclude_keys,
+                    )
+                )
         elif isinstance(elem, torch.Tensor):
             return default_collate(batch)
         elif isinstance(elem, float):
@@ -69,6 +79,7 @@ class DataLoader(torch.utils.data.DataLoader):
         shuffle: bool = False,
         follow_batch: Optional[List[str]] = [None],
         exclude_keys: Optional[List[str]] = [None],
+        overwrapper: Optional[Callable] = None,
         **kwargs,
     ):
 
@@ -83,6 +94,6 @@ class DataLoader(torch.utils.data.DataLoader):
             dataset,
             batch_size,
             shuffle,
-            collate_fn=Collater(follow_batch, exclude_keys),
+            collate_fn=Collater(follow_batch, exclude_keys, overwrapper),
             **kwargs,
         )

@@ -76,8 +76,7 @@ def test_mace():
     def wrapper(positions):
         graph = jraph.GraphsTuple(
             nodes=Node(
-                positions=positions.array,
-                attrs=jax.nn.one_hot(jnp.array([0, 1]), 2),
+                positions=positions.array, attrs=jax.nn.one_hot(jnp.array([0, 1]), 2),
             ),
             edges=Edge(shifts=jnp.array([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]])),
             globals=None,

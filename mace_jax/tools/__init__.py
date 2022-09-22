@@ -10,6 +10,7 @@ from .torch_tools import (
     to_numpy,
     to_one_hot,
 )
+from .jax_tools import get_batched_padded_graph_tuples
 from .train import SWAContainer, evaluate, train
 from .utils import (
     AtomicNumberTable,
@@ -27,12 +28,14 @@ from .utils import (
     setup_logger,
 )
 
+
 __all__ = [
     "TensorDict",
     "AtomicNumberTable",
     "atomic_numbers_to_indices",
     "to_numpy",
     "to_one_hot",
+    "get_batched_padded_graph_tuples",
     "build_default_arg_parser",
     "set_seeds",
     "init_device",

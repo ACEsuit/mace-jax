@@ -7,7 +7,12 @@ from prettytable import PrettyTable
 
 from mace_jax import data
 from mace_jax.data import AtomicData
-from mace_jax.tools import AtomicNumberTable, evaluate, torch_geometric
+from mace_jax.tools import (
+    AtomicNumberTable,
+    evaluate,
+    torch_geometric,
+    get_batched_padded_graph_tuples,
+)
 
 
 @dataclasses.dataclass
@@ -126,6 +131,7 @@ def create_error_table(
             batch_size=valid_batch_size,
             shuffle=False,
             drop_last=False,
+            overwrapper=get_batched_padded_graph_tuples,
         )
 
         logging.info(f"Evaluating {name} ...")

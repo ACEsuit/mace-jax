@@ -5,14 +5,14 @@ from typing import Optional
 
 import numpy as np
 import torch.nn.functional
-from e3nn import o3
+import e3nn_jax as e3nn
 from torch.optim.swa_utils import SWALR, AveragedModel
 from torch_ema import ExponentialMovingAverage
 from utils import create_error_table, get_dataset_from_xyz
 
 import mace_jax
 from mace_jax import data, modules, tools
-from mace_jax.tools import torch_geometric
+from mace_jax.tools import torch_geometric, get_batched_padded_graph_tuples
 
 
 def main() -> None:
@@ -112,19 +112,13 @@ def main() -> None:
         batch_size=args.valid_batch_size,
         shuffle=False,
         drop_last=False,
+        overwrapper=get_batched_padded_graph_tuples,
     )
 
-    loss_fn: torch.nn.Module
-    if args.loss == "weighted":
-        loss_fn = modules.WeightedEnergyForcesLoss(
-            energy_weight=args.energy_weight, forces_weight=args.forces_weight
-        )
-    elif args.loss == "forces_only":
-        loss_fn = modules.WeightedForcesLoss(forces_weight=args.forces_weight)
-    else:
-        loss_fn = modules.EnergyForcesLoss(
-            energy_weight=args.energy_weight, forces_weight=args.forces_weight
-        )
+    loss_fn: hk.Module
+    loss_fn = modules.WeightedEnergyForcesLoss(
+        energy_weight=args.energy_weight, forces_weight=args.forces_weight
+    )
     logging.info(loss_fn)
 
     if args.compute_avg_num_neighbors:
@@ -140,14 +134,13 @@ def main() -> None:
         max_ell=args.max_ell,
         interaction_cls=modules.interaction_classes[args.interaction],
         num_interactions=args.num_interactions,
-        num_elements=len(z_table),
-        hidden_irreps=o3.Irreps(args.hidden_irreps),
+        hidden_irreps=e3nn.Irreps(args.hidden_irreps),
         atomic_energies=atomic_energies,
         avg_num_neighbors=args.avg_num_neighbors,
         atomic_numbers=z_table.zs,
     )
 
-    model: torch.nn.Module
+    model: hk.Module
 
     if args.model == "MACE":
         if args.scaling == "no_scaling":
@@ -164,7 +157,7 @@ def main() -> None:
             interaction_cls_first=modules.interaction_classes[
                 "RealAgnosticInteractionBlock"
             ],
-            MLP_irreps=o3.Irreps(args.MLP_irreps),
+            MLP_irreps=e3nn.Irreps(args.MLP_irreps),
             atomic_inter_scale=std,
             atomic_inter_shift=0.0,
         )
@@ -175,32 +168,16 @@ def main() -> None:
             correlation=args.correlation,
             gate=modules.gate_dict[args.gate],
             interaction_cls_first=modules.interaction_classes[args.interaction_first],
-            MLP_irreps=o3.Irreps(args.MLP_irreps),
+            MLP_irreps=e3nn.Irreps(args.MLP_irreps),
             atomic_inter_scale=std,
             atomic_inter_shift=mean,
-        )
-    elif args.model == "ScaleShiftBOTNet":
-        mean, std = modules.scaling_classes[args.scaling](train_loader, atomic_energies)
-        model = modules.ScaleShiftBOTNet(
-            **model_config,
-            gate=modules.gate_dict[args.gate],
-            interaction_cls_first=modules.interaction_classes[args.interaction_first],
-            MLP_irreps=o3.Irreps(args.MLP_irreps),
-            atomic_inter_scale=std,
-            atomic_inter_shift=mean,
-        )
-    elif args.model == "BOTNet":
-        model = modules.BOTNet(
-            **model_config,
-            gate=modules.gate_dict[args.gate],
-            interaction_cls_first=modules.interaction_classes[args.interaction_first],
-            MLP_irreps=o3.Irreps(args.MLP_irreps),
         )
     else:
         raise RuntimeError(f"Unknown model: '{args.model}'")
 
-    model.to(device)
-
+    params = model.init(
+        jax.random.PRNGKey(0), get_batched_padded_graph_tuples(next(iter(train_loader)))
+    )
     # Optimizer
     decay_interactions = {}
     no_decay_interactions = {}
@@ -210,7 +187,7 @@ def main() -> None:
         else:
             no_decay_interactions[name] = param
 
-    param_options = dict(
+    mask = dict(
         params=[
             {
                 "name": "embedding",
@@ -238,24 +215,18 @@ def main() -> None:
                 "weight_decay": 0.0,
             },
         ],
-        lr=args.lr,
-        amsgrad=args.amsgrad,
     )
 
     optimizer: torch.optim.Optimizer
-    if args.optimizer == "adamw":
-        optimizer = torch.optim.AdamW(**param_options)
-    else:
-        optimizer = torch.optim.Adam(**param_options)
+
+    optimizer = optax.optax.adamw(
+        learning_rate=args.lr, weight_decay=args.weight_decay, mask=mask
+    ).init(params)
 
     logger = tools.MetricsLogger(directory=args.results_dir, tag=tag + "_train")
 
-    if args.scheduler == "ExponentialLR":
-        lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(
-            optimizer=optimizer, gamma=args.lr_scheduler_gamma
-        )
-    elif args.scheduler == "ReduceLROnPlateau":
-        lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    if args.scheduler == "ReduceLROnPlateau":
+        lr_scheduler = optax.reduce_on_plateau(
             optimizer=optimizer,
             factor=args.lr_factor,
             patience=args.scheduler_patience,
