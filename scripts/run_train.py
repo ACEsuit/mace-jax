@@ -6,13 +6,19 @@ from typing import Optional
 import numpy as np
 import torch.nn.functional
 import e3nn_jax as e3nn
+import optax
 from torch.optim.swa_utils import SWALR, AveragedModel
 from torch_ema import ExponentialMovingAverage
 from utils import create_error_table, get_dataset_from_xyz
 
 import mace_jax
 from mace_jax import data, modules, tools
-from mace_jax.tools import torch_geometric, get_batched_padded_graph_tuples
+from mace_jax.tools import (
+    torch_geometric,
+    get_batched_padded_graph_tuples,
+    flatten_dict,
+    unflatten_dict,
+)
 
 
 def main() -> None:
@@ -179,48 +185,21 @@ def main() -> None:
         jax.random.PRNGKey(0), get_batched_padded_graph_tuples(next(iter(train_loader)))
     )
     # Optimizer
-    decay_interactions = {}
-    no_decay_interactions = {}
-    for name, param in model.interactions.named_parameters():
-        if "linear.weight" in name or "skip_tp_full.weight" in name:
-            decay_interactions[name] = param
-        else:
-            no_decay_interactions[name] = param
 
-    mask = dict(
-        params=[
-            {
-                "name": "embedding",
-                "params": model.node_embedding.parameters(),
-                "weight_decay": 0.0,
-            },
-            {
-                "name": "interactions_decay",
-                "params": list(decay_interactions.values()),
-                "weight_decay": args.weight_decay,
-            },
-            {
-                "name": "interactions_no_decay",
-                "params": list(no_decay_interactions.values()),
-                "weight_decay": 0.0,
-            },
-            {
-                "name": "products",
-                "params": model.products.parameters(),
-                "weight_decay": args.weight_decay,
-            },
-            {
-                "name": "readouts",
-                "params": model.readouts.parameters(),
-                "weight_decay": 0.0,
-            },
-        ],
-    )
+    def weight_decay_mask(params):
+        params = flatten_dict(params)
+        mask = {
+            k: "linear_2" in k
+            and "multi_layer_perceptron" not in k
+            or "symmetric_contraction" in k
+            for k, _ in params.items()
+        }
+        return unflatten_dict(mask)
 
     optimizer: torch.optim.Optimizer
 
-    optimizer = optax.optax.adamw(
-        learning_rate=args.lr, weight_decay=args.weight_decay, mask=mask
+    optimizer = optax.adamw(
+        learning_rate=args.lr, weight_decay=args.weight_decay, mask=weight_decay_mask
     ).init(params)
 
     logger = tools.MetricsLogger(directory=args.results_dir, tag=tag + "_train")
