@@ -1,16 +1,17 @@
 from .arg_parser import build_default_arg_parser
 from .checkpoint import CheckpointHandler, CheckpointIO, CheckpointState
+
 from .torch_tools import (
-    TensorDict,
+    #     TensorDict,
     count_parameters,
-    init_device,
+    #     init_device,
     set_default_dtype,
     set_seeds,
     to_numpy,
     to_one_hot,
 )
 from .jax_tools import get_batched_padded_graph_tuples, flatten_dict, unflatten_dict
-from .train import SWAContainer, evaluate, train
+from .train import SWAContainer, evaluate, train, ExponentialMovingAverage
 from .utils import (
     AtomicNumberTable,
     MetricsLogger,
@@ -44,6 +45,7 @@ __all__ = [
     "get_optimizer",
     "MetricsLogger",
     "get_atomic_number_table_from_zs",
+    "ExponentialMovingAverage",
     "train",
     "evaluate",
     "SWAContainer",

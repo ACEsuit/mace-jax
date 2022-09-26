@@ -12,7 +12,6 @@ import numpy as np
 import optax
 import torch.nn.functional
 from torch.optim.swa_utils import SWALR, AveragedModel
-from torch_ema import ExponentialMovingAverage
 from utils import create_error_table, get_dataset_from_xyz
 
 import mace_jax
@@ -23,6 +22,7 @@ from mace_jax.tools import (
     torch_geometric,
     unflatten_dict,
 )
+from mace_jax.tools.train import ExponentialMovingAverage
 
 
 def main() -> None:
@@ -37,7 +37,7 @@ def main() -> None:
     except AttributeError:
         logging.info("Cannot find MACE version, please install MACE via pip")
     logging.info(f"Configuration: {args}")
-    device = tools.init_device(args.device)
+    # device = tools.init_device(args.device)
     tools.set_default_dtype(args.default_dtype)
 
     try:
@@ -122,7 +122,6 @@ def main() -> None:
         batch_size=args.valid_batch_size,
         shuffle=False,
         drop_last=False,
-        overwrapper=get_batched_padded_graph_tuples,
     )
 
     loss_fn = modules.WeightedEnergyForcesLoss(
@@ -209,53 +208,50 @@ def main() -> None:
         }
         return unflatten_dict(mask)
 
-    optimizer = optax.adamw(
-        learning_rate=args.lr, weight_decay=args.weight_decay, mask=weight_decay_mask
-    )
-
-    optimizer_state = optimizer.init(params)
-
     logger = tools.MetricsLogger(directory=args.results_dir, tag=tag + "_train")
 
     gradient_transform: optax.GradientTransformation = None
-    lr_scheduler = optax.exponential_decay(
-        init_value=args.lr_factor,
-        transition_steps=4 * args.num_epochs // 5,
-        decay_rate=args.decay,
-    )
     gradient_transform = optax.chain(
         optax.clip_by_global_norm(
-            args.clip_grad
+            np.inf if args.clip_grad is None else args.clip_grad
         ),  # Clip by the gradient by the global norm.
         optax.scale_by_adam(),  # Use the updates from adam.
+        optax.add_decayed_weights(args.weight_decay, mask=weight_decay_mask),
         optax.scale_by_schedule(
-            lr_scheduler
+            optax.exponential_decay(
+                init_value=args.lr,
+                transition_steps=4 * args.max_num_epochs // 5,
+                decay_rate=args.lr_factor,
+            )
         ),  # Use the learning rate from the scheduler.),
         optax.scale(-1.0),  # Gradient descent.
     )
+
+    optimizer_state = gradient_transform.init(params)
 
     checkpoint_handler = tools.CheckpointHandler(
         directory=args.checkpoints_dir, tag=tag, keep=args.keep_checkpoints
     )
 
     start_epoch = 0
-    if args.restart_latest:
-        opt_start_epoch = checkpoint_handler.load_latest(
-            state=tools.CheckpointState(model, optimizer, lr_scheduler), device=device
-        )
-        if opt_start_epoch is not None:
-            start_epoch = opt_start_epoch
+    # if args.restart_latest:
+    #     opt_start_epoch = checkpoint_handler.load_latest(
+    #         state=tools.CheckpointState(model, optimizer, lr_scheduler), device=device
+    #     )
+    #     if opt_start_epoch is not None:
+    #         start_epoch = opt_start_epoch
 
     ema: Optional[ExponentialMovingAverage] = None
     if args.ema:
         ema = ExponentialMovingAverage(params, decay=args.ema_decay)
 
     logging.info(model)
-    logging.info(f"Number of parameters: {tools.count_parameters(model)}")
-    logging.info(f"Optimizer: {optimizer}")
+    logging.info(f"Number of parameters: {tools.count_parameters(params)}")
+    logging.info(f"Optimizer: {gradient_transform}")
 
     tools.train(
         model=jax.jit(model.apply),
+        params=params,
         loss_fn=loss_fn,
         train_loader=train_loader,
         valid_loader=valid_loader,
@@ -267,17 +263,16 @@ def main() -> None:
         max_num_epochs=args.max_num_epochs,
         logger=logger,
         patience=args.patience,
-        device=device,
         swa=None,
         ema=ema,
         max_grad_norm=args.clip_grad,
         log_errors=args.error_table,
     )
 
-    epoch = checkpoint_handler.load_latest(
-        state=tools.CheckpointState(model, optimizer, lr_scheduler), device=device
-    )
-    logging.info(f"Loaded model from epoch {epoch}")
+    # epoch = checkpoint_handler.load_latest(
+    #     state=tools.CheckpointState(model, optimizer, lr_scheduler), device=device
+    # )
+    # logging.info(f"Loaded model from epoch {epoch}")
 
     # Evaluation on test datasets
     logging.info("Computing metrics for training, validation, and test sets")
@@ -295,7 +290,6 @@ def main() -> None:
         args.valid_batch_size,
         model,
         loss_fn,
-        device,
     )
 
     logging.info("\n" + str(table))

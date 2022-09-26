@@ -3,6 +3,7 @@ from typing import Dict
 
 import numpy as np
 import torch
+import jax
 
 TensorDict = Dict[str, torch.Tensor]
 
@@ -24,8 +25,8 @@ def to_one_hot(indices: torch.Tensor, num_classes: int) -> torch.Tensor:
     return oh.view(*shape)
 
 
-def count_parameters(module: torch.nn.Module) -> int:
-    return int(sum(np.prod(p.shape) for p in module.parameters()))
+def count_parameters(parameters) -> int:
+    return sum(x.size for x in jax.tree_util.tree_leaves(parameters))
 
 
 def tensor_dict_to_device(td: TensorDict, device: torch.device) -> TensorDict:
@@ -58,7 +59,7 @@ dtype_dict = {"float32": torch.float32, "float64": torch.float64}
 
 
 def set_default_dtype(dtype: str) -> None:
-    torch.set_default_dtype(dtype_dict[dtype])
+    jax.config.update("jax_enable_x64", dtype == "float64")
 
 
 def get_complex_default_dtype():

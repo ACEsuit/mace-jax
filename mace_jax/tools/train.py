@@ -43,7 +43,7 @@ class ExponentialMovingAverage:
 jax.tree_util.register_pytree_node(
     ExponentialMovingAverage,
     lambda x: ((x.params, x.decay), None),
-    lambda _, children: ExponentialMovingAverage(prams=children[0], decay=children[1]),
+    lambda _, children: ExponentialMovingAverage(params=children[0], decay=children[1]),
 )
 
 
@@ -61,7 +61,6 @@ def train(
     checkpoint_handler: CheckpointHandler,
     logger: MetricsLogger,
     eval_interval: int,
-    device: torch.device,
     log_errors: str,
     swa: Optional[SWAContainer] = None,
     ema: Optional[ExponentialMovingAverage] = None,
@@ -83,12 +82,14 @@ def train(
         # graph is assumed to be padded by jraph.pad_with_graphs
         mask = jraph.get_graph_padding_mask(graph)  # [n_graphs,]
         loss, grad = jax.value_and_grad(
-            lambda params: jnp.mean(loss_fn(graph, model(params, graph)) * mask)
+            lambda params: jnp.mean(loss_fn(graph, **model(params, graph)) * mask)
         )(params)
-        updates, optimizer_state = gradient_transform.update(grad, optimizer_state)
+        updates, optimizer_state = gradient_transform.update(
+            grad, optimizer_state, params
+        )
         params = optax.apply_updates(params, updates)
         if ema is not None:
-            decay = min(ema.decay, (1 + num_updates) / (10 + num_updates))
+            decay = jnp.minimum(ema.decay, (1 + num_updates) / (10 + num_updates))
             ema = ExponentialMovingAverage(
                 params=jax.tree_util.tree_map(
                     lambda x, y: x * decay + y * (1 - decay), ema.params, params
@@ -106,8 +107,9 @@ def train(
             loss, params, optimizer_state, ema = update_fn(
                 params, optimizer_state, ema, num_updates, graph
             )
+            loss = float(loss)
             opt_metrics = {
-                "loss": to_numpy(loss),
+                "loss": loss,
                 "time": time.time() - start_time,
             }
 
@@ -122,7 +124,6 @@ def train(
                 params=params if ema is not None else ema.params,
                 loss_fn=loss_fn,
                 data_loader=valid_loader,
-                device=device,
             )
             eval_metrics["mode"] = "eval"
             eval_metrics["epoch"] = epoch
@@ -161,22 +162,16 @@ def train(
             else:
                 lowest_loss = valid_loss
                 patience_counter = 0
-                if ema is not None:
-                    with ema.average_parameters():
-                        checkpoint_handler.save(
-                            state=CheckpointState(model, optimizer_state),
-                            epochs=epoch,
-                        )
-                else:
-                    checkpoint_handler.save(
-                        state=CheckpointState(model, optimizer_state),
-                        epochs=epoch,
-                    )
+                # checkpoint_handler.save(
+                #     state=CheckpointState(params, optimizer_state),
+                #     epochs=epoch,
+                # )
 
         # LR scheduler and SWA update
         if swa is None or epoch < swa.start:
             pass
         else:
+            raise NotImplementedError
             if swa_start:
                 logging.info("Changing loss based on SWA")
                 swa_start = False
@@ -201,18 +196,32 @@ def evaluate(
 
     start_time = time.time()
     for batch in data_loader:
-        graph = get_batched_padded_graph_tuples(batch)
-        output = model(params, graph)
+        ref_graph = get_batched_padded_graph_tuples(batch)
 
-        loss = loss_fn(graph=graph, pred=output)
+        output = model(params, ref_graph)
+        pred_graph = ref_graph._replace(
+            nodes=ref_graph.nodes._replace(forces=output["forces"]),
+            globals=ref_graph.globals._replace(energy=output["energy"]),
+        )
+
+        ref_graph = jraph.unpad_with_graphs(ref_graph)
+        pred_graph = jraph.unpad_with_graphs(pred_graph)
+
+        loss = jnp.mean(
+            loss_fn(
+                graph=ref_graph,
+                energy=pred_graph.globals.energy,
+                forces=pred_graph.nodes.forces,
+            )
+        )
         total_loss += float(loss)
 
-        delta_es_list.append(batch.energy - output["energy"])
+        delta_es_list.append(ref_graph.globals.energy - pred_graph.globals.energy)
         delta_es_per_atom_list.append(
-            (batch.energy - output["energy"]) / (batch.ptr[1:] - batch.ptr[:-1])
+            (ref_graph.globals.energy - pred_graph.globals.energy) / ref_graph.n_node
         )
-        delta_fs_list.append(batch.forces - output["forces"])
-        fs_list.append(batch.forces)
+        delta_fs_list.append(ref_graph.nodes.forces - pred_graph.nodes.forces)
+        fs_list.append(ref_graph.nodes.forces)
 
     avg_loss = total_loss / len(data_loader)
 

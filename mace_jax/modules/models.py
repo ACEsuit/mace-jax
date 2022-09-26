@@ -198,13 +198,11 @@ class ScaleShiftMACE(hk.Module):
         atomic_inter_shift: float,
         **kwargs,
     ):
-        super().__init__(**kwargs)
+        super().__init__()
         self.scale_shift = ScaleShiftBlock(
             scale=atomic_inter_scale, shift=atomic_inter_shift
         )
-        self.energy_model = EnergyMACE(
-            **kwargs,
-        )
+        self.energy_model = EnergyMACE(**kwargs)
         self.atomic_energies_fn = AtomicEnergiesBlock(kwargs["atomic_energies"])
 
     def __call__(self, graph: jraph.GraphsTuple) -> Dict[str, Any]:

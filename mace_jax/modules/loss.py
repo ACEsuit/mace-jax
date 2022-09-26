@@ -1,23 +1,29 @@
-from typing import Dict
-
+import e3nn_jax as e3nn
 import jax.numpy as jnp
 import jraph
-from jax import jit, vmap
 
 
-def weighted_mean_squared_error_energy(
-    configs_weight, num_atoms, energy_ref, energy_pred
-) -> jnp.ndarray:
-    # energy: [n_graphs, ]
-    return configs_weight * jnp.square(
-        (energy_ref - energy_pred) / num_atoms
+def weighted_mean_squared_error_energy(graph, energy_pred) -> jnp.ndarray:
+    energy_ref = graph.globals.energy  # [n_graphs, ]
+    return graph.globals.weight * jnp.square(
+        (energy_ref - energy_pred) / graph.n_node
     )  # [n_graphs, ]
 
 
-def mean_squared_error_forces(configs_weight, forces_ref, forces_pred) -> jnp.ndarray:
-    # forces: [n_atoms, 3]
-    return jnp.mean(
-        configs_weight * jnp.square(forces_ref - forces_pred), axis=1
+def mean_squared_error_forces(graph, forces_pred) -> jnp.ndarray:
+    forces_ref = graph.nodes.forces  # [n_nodes, 3]
+
+    # TODO: (mario) add this specific index_add into a function, we use it in multiple places
+    num_graphs = graph.n_node.shape[0]
+    num_nodes = graph.nodes.positions.shape[0]
+    graph_index = jnp.repeat(
+        jnp.arange(num_graphs), graph.n_node, total_repeat_length=num_nodes
+    )  # [n_nodes, ]
+
+    return graph.globals.weight * e3nn.index_add(
+        graph_index,
+        jnp.mean(jnp.square(forces_ref - forces_pred), axis=1),  # [n_nodes, ]
+        out_dim=num_graphs,
     )  # [n_graphs, ]
 
 
@@ -27,22 +33,12 @@ class WeightedEnergyForcesLoss:
         self.energy_weight = energy_weight
         self.forces_weight = forces_weight
 
-    def __call__(
-        self, graph: jraph.GraphsTuple, pred: Dict[str, jnp.ndarray]
-    ) -> jnp.ndarray:
-        configs_weight = graph.globals.weight  # [n_graphs, ]
-        configs_weight_forces = jnp.repeat(
-            graph.globals.weight, graph.globals.ptr[1:] - graph.globals.ptr[:-1]
-        ).unsqueeze(
-            -1
-        )  # [n_atoms, 1]
-        num_atoms = graph.ptr[1:] - graph.ptr[:-1]  # [n_graphs,]
-
-        return self.energy_weight * weighted_mean_squared_error_energy(
-            configs_weight, num_atoms, graph.globals.energy, pred["energy"]
-        ) + self.forces_weight * mean_squared_error_forces(
-            configs_weight_forces, graph.globals.forces, pred["forces"]
-        )  # [n_graphs,]
+    def __call__(self, graph: jraph.GraphsTuple, energy, forces) -> jnp.ndarray:
+        loss_energy = weighted_mean_squared_error_energy(graph, energy)
+        loss_forces = mean_squared_error_forces(graph, forces)
+        return (
+            self.energy_weight * loss_energy + self.forces_weight * loss_forces
+        )  # [n_graphs, ]
 
     def __repr__(self):
         return (

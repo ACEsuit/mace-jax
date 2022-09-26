@@ -39,26 +39,27 @@ def pad_graph_to_nearest_ceil_mantissa(
 
 Node = namedtuple("Node", ["positions", "attrs", "forces"])
 Edge = namedtuple("Edge", ["shifts"])
-Global = namedtuple("Global", ["energy", "weight", "ptr"])
+Global = namedtuple("Global", ["energy", "weight"])
 
 
 def get_batched_padded_graph_tuples(batch):
     graphs = jraph.GraphsTuple(
         nodes=Node(
-            positions=batch.position.numpy(),
-            attrs=batch.attrs.numpy(),
-            forces=batch.force.numpy(),
+            positions=batch.positions.numpy(),
+            attrs=batch.node_attrs.numpy(),
+            forces=batch.forces.numpy(),
         ),
         edges=Edge(shifts=batch.shifts.numpy()),
-        n_node=batch.position.shape[0].numpy(),
-        n_edge=batch.edge_index.shape[1].numpy(),
-        senders=batch.edge_index[0].numpy(),
-        receivers=batch.edge_index[1].numpy(),
         globals=Global(
             energy=batch.energy.numpy(),
             weight=batch.weight.numpy(),
-            ptr=batch.ptr.numpy(),
         ),
+        n_node=(batch.ptr[1:] - batch.ptr[:-1]).numpy(),
+        n_edge=np.array(
+            [batch.num_edges] + [0] * (batch.energy.numpy().shape[0] - 1)
+        ),  # TODO: (mario) this is wrong, the number of edges per graph
+        senders=batch.edge_index[0].numpy(),
+        receivers=batch.edge_index[1].numpy(),
     )
     graphs = pad_graph_to_nearest_ceil_mantissa(graphs)  # padd the whole batch once
     return graphs

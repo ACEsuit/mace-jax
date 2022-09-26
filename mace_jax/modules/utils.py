@@ -22,7 +22,8 @@ def get_edge_vectors_and_lengths(
 
 
 def compute_mean_std_atomic_inter_energy(
-    data_loader, atomic_energies: np.ndarray,
+    data_loader,
+    atomic_energies: np.ndarray,
 ) -> Tuple[float, float]:
     atomic_energies_fn = AtomicEnergiesBlock(atomic_energies=atomic_energies)
 
@@ -46,7 +47,8 @@ def compute_mean_std_atomic_inter_energy(
 
 
 def compute_mean_rms_energy_forces(
-    data_loader: torch.utils.data.DataLoader, atomic_energies: np.ndarray,
+    data_loader: torch.utils.data.DataLoader,
+    atomic_energies: np.ndarray,
 ) -> Tuple[float, float]:
     atomic_energies_fn = AtomicEnergiesBlock(atomic_energies=atomic_energies)
 
