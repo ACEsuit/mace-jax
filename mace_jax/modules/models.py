@@ -7,9 +7,6 @@ import jax.numpy as jnp
 import jraph
 import numpy as np
 
-from mace_jax.data import AtomicData
-from mace_jax.tools.scatter import scatter_sum
-
 from .blocks import (
     AtomicEnergiesBlock,
     EquivariantProductBasisBlock,
@@ -23,7 +20,7 @@ from .blocks import (
 from .utils import get_edge_vectors_and_lengths
 
 
-class MACE(hk.Module):
+class EnergyMACE(hk.Module):
     def __init__(
         self,
         r_max: float,
@@ -65,107 +62,136 @@ class MACE(hk.Module):
         num_features = hidden_irreps.count(e3nn.Irrep("0e"))
         self.interaction_irreps = (self.sh_irreps * num_features).sort()[0].simplify()
 
-        # Interactions and readout
+    def __call__(self, graph: jraph.GraphsTuple) -> Dict[str, Any]:
+        # Embeddings
+        node_attrs = e3nn.IrrepsArray(
+            f"{graph.nodes.attrs.shape[-1]}x0e", graph.nodes.attrs
+        )
+        node_feats = self.node_embedding(node_attrs)
+        vectors, lengths = get_edge_vectors_and_lengths(
+            positions=graph.nodes.positions,
+            senders=graph.senders,
+            receivers=graph.receivers,
+            shifts=graph.edges.shifts,
+        )
+        edge_attrs = e3nn.spherical_harmonics(
+            self.sh_irreps, vectors, normalize=True, normalization="component"
+        )
+        edge_feats = self.radial_embedding(lengths)
+        edge_feats = e3nn.IrrepsArray(
+            f"{edge_feats.shape[-1]}x0e", edge_feats
+        )  # [n_edges, irreps]
+
+        # Interactions
+        outputs = []
+        for i in range(self.num_interactions):
+            if i == self.num_interactions - 1:
+                hidden_irreps_out = str(
+                    self.hidden_irreps[0]
+                )  # Select only scalars for last layer
+            else:
+                hidden_irreps_out = self.hidden_irreps
+            if i == 0:
+                inter = self.interaction_cls_first(
+                    target_irreps=self.interaction_irreps,
+                    hidden_irreps=hidden_irreps_out,
+                    avg_num_neighbors=self.avg_num_neighbors,
+                )
+            else:
+                inter = self.interaction_cls(
+                    target_irreps=self.interaction_irreps,
+                    hidden_irreps=hidden_irreps_out,
+                    avg_num_neighbors=self.avg_num_neighbors,
+                )
+            node_feats, sc = inter(
+                node_attrs=node_attrs,
+                node_feats=node_feats,
+                edge_attrs=edge_attrs,
+                edge_feats=edge_feats,
+                receivers=graph.receivers,
+                senders=graph.senders,
+            )
+            prod = EquivariantProductBasisBlock(
+                target_irreps=hidden_irreps_out, correlation=self.correlation
+            )
+            node_feats = prod(node_feats=node_feats, sc=sc, node_attrs=node_attrs)
+            if i == self.num_interactions - 1:
+                readout = NonLinearReadoutBlock(self.MLP_irreps, self.gate)
+                node_energies = readout(node_feats).array.squeeze(-1)  # [n_nodes, ]
+            else:
+                readout = LinearReadoutBlock()
+                node_energies = readout(node_feats).array.squeeze(-1)  # [n_nodes, ]
+            outputs += [node_energies]
+
+        return jnp.stack(outputs, axis=1)  # [n_nodes, num_interactions]
+
+
+class MACE(hk.Module):
+    def __init__(
+        self,
+        r_max: float,
+        num_bessel: int,
+        num_polynomial_cutoff: int,
+        max_ell: int,
+        interaction_cls: Type[InteractionBlock],
+        interaction_cls_first: Type[InteractionBlock],
+        num_interactions: int,
+        hidden_irreps: e3nn.Irreps,
+        MLP_irreps: e3nn.Irreps,
+        atomic_energies: np.ndarray,
+        avg_num_neighbors: float,
+        atomic_numbers: List[int],
+        correlation: int,
+        gate: Optional[Callable],
+    ):
+        super().__init__()
+        self.energy_model = EnergyMACE(
+            r_max=r_max,
+            num_bessel=num_bessel,
+            num_polynomial_cutoff=num_polynomial_cutoff,
+            max_ell=max_ell,
+            interaction_cls=interaction_cls,
+            interaction_cls_first=interaction_cls_first,
+            num_interactions=num_interactions,
+            hidden_irreps=hidden_irreps,
+            MLP_irreps=MLP_irreps,
+            atomic_energies=atomic_energies,
+            avg_num_neighbors=avg_num_neighbors,
+            atomic_numbers=atomic_numbers,
+            correlation=correlation,
+            gate=gate,
+        )
         self.atomic_energies_fn = AtomicEnergiesBlock(atomic_energies)
 
     def __call__(self, graph: jraph.GraphsTuple) -> Dict[str, Any]:
         def energy_fn(positions):
             # Setup
             num_graphs = graph.n_node.shape[0]
-            num_nodes = positions.shape[0]
-            num_edges = len(graph.senders)
+            num_nodes = graph.nodes.positions.shape[0]
             graph_index = jnp.repeat(
                 jnp.arange(num_graphs), graph.n_node, total_repeat_length=num_nodes
             )  # (node,)
-
-            # Atomic energies
-            node_e0 = self.atomic_energies_fn(graph.nodes.attrs)
-            e0 = e3nn.index_add(
-                indices=graph_index, input=node_e0, out_dim=num_graphs
-            )  # [n_graphs,]
-            # pyg: batch=[0,0,0,0,1,1,1] #[n_nodes]
-            # jraph: n_node=[4,3] #[n_graphs]
-
-            # Embeddings
-            node_attrs = e3nn.IrrepsArray(
-                f"{graph.nodes.attrs.shape[-1]}x0e", graph.nodes.attrs
+            node_e0 = self.atomic_energies_fn(graph.nodes.attrs)  # [n_nodes, ]
+            contributions = self.energy_model(
+                graph._replace(nodes=graph.nodes._replace(positions=positions))
             )
-            node_feats = self.node_embedding(node_attrs)
-            vectors, lengths = get_edge_vectors_and_lengths(
-                positions=positions,
-                senders=graph.senders,
-                receivers=graph.receivers,
-                shifts=graph.edges.shifts,
-            )
-            edge_attrs = e3nn.spherical_harmonics(
-                self.sh_irreps, vectors, normalize=True, normalization="component"
-            )
-            edge_feats = self.radial_embedding(lengths)
-            edge_feats = e3nn.IrrepsArray(
-                f"{edge_feats.shape[-1]}x0e", edge_feats
-            )  # [n_edges, irreps]
+            node_energies = jnp.sum(contributions, axis=1)  # [n_nodes, ]
+            energy = e3nn.index_add(
+                indices=graph_index, input=(node_energies + node_e0), out_dim=num_graphs
+            )  # [ n_graphs,]
+            return jnp.sum(energy), energy
 
-            # Interactions
-            energies = [e0]
-            for i in range(self.num_interactions):
-                if i == self.num_interactions - 1:
-                    hidden_irreps_out = str(
-                        self.hidden_irreps[0]
-                    )  # Select only scalars for last layer
-                else:
-                    hidden_irreps_out = self.hidden_irreps
-                if i == 0:
-                    inter = self.interaction_cls_first(
-                        target_irreps=self.interaction_irreps,
-                        hidden_irreps=hidden_irreps_out,
-                        avg_num_neighbors=self.avg_num_neighbors,
-                    )
-                else:
-                    inter = self.interaction_cls(
-                        target_irreps=self.interaction_irreps,
-                        hidden_irreps=hidden_irreps_out,
-                        avg_num_neighbors=self.avg_num_neighbors,
-                    )
-                node_feats, sc = inter(
-                    node_attrs=node_attrs,
-                    node_feats=node_feats,
-                    edge_attrs=edge_attrs,
-                    edge_feats=edge_feats,
-                    receivers=graph.receivers,
-                    senders=graph.senders,
-                )
-                prod = EquivariantProductBasisBlock(
-                    target_irreps=hidden_irreps_out, correlation=self.correlation
-                )
-                node_feats = prod(node_feats=node_feats, sc=sc, node_attrs=node_attrs)
-                if i == self.num_interactions - 1:
-                    readout = NonLinearReadoutBlock(self.MLP_irreps, self.gate)
-                    node_energies = readout(node_feats).array.squeeze(-1)  # [n_nodes, ]
-                else:
-                    readout = LinearReadoutBlock()
-                    node_energies = readout(node_feats).array.squeeze(-1)  # [n_nodes, ]
-                energy = e3nn.index_add(
-                    indices=graph_index, input=node_energies, out_dim=num_graphs
-                )  # [n_graphs,]
-                energies.append(energy)
-
-            # Sum over energy contributions
-            contributions = jnp.stack(energies, axis=0)  # [num_layers, n_graphs]
-            total_energy = jnp.sum(contributions, axis=0)  # [n_graphs, ]
-            return jnp.sum(total_energy), (total_energy, contributions)
-
-        minus_forces, (total_energy, contributions) = jax.grad(energy_fn, has_aux=True)(
+        minus_forces, (total_energy) = jax.grad(energy_fn, has_aux=True)(
             graph.nodes.positions
         )
 
         return {
-            "energy": total_energy,
-            "contributions": contributions,
-            "forces": -minus_forces,
+            "energy": total_energy,  # [n_graphs,]
+            "forces": -minus_forces,  # [n_nodes, 3]
         }
 
 
-class ScaleShiftMACE(MACE):
+class ScaleShiftMACE(hk.Module):
     def __init__(
         self,
         atomic_inter_scale: float,
@@ -176,61 +202,37 @@ class ScaleShiftMACE(MACE):
         self.scale_shift = ScaleShiftBlock(
             scale=atomic_inter_scale, shift=atomic_inter_shift
         )
-
-    def forward(self, data: AtomicData, training=False) -> Dict[str, Any]:
-        # Setup
-        data.positions.requires_grad = True
-
-        # Atomic energies
-        node_e0 = self.atomic_energies_fn(data.node_attrs)
-        e0 = scatter_sum(
-            src=node_e0, index=data.batch, dim=-1, dim_size=data.num_graphs
-        )  # [n_graphs,]
-
-        # Embeddings
-        node_feats = self.node_embedding(data.node_attrs)
-        vectors, lengths = get_edge_vectors_and_lengths(
-            positions=data.positions, edge_index=data.edge_index, shifts=data.shifts
+        self.energy_model = EnergyMACE(
+            **kwargs,
         )
-        edge_attrs = self.spherical_harmonics(vectors)
-        edge_feats = self.radial_embedding(lengths)
+        self.atomic_energies_fn = AtomicEnergiesBlock(kwargs["atomic_energies"])
 
-        # Interactions
-        node_es_list = []
-        for interaction, product, readout in zip(
-            self.interactions, self.products, self.readouts
-        ):
-            node_feats, sc = interaction(
-                node_attrs=data.node_attrs,
-                node_feats=node_feats,
-                edge_attrs=edge_attrs,
-                edge_feats=edge_feats,
-                edge_index=data.edge_index,
+    def __call__(self, graph: jraph.GraphsTuple) -> Dict[str, Any]:
+        def energy_fn(positions):
+            # Setup
+            num_graphs = graph.n_node.shape[0]
+            num_nodes = graph.nodes.positions.shape[0]
+            graph_index = jnp.repeat(
+                jnp.arange(num_graphs), graph.n_node, total_repeat_length=num_nodes
+            )  # (node,)
+            node_e0 = self.atomic_energies_fn(graph.nodes.attrs)
+            contributions = self.energy_model(
+                graph._replace(nodes=graph.nodes._replace(positions=positions))
             )
-            node_feats = product(
-                node_feats=node_feats, sc=sc, node_attrs=data.node_attrs
-            )
-            node_es_list.append(readout(node_feats).squeeze(-1))  # {[n_nodes, ], }
+            node_energies = jnp.sum(contributions, axis=1)
+            node_inter_es = self.scale_shift(node_energies)
+            energy = e3nn.index_add(
+                indices=graph_index, input=(node_inter_es + node_e0), out_dim=num_graphs
+            )  # [ n_graphs,]
+            return jnp.sum(energy), energy
 
-        # Sum over interactions
-        node_inter_es = torch.sum(
-            torch.stack(node_es_list, dim=0), dim=0
-        )  # [n_nodes, ]
-        node_inter_es = self.scale_shift(node_inter_es)
-
-        # Sum over nodes in graph
-        inter_e = scatter_sum(
-            src=node_inter_es, index=data.batch, dim=-1, dim_size=data.num_graphs
-        )  # [n_graphs,]
-
-        # Add E_0 and (scaled) interaction energy
-        total_e = e0 + inter_e
+        minus_forces, (total_energy) = jax.grad(energy_fn, has_aux=True)(
+            graph.nodes.positions
+        )
 
         output = {
-            "energy": total_e,
-            "forces": compute_forces(
-                energy=inter_e, positions=data.positions, training=training
-            ),
+            "energy": total_energy,  # [n_graphs,]
+            "forces": -minus_forces,  # [n_nodes, 3]
         }
 
         return output

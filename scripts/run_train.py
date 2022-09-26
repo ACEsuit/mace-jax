@@ -1,12 +1,16 @@
 import ast
 import logging
 import os
-from typing import Optional
+from typing import Dict, Optional
 
-import numpy as np
-import torch.nn.functional
 import e3nn_jax as e3nn
+import haiku as hk
+import jax
+import jax.numpy as jnp
+import jraph
+import numpy as np
 import optax
+import torch.nn.functional
 from torch.optim.swa_utils import SWALR, AveragedModel
 from torch_ema import ExponentialMovingAverage
 from utils import create_error_table, get_dataset_from_xyz
@@ -14,9 +18,9 @@ from utils import create_error_table, get_dataset_from_xyz
 import mace_jax
 from mace_jax import data, modules, tools
 from mace_jax.tools import (
-    torch_geometric,
-    get_batched_padded_graph_tuples,
     flatten_dict,
+    get_batched_padded_graph_tuples,
+    torch_geometric,
     unflatten_dict,
 )
 
@@ -121,7 +125,6 @@ def main() -> None:
         overwrapper=get_batched_padded_graph_tuples,
     )
 
-    loss_fn: hk.Module
     loss_fn = modules.WeightedEnergyForcesLoss(
         energy_weight=args.energy_weight, forces_weight=args.forces_weight
     )
@@ -146,43 +149,53 @@ def main() -> None:
         atomic_numbers=z_table.zs,
     )
 
-    model: hk.Module
+    model: hk.Transformed
 
-    if args.model == "MACE":
-        if args.scaling == "no_scaling":
-            std = 1.0
-            logging.info("No scaling selected")
-        else:
+    @hk.without_apply_rng
+    @hk.transform
+    def model(graph: jraph.GraphsTuple) -> Dict[str, jnp.ndarray]:
+        if args.model == "MACE":
+            if args.scaling == "no_scaling":
+                std = 1.0
+                logging.info("No scaling selected")
+            else:
+                mean, std = modules.scaling_classes[args.scaling](
+                    train_loader, atomic_energies
+                )
+            mace = modules.ScaleShiftMACE(
+                **model_config,
+                correlation=args.correlation,
+                gate=modules.gate_dict[args.gate],
+                interaction_cls_first=modules.interaction_classes[
+                    "RealAgnosticInteractionBlock"
+                ],
+                MLP_irreps=e3nn.Irreps(args.MLP_irreps),
+                atomic_inter_scale=std,
+                atomic_inter_shift=0.0,
+            )
+        elif args.model == "ScaleShiftMACE":
             mean, std = modules.scaling_classes[args.scaling](
                 train_loader, atomic_energies
             )
-        model = modules.ScaleShiftMACE(
-            **model_config,
-            correlation=args.correlation,
-            gate=modules.gate_dict[args.gate],
-            interaction_cls_first=modules.interaction_classes[
-                "RealAgnosticInteractionBlock"
-            ],
-            MLP_irreps=e3nn.Irreps(args.MLP_irreps),
-            atomic_inter_scale=std,
-            atomic_inter_shift=0.0,
-        )
-    elif args.model == "ScaleShiftMACE":
-        mean, std = modules.scaling_classes[args.scaling](train_loader, atomic_energies)
-        model = modules.ScaleShiftMACE(
-            **model_config,
-            correlation=args.correlation,
-            gate=modules.gate_dict[args.gate],
-            interaction_cls_first=modules.interaction_classes[args.interaction_first],
-            MLP_irreps=e3nn.Irreps(args.MLP_irreps),
-            atomic_inter_scale=std,
-            atomic_inter_shift=mean,
-        )
-    else:
-        raise RuntimeError(f"Unknown model: '{args.model}'")
+            mace = modules.ScaleShiftMACE(
+                **model_config,
+                correlation=args.correlation,
+                gate=modules.gate_dict[args.gate],
+                interaction_cls_first=modules.interaction_classes[
+                    args.interaction_first
+                ],
+                MLP_irreps=e3nn.Irreps(args.MLP_irreps),
+                atomic_inter_scale=std,
+                atomic_inter_shift=mean,
+            )
+        else:
+            raise RuntimeError(f"Unknown model: '{args.model}'")
 
-    params = model.init(
-        jax.random.PRNGKey(0), get_batched_padded_graph_tuples(next(iter(train_loader)))
+        return mace(graph)
+
+    params = jax.jit(model.init)(
+        jax.random.PRNGKey(0),
+        get_batched_padded_graph_tuples(next(iter(train_loader))),
     )
     # Optimizer
 
@@ -196,22 +209,30 @@ def main() -> None:
         }
         return unflatten_dict(mask)
 
-    optimizer: torch.optim.Optimizer
-
     optimizer = optax.adamw(
         learning_rate=args.lr, weight_decay=args.weight_decay, mask=weight_decay_mask
-    ).init(params)
+    )
+
+    optimizer_state = optimizer.init(params)
 
     logger = tools.MetricsLogger(directory=args.results_dir, tag=tag + "_train")
 
-    if args.scheduler == "ReduceLROnPlateau":
-        lr_scheduler = optax.reduce_on_plateau(
-            optimizer=optimizer,
-            factor=args.lr_factor,
-            patience=args.scheduler_patience,
-        )
-    else:
-        raise RuntimeError(f"Unknown scheduler: '{args.scheduler}'")
+    gradient_transform: optax.GradientTransformation = None
+    lr_scheduler = optax.exponential_decay(
+        init_value=args.lr_factor,
+        transition_steps=4 * args.num_epochs // 5,
+        decay_rate=args.decay,
+    )
+    gradient_transform = optax.chain(
+        optax.clip_by_global_norm(
+            args.clip_grad
+        ),  # Clip by the gradient by the global norm.
+        optax.scale_by_adam(),  # Use the updates from adam.
+        optax.scale_by_schedule(
+            lr_scheduler
+        ),  # Use the learning rate from the scheduler.),
+        optax.scale(-1.0),  # Gradient descent.
+    )
 
     checkpoint_handler = tools.CheckpointHandler(
         directory=args.checkpoints_dir, tag=tag, keep=args.keep_checkpoints
@@ -227,19 +248,19 @@ def main() -> None:
 
     ema: Optional[ExponentialMovingAverage] = None
     if args.ema:
-        ema = ExponentialMovingAverage(model.parameters(), decay=args.ema_decay)
+        ema = ExponentialMovingAverage(params, decay=args.ema_decay)
 
     logging.info(model)
     logging.info(f"Number of parameters: {tools.count_parameters(model)}")
     logging.info(f"Optimizer: {optimizer}")
 
     tools.train(
-        model=model,
+        model=jax.jit(model.apply),
         loss_fn=loss_fn,
         train_loader=train_loader,
         valid_loader=valid_loader,
-        optimizer=optimizer,
-        lr_scheduler=lr_scheduler,
+        gradient_transform=gradient_transform,
+        optimizer_state=optimizer_state,
         checkpoint_handler=checkpoint_handler,
         eval_interval=args.eval_interval,
         start_epoch=start_epoch,

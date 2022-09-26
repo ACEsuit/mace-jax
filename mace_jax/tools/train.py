@@ -1,17 +1,20 @@
 import dataclasses
 import logging
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
+import jax
+import jax.numpy as jnp
+import jraph
 import numpy as np
+import optax
 import torch
 from torch.optim.swa_utils import SWALR, AveragedModel
 from torch.utils.data import DataLoader
 from torch_ema import ExponentialMovingAverage
 
-from . import torch_geometric
 from .checkpoint import CheckpointHandler, CheckpointState
-from .torch_tools import tensor_dict_to_device, to_numpy
+from .torch_tools import to_numpy
 from .utils import (
     MetricsLogger,
     compute_mae,
@@ -20,6 +23,7 @@ from .utils import (
     compute_rel_rmse,
     compute_rmse,
 )
+from .jax_tools import get_batched_padded_graph_tuples
 
 
 @dataclasses.dataclass
@@ -30,13 +34,27 @@ class SWAContainer:
     loss_fn: torch.nn.Module
 
 
+@dataclasses.dataclass
+class ExponentialMovingAverage:
+    params: Dict[str, Any]
+    decay: float
+
+
+jax.tree_util.register_pytree_node(
+    ExponentialMovingAverage,
+    lambda x: ((x.params, x.decay), None),
+    lambda _, children: ExponentialMovingAverage(prams=children[0], decay=children[1]),
+)
+
+
 def train(
-    model: torch.nn.Module,
-    loss_fn: torch.nn.Module,
+    model: Callable,
+    params: Dict[str, Any],
+    loss_fn: Any,
     train_loader: DataLoader,
     valid_loader: DataLoader,
-    optimizer: torch.optim.Optimizer,
-    lr_scheduler: torch.optim.lr_scheduler.ExponentialLR,
+    gradient_transform: Any,
+    optimizer_state: Dict[str, Any],
     start_epoch: int,
     max_num_epochs: int,
     patience: int,
@@ -51,44 +69,61 @@ def train(
 ):
     lowest_loss = np.inf
     patience_counter = 0
+    num_updates = 0
     swa_start = True
 
     if max_grad_norm is not None:
         logging.info(f"Using gradient clipping with tolerance={max_grad_norm:.3f}")
     logging.info("Started training")
+
+    @jax.jit
+    def update_fn(
+        params, optimizer_state, ema, num_updates: int, graph: jraph.GraphsTuple
+    ) -> Tuple[float, Any, Any]:
+        # graph is assumed to be padded by jraph.pad_with_graphs
+        mask = jraph.get_graph_padding_mask(graph)  # [n_graphs,]
+        loss, grad = jax.value_and_grad(
+            lambda params: jnp.mean(loss_fn(graph, model(params, graph)) * mask)
+        )(params)
+        updates, optimizer_state = gradient_transform.update(grad, optimizer_state)
+        params = optax.apply_updates(params, updates)
+        if ema is not None:
+            decay = min(ema.decay, (1 + num_updates) / (10 + num_updates))
+            ema = ExponentialMovingAverage(
+                params=jax.tree_util.tree_map(
+                    lambda x, y: x * decay + y * (1 - decay), ema.params, params
+                ),
+                decay=ema.decay,
+            )
+        return loss, params, optimizer_state, ema
+
     for epoch in range(start_epoch, max_num_epochs):
         # Train
         for batch in train_loader:
-            _, opt_metrics = take_step(
-                model=model,
-                loss_fn=loss_fn,
-                batch=batch,
-                optimizer=optimizer,
-                ema=ema,
-                max_grad_norm=max_grad_norm,
-                device=device,
+            graph = get_batched_padded_graph_tuples(batch)
+            num_updates += 1
+            start_time = time.time()
+            loss, params, optimizer_state, ema = update_fn(
+                params, optimizer_state, ema, num_updates, graph
             )
+            opt_metrics = {
+                "loss": to_numpy(loss),
+                "time": time.time() - start_time,
+            }
+
             opt_metrics["mode"] = "opt"
             opt_metrics["epoch"] = epoch
             logger.log(opt_metrics)
 
         # Validate
         if epoch % eval_interval == 0:
-            if ema is not None:
-                with ema.average_parameters():
-                    valid_loss, eval_metrics = evaluate(
-                        model=model,
-                        loss_fn=loss_fn,
-                        data_loader=valid_loader,
-                        device=device,
-                    )
-            else:
-                valid_loss, eval_metrics = evaluate(
-                    model=model,
-                    loss_fn=loss_fn,
-                    data_loader=valid_loader,
-                    device=device,
-                )
+            valid_loss, eval_metrics = evaluate(
+                model=model,
+                params=params if ema is not None else ema.params,
+                loss_fn=loss_fn,
+                data_loader=valid_loader,
+                device=device,
+            )
             eval_metrics["mode"] = "eval"
             eval_metrics["epoch"] = epoch
             logger.log(eval_metrics)
@@ -129,18 +164,18 @@ def train(
                 if ema is not None:
                     with ema.average_parameters():
                         checkpoint_handler.save(
-                            state=CheckpointState(model, optimizer, lr_scheduler),
+                            state=CheckpointState(model, optimizer_state),
                             epochs=epoch,
                         )
                 else:
                     checkpoint_handler.save(
-                        state=CheckpointState(model, optimizer, lr_scheduler),
+                        state=CheckpointState(model, optimizer_state),
                         epochs=epoch,
                     )
 
         # LR scheduler and SWA update
         if swa is None or epoch < swa.start:
-            lr_scheduler.step(valid_loss)  # Can break if exponential LR, TODO fix that!
+            pass
         else:
             if swa_start:
                 logging.info("Changing loss based on SWA")
@@ -152,42 +187,11 @@ def train(
     logging.info("Training complete")
 
 
-def take_step(
-    model: torch.nn.Module,
-    loss_fn: torch.nn.Module,
-    batch: torch_geometric.batch.Batch,
-    optimizer: torch.optim.Optimizer,
-    ema: Optional[ExponentialMovingAverage],
-    max_grad_norm: Optional[float],
-    device: torch.device,
-) -> Tuple[float, Dict[str, Any]]:
-
-    start_time = time.time()
-    batch = batch.to(device)
-    optimizer.zero_grad()
-    output = model(batch, training=True)
-    loss = loss_fn(pred=output, ref=batch)
-    loss.backward()
-    if max_grad_norm is not None:
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
-    optimizer.step()
-
-    if ema is not None:
-        ema.update()
-
-    loss_dict = {
-        "loss": to_numpy(loss),
-        "time": time.time() - start_time,
-    }
-
-    return loss, loss_dict
-
-
 def evaluate(
-    model: torch.nn.Module,
-    loss_fn: torch.nn.Module,
+    model: Callable,
+    params: Any,
+    loss_fn: Any,
     data_loader: DataLoader,
-    device: torch.device,
 ) -> Tuple[float, Dict[str, Any]]:
     total_loss = 0.0
     delta_es_list = []
@@ -197,13 +201,11 @@ def evaluate(
 
     start_time = time.time()
     for batch in data_loader:
-        batch = batch.to(device)
-        output = model(batch, training=False)
-        batch = batch.cpu()
-        output = tensor_dict_to_device(output, device=torch.device("cpu"))
+        graph = get_batched_padded_graph_tuples(batch)
+        output = model(params, graph)
 
-        loss = loss_fn(pred=output, ref=batch)
-        total_loss += to_numpy(loss).item()
+        loss = loss_fn(graph=graph, pred=output)
+        total_loss += float(loss)
 
         delta_es_list.append(batch.energy - output["energy"])
         delta_es_per_atom_list.append(
@@ -214,10 +216,10 @@ def evaluate(
 
     avg_loss = total_loss / len(data_loader)
 
-    delta_es = to_numpy(torch.cat(delta_es_list, dim=0))
-    delta_es_per_atom = to_numpy(torch.cat(delta_es_per_atom_list, dim=0))
-    delta_fs = to_numpy(torch.cat(delta_fs_list, dim=0))
-    fs = to_numpy(torch.cat(fs_list, dim=0))
+    delta_es = np.concatenate(delta_es_list, axis=0)
+    delta_es_per_atom = np.concatenate(delta_es_per_atom_list, axis=0)
+    delta_fs = np.concatenate(delta_fs_list, axis=0)
+    fs = np.concatenate(fs_list, axis=0)
 
     aux = {
         "loss": avg_loss,

@@ -2,17 +2,10 @@ from collections import namedtuple
 import numpy as np
 import jax.numpy as jnp
 import jraph
+from roundmantissa import ceil_mantissa
 
 
-def _nearest_bigger_power_of_two(x: int) -> int:
-    """Computes the nearest power of two greater than x for padding."""
-    y = 2
-    while y < x:
-        y *= 2
-    return y
-
-
-def pad_graph_to_nearest_power_of_two(
+def pad_graph_to_nearest_ceil_mantissa(
     graphs_tuple: jraph.GraphsTuple,
 ) -> jraph.GraphsTuple:
     """Pads a batched `GraphsTuple` to the nearest power of two.
@@ -34,8 +27,8 @@ def pad_graph_to_nearest_power_of_two(
         A graphs_tuple batched to the nearest power of two.
     """
     # Add 1 since we need at least one padding node for pad_with_graphs.
-    pad_nodes_to = _nearest_bigger_power_of_two(jnp.sum(graphs_tuple.n_node)) + 1
-    pad_edges_to = _nearest_bigger_power_of_two(jnp.sum(graphs_tuple.n_edge))
+    pad_nodes_to = ceil_mantissa(jnp.sum(graphs_tuple.n_node) + 1, 1)
+    pad_edges_to = ceil_mantissa(jnp.sum(graphs_tuple.n_edge), 1)
     # Add 1 since we need at least one padding graph for pad_with_graphs.
     # We do not pad to nearest power of two because the batch size is fixed.
     pad_graphs_to = graphs_tuple.n_node.shape[0] + 1
@@ -52,25 +45,23 @@ Global = namedtuple("Global", ["energy", "weight", "ptr"])
 def get_batched_padded_graph_tuples(batch):
     graphs = jraph.GraphsTuple(
         nodes=Node(
-            positions=np.array(batch.position),
-            attrs=np.array(batch.attrs),
-            forces=np.array(batch.forces),
+            positions=batch.position.numpy(),
+            attrs=batch.attrs.numpy(),
+            forces=batch.force.numpy(),
         ),
-        edges=Edge(shifts=np.array(batch.shifts)),
-        n_node=np.array(batch.position.shape[0]),
-        n_edge=np.array(batch.edge_index.shape[1]),
-        senders=np.array(batch.edge_index[0]),
-        receivers=np.array(batch.edge_index[1]),
+        edges=Edge(shifts=batch.shifts.numpy()),
+        n_node=batch.position.shape[0].numpy(),
+        n_edge=batch.edge_index.shape[1].numpy(),
+        senders=batch.edge_index[0].numpy(),
+        receivers=batch.edge_index[1].numpy(),
         globals=Global(
-            energy=np.array(batch.energy),
-            weight=np.array(batch.weight),
-            ptr=np.array(batch.ptr),
+            energy=batch.energy.numpy(),
+            weight=batch.weight.numpy(),
+            ptr=batch.ptr.numpy(),
         ),
     )
-
-    labels = np.array(batch.y)
-    graphs = pad_graph_to_nearest_power_of_two(graphs)  # padd the whole batch once
-    return graphs, labels
+    graphs = pad_graph_to_nearest_ceil_mantissa(graphs)  # padd the whole batch once
+    return graphs
 
 
 ### From Flax
@@ -84,39 +75,39 @@ empty_node = _EmptyNode()
 def flatten_dict(xs, keep_empty_nodes=False, is_leaf=None, sep=None):
     """Flatten a nested dictionary.
 
-  The nested keys are flattened to a tuple.
-  See `unflatten_dict` on how to restore the
-  nested dictionary structure.
+    The nested keys are flattened to a tuple.
+    See `unflatten_dict` on how to restore the
+    nested dictionary structure.
 
-  Example::
+    Example::
 
-    xs = {'foo': 1, 'bar': {'a': 2, 'b': {}}}
-    flat_xs = flatten_dict(xs)
-    print(flat_xs)
-    # {
-    #   ('foo',): 1,
-    #   ('bar', 'a'): 2,
-    # }
+      xs = {'foo': 1, 'bar': {'a': 2, 'b': {}}}
+      flat_xs = flatten_dict(xs)
+      print(flat_xs)
+      # {
+      #   ('foo',): 1,
+      #   ('bar', 'a'): 2,
+      # }
 
-  Note that empty dictionaries are ignored and
-  will not be restored by `unflatten_dict`.
+    Note that empty dictionaries are ignored and
+    will not be restored by `unflatten_dict`.
 
-  Args:
-    xs: a nested dictionary
-    keep_empty_nodes: replaces empty dictionaries
-      with `traverse_util.empty_node`. This must
-      be set to `True` for `unflatten_dict` to
-      correctly restore empty dictionaries.
-    is_leaf: an optional function that takes the
-      next nested dictionary and nested keys and
-      returns True if the nested dictionary is a
-      leaf (i.e., should not be flattened further).
-    sep: if specified, then the keys of the returned
-      dictionary will be `sep`-joined strings (if
-      `None`, then keys will be tuples).
-  Returns:
-    The flattened dictionary.
-  """
+    Args:
+      xs: a nested dictionary
+      keep_empty_nodes: replaces empty dictionaries
+        with `traverse_util.empty_node`. This must
+        be set to `True` for `unflatten_dict` to
+        correctly restore empty dictionaries.
+      is_leaf: an optional function that takes the
+        next nested dictionary and nested keys and
+        returns True if the nested dictionary is a
+        leaf (i.e., should not be flattened further).
+      sep: if specified, then the keys of the returned
+        dictionary will be `sep`-joined strings (if
+        `None`, then keys will be tuples).
+    Returns:
+      The flattened dictionary.
+    """
     assert isinstance(xs, dict), "expected (frozen)dict"
 
     def _key(path):
@@ -145,27 +136,27 @@ def flatten_dict(xs, keep_empty_nodes=False, is_leaf=None, sep=None):
 def unflatten_dict(xs, sep=None):
     """Unflatten a dictionary.
 
-  See `flatten_dict`
+    See `flatten_dict`
 
-  Example::
+    Example::
 
-    flat_xs = {
-      ('foo',): 1,
-      ('bar', 'a'): 2,
-    }
-    xs = unflatten_dict(flat_xs)
-    print(xs)
-    # {
-    #   'foo': 1
-    #   'bar': {'a': 2}
-    # }
+      flat_xs = {
+        ('foo',): 1,
+        ('bar', 'a'): 2,
+      }
+      xs = unflatten_dict(flat_xs)
+      print(xs)
+      # {
+      #   'foo': 1
+      #   'bar': {'a': 2}
+      # }
 
-  Args:
-    xs: a flattened dictionary
-    sep: separator (same as used with `flatten_dict()`).
-  Returns:
-    The nested dictionary.
-  """
+    Args:
+      xs: a flattened dictionary
+      sep: separator (same as used with `flatten_dict()`).
+    Returns:
+      The nested dictionary.
+    """
     assert isinstance(xs, dict), "input is not a dict"
     result = {}
     for path, value in xs.items():
@@ -180,4 +171,3 @@ def unflatten_dict(xs, sep=None):
             cursor = cursor[key]
         cursor[path[-1]] = value
     return result
-
