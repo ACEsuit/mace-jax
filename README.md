@@ -101,7 +101,8 @@ python scripts/run_train.py \
     --amsgrad \
     --default_dtype="float32"\
     --clip_grad=None \
-    --seed=3
+    --seed=3 \
+    --debug_nans
 ```
 
 To give a specific validation set, use the argument `--valid_file`. To set a larger batch size for evaluating the validation set, specify `--valid_batch_size`.

@@ -17,7 +17,7 @@ from .blocks import (
     RadialEmbeddingBlock,
     ScaleShiftBlock,
 )
-from .utils import get_edge_vectors_and_lengths
+from .utils import get_edge_vectors_and_lengths, safe_norm
 
 
 class EnergyMACE(hk.Module):
@@ -32,7 +32,7 @@ class EnergyMACE(hk.Module):
         num_interactions: int,
         hidden_irreps: e3nn.Irreps,
         MLP_irreps: e3nn.Irreps,
-        atomic_energies: np.ndarray,
+        atomic_energies: np.ndarray,  # TODO (mario): remove this ?
         avg_num_neighbors: float,
         atomic_numbers: List[int],
         correlation: int,
@@ -75,7 +75,10 @@ class EnergyMACE(hk.Module):
             shifts=graph.edges.shifts,
         )
         edge_attrs = e3nn.spherical_harmonics(
-            self.sh_irreps, vectors, normalize=True, normalization="component"
+            self.sh_irreps,
+            vectors / safe_norm(vectors, axis=-1, keepdims=True),
+            normalize=False,
+            normalization="component",
         )
         edge_feats = self.radial_embedding(lengths)
         edge_feats = e3nn.IrrepsArray(
@@ -165,28 +168,29 @@ class MACE(hk.Module):
 
     def __call__(self, graph: jraph.GraphsTuple) -> Dict[str, Any]:
         def energy_fn(positions):
-            # Setup
-            num_graphs = graph.n_node.shape[0]
-            num_nodes = graph.nodes.positions.shape[0]
-            graph_index = jnp.repeat(
-                jnp.arange(num_graphs), graph.n_node, total_repeat_length=num_nodes
-            )  # (node,)
             node_e0 = self.atomic_energies_fn(graph.nodes.attrs)  # [n_nodes, ]
             contributions = self.energy_model(
                 graph._replace(nodes=graph.nodes._replace(positions=positions))
             )
             node_energies = jnp.sum(contributions, axis=1)  # [n_nodes, ]
-            energy = e3nn.index_add(
-                indices=graph_index, input=(node_energies + node_e0), out_dim=num_graphs
-            )  # [ n_graphs,]
-            return jnp.sum(energy), energy
+            node_energies = node_energies + node_e0  # [n_nodes, ]
+            return jnp.sum(node_energies), node_energies
 
-        minus_forces, (total_energy) = jax.grad(energy_fn, has_aux=True)(
+        minus_forces, node_energies = jax.grad(energy_fn, has_aux=True)(
             graph.nodes.positions
         )
 
+        num_graphs = graph.n_node.shape[0]
+        num_nodes = graph.nodes.positions.shape[0]
+        graph_index = jnp.repeat(
+            jnp.arange(num_graphs), graph.n_node, total_repeat_length=num_nodes
+        )  # (node,)
+        graph_energies = e3nn.index_add(
+            indices=graph_index, input=node_energies, out_dim=num_graphs
+        )  # [ n_graphs,]
+
         return {
-            "energy": total_energy,  # [n_graphs,]
+            "energy": graph_energies,  # [n_graphs,]
             "forces": -minus_forces,  # [n_nodes, 3]
         }
 
@@ -207,29 +211,33 @@ class ScaleShiftMACE(hk.Module):
 
     def __call__(self, graph: jraph.GraphsTuple) -> Dict[str, Any]:
         def energy_fn(positions):
-            # Setup
-            num_graphs = graph.n_node.shape[0]
-            num_nodes = graph.nodes.positions.shape[0]
-            graph_index = jnp.repeat(
-                jnp.arange(num_graphs), graph.n_node, total_repeat_length=num_nodes
-            )  # (node,)
-            node_e0 = self.atomic_energies_fn(graph.nodes.attrs)
+            node_e0 = self.atomic_energies_fn(
+                graph.nodes.attrs
+            )  # TODO (mario): check if we need this variable
             contributions = self.energy_model(
                 graph._replace(nodes=graph.nodes._replace(positions=positions))
-            )
-            node_energies = jnp.sum(contributions, axis=1)
-            node_inter_es = self.scale_shift(node_energies)
-            energy = e3nn.index_add(
-                indices=graph_index, input=(node_inter_es + node_e0), out_dim=num_graphs
-            )  # [ n_graphs,]
-            return jnp.sum(energy), energy
+            )  # [n_nodes, num_interactions]
+            node_energies = jnp.sum(contributions, axis=1)  # [n_nodes, ]
+            node_inter_es = self.scale_shift(node_energies)  # [n_nodes, ]
 
-        minus_forces, (total_energy) = jax.grad(energy_fn, has_aux=True)(
+            node_energies = node_energies + node_inter_es  # [n_nodes, ]
+            return jnp.sum(node_energies), node_energies
+
+        minus_forces, node_energies = jax.grad(energy_fn, has_aux=True)(
             graph.nodes.positions
         )
 
+        num_graphs = graph.n_node.shape[0]
+        num_nodes = graph.nodes.positions.shape[0]
+        graph_index = jnp.repeat(
+            jnp.arange(num_graphs), graph.n_node, total_repeat_length=num_nodes
+        )  # (node,)
+        graph_energies = e3nn.index_add(
+            indices=graph_index, input=node_energies, out_dim=num_graphs
+        )  # [ n_graphs,]
+
         output = {
-            "energy": total_energy,  # [n_graphs,]
+            "energy": graph_energies,  # [n_graphs,]
             "forces": -minus_forces,  # [n_nodes, 3]
         }
 

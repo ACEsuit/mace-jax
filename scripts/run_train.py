@@ -30,6 +30,7 @@ def main() -> None:
     tag = tools.get_tag(name=args.name, seed=args.seed)
 
     # Setup
+    jax.config.update("jax_debug_nans", args.debug_nans)
     tools.set_seeds(args.seed)
     tools.setup_logger(level=args.log_level, tag=tag, directory=args.log_dir)
     try:

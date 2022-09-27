@@ -10,6 +10,12 @@ from mace_jax.tools.scatter import scatter_sum
 from .blocks import AtomicEnergiesBlock
 
 
+def safe_norm(x: jnp.ndarray, axis: int = None, keepdims=False) -> jnp.ndarray:
+    """nan-safe norm."""
+    x2 = jnp.sum(x**2, axis=axis, keepdims=keepdims)
+    return jnp.where(x2 == 0, 1, x2) ** 0.5
+
+
 def get_edge_vectors_and_lengths(
     positions: np.ndarray,  # [n_nodes, 3]
     receivers: np.ndarray,  # [n_edges]
@@ -17,7 +23,7 @@ def get_edge_vectors_and_lengths(
     shifts: np.ndarray,  # [n_edges, 3]
 ) -> Tuple[np.ndarray, np.ndarray]:
     vectors = positions[receivers] - positions[senders] + shifts  # [n_edges, 3]
-    lengths = jnp.linalg.norm(vectors, axis=-1, keepdims=True)  # [n_edges, 1]
+    lengths = safe_norm(vectors, axis=-1, keepdims=True)  # [n_edges, 1]
     return vectors, lengths
 
 
