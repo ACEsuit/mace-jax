@@ -111,6 +111,7 @@ class EquivariantProductBasisBlock(hk.Module):
 class InteractionBlock(ABC, hk.Module):
     def __init__(
         self,
+        *,
         target_irreps: e3nn.Irreps,
         hidden_irreps: e3nn.Irreps,
         avg_num_neighbors: float,
@@ -169,7 +170,8 @@ class AgnosticResidualInteractionBlock(InteractionBlock):
         # Learnable Radial
         tp_weights = e3nn.MultiLayerPerceptron(3 * [64] + [weight_numel], jax.nn.silu)(
             edge_feats.array
-        )  # [n_edges, n_basis, 1]
+        )  # [n_edges, weight_numel]
+        assert tp_weights.shape == (edge_feats.shape[0], weight_numel)
 
         # Convolution weights
         mji = jax.vmap(conv_tp.left_right)(
@@ -178,8 +180,10 @@ class AgnosticResidualInteractionBlock(InteractionBlock):
         mji = mji.simplify()
 
         # Scatter sum
-        message = jnp.zeros((node_feats.shape[0], mji.shape[1]))  # [n_nodes, irreps]
-        message = e3nn.IrrepsArray(mji.irreps, message.at[receivers].add(mji.array))
+        message = e3nn.IrrepsArray.zeros(
+            mji.irreps, (node_feats.shape[0],)
+        )  # [n_nodes, irreps]
+        message = message.at[receivers].add(mji)
         # Linear
         message = e3nn.Linear(self.target_irreps)(message) / self.avg_num_neighbors
 
@@ -199,20 +203,11 @@ class AgnosticInteractionBlock(InteractionBlock):
         senders: jnp.ndarray,
         receivers: jnp.ndarray,
     ) -> Tuple[e3nn.IrrepsArray, Optional[e3nn.IrrepsArray]]:
-        interaction_block = AgnosticResidualInteractionBlock(
-            node_attrs=node_attrs,
-            node_feats=node_feats,
-            edge_attrs=edge_attrs,
-            edge_feats=edge_feats,
-            senders=senders,
-            receivers=receivers,
+        message, _ = AgnosticResidualInteractionBlock(
             target_irreps=self.target_irreps,
             hidden_irreps=self.hidden_irreps,
             avg_num_neighbors=self.avg_num_neighbors,
-        )
-        message, _ = interaction_block(
-            node_attrs, node_feats, edge_attrs, edge_feats, senders, receivers
-        )
+        )(node_attrs, node_feats, edge_attrs, edge_feats, senders, receivers)
 
         # Selector TensorProduct
         message = e3nn.Linear(self.target_irreps)(

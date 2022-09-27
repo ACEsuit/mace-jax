@@ -94,19 +94,17 @@ class EnergyMACE(hk.Module):
                 )  # Select only scalars for last layer
             else:
                 hidden_irreps_out = self.hidden_irreps
+
             if i == 0:
-                inter = self.interaction_cls_first(
-                    target_irreps=self.interaction_irreps,
-                    hidden_irreps=hidden_irreps_out,
-                    avg_num_neighbors=self.avg_num_neighbors,
-                )
+                inter = self.interaction_cls_first
             else:
-                inter = self.interaction_cls(
-                    target_irreps=self.interaction_irreps,
-                    hidden_irreps=hidden_irreps_out,
-                    avg_num_neighbors=self.avg_num_neighbors,
-                )
+                inter = self.interaction_cls
+
             node_feats, sc = inter(
+                target_irreps=self.interaction_irreps,
+                hidden_irreps=hidden_irreps_out,
+                avg_num_neighbors=self.avg_num_neighbors,
+            )(
                 node_attrs=node_attrs,
                 node_feats=node_feats,
                 edge_attrs=edge_attrs,
