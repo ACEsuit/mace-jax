@@ -17,7 +17,7 @@ from .blocks import (
     RadialEmbeddingBlock,
     ScaleShiftBlock,
 )
-from .utils import get_edge_vectors_and_lengths, safe_norm
+from .utils import get_edge_vectors_and_lengths, safe_norm, sum_nodes_of_the_same_graph
 
 
 class EnergyMACE(hk.Module):
@@ -180,13 +180,8 @@ class MACE(hk.Module):
             graph.nodes.positions
         )
 
-        num_graphs = graph.n_node.shape[0]
-        num_nodes = graph.nodes.positions.shape[0]
-        graph_index = jnp.repeat(
-            jnp.arange(num_graphs), graph.n_node, total_repeat_length=num_nodes
-        )  # (node,)
-        graph_energies = e3nn.index_add(
-            indices=graph_index, input=node_energies, out_dim=num_graphs
+        graph_energies = sum_nodes_of_the_same_graph(
+            graph, node_energies
         )  # [ n_graphs,]
 
         return {
@@ -227,13 +222,8 @@ class ScaleShiftMACE(hk.Module):
             graph.nodes.positions
         )
 
-        num_graphs = graph.n_node.shape[0]
-        num_nodes = graph.nodes.positions.shape[0]
-        graph_index = jnp.repeat(
-            jnp.arange(num_graphs), graph.n_node, total_repeat_length=num_nodes
-        )  # (node,)
-        graph_energies = e3nn.index_add(
-            indices=graph_index, input=node_energies, out_dim=num_graphs
+        graph_energies = sum_nodes_of_the_same_graph(
+            graph, node_energies
         )  # [ n_graphs,]
 
         output = {

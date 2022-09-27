@@ -1,8 +1,10 @@
-import logging
 from typing import Tuple
-import torch
-import numpy as np
+
+import e3nn_jax as e3nn
 import jax.numpy as jnp
+import jraph
+import numpy as np
+import torch
 
 from mace_jax.tools import to_numpy
 from mace_jax.tools.scatter import scatter_sum
@@ -93,3 +95,18 @@ def compute_avg_num_neighbors(data_loader: torch.utils.data.DataLoader) -> float
         torch.cat(num_neighbors, dim=0).type(torch.get_default_dtype())
     )
     return to_numpy(avg_num_neighbors).item()
+
+
+def sum_nodes_of_the_same_graph(
+    graph: jraph.GraphsTuple, node_quantities: jnp.ndarray
+) -> jnp.ndarray:
+    """Sum node quantities and return a graph quantity."""
+    num_graphs = graph.n_node.shape[0]
+    num_nodes = graph.nodes.positions.shape[0]
+    graph_index = jnp.repeat(
+        jnp.arange(num_graphs), graph.n_node, total_repeat_length=num_nodes
+    )  # [n_nodes,]
+    graph_quantities = e3nn.index_add(
+        indices=graph_index, input=node_quantities, out_dim=num_graphs
+    )  # [ n_graphs,]
+    return graph_quantities
