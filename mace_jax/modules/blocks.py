@@ -125,11 +125,11 @@ class InteractionBlock(ABC, hk.Module):
     def __call__(
         self,
         node_attrs: e3nn.IrrepsArray,  # [n_nodes, irreps]
-        node_feats: e3nn.IrrepsArray,
-        edge_attrs: e3nn.IrrepsArray,
-        edge_feats: e3nn.IrrepsArray,
-        senders: jnp.ndarray,
-        receivers: jnp.ndarray,
+        node_feats: e3nn.IrrepsArray,  # [n_nodes, irreps]
+        edge_attrs: e3nn.IrrepsArray,  # [n_edges, irreps]
+        edge_feats: e3nn.IrrepsArray,  # [n_edges, irreps]
+        senders: jnp.ndarray,  # [n_edges, ]
+        receivers: jnp.ndarray,  # [n_edges, ]
     ) -> Tuple[e3nn.IrrepsArray, Optional[e3nn.IrrepsArray]]:
         raise NotImplementedError
 
@@ -137,12 +137,12 @@ class InteractionBlock(ABC, hk.Module):
 class AgnosticResidualInteractionBlock(InteractionBlock):
     def __call__(
         self,
-        node_attrs: e3nn.IrrepsArray,
-        node_feats: e3nn.IrrepsArray,
-        edge_attrs: e3nn.IrrepsArray,
-        edge_feats: e3nn.IrrepsArray,
-        senders: jnp.ndarray,
-        receivers: jnp.ndarray,
+        node_attrs: e3nn.IrrepsArray,  # [n_nodes, irreps]
+        node_feats: e3nn.IrrepsArray,  # [n_nodes, irreps]
+        edge_attrs: e3nn.IrrepsArray,  # [n_edges, irreps]
+        edge_feats: e3nn.IrrepsArray,  # [n_edges, irreps]
+        senders: jnp.ndarray,  # [n_edges, ]
+        receivers: jnp.ndarray,  # [n_edges, ]
     ) -> Tuple[e3nn.IrrepsArray, e3nn.IrrepsArray]:
         sc = e3nn.Linear(self.hidden_irreps)(
             e3nn.tensor_product(node_feats, node_attrs)
@@ -168,6 +168,7 @@ class AgnosticResidualInteractionBlock(InteractionBlock):
         )
 
         # Learnable Radial
+        assert {ir for _, ir in edge_attrs.irreps} == {e3nn.Irrep("0e")}
         tp_weights = e3nn.MultiLayerPerceptron(3 * [64] + [weight_numel], jax.nn.silu)(
             edge_feats.array
         )  # [n_edges, weight_numel]
@@ -196,12 +197,12 @@ class AgnosticResidualInteractionBlock(InteractionBlock):
 class AgnosticInteractionBlock(InteractionBlock):
     def __call__(
         self,
-        node_attrs: e3nn.IrrepsArray,
-        node_feats: e3nn.IrrepsArray,
-        edge_attrs: e3nn.IrrepsArray,
-        edge_feats: e3nn.IrrepsArray,
-        senders: jnp.ndarray,
-        receivers: jnp.ndarray,
+        node_attrs: e3nn.IrrepsArray,  # [n_nodes, irreps]
+        node_feats: e3nn.IrrepsArray,  # [n_nodes, irreps]
+        edge_attrs: e3nn.IrrepsArray,  # [n_edges, irreps]
+        edge_feats: e3nn.IrrepsArray,  # [n_edges, irreps]
+        senders: jnp.ndarray,  # [n_edges, ]
+        receivers: jnp.ndarray,  # [n_edges, ]
     ) -> Tuple[e3nn.IrrepsArray, Optional[e3nn.IrrepsArray]]:
         message, _ = AgnosticResidualInteractionBlock(
             target_irreps=self.target_irreps,
