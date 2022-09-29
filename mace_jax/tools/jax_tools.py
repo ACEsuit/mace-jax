@@ -55,9 +55,7 @@ def get_batched_padded_graph_tuples(batch):
             weight=batch.weight.numpy(),
         ),
         n_node=(batch.ptr[1:] - batch.ptr[:-1]).numpy(),
-        n_edge=np.array(
-            [batch.num_edges] + [0] * (batch.energy.numpy().shape[0] - 1)
-        ),  # TODO: (mario) this is wrong, the number of edges per graph
+        n_edge=batch.n_edge.numpy(),
         senders=batch.edge_index[0].numpy(),
         receivers=batch.edge_index[1].numpy(),
     )

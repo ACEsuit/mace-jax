@@ -1,5 +1,6 @@
 from typing import Optional, Sequence
 
+import torch
 import torch.utils.data
 
 from mace_jax.tools import (
@@ -15,6 +16,8 @@ from .utils import Configuration
 
 class AtomicData(torch_geometric.data.Data):
     num_graphs: torch.Tensor
+    num_nodes: torch.Tensor
+    n_edge: torch.Tensor
     batch: torch.Tensor
     edge_index: torch.Tensor
     node_attrs: torch.Tensor
@@ -40,10 +43,11 @@ class AtomicData(torch_geometric.data.Data):
     ):
         # Check shapes
         num_nodes = node_attrs.shape[0]
+        n_edge = edge_index.shape[1]
 
         assert edge_index.shape[0] == 2 and len(edge_index.shape) == 2
         assert positions.shape == (num_nodes, 3)
-        assert shifts.shape[1] == 3
+        assert shifts.shape == (n_edge, 3)
         assert len(node_attrs.shape) == 2
         assert weight is None or len(weight.shape) == 0
         assert cell is None or cell.shape == (3, 3)
@@ -52,6 +56,7 @@ class AtomicData(torch_geometric.data.Data):
         # Aggregate data
         data = {
             "num_nodes": num_nodes,
+            "n_edge": n_edge,
             "edge_index": edge_index,
             "positions": positions,
             "shifts": shifts,

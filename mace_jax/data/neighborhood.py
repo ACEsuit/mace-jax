@@ -46,6 +46,8 @@ def get_neighborhood(
 
     # From the docs: With the shift vector S, the distances D between atoms can be computed from
     # D = positions[j]-positions[i]+S.dot(cell)
-    shifts = np.dot(unit_shifts, cell)  # [n_edges, 3]
+    shifts = np.dot(
+        unit_shifts, cell
+    )  # [n_edges, 3] TODO (mario): keep unit_shifts as int and pass cell to the model
 
     return edge_index, shifts

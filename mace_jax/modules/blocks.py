@@ -168,7 +168,9 @@ class AgnosticResidualInteractionBlock(InteractionBlock):
         )
 
         # Learnable Radial
-        assert {ir for _, ir in edge_attrs.irreps} == {e3nn.Irrep("0e")}
+        assert {ir for _, ir in edge_feats.irreps} == {
+            e3nn.Irrep("0e")
+        }, edge_feats.irreps
         tp_weights = e3nn.MultiLayerPerceptron(3 * [64] + [weight_numel], jax.nn.silu)(
             edge_feats.array
         )  # [n_edges, weight_numel]
