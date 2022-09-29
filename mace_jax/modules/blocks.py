@@ -30,7 +30,7 @@ class LinearReadoutBlock(hk.Module):
     def __call__(
         self, x: e3nn.IrrepsArray
     ) -> e3nn.IrrepsArray:  # [n_nodes, irreps]  # [..., ]
-        return e3nn.Linear(e3nn.Irreps("0e"))(x)  # [n_nodes, 1]
+        return e3nn.Linear("0e")(x)  # [n_nodes, 1]
 
 
 class NonLinearReadoutBlock(hk.Module):
@@ -45,7 +45,7 @@ class NonLinearReadoutBlock(hk.Module):
     ) -> e3nn.IrrepsArray:  # [n_nodes, irreps]  # [..., ]
         x = e3nn.Linear(self.hidden_irreps)(x)
         x = e3nn.scalar_activation(x, [self.gate])
-        return e3nn.Linear(e3nn.Irreps("0e"))(x)  # [n_nodes, 1]
+        return e3nn.Linear("0e")(x)  # [n_nodes, 1]
 
 
 class AtomicEnergiesBlock(hk.Module):
@@ -53,12 +53,12 @@ class AtomicEnergiesBlock(hk.Module):
 
     def __init__(self, atomic_energies: Union[np.ndarray, jnp.ndarray]):
         super().__init__()
-        assert len(atomic_energies.shape) == 1
+        assert atomic_energies.ndim == 1
         self.atomic_energies = atomic_energies  # [n_elements, ]
 
     def __call__(
-        self, x: e3nn.IrrepsArray  # one-hot of elements [..., n_elements]
-    ) -> e3nn.IrrepsArray:  # [..., ]
+        self, x: jnp.ndarray  # one-hot of elements [..., n_elements]
+    ) -> jnp.ndarray:  # [..., ]
         return x @ self.atomic_energies
 
     def __repr__(self):
@@ -70,15 +70,17 @@ class RadialEmbeddingBlock(hk.Module):
     def __init__(self, r_max: float, num_bessel: int, num_polynomial_cutoff: int):
         super().__init__()
         self.bessel_fn = BesselBasis(r_max=r_max, num_basis=num_bessel)
-        self.cutoff_fn = PolynomialCutoff(r_max=r_max, p=num_polynomial_cutoff)
+        self.cutoff_fn = PolynomialCutoff(
+            r_max=r_max, p=num_polynomial_cutoff
+        )  # TODO (mario): generalize with e3nn.poly_envelope
 
     def __call__(
         self,
-        edge_lengths: e3nn.IrrepsArray,  # [n_edges, 1]
-    ):
-        bessel = self.bessel_fn(edge_lengths)  # [n_edges, n_basis]
+        edge_lengths: jnp.ndarray,  # [n_edges, 1]
+    ) -> jnp.ndarray:  # [n_edges, num_bessel]
+        bessel = self.bessel_fn(edge_lengths)  # [n_edges, num_bessel]
         cutoff = self.cutoff_fn(edge_lengths)  # [n_edges, 1]
-        return bessel * cutoff  # [n_edges, n_basis]
+        return bessel * cutoff  # [n_edges, num_bessel]
 
 
 class EquivariantProductBasisBlock(hk.Module):
@@ -96,11 +98,11 @@ class EquivariantProductBasisBlock(hk.Module):
 
     def __call__(
         self,
-        node_feats: e3nn.IrrepsArray,
-        node_attrs: e3nn.IrrepsArray,
-        sc: Optional[e3nn.IrrepsArray],
+        node_feats: e3nn.IrrepsArray,  # [n_nodes, irreps] with identical multiplicities
+        node_attrs: e3nn.IrrepsArray,  # [n_nodes, irreps] with only scalars
+        sc: Optional[e3nn.IrrepsArray],  # [n_nodes, irreps] like node_feats
     ) -> e3nn.IrrepsArray:
-        assert {ir for _, ir in node_attrs.irreps} == {e3nn.Irrep("0e")}
+        assert node_attrs.irreps.is_scalar()
         node_feats = self.symmetric_contractions(
             node_feats.factor_mul_to_last_axis(), node_attrs.array
         ).repeat_mul_by_last_axis()
@@ -168,9 +170,7 @@ class AgnosticResidualInteractionBlock(InteractionBlock):
         )
 
         # Learnable Radial
-        assert {ir for _, ir in edge_feats.irreps} == {
-            e3nn.Irrep("0e")
-        }, edge_feats.irreps
+        assert edge_feats.irreps.is_scalar()
         tp_weights = e3nn.MultiLayerPerceptron(3 * [64] + [weight_numel], jax.nn.silu)(
             edge_feats.array
         )  # [n_edges, weight_numel]
@@ -183,17 +183,17 @@ class AgnosticResidualInteractionBlock(InteractionBlock):
         mji = mji.simplify()
 
         # Scatter sum
-        message = e3nn.IrrepsArray.zeros(
-            mji.irreps, (node_feats.shape[0],)
-        )  # [n_nodes, irreps]
-        message = message.at[receivers].add(mji)
+        message = e3nn.IrrepsArray.zeros(mji.irreps, (node_feats.shape[0],))
+        message = message.at[receivers].add(mji)  # [n_nodes, irreps]
         # Linear
-        message = e3nn.Linear(self.target_irreps)(message) / self.avg_num_neighbors
+        message = (
+            e3nn.Linear(self.target_irreps)(message) / self.avg_num_neighbors
+        )  # TODO (mario): x/n vs epsilon*x/sqrt(n) ?
 
         return (
-            message,
-            sc,
-        )  # [n_nodes, channels, (lmax + 1)**2]
+            message,  # [n_nodes, target_irreps]
+            sc,  # [n_nodes, hidden_irreps]
+        )
 
 
 class AgnosticInteractionBlock(InteractionBlock):
@@ -217,9 +217,9 @@ class AgnosticInteractionBlock(InteractionBlock):
             e3nn.tensor_product(message, node_attrs)
         )
         return (
-            message,
+            message,  # [n_nodes, target_irreps]
             None,
-        )  # [n_nodes, channels, (lmax + 1)**2]
+        )
 
 
 class ScaleShiftBlock(hk.Module):

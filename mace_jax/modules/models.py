@@ -23,6 +23,7 @@ from .utils import get_edge_vectors_and_lengths, safe_norm, sum_nodes_of_the_sam
 class EnergyMACE(hk.Module):
     def __init__(
         self,
+        *,
         r_max: float,
         num_bessel: int,
         num_polynomial_cutoff: int,
@@ -48,9 +49,11 @@ class EnergyMACE(hk.Module):
         self.interaction_cls_first = interaction_cls_first
         self.interaction_cls = interaction_cls
         self.num_interactions = num_interactions
-        # Embedding
-        node_feats_irreps = e3nn.Irreps([(hidden_irreps.count(e3nn.Irrep("0e")), "0e")])
-        self.node_embedding = LinearNodeEmbeddingBlock(irreps_out=node_feats_irreps)
+
+        # Embeddings
+        self.node_embedding = LinearNodeEmbeddingBlock(
+            self.hidden_irreps.filter(["0e"])
+        )
         self.radial_embedding = RadialEmbeddingBlock(
             r_max=r_max,
             num_bessel=num_bessel,
@@ -59,7 +62,9 @@ class EnergyMACE(hk.Module):
 
         self.sh_irreps = e3nn.Irreps.spherical_harmonics(max_ell)
         num_features = hidden_irreps.count(e3nn.Irrep("0e"))
-        self.interaction_irreps = (self.sh_irreps * num_features).sort()[0].simplify()
+        self.interaction_irreps = e3nn.Irreps(
+            [(num_features, ir) for _, ir in self.sh_irreps]
+        )
 
     def __call__(self, graph: jraph.GraphsTuple) -> Dict[str, Any]:
         # Embeddings
@@ -87,14 +92,12 @@ class EnergyMACE(hk.Module):
         # Interactions
         outputs = []
         for i in range(self.num_interactions):
-            if i == self.num_interactions - 1:
-                hidden_irreps_out = str(
-                    self.hidden_irreps[0]
-                )  # Select only scalars for last layer
+            if i == self.num_interactions - 1:  # Select only scalars for last layer
+                hidden_irreps_out = self.hidden_irreps.filter(["0e"])
             else:
                 hidden_irreps_out = self.hidden_irreps
 
-            if i == 0:
+            if i == 0:  # No residual connection for first layer
                 inter = self.interaction_cls_first
             else:
                 inter = self.interaction_cls
@@ -111,17 +114,18 @@ class EnergyMACE(hk.Module):
                 receivers=graph.receivers,
                 senders=graph.senders,
             )
-            prod = EquivariantProductBasisBlock(
+            node_feats = EquivariantProductBasisBlock(
                 target_irreps=hidden_irreps_out, correlation=self.correlation
-            )
-            node_feats = prod(node_feats=node_feats, sc=sc, node_attrs=node_attrs)
-            if i == self.num_interactions - 1:
-                readout = NonLinearReadoutBlock(self.MLP_irreps, self.gate)
-                node_energies = readout(node_feats).array.squeeze(-1)  # [n_nodes, ]
+            )(node_feats=node_feats, sc=sc, node_attrs=node_attrs)
+
+            if i == self.num_interactions - 1:  # Non linear readout for last layer
+                node_energies = NonLinearReadoutBlock(self.MLP_irreps, self.gate)(
+                    node_feats
+                )  # [n_nodes, 1]
             else:
-                readout = LinearReadoutBlock()
-                node_energies = readout(node_feats).array.squeeze(-1)  # [n_nodes, ]
-            outputs += [node_energies]
+                node_energies = LinearReadoutBlock()(node_feats)  # [n_nodes, 1]
+
+            outputs += [node_energies[:, 0]]
 
         return jnp.stack(outputs, axis=1)  # [n_nodes, num_interactions]
 
@@ -129,6 +133,7 @@ class EnergyMACE(hk.Module):
 class MACE(hk.Module):
     def __init__(
         self,
+        *,
         r_max: float,
         num_bessel: int,
         num_polynomial_cutoff: int,
@@ -138,11 +143,11 @@ class MACE(hk.Module):
         num_interactions: int,
         hidden_irreps: e3nn.Irreps,
         MLP_irreps: e3nn.Irreps,
-        atomic_energies: np.ndarray,
         avg_num_neighbors: float,
         atomic_numbers: List[int],
         correlation: int,
         gate: Optional[Callable],
+        atomic_energies: np.ndarray,
     ):
         super().__init__()
         self.energy_model = EnergyMACE(
@@ -155,7 +160,6 @@ class MACE(hk.Module):
             num_interactions=num_interactions,
             hidden_irreps=hidden_irreps,
             MLP_irreps=MLP_irreps,
-            atomic_energies=atomic_energies,
             avg_num_neighbors=avg_num_neighbors,
             atomic_numbers=atomic_numbers,
             correlation=correlation,
@@ -192,6 +196,7 @@ class ScaleShiftMACE(hk.Module):
         self,
         atomic_inter_scale: float,
         atomic_inter_shift: float,
+        atomic_energies: np.ndarray,
         **kwargs,
     ):
         super().__init__()
@@ -199,7 +204,7 @@ class ScaleShiftMACE(hk.Module):
             scale=atomic_inter_scale, shift=atomic_inter_shift
         )
         self.energy_model = EnergyMACE(**kwargs)
-        self.atomic_energies_fn = AtomicEnergiesBlock(kwargs["atomic_energies"])
+        self.atomic_energies_fn = AtomicEnergiesBlock(atomic_energies)
 
     def __call__(self, graph: jraph.GraphsTuple) -> Dict[str, Any]:
         def energy_fn(positions):
