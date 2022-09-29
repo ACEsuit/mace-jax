@@ -32,7 +32,6 @@ class EnergyMACE(hk.Module):
         num_interactions: int,
         hidden_irreps: e3nn.Irreps,
         MLP_irreps: e3nn.Irreps,
-        atomic_energies: np.ndarray,  # TODO (mario): remove this ?
         avg_num_neighbors: float,
         atomic_numbers: List[int],
         correlation: int,
