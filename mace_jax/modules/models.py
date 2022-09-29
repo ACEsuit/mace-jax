@@ -170,8 +170,8 @@ class MACE(hk.Module):
             contributions = self.energy_model(
                 graph._replace(nodes=graph.nodes._replace(positions=positions))
             )
-            node_energies = jnp.sum(contributions, axis=1)  # [n_nodes, ]
-            node_energies = node_energies + node_e0  # [n_nodes, ]
+
+            node_energies = node_e0 + jnp.sum(contributions, axis=1)  # [n_nodes, ]
             return jnp.sum(node_energies), node_energies
 
         minus_forces, node_energies = jax.grad(energy_fn, has_aux=True)(
@@ -204,16 +204,14 @@ class ScaleShiftMACE(hk.Module):
 
     def __call__(self, graph: jraph.GraphsTuple) -> Dict[str, Any]:
         def energy_fn(positions):
-            node_e0 = self.atomic_energies_fn(
-                graph.nodes.attrs
-            )  # TODO (mario): check if we need this variable
+            node_e0 = self.atomic_energies_fn(graph.nodes.attrs)
             contributions = self.energy_model(
                 graph._replace(nodes=graph.nodes._replace(positions=positions))
             )  # [n_nodes, num_interactions]
-            node_energies = jnp.sum(contributions, axis=1)  # [n_nodes, ]
-            node_inter_es = self.scale_shift(node_energies)  # [n_nodes, ]
 
-            node_energies = node_energies + node_inter_es  # [n_nodes, ]
+            node_energies = node_e0 + self.scale_shift(
+                jnp.sum(contributions, axis=1)
+            )  # [n_nodes, ]
             return jnp.sum(node_energies), node_energies
 
         minus_forces, node_energies = jax.grad(energy_fn, has_aux=True)(
