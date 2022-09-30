@@ -116,7 +116,10 @@ class EnergyMACE(hk.Module):
             )
             node_feats = EquivariantProductBasisBlock(
                 target_irreps=hidden_irreps_out, correlation=self.correlation
-            )(node_feats=node_feats, sc=sc, node_attrs=node_attrs)
+            )(node_feats=node_feats, node_attrs=node_attrs)
+
+            if sc is not None:
+                node_feats = node_feats + sc
 
             if i == self.num_interactions - 1:  # Non linear readout for last layer
                 node_energies = NonLinearReadoutBlock(self.MLP_irreps, self.gate)(

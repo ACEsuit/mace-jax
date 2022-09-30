@@ -106,14 +106,12 @@ class EquivariantProductBasisBlock(hk.Module):
         self,
         node_feats: e3nn.IrrepsArray,  # [n_nodes, irreps] with identical multiplicities
         node_attrs: e3nn.IrrepsArray,  # [n_nodes, irreps] with only scalars
-        sc: Optional[e3nn.IrrepsArray],  # [n_nodes, irreps] like node_feats
     ) -> e3nn.IrrepsArray:
         assert node_attrs.irreps.is_scalar()
         node_feats = self.symmetric_contractions(
             node_feats.factor_mul_to_last_axis(), node_attrs.array
         ).repeat_mul_by_last_axis()
-        node_feats = e3nn.Linear(node_feats.irreps)(node_feats)
-        return node_feats + sc if sc is not None else node_feats
+        return e3nn.Linear(node_feats.irreps)(node_feats)
 
 
 class InteractionBlock(ABC, hk.Module):
