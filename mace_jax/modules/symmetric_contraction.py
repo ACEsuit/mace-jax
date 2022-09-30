@@ -23,32 +23,32 @@ class SymmetricContraction(hk.Module):
 
             out = dict()
 
-            for order in range(self.correlation, 0, -1):
+            for order in range(self.correlation, 0, -1):  # correlation, ..., 1
                 U = e3nn.reduced_tensor_product_basis(
                     [x.irreps] * order, keep_ir=self.keep_irrep_out
                 )
 
-                for (mul, irrep_out), u in zip(U.irreps, U.list):
+                for (mul, ir_out), u in zip(U.irreps, U.list):
                     # u: ndarray [(irreps_x.dim)^order, multiplicity, ir_out.dim]
 
                     w = hk.get_parameter(
-                        f"w{order}_{irrep_out}",
+                        f"w{order}_{ir_out}",
                         (mul, y.shape[0], x.shape[0]),
                         dtype=jnp.float32,
                         init=hk.initializers.RandomNormal(),
                     )  # [multiplicity, num_elements, num_features]
 
-                    if irrep_out not in out:
-                        out[irrep_out] = jnp.einsum(
+                    if ir_out not in out:
+                        out[ir_out] = jnp.einsum(
                             "...jki,kec,e,cj->c...i", u, w, y, x.array
                         )
                     else:
                         c_tensor = jnp.einsum(
                             "...ki,kec,e->c...i", u, w, y
                         )  # [num_features, (irreps_x.dim)^order, ir_out.dim]
-                        c_tensor = c_tensor + out[irrep_out]
+                        c_tensor = c_tensor + out[ir_out]
 
-                        out[irrep_out] = jnp.einsum(
+                        out[ir_out] = jnp.einsum(
                             "c...ji,cj->c...i", c_tensor, x.array
                         )  # [num_features, (irreps_x.dim)^(oder-1), ir_out.dim]
 

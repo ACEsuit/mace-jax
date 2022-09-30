@@ -35,13 +35,12 @@ def test_mace():
     model_config = dict(
         r_max=5,
         num_bessel=8,
-        num_polynomial_cutoff=6,
+        num_deriv_in_one=5,
+        num_deriv_in_zero=2,
         max_ell=2,
-        interaction_cls=modules.interaction_classes[
-            "RealAgnosticResidualInteractionBlock"
-        ],
+        interaction_cls=modules.interaction_classes["AgnosticResidualInteractionBlock"],
         interaction_cls_first=modules.interaction_classes[
-            "RealAgnosticResidualInteractionBlock"
+            "AgnosticResidualInteractionBlock"
         ],
         num_interactions=5,
         num_elements=2,

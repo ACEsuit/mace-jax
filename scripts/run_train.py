@@ -139,7 +139,8 @@ def main() -> None:
     model_config = dict(
         r_max=args.r_max,
         num_bessel=args.num_radial_basis,
-        num_polynomial_cutoff=args.num_cutoff_basis,
+        num_deriv_in_zero=args.num_cutoff_basis - 1,
+        num_deriv_in_one=2,
         max_ell=args.max_ell,
         interaction_cls=modules.interaction_classes[args.interaction],
         num_interactions=args.num_interactions,

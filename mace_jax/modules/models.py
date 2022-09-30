@@ -25,22 +25,21 @@ class EnergyMACE(hk.Module):
         self,
         *,
         r_max: float,
-        num_bessel: int,
-        num_polynomial_cutoff: int,
-        max_ell: int,
+        num_bessel: int,  # Number of Bessel functions, default 8
+        num_deriv_in_zero: int,  # Number of zero derivatives at small distances, default 4
+        num_deriv_in_one: int,  # Number of zero derivatives at large distances, default 2
+        max_ell: int,  # Max spherical harmonic degree, default 3
         interaction_cls: Type[InteractionBlock],
         interaction_cls_first: Type[InteractionBlock],
-        num_interactions: int,
-        hidden_irreps: e3nn.Irreps,
-        MLP_irreps: e3nn.Irreps,
+        num_interactions: int,  # Number of interactions (layers), default 2
+        hidden_irreps: e3nn.Irreps,  # 256x0e or 128x0e + 128x1o
+        MLP_irreps: e3nn.Irreps,  # Hidden irreps of the MLP in last readout, default 16x0e
         avg_num_neighbors: float,
-        atomic_numbers: List[int],
-        correlation: int,
-        gate: Optional[Callable],
+        correlation: int,  # Correlation order at each layer (~ node_features^correlation), default 3
+        gate: Optional[Callable],  # Gate function for the MLP in last readout
     ):
         super().__init__()
         self.r_max = r_max
-        self.atomic_numbers = atomic_numbers
         self.correlation = correlation
         self.hidden_irreps = hidden_irreps
         self.avg_num_neighbors = avg_num_neighbors
@@ -57,7 +56,8 @@ class EnergyMACE(hk.Module):
         self.radial_embedding = RadialEmbeddingBlock(
             r_max=r_max,
             num_bessel=num_bessel,
-            num_polynomial_cutoff=num_polynomial_cutoff,
+            num_deriv_in_zero=num_deriv_in_zero,
+            num_deriv_in_one=num_deriv_in_one,
         )
 
         self.sh_irreps = e3nn.Irreps.spherical_harmonics(max_ell)
@@ -125,7 +125,7 @@ class EnergyMACE(hk.Module):
             else:
                 node_energies = LinearReadoutBlock()(node_feats)  # [n_nodes, 1]
 
-            outputs += [node_energies[:, 0]]
+            outputs += [node_energies.array[:, 0]]  # [n_nodes, ]
 
         return jnp.stack(outputs, axis=1)  # [n_nodes, num_interactions]
 
@@ -136,7 +136,8 @@ class MACE(hk.Module):
         *,
         r_max: float,
         num_bessel: int,
-        num_polynomial_cutoff: int,
+        num_deriv_in_zero: int,
+        num_deriv_in_one: int,
         max_ell: int,
         interaction_cls: Type[InteractionBlock],
         interaction_cls_first: Type[InteractionBlock],
@@ -144,7 +145,7 @@ class MACE(hk.Module):
         hidden_irreps: e3nn.Irreps,
         MLP_irreps: e3nn.Irreps,
         avg_num_neighbors: float,
-        atomic_numbers: List[int],
+        atomic_numbers: List[int],  # TODO (mario): Remove this?
         correlation: int,
         gate: Optional[Callable],
         atomic_energies: np.ndarray,
@@ -153,7 +154,8 @@ class MACE(hk.Module):
         self.energy_model = EnergyMACE(
             r_max=r_max,
             num_bessel=num_bessel,
-            num_polynomial_cutoff=num_polynomial_cutoff,
+            num_deriv_in_zero=num_deriv_in_zero,
+            num_deriv_in_one=num_deriv_in_one,
             max_ell=max_ell,
             interaction_cls=interaction_cls,
             interaction_cls_first=interaction_cls_first,
@@ -161,7 +163,6 @@ class MACE(hk.Module):
             hidden_irreps=hidden_irreps,
             MLP_irreps=MLP_irreps,
             avg_num_neighbors=avg_num_neighbors,
-            atomic_numbers=atomic_numbers,
             correlation=correlation,
             gate=gate,
         )

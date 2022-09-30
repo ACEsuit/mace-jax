@@ -67,12 +67,18 @@ class AtomicEnergiesBlock(hk.Module):
 
 
 class RadialEmbeddingBlock(hk.Module):
-    def __init__(self, r_max: float, num_bessel: int, num_polynomial_cutoff: int):
+    def __init__(
+        self,
+        r_max: float,
+        num_bessel: int,
+        num_deriv_in_zero: int,
+        num_deriv_in_one: int,
+    ):
         super().__init__()
         self.bessel_fn = BesselBasis(r_max=r_max, num_basis=num_bessel)
         self.cutoff_fn = PolynomialCutoff(
-            r_max=r_max, p=num_polynomial_cutoff
-        )  # TODO (mario): generalize with e3nn.poly_envelope
+            r_max=r_max, n0=num_deriv_in_zero, n1=num_deriv_in_one
+        )
 
     def __call__(
         self,

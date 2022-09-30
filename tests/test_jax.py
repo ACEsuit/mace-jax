@@ -32,7 +32,8 @@ def test_mace():
     model_config = dict(
         r_max=5,
         num_bessel=8,
-        num_polynomial_cutoff=6,
+        num_deriv_in_zero=5,
+        num_deriv_in_one=2,
         max_ell=2,
         interaction_cls=modules.interaction_classes["AgnosticResidualInteractionBlock"],
         interaction_cls_first=modules.interaction_classes[
@@ -75,7 +76,8 @@ def test_mace():
     def wrapper(positions):
         graph = jraph.GraphsTuple(
             nodes=Node(
-                positions=positions.array, attrs=jax.nn.one_hot(jnp.array([0, 1]), 2),
+                positions=positions.array,
+                attrs=jax.nn.one_hot(jnp.array([0, 1]), 2),
             ),
             edges=Edge(shifts=jnp.array([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]])),
             globals=None,
