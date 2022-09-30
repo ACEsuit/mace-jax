@@ -16,13 +16,7 @@ class BesselBasis(hk.Module):
         self.num_basis = num_basis
 
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:  # [..., 1]
-        n = jnp.arange(1, self.num_basis + 1)
-        x_nonzero = jnp.where(x == 0, 1, x)
-        return jnp.sqrt(2 / self.r_max) * jnp.where(
-            x == 0,
-            n * jnp.pi / self.r_max,
-            jnp.sin(n * jnp.pi / self.r_max * x_nonzero) / x_nonzero,
-        )
+        return e3nn.bessel(x[..., 0], self.num_basis, self.r_max)
 
     def __repr__(self):
         return (
@@ -45,12 +39,7 @@ class PolynomialCutoff(hk.Module):
         self.n1 = n1
 
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
-        x_small = jnp.where(x < self.r_max, x, self.r_max)
-        return jnp.where(
-            x < self.r_max,
-            e3nn.poly_envelope(self.n0, self.n1)(x_small / self.r_max),
-            0.0,
-        )
+        return e3nn.poly_envelope(self.n0, self.n1, x_max=self.r_max)(x)
 
     def __repr__(self):
         return (
