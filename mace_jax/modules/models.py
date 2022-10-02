@@ -74,7 +74,9 @@ class GeneralMACE(hk.Module):
             f"{graph.nodes.attrs.shape[-1]}x0e", graph.nodes.attrs
         )
         node_feats = self.node_embedding(node_attrs)
-        vectors, lengths = get_edge_vectors_and_lengths(
+
+        # TODO (mario): use jax_md formalism to compute the relative vectors and lengths
+        (vectors, lengths,) = get_edge_vectors_and_lengths(
             positions=graph.nodes.positions,
             senders=graph.senders,
             receivers=graph.receivers,
