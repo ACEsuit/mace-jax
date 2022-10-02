@@ -17,7 +17,7 @@ class SymmetricContraction(hk.Module):
         self.keep_irrep_out = {e3nn.Irrep(ir) for ir in keep_irrep_out}
 
     def __call__(self, x: e3nn.IrrepsArray, y: jnp.ndarray):
-        def fn(x, y):
+        def fn(x: e3nn.IrrepsArray, y: jnp.ndarray):
             assert x.ndim == 2  # [num_features, irreps_x.dim]
             assert y.ndim == 1  # [num_elements]
 

@@ -1,4 +1,4 @@
-from typing import Any, Callable, Dict, List, Optional, Type
+from typing import Callable, Dict, List, Optional, Type
 
 import e3nn_jax as e3nn
 import haiku as hk
@@ -20,7 +20,7 @@ from .blocks import (
 from .utils import get_edge_vectors_and_lengths, safe_norm, sum_nodes_of_the_same_graph
 
 
-class EnergyMACE(hk.Module):
+class GeneralMACE(hk.Module):
     def __init__(
         self,
         *,
@@ -37,6 +37,7 @@ class EnergyMACE(hk.Module):
         avg_num_neighbors: float,
         correlation: int,  # Correlation order at each layer (~ node_features^correlation), default 3
         gate: Optional[Callable],  # Gate function for the MLP in last readout
+        output_irreps: e3nn.Irreps,  # Irreps of the output, default 1x0e
     ):
         super().__init__()
         self.r_max = r_max
@@ -48,6 +49,7 @@ class EnergyMACE(hk.Module):
         self.interaction_cls_first = interaction_cls_first
         self.interaction_cls = interaction_cls
         self.num_interactions = num_interactions
+        self.output_irreps = output_irreps
 
         # Embeddings
         self.node_embedding = LinearNodeEmbeddingBlock(
@@ -66,7 +68,7 @@ class EnergyMACE(hk.Module):
             [(num_features, ir) for _, ir in self.sh_irreps]
         )
 
-    def __call__(self, graph: jraph.GraphsTuple) -> Dict[str, Any]:
+    def __call__(self, graph: jraph.GraphsTuple) -> e3nn.IrrepsArray:
         # Embeddings
         node_attrs = e3nn.IrrepsArray(
             f"{graph.nodes.attrs.shape[-1]}x0e", graph.nodes.attrs
@@ -122,15 +124,19 @@ class EnergyMACE(hk.Module):
                 node_feats = node_feats + sc
 
             if i == self.num_interactions - 1:  # Non linear readout for last layer
-                node_energies = NonLinearReadoutBlock(self.MLP_irreps, self.gate)(
+                node_outputs = NonLinearReadoutBlock(
+                    self.MLP_irreps, self.output_irreps, self.gate
+                )(
                     node_feats
-                )  # [n_nodes, 1]
+                )  # [n_nodes, output_irreps]
             else:
-                node_energies = LinearReadoutBlock()(node_feats)  # [n_nodes, 1]
+                node_outputs = LinearReadoutBlock(self.output_irreps)(
+                    node_feats
+                )  # [n_nodes, output_irreps]
 
-            outputs += [node_energies.array[:, 0]]  # [n_nodes, ]
+            outputs += [node_outputs]  # list of [n_nodes, output_irreps]
 
-        return jnp.stack(outputs, axis=1)  # [n_nodes, num_interactions]
+        return e3nn.stack(outputs, axis=1)  # [n_nodes, num_interactions, output_irreps]
 
 
 class MACE(hk.Module):
@@ -154,7 +160,7 @@ class MACE(hk.Module):
         atomic_energies: np.ndarray,
     ):
         super().__init__()
-        self.energy_model = EnergyMACE(
+        self.energy_model = GeneralMACE(
             r_max=r_max,
             num_bessel=num_bessel,
             num_deriv_in_zero=num_deriv_in_zero,
@@ -168,15 +174,17 @@ class MACE(hk.Module):
             avg_num_neighbors=avg_num_neighbors,
             correlation=correlation,
             gate=gate,
+            output_irreps="0e",
         )
         self.atomic_energies_fn = AtomicEnergiesBlock(atomic_energies)
 
-    def __call__(self, graph: jraph.GraphsTuple) -> Dict[str, Any]:
+    def __call__(self, graph: jraph.GraphsTuple) -> Dict[str, jnp.ndarray]:
         def energy_fn(positions):
             node_e0 = self.atomic_energies_fn(graph.nodes.attrs)  # [n_nodes, ]
             contributions = self.energy_model(
                 graph._replace(nodes=graph.nodes._replace(positions=positions))
-            )
+            )  # [n_nodes, num_interactions, 0e]
+            contributions = contributions.array[:, :, 0]  # [n_nodes, num_interactions]
 
             node_energies = node_e0 + jnp.sum(contributions, axis=1)  # [n_nodes, ]
             return jnp.sum(node_energies), node_energies
@@ -207,15 +215,16 @@ class ScaleShiftMACE(hk.Module):
         self.scale_shift = ScaleShiftBlock(
             scale=atomic_inter_scale, shift=atomic_inter_shift
         )
-        self.energy_model = EnergyMACE(**kwargs)
+        self.energy_model = GeneralMACE(**kwargs)
         self.atomic_energies_fn = AtomicEnergiesBlock(atomic_energies)
 
-    def __call__(self, graph: jraph.GraphsTuple) -> Dict[str, Any]:
+    def __call__(self, graph: jraph.GraphsTuple) -> Dict[str, jnp.ndarray]:
         def energy_fn(positions):
             node_e0 = self.atomic_energies_fn(graph.nodes.attrs)
             contributions = self.energy_model(
                 graph._replace(nodes=graph.nodes._replace(positions=positions))
-            )  # [n_nodes, num_interactions]
+            )  # [n_nodes, num_interactions, 0e]
+            contributions = contributions.array[:, :, 0]  # [n_nodes, num_interactions]
 
             node_energies = node_e0 + self.scale_shift(
                 jnp.sum(contributions, axis=1)

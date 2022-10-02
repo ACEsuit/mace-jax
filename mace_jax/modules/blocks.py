@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Callable, Dict, Optional, Tuple, Union
+from typing import Callable, Optional, Tuple, Union
 
 import numpy as np
 
@@ -27,25 +27,40 @@ class LinearNodeEmbeddingBlock(hk.Module):
 
 
 class LinearReadoutBlock(hk.Module):
-    def __call__(
-        self, x: e3nn.IrrepsArray
-    ) -> e3nn.IrrepsArray:  # [n_nodes, irreps]  # [..., ]
-        return e3nn.Linear("0e")(x)  # [n_nodes, 1]
+    def __init__(
+        self,
+        output_irreps: e3nn.Irreps,
+    ):
+        super().__init__()
+        self.output_irreps = output_irreps
+
+    def __call__(self, x: e3nn.IrrepsArray) -> e3nn.IrrepsArray:
+        # x = [n_nodes, irreps]
+        return e3nn.Linear(self.output_irreps)(x)  # [n_nodes, output_irreps]
 
 
 class NonLinearReadoutBlock(hk.Module):
-    def __init__(self, MLP_irreps: e3nn.Irreps, gate: Optional[Callable]):
+    def __init__(
+        self,
+        hidden_irreps: e3nn.Irreps,
+        output_irreps: e3nn.Irreps,
+        gate: Optional[Callable],
+    ):
         super().__init__()
-        assert len(MLP_irreps) == 1
-        self.hidden_irreps = MLP_irreps
+        self.hidden_irreps = hidden_irreps
+        self.output_irreps = output_irreps
         self.gate = gate
 
-    def __call__(
-        self, x: e3nn.IrrepsArray
-    ) -> e3nn.IrrepsArray:  # [n_nodes, irreps]  # [..., ]
-        x = e3nn.Linear(self.hidden_irreps)(x)
-        x = e3nn.scalar_activation(x, [self.gate])
-        return e3nn.Linear("0e")(x)  # [n_nodes, 1]
+    def __call__(self, x: e3nn.IrrepsArray) -> e3nn.IrrepsArray:
+        # x = [n_nodes, irreps]
+        num_vectors = (
+            self.hidden_irreps.num_irreps
+            - self.hidden_irreps.filter(["0e", "0o"]).num_irreps
+        )  # Multiplicity of (l > 0) irreps
+        irreps = (self.hidden_irreps + e3nn.Irreps(f"{num_vectors}x0e")).sort().irreps
+        x = e3nn.Linear(irreps)(x)
+        x = e3nn.gate(x, even_act=self.gate, even_gate_act=self.gate)
+        return e3nn.Linear(self.output_irreps)(x)  # [n_nodes, output_irreps]
 
 
 class AtomicEnergiesBlock(hk.Module):
