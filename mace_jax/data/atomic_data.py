@@ -60,7 +60,7 @@ class AtomicData(torch_geometric.data.Data):
             "edge_index": edge_index,
             "positions": positions,
             "shifts": shifts,
-            "cell": cell,
+            "cell": cell[None, :, :] if cell is not None else None,
             "node_attrs": node_attrs,
             "weight": weight,
             "forces": forces,
@@ -72,7 +72,7 @@ class AtomicData(torch_geometric.data.Data):
     def from_config(
         cls, config: Configuration, z_table: AtomicNumberTable, cutoff: float
     ) -> "AtomicData":
-        edge_index, shifts = get_neighborhood(
+        edge_index, shifts, cell = get_neighborhood(
             positions=config.positions, cutoff=cutoff, pbc=config.pbc, cell=config.cell
         )
         indices = atomic_numbers_to_indices(config.atomic_numbers, z_table=z_table)
@@ -82,7 +82,7 @@ class AtomicData(torch_geometric.data.Data):
         )
 
         cell = (
-            torch.tensor(config.cell, dtype=torch.get_default_dtype())
+            torch.tensor(cell, dtype=torch.get_default_dtype())
             if config.cell is not None
             else None
         )
@@ -107,7 +107,7 @@ class AtomicData(torch_geometric.data.Data):
         return cls(
             edge_index=torch.tensor(edge_index, dtype=torch.long),
             positions=torch.tensor(config.positions, dtype=torch.get_default_dtype()),
-            shifts=torch.tensor(shifts, dtype=torch.get_default_dtype()),
+            shifts=torch.tensor(shifts, dtype=torch.long),
             cell=cell,
             node_attrs=one_hot,
             weight=weight,

@@ -79,6 +79,8 @@ class GeneralMACE(hk.Module):
             senders=graph.senders,
             receivers=graph.receivers,
             shifts=graph.edges.shifts,
+            cell=graph.globals.cell,
+            n_edge=graph.n_edge,
         )
         edge_attrs = e3nn.spherical_harmonics(
             self.sh_irreps,
@@ -215,7 +217,7 @@ class ScaleShiftMACE(hk.Module):
         self.scale_shift = ScaleShiftBlock(
             scale=atomic_inter_scale, shift=atomic_inter_shift
         )
-        self.energy_model = GeneralMACE(**kwargs)
+        self.energy_model = GeneralMACE(output_irreps="0e", **kwargs)
         self.atomic_energies_fn = AtomicEnergiesBlock(atomic_energies)
 
     def __call__(self, graph: jraph.GraphsTuple) -> Dict[str, jnp.ndarray]:

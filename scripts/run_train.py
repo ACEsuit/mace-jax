@@ -11,7 +11,6 @@ import jraph
 import numpy as np
 import optax
 import torch.nn.functional
-from torch.optim.swa_utils import SWALR, AveragedModel
 from utils import create_error_table, get_dataset_from_xyz
 
 import mace_jax
@@ -147,7 +146,7 @@ def main() -> None:
         hidden_irreps=e3nn.Irreps(args.hidden_irreps),
         atomic_energies=atomic_energies,
         avg_num_neighbors=args.avg_num_neighbors,
-        atomic_numbers=z_table.zs,
+        # atomic_numbers=z_table.zs,  # TODO (mario): check if this is needed
     )
 
     model: hk.Transformed

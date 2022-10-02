@@ -1,5 +1,5 @@
 from collections import namedtuple
-import numpy as np
+
 import jax.numpy as jnp
 import jraph
 from roundmantissa import ceil_mantissa
@@ -39,7 +39,7 @@ def pad_graph_to_nearest_ceil_mantissa(
 
 Node = namedtuple("Node", ["positions", "attrs", "forces"])
 Edge = namedtuple("Edge", ["shifts"])
-Global = namedtuple("Global", ["energy", "weight"])
+Global = namedtuple("Global", ["energy", "weight", "cell"])
 
 
 def get_batched_padded_graph_tuples(batch):
@@ -53,6 +53,7 @@ def get_batched_padded_graph_tuples(batch):
         globals=Global(
             energy=batch.energy.numpy(),
             weight=batch.weight.numpy(),
+            cell=batch.cell.numpy() if batch.cell is not None else None,
         ),
         n_node=(batch.ptr[1:] - batch.ptr[:-1]).numpy(),
         n_edge=batch.n_edge.numpy(),
@@ -63,7 +64,7 @@ def get_batched_padded_graph_tuples(batch):
     return graphs
 
 
-### From Flax
+# From Flax
 class _EmptyNode:
     pass
 

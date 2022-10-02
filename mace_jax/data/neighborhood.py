@@ -14,7 +14,9 @@ def get_neighborhood(
     if pbc is None:
         pbc = (False, False, False)
 
-    if cell is None or cell.any() == np.zeros((3, 3)).any():
+    if (
+        cell is None or cell.any() == np.zeros((3, 3)).any()
+    ):  # TODO (mario): check this condition
         cell = np.identity(3, dtype=float)
 
     assert len(pbc) == 3 and all(isinstance(i, (bool, np.bool_)) for i in pbc)
@@ -46,8 +48,4 @@ def get_neighborhood(
 
     # From the docs: With the shift vector S, the distances D between atoms can be computed from
     # D = positions[j]-positions[i]+S.dot(cell)
-    shifts = np.dot(
-        unit_shifts, cell
-    )  # [n_edges, 3] TODO (mario): keep unit_shifts as int and pass cell to the model
-
-    return edge_index, shifts
+    return edge_index, unit_shifts, cell
