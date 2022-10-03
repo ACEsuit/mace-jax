@@ -76,7 +76,7 @@ class GeneralMACE(hk.Module):
         node_feats = self.node_embedding(node_attrs)
 
         # TODO (mario): use jax_md formalism to compute the relative vectors and lengths
-        (vectors, lengths,) = get_edge_vectors_and_lengths(
+        vectors, lengths = get_edge_vectors_and_lengths(
             positions=graph.nodes.positions,
             senders=graph.senders,
             receivers=graph.receivers,
@@ -129,7 +129,7 @@ class GeneralMACE(hk.Module):
 
             if i == self.num_interactions - 1:  # Non linear readout for last layer
                 node_outputs = NonLinearReadoutBlock(
-                    self.MLP_irreps, self.output_irreps, self.gate
+                    self.MLP_irreps, self.output_irreps, activation=self.gate
                 )(
                     node_feats
                 )  # [n_nodes, output_irreps]
