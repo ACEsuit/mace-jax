@@ -21,7 +21,7 @@ class SymmetricContraction(hk.Module):
             # - This operation is parallel on the feature dimension (but each feature has its own parameters)
             # - y is trivially contracted with the parameters
             # This operation is an efficient implementation of
-            # Linear(irreps_out)(x) + Linear(irreps_out)(tensor_product(x, x)) + Linear(irreps_out)(tensor_product(x, x, x)) + ...
+            # vmap(lambda w, x: FunctionalLinear(irreps_out)(w, concatenate([x, tensor_product(x, x), tensor_product(x, x, x), ...])))(w, x)
             # up to x power self.correlation
             assert x.ndim == 2  # [num_features, irreps_x.dim]
             assert y.ndim == 1  # [num_elements]
