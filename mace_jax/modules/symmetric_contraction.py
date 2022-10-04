@@ -18,15 +18,20 @@ class SymmetricContraction(hk.Module):
 
     def __call__(self, x: e3nn.IrrepsArray, y: jnp.ndarray):
         def fn(x: e3nn.IrrepsArray, y: jnp.ndarray):
+            # - This operation is parallel on the feature dimension (but each feature has its own parameters)
+            # - y is trivially contracted with the parameters
+            # This operation is an efficient implementation of
+            # Linear(irreps_out)(x) + Linear(irreps_out)(tensor_product(x, x)) + Linear(irreps_out)(tensor_product(x, x, x)) + ...
+            # up to x power self.correlation
             assert x.ndim == 2  # [num_features, irreps_x.dim]
             assert y.ndim == 1  # [num_elements]
 
             out = dict()
 
             for order in range(self.correlation, 0, -1):  # correlation, ..., 1
-                U = e3nn.reduced_tensor_product_basis(
-                    [x.irreps] * order, keep_ir=self.keep_irrep_out
-                )
+                U = e3nn.reduced_symmetric_tensor_product_basis(
+                    x.irreps, order, keep_ir=self.keep_irrep_out
+                )  # TODO (mario): I think this is just faster
 
                 for (mul, ir_out), u in zip(U.irreps, U.list):
                     # u: ndarray [(irreps_x.dim)^order, multiplicity, ir_out.dim]
