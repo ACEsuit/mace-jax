@@ -11,7 +11,7 @@ from .torch_tools import (
     to_one_hot,
 )
 from .jax_tools import get_batched_padded_graph_tuples, flatten_dict, unflatten_dict
-from .train import SWAContainer, evaluate, train, ExponentialMovingAverage
+from .train import SWAContainer, evaluate, train
 from .utils import (
     AtomicNumberTable,
     MetricsLogger,

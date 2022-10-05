@@ -1,7 +1,7 @@
 import ast
 import logging
 import os
-from typing import Dict, Optional
+from typing import Dict
 
 import e3nn_jax as e3nn
 import haiku as hk
@@ -21,7 +21,6 @@ from mace_jax.tools import (
     torch_geometric,
     unflatten_dict,
 )
-from mace_jax.tools.train import ExponentialMovingAverage
 
 
 def main() -> None:
@@ -242,10 +241,6 @@ def main() -> None:
     #     if opt_start_epoch is not None:
     #         start_epoch = opt_start_epoch
 
-    ema: Optional[ExponentialMovingAverage] = None
-    if args.ema:
-        ema = ExponentialMovingAverage(params, decay=args.ema_decay)
-
     logging.info(model)
     logging.info(f"Number of parameters: {tools.count_parameters(params)}")
     logging.info(f"Optimizer: {gradient_transform}")
@@ -265,7 +260,7 @@ def main() -> None:
         logger=logger,
         patience=args.patience,
         swa=None,
-        ema=ema,
+        ema_decay=args.ema_decay,
         max_grad_norm=args.clip_grad,
         log_errors=args.error_table,
     )

@@ -11,7 +11,6 @@ import optax
 import torch
 from torch.optim.swa_utils import SWALR, AveragedModel
 from torch.utils.data import DataLoader
-from torch_ema import ExponentialMovingAverage
 
 from .checkpoint import CheckpointHandler
 from .jax_tools import get_batched_padded_graph_tuples
@@ -33,13 +32,6 @@ class SWAContainer:
     loss_fn: torch.nn.Module
 
 
-jax.tree_util.register_pytree_node(
-    ExponentialMovingAverage,
-    lambda x: ((x.params, x.decay), None),
-    lambda _, children: ExponentialMovingAverage(params=children[0], decay=children[1]),
-)
-
-
 def train(
     model: Callable,
     params: Dict[str, Any],
@@ -56,13 +48,14 @@ def train(
     eval_interval: int,
     log_errors: str,
     swa: Optional[SWAContainer] = None,
-    ema: Optional[ExponentialMovingAverage] = None,
+    ema_decay: Optional[float] = None,
     max_grad_norm: Optional[float] = 10.0,
 ):
     lowest_loss = np.inf
     patience_counter = 0
     num_updates = 0
     swa_start = True
+    ema_params = params  # TODO (mario)
 
     if max_grad_norm is not None:
         logging.info(f"Using gradient clipping with tolerance={max_grad_norm:.3f}")
@@ -70,7 +63,7 @@ def train(
 
     @jax.jit
     def update_fn(
-        params, optimizer_state, ema, num_updates: int, graph: jraph.GraphsTuple
+        params, optimizer_state, ema_params, num_updates: int, graph: jraph.GraphsTuple
     ) -> Tuple[float, Any, Any]:
         # graph is assumed to be padded by jraph.pad_with_graphs
         mask = jraph.get_graph_padding_mask(graph)  # [n_graphs,]
@@ -81,15 +74,12 @@ def train(
             grad, optimizer_state, params
         )
         params = optax.apply_updates(params, updates)
-        if ema is not None:
-            decay = jnp.minimum(ema.decay, (1 + num_updates) / (10 + num_updates))
-            ema = ExponentialMovingAverage(
-                params=jax.tree_util.tree_map(
-                    lambda x, y: x * decay + y * (1 - decay), ema.params, params
-                ),
-                decay=ema.decay,
+        if ema_decay is not None:
+            decay = jnp.minimum(ema_decay, (1 + num_updates) / (10 + num_updates))
+            ema_params = jax.tree_util.tree_map(
+                lambda x, y: x * decay + y * (1 - decay), ema_params, params
             )
-        return loss, params, optimizer_state, ema
+        return loss, params, optimizer_state, ema_params
 
     for epoch in range(start_epoch, max_num_epochs):
         # Train
@@ -97,8 +87,8 @@ def train(
             graph = get_batched_padded_graph_tuples(batch)
             num_updates += 1
             start_time = time.time()
-            loss, params, optimizer_state, ema = update_fn(
-                params, optimizer_state, ema, num_updates, graph
+            loss, params, optimizer_state, ema_params = update_fn(
+                params, optimizer_state, ema_params, num_updates, graph
             )
             loss = float(loss)
             opt_metrics = {
@@ -114,7 +104,7 @@ def train(
         if epoch % eval_interval == 0:
             valid_loss, eval_metrics = evaluate(
                 model=model,
-                params=params if ema is not None else ema.params,
+                params=params if ema_decay is not None else ema_params,
                 loss_fn=loss_fn,
                 data_loader=valid_loader,
             )
