@@ -146,6 +146,7 @@ def main() -> None:
         hidden_irreps=e3nn.Irreps(args.hidden_irreps),
         atomic_energies=atomic_energies,
         avg_num_neighbors=args.avg_num_neighbors,
+        epsilon=args.epsilon,
     )
 
     model: hk.Transformed

@@ -33,7 +33,7 @@ def scatter_sum(
     dim_size: Optional[int] = None,
     reduce: str = "sum",
 ) -> torch.Tensor:
-    assert reduce == "sum"  # for now, TODO
+    assert reduce == "sum"
     index = _broadcast(index, src, dim)
     if out is None:
         size = list(src.size())

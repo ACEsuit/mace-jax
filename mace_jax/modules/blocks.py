@@ -209,9 +209,9 @@ class AgnosticResidualInteractionBlock(InteractionBlock):
         message = e3nn.IrrepsArray.zeros(mji.irreps, (node_feats.shape[0],))
         message = message.at[receivers].add(mji)  # [n_nodes, irreps]
         # Linear
-        message = (
-            e3nn.Linear(self.target_irreps)(message) / self.avg_num_neighbors
-        )  # TODO (mario): x/n vs epsilon*x/sqrt(n) ?
+        message = e3nn.Linear(self.target_irreps)(message) / jnp.sqrt(
+            self.avg_num_neighbors
+        )
 
         return (
             message,  # [n_nodes, target_irreps]

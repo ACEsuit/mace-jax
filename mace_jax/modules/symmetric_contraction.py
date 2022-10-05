@@ -31,7 +31,7 @@ class SymmetricContraction(hk.Module):
             for order in range(self.correlation, 0, -1):  # correlation, ..., 1
                 U = e3nn.reduced_symmetric_tensor_product_basis(
                     x.irreps, order, keep_ir=self.keep_irrep_out
-                )  # TODO (mario): I think this is just faster
+                )
 
                 for (mul, ir_out), u in zip(U.irreps, U.list):
                     # u: ndarray [(irreps_x.dim)^order, multiplicity, ir_out.dim]

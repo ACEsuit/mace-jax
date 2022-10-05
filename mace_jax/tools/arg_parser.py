@@ -136,6 +136,12 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         default=1,
     )
     parser.add_argument(
+        "--epsilon",
+        help="constant smaller than one to avoid exploding features when applying the symmetric contraction",
+        type=float,
+        default=None,  # suggested value: 0.2
+    )
+    parser.add_argument(
         "--compute_avg_num_neighbors",
         help="normalization factor for the message",
         type=bool,

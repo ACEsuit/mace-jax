@@ -35,6 +35,7 @@ class GeneralMACE(hk.Module):
         hidden_irreps: e3nn.Irreps,  # 256x0e or 128x0e + 128x1o
         MLP_irreps: e3nn.Irreps,  # Hidden irreps of the MLP in last readout, default 16x0e
         avg_num_neighbors: float,
+        epsilon: Optional[float] = None,
         correlation: int,  # Correlation order at each layer (~ node_features^correlation), default 3
         gate: Optional[Callable],  # Gate function for the MLP in last readout
         output_irreps: e3nn.Irreps,  # Irreps of the output, default 1x0e
@@ -44,6 +45,7 @@ class GeneralMACE(hk.Module):
         self.correlation = correlation
         self.hidden_irreps = hidden_irreps
         self.avg_num_neighbors = avg_num_neighbors
+        self.epsilon = epsilon
         self.MLP_irreps = MLP_irreps
         self.gate = gate
         self.interaction_cls_first = interaction_cls_first
@@ -120,6 +122,12 @@ class GeneralMACE(hk.Module):
                 receivers=graph.receivers,
                 senders=graph.senders,
             )
+
+            if self.epsilon is not None:
+                node_feats *= self.epsilon
+            else:
+                node_feats /= jnp.sqrt(self.avg_num_neighbors)
+
             node_feats = EquivariantProductBasisBlock(
                 target_irreps=hidden_irreps_out, correlation=self.correlation
             )(node_feats=node_feats, node_attrs=node_attrs)
@@ -158,6 +166,7 @@ class MACE(hk.Module):
         hidden_irreps: e3nn.Irreps,
         MLP_irreps: e3nn.Irreps,
         avg_num_neighbors: float,
+        epsilon: Optional[float],
         correlation: int,
         gate: Optional[Callable],
         atomic_energies: np.ndarray,
@@ -175,6 +184,7 @@ class MACE(hk.Module):
             hidden_irreps=hidden_irreps,
             MLP_irreps=MLP_irreps,
             avg_num_neighbors=avg_num_neighbors,
+            epsilon=epsilon,
             correlation=correlation,
             gate=gate,
             output_irreps="0e",
