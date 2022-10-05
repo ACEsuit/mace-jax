@@ -250,7 +250,7 @@ def main() -> None:
     logging.info(f"Number of parameters: {tools.count_parameters(params)}")
     logging.info(f"Optimizer: {gradient_transform}")
 
-    tools.train(
+    params, optimizer_state = tools.train(
         model=jax.jit(model.apply),
         params=params,
         loss_fn=loss_fn,
@@ -291,6 +291,7 @@ def main() -> None:
         args.valid_batch_size,
         model,
         loss_fn,
+        params,
     )
 
     logging.info("\n" + str(table))

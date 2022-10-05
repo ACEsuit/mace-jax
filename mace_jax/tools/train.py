@@ -13,8 +13,8 @@ from torch.optim.swa_utils import SWALR, AveragedModel
 from torch.utils.data import DataLoader
 from torch_ema import ExponentialMovingAverage
 
-from .checkpoint import CheckpointHandler, CheckpointState
-from .torch_tools import to_numpy
+from .checkpoint import CheckpointHandler
+from .jax_tools import get_batched_padded_graph_tuples
 from .utils import (
     MetricsLogger,
     compute_mae,
@@ -23,7 +23,6 @@ from .utils import (
     compute_rel_rmse,
     compute_rmse,
 )
-from .jax_tools import get_batched_padded_graph_tuples
 
 
 @dataclasses.dataclass
@@ -32,12 +31,6 @@ class SWAContainer:
     scheduler: SWALR
     start: int
     loss_fn: torch.nn.Module
-
-
-@dataclasses.dataclass
-class ExponentialMovingAverage:
-    params: Dict[str, Any]
-    decay: float
 
 
 jax.tree_util.register_pytree_node(
@@ -180,6 +173,7 @@ def train(
             swa.scheduler.step()
 
     logging.info("Training complete")
+    return params, optimizer_state
 
 
 def evaluate(

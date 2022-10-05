@@ -91,7 +91,7 @@ def create_error_table(
     valid_batch_size: int,
     model: torch.nn.Module,
     loss_fn: torch.nn.Module,
-    device: str,
+    parameters: dict,
 ) -> PrettyTable:
     table = PrettyTable()
     if table_type == "TotalRMSE":
@@ -136,7 +136,7 @@ def create_error_table(
 
         logging.info(f"Evaluating {name} ...")
         _, metrics = evaluate(
-            model, loss_fn=loss_fn, data_loader=data_loader, device=device
+            model, parameters, loss_fn=loss_fn, data_loader=data_loader
         )
         if table_type == "TotalRMSE":
             table.add_row(
