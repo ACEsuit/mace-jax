@@ -146,7 +146,6 @@ def main() -> None:
         hidden_irreps=e3nn.Irreps(args.hidden_irreps),
         atomic_energies=atomic_energies,
         avg_num_neighbors=args.avg_num_neighbors,
-        # atomic_numbers=z_table.zs,  # TODO (mario): check if this is needed
     )
 
     model: hk.Transformed

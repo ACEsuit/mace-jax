@@ -42,7 +42,7 @@ class SymmetricContraction(hk.Module):
                         dtype=jnp.float32,
                         init=hk.initializers.RandomNormal(),
                     )  # [multiplicity, num_elements, num_features]
-
+                    w = w / w.shape[0]  # normalize
                     if ir_out not in out:
                         out[ir_out] = jnp.einsum(
                             "...jki,kec,e,cj->c...i", u, w, y, x.array

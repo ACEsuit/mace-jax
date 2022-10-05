@@ -14,9 +14,7 @@ def get_neighborhood(
     if pbc is None:
         pbc = (False, False, False)
 
-    if (
-        cell is None or cell.any() == np.zeros((3, 3)).any()
-    ):  # TODO (mario): check this condition
+    if cell is None or (cell == 0.0).all():
         cell = np.identity(3, dtype=float)
 
     assert len(pbc) == 3 and all(isinstance(i, (bool, np.bool_)) for i in pbc)

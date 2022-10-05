@@ -1,4 +1,4 @@
-from typing import Callable, Dict, List, Optional, Type
+from typing import Callable, Dict, Optional, Type
 
 import e3nn_jax as e3nn
 import haiku as hk
@@ -158,7 +158,6 @@ class MACE(hk.Module):
         hidden_irreps: e3nn.Irreps,
         MLP_irreps: e3nn.Irreps,
         avg_num_neighbors: float,
-        atomic_numbers: List[int],  # TODO (mario): Remove this?
         correlation: int,
         gate: Optional[Callable],
         atomic_energies: np.ndarray,
