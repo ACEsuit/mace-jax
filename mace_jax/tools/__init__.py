@@ -2,9 +2,7 @@ from .arg_parser import build_default_arg_parser
 from .checkpoint import CheckpointHandler, CheckpointIO, CheckpointState
 
 from .torch_tools import (
-    #     TensorDict,
     count_parameters,
-    #     init_device,
     set_default_dtype,
     set_seeds,
     to_numpy,
@@ -36,6 +34,8 @@ __all__ = [
     "to_numpy",
     "to_one_hot",
     "get_batched_padded_graph_tuples",
+    "flatten_dict",
+    "unflatten_dict",
     "build_default_arg_parser",
     "set_seeds",
     "init_device",
