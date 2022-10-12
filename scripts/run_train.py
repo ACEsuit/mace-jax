@@ -153,13 +153,22 @@ def main() -> None:
         disp_fn=disp,
     )
 
-    def initialize_nbr_list(graphs: jraph.GraphsTuple):
+    def initialize_nbr_list(graph: jraph.GraphsTuple):
         # initialize a jax-md neighbour list to allow for efficient simulation
-
+        # take first N atom positions
+        # 
         neighbour_fn = partition.neighbor_list(
-            disp, args.box_size, args.r_max, format=partition.Sparse, mask_self=True
+            # node jax-md is using nanometers, r_max is in angstroms
+            disp,
+            args.box_size,
+            args.r_max / 10,
+            format=partition.Sparse,
+            mask_self=True,
         )
-        return neighbour_fn.allocate(graphs.nodes.positions)
+        # this is a neighbour list running over all nodes in the graph - actually we want
+        nbr_list = neighbour_fn.allocate(graph.nodes.positions)
+        print(nbr_list.idx.shape)
+        return nbr_list
 
     model: hk.Transformed
 
@@ -211,6 +220,7 @@ def main() -> None:
 
     # initialize with jax-md neighbour list
     init_positions = get_batched_padded_graph_tuples(next(iter(train_loader)))
+    print(init_positions)
     nbr_list = initialize_nbr_list(init_positions)
     params = jax.jit(model.init)(jax.random.PRNGKey(0), init_positions, nbr_list)
     # Optimizer

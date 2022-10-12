@@ -48,18 +48,15 @@ def get_edge_vectors_and_lengths(
     #         ),  # [n_edges, 3, 3]
     #     )  # [n_edges, 3]
     #     vectors += shifts
-    # mask = partition.neighbor_list_mask(neighbour_list)
-    disp_fn = vmap(partial(disp_fn))
-    vectors = disp_fn(
+    mask = partition.neighbor_list_mask(neighbour_list)
+
+    d = vmap(partial(disp_fn))
+    vectors = d(
         positions[neighbour_list.idx[0, :]], positions[neighbour_list.idx[1, :]]
     )
-    # I think we need to remove the zeroes in the vector to be normed
-    # vectors = jnp.where(mask[:, None], vectors, 1.0)
-    # # replace the zero values with 1 to avoid nan value
-    # # dR = jnp.where(is_zero, jnp.ones_like(dR), dR)
-    # lengths = jnp.linalg.norm(vectors, axis=-1).squeeze()  # [n_edges, 1]
 
-    # lengths = jnp.where(mask, lengths, 0.0)
+    mask = partition.neighbor_list_mask(neighbour_list)
+    vectors = jnp.where(mask[:, None], vectors, 0)
 
     lengths = safe_norm(vectors, axis=-1, keepdims=True)  # [n_edges, 1]
     return vectors, lengths
