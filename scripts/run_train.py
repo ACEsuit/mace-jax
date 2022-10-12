@@ -36,7 +36,6 @@ def main() -> None:
     except AttributeError:
         logging.info("Cannot find MACE version, please install MACE via pip")
     logging.info(f"Configuration: {args}")
-    # device = tools.init_device(args.device)
     tools.set_default_dtype(args.default_dtype)
 
     try:
@@ -210,20 +209,17 @@ def main() -> None:
 
     logger = tools.MetricsLogger(directory=args.results_dir, tag=tag + "_train")
 
-    gradient_transform: optax.GradientTransformation = None
-    gradient_transform = optax.chain(
-        optax.clip_by_global_norm(
-            np.inf if args.clip_grad is None else args.clip_grad
-        ),  # Clip by the gradient by the global norm.
-        optax.scale_by_adam(),  # Use the updates from adam.
+    gradient_transform: optax.GradientTransformation = optax.chain(
+        optax.clip_by_global_norm(np.inf if args.clip_grad is None else args.clip_grad),
+        tools.scale_by_amsgrad() if args.amsgrad == "True" else optax.scale_by_adam(),
         optax.add_decayed_weights(args.weight_decay, mask=weight_decay_mask),
         optax.scale_by_schedule(
             optax.exponential_decay(
                 init_value=args.lr,
-                transition_steps=4 * args.max_num_epochs // 5,
+                transition_steps=4 * len(train_loader) * args.max_num_epochs // 5,
                 decay_rate=args.lr_factor,
             )
-        ),  # Use the learning rate from the scheduler.),
+        ),  # Use the learning rate from the scheduler.), TODO: reduce on plateau scheduler
         optax.scale(-1.0),  # Gradient descent.
     )
 

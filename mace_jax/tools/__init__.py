@@ -25,6 +25,7 @@ from .utils import (
     get_tag,
     setup_logger,
 )
+from .amsgrad import scale_by_amsgrad
 
 
 __all__ = [
@@ -59,5 +60,5 @@ __all__ = [
     "compute_rel_rmse",
     "compute_q95",
     "compute_c",
-    "U_matrix_real",
+    "scale_by_amsgrad",
 ]

@@ -59,6 +59,7 @@ dtype_dict = {"float32": torch.float32, "float64": torch.float64}
 
 
 def set_default_dtype(dtype: str) -> None:
+    torch.set_default_dtype(dtype_dict[dtype])
     jax.config.update("jax_enable_x64", dtype == "float64")
 
 
