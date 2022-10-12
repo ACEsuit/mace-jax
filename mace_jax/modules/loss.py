@@ -1,4 +1,3 @@
-import e3nn_jax as e3nn
 import jax.numpy as jnp
 import jraph
 
@@ -14,8 +13,12 @@ def weighted_mean_squared_error_energy(graph, energy_pred) -> jnp.ndarray:
 
 def mean_squared_error_forces(graph, forces_pred) -> jnp.ndarray:
     forces_ref = graph.nodes.forces  # [n_nodes, 3]
-    return graph.globals.weight * sum_nodes_of_the_same_graph(
-        graph, jnp.mean(jnp.square(forces_ref - forces_pred), axis=1)
+    return (
+        graph.globals.weight
+        * sum_nodes_of_the_same_graph(
+            graph, jnp.mean(jnp.square(forces_ref - forces_pred), axis=1)
+        )
+        / graph.n_node
     )  # [n_graphs, ]
 
 
