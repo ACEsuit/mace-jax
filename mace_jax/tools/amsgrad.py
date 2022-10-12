@@ -1,14 +1,12 @@
 # ###Functions taken from the PR of @merajhashemi d5d72605a5 ####
 
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 
 import chex
 import jax
 import jax.numpy as jnp
 import optax
-from optax._src import numerics, utils
-from optax._src import base
-from collections import NamedTuple
+from optax._src import base, numerics, utils
 
 _abs_sq = numerics.abs_sq
 
