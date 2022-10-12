@@ -1,12 +1,11 @@
 from typing import Callable, Dict, Optional, Type
-
 import e3nn_jax as e3nn
 import haiku as hk
 import jax
 import jax.numpy as jnp
 import jraph
 import numpy as np
-
+from jax_md.partition import neighbor_list
 from .blocks import (
     AtomicEnergiesBlock,
     EquivariantProductBasisBlock,
@@ -39,6 +38,7 @@ class GeneralMACE(hk.Module):
         correlation: int,  # Correlation order at each layer (~ node_features^correlation), default 3
         gate: Optional[Callable],  # Gate function for the MLP in last readout
         output_irreps: e3nn.Irreps,  # Irreps of the output, default 1x0e
+        disp_fn: Callable,
     ):
         super().__init__()
         self.r_max = r_max
@@ -52,6 +52,7 @@ class GeneralMACE(hk.Module):
         self.interaction_cls = interaction_cls
         self.num_interactions = num_interactions
         self.output_irreps = output_irreps
+        self.disp_fn = disp_fn
 
         # Embeddings
         self.node_embedding = LinearNodeEmbeddingBlock(
@@ -70,7 +71,9 @@ class GeneralMACE(hk.Module):
             [(num_features, ir) for _, ir in self.sh_irreps]
         )
 
-    def __call__(self, graph: jraph.GraphsTuple) -> e3nn.IrrepsArray:
+    def __call__(
+        self, graph: jraph.GraphsTuple, neighbours: neighbor_list
+    ) -> e3nn.IrrepsArray:
         # Embeddings
         node_attrs = e3nn.IrrepsArray(
             f"{graph.nodes.attrs.shape[-1]}x0e", graph.nodes.attrs
@@ -78,13 +81,19 @@ class GeneralMACE(hk.Module):
         node_feats = self.node_embedding(node_attrs)
 
         # TODO (mario): use jax_md formalism to compute the relative vectors and lengths
+        # we need to construct the neighbour list outside of the model, then this gets updated in the apply method
+        # then this will just take positions and the neighbour list, can remove the cell complexity
+        # each call to init and apply will require the updated neighbour list to be passed for that graph
+        # in training this will change with every configuration, will change more slowly when running MD
         vectors, lengths = get_edge_vectors_and_lengths(
             positions=graph.nodes.positions,
-            senders=graph.senders,
-            receivers=graph.receivers,
-            shifts=graph.edges.shifts,
-            cell=graph.globals.cell,
-            n_edge=graph.n_edge,
+            neighbour_list=neighbours,
+            disp_fn=self.disp_fn
+            # senders=graph.senders,
+            # receivers=graph.receivers,
+            # shifts=graph.edges.shifts,
+            # cell=graph.globals.cell,
+            # n_edge=graph.n_edge,
         )
         edge_attrs = e3nn.spherical_harmonics(
             self.sh_irreps,
@@ -119,8 +128,9 @@ class GeneralMACE(hk.Module):
                 node_feats=node_feats,
                 edge_attrs=edge_attrs,
                 edge_feats=edge_feats,
-                receivers=graph.receivers,
-                senders=graph.senders,
+                nbr_list=neighbours,
+                # receivers=graph.receivers,
+                # senders=graph.senders,
             )
 
             if self.epsilon is not None:
@@ -170,6 +180,7 @@ class MACE(hk.Module):
         correlation: int,
         gate: Optional[Callable],
         atomic_energies: np.ndarray,
+        disp_fn: Callable,
     ):
         super().__init__()
         self.energy_model = GeneralMACE(
@@ -188,10 +199,13 @@ class MACE(hk.Module):
             correlation=correlation,
             gate=gate,
             output_irreps="0e",
+            disp_fn=disp_fn,
         )
         self.atomic_energies_fn = AtomicEnergiesBlock(atomic_energies)
 
-    def __call__(self, graph: jraph.GraphsTuple) -> Dict[str, jnp.ndarray]:
+    def __call__(
+        self, graph: jraph.GraphsTuple, neighbours: neighbor_list
+    ) -> Dict[str, jnp.ndarray]:
         def energy_fn(positions):
             node_e0 = self.atomic_energies_fn(graph.nodes.attrs)  # [n_nodes, ]
             contributions = self.energy_model(
@@ -231,11 +245,16 @@ class ScaleShiftMACE(hk.Module):
         self.energy_model = GeneralMACE(output_irreps="0e", **kwargs)
         self.atomic_energies_fn = AtomicEnergiesBlock(atomic_energies)
 
-    def __call__(self, graph: jraph.GraphsTuple) -> Dict[str, jnp.ndarray]:
+    def __call__(
+        self, graph: jraph.GraphsTuple, neighbours: neighbor_list
+    ) -> Dict[str, jnp.ndarray]:
         def energy_fn(positions):
             node_e0 = self.atomic_energies_fn(graph.nodes.attrs)
             contributions = self.energy_model(
-                graph._replace(nodes=graph.nodes._replace(positions=positions))
+                graph._replace(
+                    nodes=graph.nodes._replace(positions=positions)),
+                    neighbours=neighbours,
+                
             )  # [n_nodes, num_interactions, 0e]
             contributions = contributions.array[:, :, 0]  # [n_nodes, num_interactions]
 

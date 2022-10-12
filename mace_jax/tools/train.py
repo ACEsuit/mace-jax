@@ -22,6 +22,7 @@ from .utils import (
     compute_rel_rmse,
     compute_rmse,
 )
+from jax_md.partition import neighbor_list
 
 
 @dataclasses.dataclass
@@ -47,6 +48,7 @@ def train(
     logger: MetricsLogger,
     eval_interval: int,
     log_errors: str,
+    nbr_list: neighbor_list,
     swa: Optional[SWAContainer] = None,
     ema_decay: Optional[float] = None,
     max_grad_norm: Optional[float] = 10.0,
@@ -63,12 +65,21 @@ def train(
 
     @jax.jit
     def update_fn(
-        params, optimizer_state, ema_params, num_updates: int, graph: jraph.GraphsTuple
+        params,
+        optimizer_state,
+        ema_params,
+        num_updates: int,
+        graph: jraph.GraphsTuple,
+        nbr_list: neighbor_list,
     ) -> Tuple[float, Any, Any]:
         # graph is assumed to be padded by jraph.pad_with_graphs
         mask = jraph.get_graph_padding_mask(graph)  # [n_graphs,]
+        # update neighbour list for this graph
+        nbr_list = nbr_list.update(graph.nodes.positions)
         loss, grad = jax.value_and_grad(
-            lambda params: jnp.mean(loss_fn(graph, **model(params, graph)) * mask)
+            lambda params: jnp.mean(
+                loss_fn(graph, **model(params, graph, nbr_list)) * mask
+            )
         )(params)
         updates, optimizer_state = gradient_transform.update(
             grad, optimizer_state, params
@@ -87,8 +98,9 @@ def train(
             graph = get_batched_padded_graph_tuples(batch)
             num_updates += 1
             start_time = time.time()
+            # update handles changes to the neighbour list as well
             loss, params, optimizer_state, ema_params = update_fn(
-                params, optimizer_state, ema_params, num_updates, graph
+                params, optimizer_state, ema_params, num_updates, graph, nbr_list
             )
             loss = float(loss)
             opt_metrics = {
@@ -107,6 +119,7 @@ def train(
                 params=params if ema_decay is not None else ema_params,
                 loss_fn=loss_fn,
                 data_loader=valid_loader,
+                nbr_list=nbr_list
             )
             eval_metrics["mode"] = "eval"
             eval_metrics["epoch"] = epoch
@@ -171,6 +184,7 @@ def evaluate(
     params: Any,
     loss_fn: Any,
     data_loader: DataLoader,
+    nbr_list: neighbor_list
 ) -> Tuple[float, Dict[str, Any]]:
     total_loss = 0.0
     delta_es_list = []
@@ -182,7 +196,7 @@ def evaluate(
     for batch in data_loader:
         ref_graph = get_batched_padded_graph_tuples(batch)
 
-        output = model(params, ref_graph)
+        output = model(params, ref_graph, nbr_list)
         pred_graph = ref_graph._replace(
             nodes=ref_graph.nodes._replace(forces=output["forces"]),
             globals=ref_graph.globals._replace(energy=output["energy"]),

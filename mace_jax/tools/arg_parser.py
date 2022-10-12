@@ -323,6 +323,12 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         type=check_float_or_none,
         default=10.0,
     )
+    parser.add_argument(
+        "--box_size",
+        help="Dimensions of the periodic box",
+        default=12.0,
+        type=float,
+    )
     return parser
 
 

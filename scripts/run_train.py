@@ -21,6 +21,8 @@ from mace_jax.tools import (
     torch_geometric,
     unflatten_dict,
 )
+from jax_md import space, partition
+from jax_md.partition import neighbor_list
 
 
 def main() -> None:
@@ -48,6 +50,8 @@ def main() -> None:
         )
         config_type_weights = {"Default": 1.0}
 
+    # prepare periodic system for simulation
+    disp, shift = space.periodic(args.box_size)
     # Data preparation
     collections, atomic_energies_dict = get_dataset_from_xyz(
         train_path=args.train_file,
@@ -146,13 +150,24 @@ def main() -> None:
         atomic_energies=atomic_energies,
         avg_num_neighbors=args.avg_num_neighbors,
         epsilon=args.epsilon,
+        disp_fn=disp,
     )
+
+    def initialize_nbr_list(graphs: jraph.GraphsTuple):
+        # initialize a jax-md neighbour list to allow for efficient simulation
+
+        neighbour_fn = partition.neighbor_list(
+            disp, args.box_size, args.r_max, format=partition.Sparse, mask_self=True
+        )
+        return neighbour_fn.allocate(graphs.nodes.positions)
 
     model: hk.Transformed
 
     @hk.without_apply_rng
     @hk.transform
-    def model(graph: jraph.GraphsTuple) -> Dict[str, jnp.ndarray]:
+    def model(
+        graph: jraph.GraphsTuple, nbr_list: neighbor_list
+    ) -> Dict[str, jnp.ndarray]:
         if args.model == "MACE":
             if args.scaling == "no_scaling":
                 std = 1.0
@@ -190,12 +205,14 @@ def main() -> None:
         else:
             raise RuntimeError(f"Unknown model: '{args.model}'")
 
-        return mace(graph)
+        return mace(graph, nbr_list)
 
-    params = jax.jit(model.init)(
-        jax.random.PRNGKey(0),
-        get_batched_padded_graph_tuples(next(iter(train_loader))),
-    )
+    # This needs to take initial positions from the dataloader
+
+    # initialize with jax-md neighbour list
+    init_positions = get_batched_padded_graph_tuples(next(iter(train_loader)))
+    nbr_list = initialize_nbr_list(init_positions)
+    params = jax.jit(model.init)(jax.random.PRNGKey(0), init_positions, nbr_list)
     # Optimizer
 
     def weight_decay_mask(params):
@@ -263,6 +280,7 @@ def main() -> None:
         ema_decay=args.ema_decay,
         max_grad_norm=args.clip_grad,
         log_errors=args.error_table,
+        nbr_list=nbr_list,
     )
 
     # epoch = checkpoint_handler.load_latest(

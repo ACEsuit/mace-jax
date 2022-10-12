@@ -1,10 +1,13 @@
-from typing import Tuple, Optional
-
+from typing import Callable, Tuple, Optional
+from jax_md.partition import neighbor_list
+from jax_md import partition
 import e3nn_jax as e3nn
 import jax.numpy as jnp
 import jraph
 import numpy as np
 import torch
+from functools import partial
+from jax import vmap
 
 from mace_jax.tools import to_numpy
 from mace_jax.tools.scatter import scatter_sum
@@ -20,29 +23,43 @@ def safe_norm(x: jnp.ndarray, axis: int = None, keepdims=False) -> jnp.ndarray:
 
 def get_edge_vectors_and_lengths(
     positions: np.ndarray,  # [n_nodes, 3]
-    receivers: np.ndarray,  # [n_edges]
-    senders: np.ndarray,  # [n_edges]
-    shifts: np.ndarray,  # [n_edges, 3]
-    cell: Optional[np.ndarray],  # [n_graph, 3, 3]
-    n_edge: np.ndarray,  # [n_graph]
+    neighbour_list: neighbor_list,
+    disp_fn: Callable
+    # receivers: np.ndarray,  # [n_edges]
+    # senders: np.ndarray,  # [n_edges]
+    # shifts: np.ndarray,  # [n_edges, 3]
+    # cell: Optional[np.ndarray],  # [n_graph, 3, 3]
+    # n_edge: np.ndarray,  # [n_graph]
 ) -> Tuple[np.ndarray, np.ndarray]:
-    vectors = positions[receivers] - positions[senders]  # [n_edges, 3]
+    # vectors = positions[receivers] - positions[senders]  # [n_edges, 3]
 
-    if cell is not None:
-        # From the docs: With the shift vector S, the distances D between atoms can be computed from
-        # D = positions[j]-positions[i]+S.dot(cell)
-        num_edges = receivers.shape[0]
-        shifts = jnp.einsum(
-            "ei,eij->ej",
-            shifts,  # [n_edges, 3]
-            jnp.repeat(
-                cell,  # [n_graph, 3, 3]
-                n_edge,  # [n_graph]
-                axis=0,
-                total_repeat_length=num_edges,
-            ),  # [n_edges, 3, 3]
-        )  # [n_edges, 3]
-        vectors += shifts
+    # if cell is not None:
+    #     # From the docs: With the shift vector S, the distances D between atoms can be computed from
+    #     # D = positions[j]-positions[i]+S.dot(cell)
+    #     num_edges = receivers.shape[0]
+    #     shifts = jnp.einsum(
+    #         "ei,eij->ej",
+    #         shifts,  # [n_edges, 3]
+    #         jnp.repeat(
+    #             cell,  # [n_graph, 3, 3]
+    #             n_edge,  # [n_graph]
+    #             axis=0,
+    #             total_repeat_length=num_edges,
+    #         ),  # [n_edges, 3, 3]
+    #     )  # [n_edges, 3]
+    #     vectors += shifts
+    # mask = partition.neighbor_list_mask(neighbour_list)
+    disp_fn = vmap(partial(disp_fn))
+    vectors = disp_fn(
+        positions[neighbour_list.idx[0, :]], positions[neighbour_list.idx[1, :]]
+    )
+    # I think we need to remove the zeroes in the vector to be normed
+    # vectors = jnp.where(mask[:, None], vectors, 1.0)
+    # # replace the zero values with 1 to avoid nan value
+    # # dR = jnp.where(is_zero, jnp.ones_like(dR), dR)
+    # lengths = jnp.linalg.norm(vectors, axis=-1).squeeze()  # [n_edges, 1]
+
+    # lengths = jnp.where(mask, lengths, 0.0)
 
     lengths = safe_norm(vectors, axis=-1, keepdims=True)  # [n_edges, 1]
     return vectors, lengths
