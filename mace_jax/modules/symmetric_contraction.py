@@ -16,7 +16,7 @@ class SymmetricContraction(hk.Module):
 
         self.keep_irrep_out = {e3nn.Irrep(ir) for ir in keep_irrep_out}
 
-    def __call__(self, x: e3nn.IrrepsArray, y: jnp.ndarray):
+    def __call__(self, x: e3nn.IrrepsArray, y: jnp.ndarray) -> e3nn.IrrepsArray:
         def fn(x: e3nn.IrrepsArray, y: jnp.ndarray):
             # - This operation is parallel on the feature dimension (but each feature has its own parameters)
             # - y is trivially contracted with the parameters

@@ -54,9 +54,7 @@ class GeneralMACE(hk.Module):
         self.output_irreps = output_irreps
 
         # Embeddings
-        self.node_embedding = LinearNodeEmbeddingBlock(
-            self.hidden_irreps.filter(["0e"])
-        )
+        self.node_embedding = LinearNodeEmbeddingBlock(self.hidden_irreps)
         self.radial_embedding = RadialEmbeddingBlock(
             r_max=r_max,
             num_bessel=num_bessel,
@@ -100,19 +98,17 @@ class GeneralMACE(hk.Module):
         # Interactions
         outputs = []
         for i in range(self.num_interactions):
-            if i == self.num_interactions - 1:  # Select only scalars for last layer
-                hidden_irreps_out = self.hidden_irreps.filter(["0e"])
-            else:
-                hidden_irreps_out = self.hidden_irreps
 
             if i == 0:  # No residual connection for first layer
                 inter = self.interaction_cls_first
             else:
                 inter = self.interaction_cls
 
+            node_feats: e3nn.IrrepsArray
+            sc: Optional[e3nn.IrrepsArray]
             node_feats, sc = inter(
                 target_irreps=self.interaction_irreps,
-                hidden_irreps=hidden_irreps_out,
+                hidden_irreps=self.hidden_irreps,
                 avg_num_neighbors=self.avg_num_neighbors,
             )(
                 node_attrs=node_attrs,
@@ -129,7 +125,7 @@ class GeneralMACE(hk.Module):
                 node_feats /= jnp.sqrt(self.avg_num_neighbors)
 
             node_feats = EquivariantProductBasisBlock(
-                target_irreps=hidden_irreps_out, correlation=self.correlation
+                target_irreps=self.hidden_irreps, correlation=self.correlation
             )(node_feats=node_feats, node_attrs=node_attrs)
 
             if sc is not None:

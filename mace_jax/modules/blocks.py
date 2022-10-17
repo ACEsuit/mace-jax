@@ -207,11 +207,12 @@ class AgnosticResidualInteractionBlock(InteractionBlock):
 
         # Scatter sum
         message = e3nn.IrrepsArray.zeros(mji.irreps, (node_feats.shape[0],))
-        message = message.at[receivers].add(mji)  # [n_nodes, irreps]
-        # Linear
-        message = e3nn.Linear(self.target_irreps)(message) / jnp.sqrt(
+        message = message.at[receivers].add(mji) / jnp.sqrt(
             self.avg_num_neighbors
-        )
+        )  # [n_nodes, irreps]
+
+        # Linear
+        message = e3nn.Linear(self.target_irreps)(message)
 
         return (
             message,  # [n_nodes, target_irreps]
