@@ -16,7 +16,7 @@ from .blocks import (
 )
 
 from .loss import WeightedEnergyForcesLoss
-from .models import MACE, ScaleShiftMACE
+from .models import GeneralMACE, MACE, ScaleShiftMACE
 from .radial import BesselBasis, PolynomialCutoff
 from .symmetric_contraction import SymmetricContraction
 
@@ -44,6 +44,7 @@ gate_dict: Dict[str, Optional[Callable]] = {
 }
 
 __all__ = [
+    "GeneralMACE",
     "MACE",
     "ScaleShiftMACE",
     "EnergyForcesLoss",

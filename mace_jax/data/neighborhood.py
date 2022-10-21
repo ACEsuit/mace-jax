@@ -10,7 +10,7 @@ def get_neighborhood(
     pbc: Optional[Tuple[bool, bool, bool]] = None,
     cell: Optional[np.ndarray] = None,  # [3, 3]
     true_self_interaction=False,
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     if pbc is None:
         pbc = (False, False, False)
 
@@ -20,7 +20,11 @@ def get_neighborhood(
     assert len(pbc) == 3 and all(isinstance(i, (bool, np.bool_)) for i in pbc)
     assert cell.shape == (3, 3)
 
-    sender, receiver, unit_shifts = ase.neighborlist.primitive_neighbor_list(
+    # Note (mario): I swapped senders and receivers here
+    # j = senders, i = receivers instead of the other way around
+    # such that the receivers are always in the central cell.
+    # This is important to propagate message passing towards the center which can be useful in some cases.
+    receiver, sender, unit_shifts = ase.neighborlist.primitive_neighbor_list(
         quantities="ijS",
         pbc=pbc,
         cell=cell,
@@ -46,4 +50,5 @@ def get_neighborhood(
 
     # From the docs: With the shift vector S, the distances D between atoms can be computed from
     # D = positions[j]-positions[i]+S.dot(cell)
+    # Note (mario): this is done in the function get_edge_relative_vectors
     return edge_index, unit_shifts, cell

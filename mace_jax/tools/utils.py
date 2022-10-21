@@ -2,12 +2,76 @@ import json
 import logging
 import os
 import sys
-from typing import Any, Dict, Iterable, Optional, Sequence, Union
+from typing import Any, Dict, Iterable, Optional, Sequence, Tuple, Union
 
+import jax.numpy as jnp
 import numpy as np
 import torch
 
 from .torch_tools import to_numpy
+
+
+def get_edge_vectors(
+    positions: np.ndarray,  # [n_nodes, 3]
+    senders: np.ndarray,  # [n_edges]
+    receivers: np.ndarray,  # [n_edges]
+    shifts: np.ndarray,  # [n_edges, 3]
+    cell: Optional[np.ndarray],  # [n_graph, 3, 3]
+    n_edge: np.ndarray,  # [n_graph]
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Compute the positions of the sender and receiver nodes of each edge.
+
+    This function assumes that the shift is done to the sender node.
+
+    Args:
+        positions: The positions of the nodes.
+        senders: The sender nodes of each edge. ``j`` output of ``ase.neighborlist.primitive_neighbor_list``.
+        receivers: The receiver nodes of each edge. ``i`` output of ``ase.neighborlist.primitive_neighbor_list``.
+        shifts: The shift vectors of each edge. ``S`` output of ``ase.neighborlist.primitive_neighbor_list``.
+        cell: The cell of each graph. Array of shape ``[n_graph, 3, 3]``.
+        n_edge: The number of edges of each graph. Array of shape ``[n_graph]``.
+
+    Returns:
+        The positions of the sender and receiver nodes of each edge.
+    """
+    # From ASE docs: With the shift vector S, the distances D between atoms can be computed from
+    # D = positions[j]-positions[i]+S.dot(cell)
+    vectors_senders = positions[senders]  # [n_edges, 3]
+
+    if cell is not None:
+        num_edges = receivers.shape[0]
+        shifts = jnp.einsum(
+            "ei,eij->ej",
+            shifts,  # [n_edges, 3]
+            jnp.repeat(
+                cell,  # [n_graph, 3, 3]
+                n_edge,  # [n_graph]
+                axis=0,
+                total_repeat_length=num_edges,
+            ),  # [n_edges, 3, 3]
+        )  # [n_edges, 3]
+        vectors_senders += shifts
+
+    return vectors_senders, positions[receivers]  # [n_edges, 3]
+
+
+def get_edge_relative_vectors(
+    positions: np.ndarray,  # [n_nodes, 3]
+    senders: np.ndarray,  # [n_edges]
+    receivers: np.ndarray,  # [n_edges]
+    shifts: np.ndarray,  # [n_edges, 3]
+    cell: Optional[np.ndarray],  # [n_graph, 3, 3]
+    n_edge: np.ndarray,  # [n_graph]
+) -> np.ndarray:
+    vectors_senders, vectors_receivers = get_edge_vectors(
+        positions=positions,
+        senders=senders,
+        receivers=receivers,
+        shifts=shifts,
+        cell=cell,
+        n_edge=n_edge,
+    )
+    return vectors_receivers - vectors_senders
 
 
 def compute_mae(delta: np.ndarray) -> float:

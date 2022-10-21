@@ -42,8 +42,8 @@ Edge = namedtuple("Edge", ["shifts"])
 Global = namedtuple("Global", ["energy", "weight", "cell"])
 
 
-def get_batched_padded_graph_tuples(batch):
-    graphs = jraph.GraphsTuple(
+def get_jraph_graph_from_pyg(batch):
+    return jraph.GraphsTuple(
         nodes=Node(
             positions=batch.positions.numpy(),
             attrs=batch.node_attrs.numpy(),
@@ -60,6 +60,10 @@ def get_batched_padded_graph_tuples(batch):
         senders=batch.edge_index[0].numpy(),
         receivers=batch.edge_index[1].numpy(),
     )
+
+
+def get_batched_padded_graph_tuples(batch):
+    graphs = get_jraph_graph_from_pyg(batch)
     graphs = pad_graph_to_nearest_ceil_mantissa(graphs)  # padd the whole batch once
     return graphs
 

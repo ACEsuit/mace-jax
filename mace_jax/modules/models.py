@@ -7,6 +7,7 @@ import jax.numpy as jnp
 import jraph
 import numpy as np
 
+from ..tools import get_edge_relative_vectors
 from .blocks import (
     AtomicEnergiesBlock,
     EquivariantProductBasisBlock,
@@ -17,7 +18,7 @@ from .blocks import (
     RadialEmbeddingBlock,
     ScaleShiftBlock,
 )
-from .utils import get_edge_vectors_and_lengths, safe_norm, sum_nodes_of_the_same_graph
+from .utils import safe_norm, sum_nodes_of_the_same_graph
 
 
 class GeneralMACE(hk.Module):
@@ -68,25 +69,23 @@ class GeneralMACE(hk.Module):
             [(num_features, ir) for _, ir in self.sh_irreps]
         )
 
-    def __call__(self, graph: jraph.GraphsTuple) -> e3nn.IrrepsArray:
+    def __call__(
+        self,
+        vectors: jnp.ndarray,  # [n_edges, 3]
+        node_attrs: jnp.ndarray,  # [n_nodes, #scalar_features]
+        senders: jnp.ndarray,  # [n_edges]
+        receivers: jnp.ndarray,  # [n_edges]
+    ) -> e3nn.IrrepsArray:
         # Embeddings
-        node_attrs = e3nn.IrrepsArray(
-            f"{graph.nodes.attrs.shape[-1]}x0e", graph.nodes.attrs
-        )
+        node_attrs = e3nn.IrrepsArray(f"{node_attrs.shape[-1]}x0e", node_attrs)
         node_feats = self.node_embedding(node_attrs)
 
         # TODO (mario): use jax_md formalism to compute the relative vectors and lengths
-        vectors, lengths = get_edge_vectors_and_lengths(
-            positions=graph.nodes.positions,
-            senders=graph.senders,
-            receivers=graph.receivers,
-            shifts=graph.edges.shifts,
-            cell=graph.globals.cell,
-            n_edge=graph.n_edge,
-        )
+
+        lengths = safe_norm(vectors, axis=-1, keepdims=True)
         edge_attrs = e3nn.spherical_harmonics(
             self.sh_irreps,
-            vectors / safe_norm(vectors, axis=-1, keepdims=True),
+            vectors / lengths,
             normalize=False,
             normalization="component",
         )
@@ -115,8 +114,8 @@ class GeneralMACE(hk.Module):
                 node_feats=node_feats,
                 edge_attrs=edge_attrs,
                 edge_feats=edge_feats,
-                receivers=graph.receivers,
-                senders=graph.senders,
+                receivers=receivers,
+                senders=senders,
             )
 
             if self.epsilon is not None:
@@ -189,9 +188,18 @@ class MACE(hk.Module):
 
     def __call__(self, graph: jraph.GraphsTuple) -> Dict[str, jnp.ndarray]:
         def energy_fn(positions):
+            vectors = get_edge_relative_vectors(
+                positions=positions,
+                senders=graph.senders,
+                receivers=graph.receivers,
+                shifts=graph.edges.shifts,
+                cell=graph.globals.cell,
+                n_edge=graph.n_edge,
+            )
+
             node_e0 = self.atomic_energies_fn(graph.nodes.attrs)  # [n_nodes, ]
             contributions = self.energy_model(
-                graph._replace(nodes=graph.nodes._replace(positions=positions))
+                vectors, graph.nodes.attrs, graph.senders, graph.receivers
             )  # [n_nodes, num_interactions, 0e]
             contributions = contributions.array[:, :, 0]  # [n_nodes, num_interactions]
 
@@ -229,9 +237,18 @@ class ScaleShiftMACE(hk.Module):
 
     def __call__(self, graph: jraph.GraphsTuple) -> Dict[str, jnp.ndarray]:
         def energy_fn(positions):
+            vectors = get_edge_relative_vectors(
+                positions=positions,
+                senders=graph.senders,
+                receivers=graph.receivers,
+                shifts=graph.edges.shifts,
+                cell=graph.globals.cell,
+                n_edge=graph.n_edge,
+            )
+
             node_e0 = self.atomic_energies_fn(graph.nodes.attrs)
             contributions = self.energy_model(
-                graph._replace(nodes=graph.nodes._replace(positions=positions))
+                vectors, graph.nodes.attrs, graph.senders, graph.receivers
             )  # [n_nodes, num_interactions, 0e]
             contributions = contributions.array[:, :, 0]  # [n_nodes, num_interactions]
 

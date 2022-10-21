@@ -18,7 +18,7 @@ build/
 .vscode/
 
 # Notebook
-notebooks/*.ipynb
+notebooks
 
 
 

@@ -1,4 +1,4 @@
-from typing import Tuple, Optional
+from typing import Tuple
 
 import e3nn_jax as e3nn
 import jax.numpy as jnp
@@ -16,36 +16,6 @@ def safe_norm(x: jnp.ndarray, axis: int = None, keepdims=False) -> jnp.ndarray:
     """nan-safe norm."""
     x2 = jnp.sum(x**2, axis=axis, keepdims=keepdims)
     return jnp.where(x2 == 0, 1, x2) ** 0.5
-
-
-def get_edge_vectors_and_lengths(
-    positions: np.ndarray,  # [n_nodes, 3]
-    receivers: np.ndarray,  # [n_edges]
-    senders: np.ndarray,  # [n_edges]
-    shifts: np.ndarray,  # [n_edges, 3]
-    cell: Optional[np.ndarray],  # [n_graph, 3, 3]
-    n_edge: np.ndarray,  # [n_graph]
-) -> Tuple[np.ndarray, np.ndarray]:
-    vectors = positions[receivers] - positions[senders]  # [n_edges, 3]
-
-    if cell is not None:
-        # From the docs: With the shift vector S, the distances D between atoms can be computed from
-        # D = positions[j]-positions[i]+S.dot(cell)
-        num_edges = receivers.shape[0]
-        shifts = jnp.einsum(
-            "ei,eij->ej",
-            shifts,  # [n_edges, 3]
-            jnp.repeat(
-                cell,  # [n_graph, 3, 3]
-                n_edge,  # [n_graph]
-                axis=0,
-                total_repeat_length=num_edges,
-            ),  # [n_edges, 3, 3]
-        )  # [n_edges, 3]
-        vectors += shifts
-
-    lengths = safe_norm(vectors, axis=-1, keepdims=True)  # [n_edges, 1]
-    return vectors, lengths
 
 
 def compute_mean_std_atomic_inter_energy(
