@@ -9,14 +9,16 @@ import numpy as np
 
 from ..tools import get_edge_relative_vectors
 from .blocks import (
+    AgnosticInteractionBlock,
+    AgnosticResidualInteractionBlock,
     AtomicEnergiesBlock,
     EquivariantProductBasisBlock,
     InteractionBlock,
     LinearNodeEmbeddingBlock,
     LinearReadoutBlock,
     NonLinearReadoutBlock,
-    ScaleShiftBlock,
     RadialEmbeddingBlock,
+    ScaleShiftBlock,
 )
 from .utils import safe_norm, sum_nodes_of_the_same_graph
 
@@ -25,25 +27,32 @@ class GeneralMACE(hk.Module):
     def __init__(
         self,
         *,
+        output_irreps: e3nn.Irreps,  # Irreps of the output, default 1x0e
         r_max: float,
-        num_bessel: int,  # Number of Bessel functions, default 8
-        num_deriv_in_zero: Optional[int] = None,
-        num_deriv_in_one: Optional[int] = None,
-        # Number of zero derivatives at small and large distances, default 4 and 2
-        # If both are None, it uses a smooth C^inf envelope function
-        max_ell: int,  # Max spherical harmonic degree, default 3
-        interaction_cls: Type[InteractionBlock],
-        interaction_cls_first: Type[InteractionBlock],
         num_interactions: int,  # Number of interactions (layers), default 2
         hidden_irreps: e3nn.Irreps,  # 256x0e or 128x0e + 128x1o
         MLP_irreps: e3nn.Irreps,  # Hidden irreps of the MLP in last readout, default 16x0e
         avg_num_neighbors: float,
-        epsilon: Optional[float] = None,
-        correlation: int,  # Correlation order at each layer (~ node_features^correlation), default 3
-        gate: Optional[Callable],  # Gate function for the MLP in last readout
-        output_irreps: e3nn.Irreps,  # Irreps of the output, default 1x0e
+        num_bessel: int = 8,  # Number of Bessel functions, default 8
+        num_deriv_in_zero: Optional[int] = None,
+        num_deriv_in_one: Optional[int] = None,
+        # Number of zero derivatives at small and large distances, default 4 and 2
+        # If both are None, it uses a smooth C^inf envelope function
+        max_ell: int = 3,  # Max spherical harmonic degree, default 3
+        interaction_cls: Type[InteractionBlock] = AgnosticResidualInteractionBlock,
+        interaction_cls_first: Type[InteractionBlock] = AgnosticInteractionBlock,
+        epsilon: Optional[float] = 0.5,
+        correlation: int = 3,  # Correlation order at each layer (~ node_features^correlation), default 3
+        gate: Optional[
+            Callable
+        ] = jax.nn.silu,  # Gate function for the MLP in last readout
     ):
         super().__init__()
+
+        output_irreps = e3nn.Irreps(output_irreps)
+        hidden_irreps = e3nn.Irreps(hidden_irreps)
+        MLP_irreps = e3nn.Irreps(MLP_irreps)
+
         self.r_max = r_max
         self.correlation = correlation
         self.hidden_irreps = hidden_irreps
