@@ -17,7 +17,6 @@ from .blocks import (
 
 from .loss import WeightedEnergyForcesLoss
 from .models import GeneralMACE, MACE, ScaleShiftMACE
-from .radial import BesselBasis, PolynomialCutoff
 from .symmetric_contraction import SymmetricContraction
 
 from .utils import (
@@ -44,22 +43,21 @@ gate_dict: Dict[str, Optional[Callable]] = {
 }
 
 __all__ = [
-    "GeneralMACE",
-    "MACE",
-    "ScaleShiftMACE",
-    "EnergyForcesLoss",
-    "WeightedEnergyForcesLoss",
-    "WeightedForcesLoss",
-    "RadialEmbeddingBlock",
+    "AtomicEnergiesBlock",
+    "EquivariantProductBasisBlock",
+    "InteractionBlock",
     "LinearNodeEmbeddingBlock",
     "LinearReadoutBlock",
     "NonLinearReadoutBlock",
-    "EquivariantProductBasisBlock",
-    "AtomicEnergiesBlock",
+    "RadialEmbeddingBlock",
+    "AgnosticInteractionBlock",
+    "AgnosticResidualInteractionBlock",
     "ScaleShiftBlock",
+    "WeightedEnergyForcesLoss",
+    "GeneralMACE",
+    "MACE",
+    "ScaleShiftMACE",
     "SymmetricContraction",
-    "BesselBasis",
-    "PolynomialCutoff",
     "compute_avg_num_neighbors",
     "compute_mean_rms_energy_forces",
     "compute_mean_std_atomic_inter_energy",

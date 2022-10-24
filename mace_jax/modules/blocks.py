@@ -1,16 +1,13 @@
 from abc import ABC, abstractmethod
 from typing import Callable, Optional, Tuple, Union
 
-import numpy as np
-
 import e3nn_jax as e3nn
 import haiku as hk
 import jax
 import jax.numpy as jnp
-
+import numpy as np
 
 from .irreps_tools import tp_out_irreps_with_instructions
-from .radial import BesselBasis, PolynomialCutoff
 from .symmetric_contraction import SymmetricContraction
 
 
@@ -85,26 +82,36 @@ class AtomicEnergiesBlock(hk.Module):
         return f"{self.__class__.__name__}(energies=[{formatted_energies}])"
 
 
-class RadialEmbeddingBlock(hk.Module):
+class RadialEmbeddingBlock:
     def __init__(
         self,
+        *,
         r_max: float,
         num_bessel: int,
-        num_deriv_in_zero: int,
-        num_deriv_in_one: int,
+        num_deriv_in_zero: Optional[int],
+        num_deriv_in_one: Optional[int],
     ):
-        super().__init__()
-        self.bessel_fn = BesselBasis(r_max=r_max, num_basis=num_bessel)
-        self.cutoff_fn = PolynomialCutoff(
-            r_max=r_max, n0=num_deriv_in_zero, n1=num_deriv_in_one
-        )
+        self.num_bessel = num_bessel
+        self.r_max = r_max
+        self.num_deriv_in_zero = num_deriv_in_zero
+        self.num_deriv_in_one = num_deriv_in_one
 
     def __call__(
         self,
         edge_lengths: jnp.ndarray,  # [n_edges, 1]
     ) -> jnp.ndarray:  # [n_edges, num_bessel]
-        bessel = self.bessel_fn(edge_lengths)  # [n_edges, num_bessel]
-        cutoff = self.cutoff_fn(edge_lengths)  # [n_edges, 1]
+        bessel = e3nn.bessel(
+            edge_lengths[..., 0], self.num_bessel, x_max=self.r_max
+        )  # [n_edges, num_bessel]
+
+        if self.num_deriv_in_zero is None and self.num_deriv_in_one is None:
+            cutoff = e3nn.soft_envelope(edge_lengths, x_max=self.r_max)  # [n_edges, 1]
+        else:
+            cutoff = e3nn.poly_envelope(
+                self.num_deriv_in_zero, self.num_deriv_in_one, x_max=self.r_max
+            )(
+                edge_lengths
+            )  # [n_edges, 1]
         return bessel * cutoff  # [n_edges, num_bessel]
 
 

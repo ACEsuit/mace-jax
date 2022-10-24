@@ -15,8 +15,8 @@ from .blocks import (
     LinearNodeEmbeddingBlock,
     LinearReadoutBlock,
     NonLinearReadoutBlock,
-    RadialEmbeddingBlock,
     ScaleShiftBlock,
+    RadialEmbeddingBlock,
 )
 from .utils import safe_norm, sum_nodes_of_the_same_graph
 
@@ -27,8 +27,10 @@ class GeneralMACE(hk.Module):
         *,
         r_max: float,
         num_bessel: int,  # Number of Bessel functions, default 8
-        num_deriv_in_zero: int,  # Number of zero derivatives at small distances, default 4
-        num_deriv_in_one: int,  # Number of zero derivatives at large distances, default 2
+        num_deriv_in_zero: Optional[int] = None,
+        num_deriv_in_one: Optional[int] = None,
+        # Number of zero derivatives at small and large distances, default 4 and 2
+        # If both are None, it uses a smooth C^inf envelope function
         max_ell: int,  # Max spherical harmonic degree, default 3
         interaction_cls: Type[InteractionBlock],
         interaction_cls_first: Type[InteractionBlock],
