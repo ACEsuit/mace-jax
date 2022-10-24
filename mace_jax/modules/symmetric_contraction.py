@@ -33,6 +33,10 @@ class SymmetricContraction(hk.Module):
                     x.irreps, order, keep_ir=self.keep_irrep_out
                 )
 
+                # ((w3 x + w2) x + w1) x
+                #  \-----------/
+                #       out
+
                 for (mul, ir_out), u in zip(U.irreps, U.list):
                     # u: ndarray [(irreps_x.dim)^order, multiplicity, ir_out.dim]
 
@@ -44,21 +48,34 @@ class SymmetricContraction(hk.Module):
                     )  # [multiplicity, num_elements, num_features]
                     w = w / w.shape[0]  # normalize
                     if ir_out not in out:
-                        out[ir_out] = jnp.einsum(
-                            "...jki,kec,e,cj->c...i", u, w, y, x.array
-                        )
+                        out[ir_out] = (
+                            "special",
+                            jnp.einsum("...jki,kec,e,cj->c...i", u, w, y, x.array),
+                        )  # [num_features, (irreps_x.dim)^(oder-1), ir_out.dim]
                     else:
-                        c_tensor = jnp.einsum(
+                        out[ir_out] += jnp.einsum(
                             "...ki,kec,e->c...i", u, w, y
                         )  # [num_features, (irreps_x.dim)^order, ir_out.dim]
-                        c_tensor = c_tensor + out[ir_out]
 
-                        out[ir_out] = jnp.einsum(
-                            "c...ji,cj->c...i", c_tensor, x.array
-                        )  # [num_features, (irreps_x.dim)^(oder-1), ir_out.dim]
+                # ((w3 x + w2) x + w1) x
+                #  \----------------/
+                #         out (in the normal case)
+
+                for ir_out in out:
+                    if isinstance(out[ir_out], tuple):
+                        out[ir_out] = out[ir_out][1]
+                        continue  # already done (special case optimization above)
+
+                    out[ir_out] = jnp.einsum(
+                        "c...ji,cj->c...i", out[ir_out], x.array
+                    )  # [num_features, (irreps_x.dim)^(oder-1), ir_out.dim]
+
+                # ((w3 x + w2) x + w1) x
+                #  \-------------------/
+                #           out
 
             # out[irrep_out] : [num_features, ir_out.dim]
-            irreps_out = e3nn.Irreps(sorted([ir for ir in out]))
+            irreps_out = e3nn.Irreps(sorted(out.keys()))
             return e3nn.IrrepsArray.from_list(
                 irreps_out,
                 [out[ir][:, None, :] for (_, ir) in irreps_out],
