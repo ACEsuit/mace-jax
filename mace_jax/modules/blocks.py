@@ -122,9 +122,9 @@ class EquivariantProductBasisBlock(hk.Module):
         correlation: int,
     ) -> None:
         super().__init__()
-        target_irreps = e3nn.Irreps(target_irreps)
+        self.target_irreps = e3nn.Irreps(target_irreps)
         self.symmetric_contractions = SymmetricContraction(
-            keep_irrep_out={ir for _, ir in target_irreps},
+            keep_irrep_out={ir for _, ir in self.target_irreps},
             correlation=correlation,
         )
 
@@ -137,7 +137,7 @@ class EquivariantProductBasisBlock(hk.Module):
         node_feats = self.symmetric_contractions(
             node_feats.factor_mul_to_last_axis(), node_attrs.array
         ).repeat_mul_by_last_axis()
-        return e3nn.Linear(node_feats.irreps)(node_feats)
+        return e3nn.Linear(self.target_irreps)(node_feats)
 
 
 class InteractionBlock(ABC, hk.Module):
