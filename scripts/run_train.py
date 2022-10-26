@@ -160,14 +160,14 @@ def main() -> None:
                 mean, std = modules.scaling_classes[args.scaling](
                     train_loader, atomic_energies
                 )
-            mace = modules.ScaleShiftMACE(
+            mace = modules.MACE(
                 **model_config,
                 correlation=args.correlation,
                 gate=modules.gate_dict[args.gate],
                 interaction_cls_first=modules.interaction_classes[
                     "RealAgnosticInteractionBlock"
                 ],
-                MLP_irreps=e3nn.Irreps(args.MLP_irreps),
+                readout_mlp_irreps=e3nn.Irreps(args.MLP_irreps),
                 atomic_inter_scale=std,
                 atomic_inter_shift=0.0,
             )
@@ -175,14 +175,14 @@ def main() -> None:
             mean, std = modules.scaling_classes[args.scaling](
                 train_loader, atomic_energies
             )
-            mace = modules.ScaleShiftMACE(
+            mace = modules.MACE(
                 **model_config,
                 correlation=args.correlation,
                 gate=modules.gate_dict[args.gate],
                 interaction_cls_first=modules.interaction_classes[
                     args.interaction_first
                 ],
-                MLP_irreps=e3nn.Irreps(args.MLP_irreps),
+                readout_mlp_irreps=e3nn.Irreps(args.MLP_irreps),
                 atomic_inter_scale=std,
                 atomic_inter_shift=mean,
             )

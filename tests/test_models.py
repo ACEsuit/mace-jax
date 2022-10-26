@@ -45,7 +45,7 @@ def test_mace():
         num_interactions=5,
         num_elements=2,
         hidden_irreps=o3.Irreps("32x0e + 32x1o"),
-        MLP_irreps=o3.Irreps("16x0e"),
+        readout_mlp_irreps=o3.Irreps("16x0e"),
         gate=torch.nn.functional.silu,
         atomic_energies=atomic_energies,
         avg_num_neighbors=8,

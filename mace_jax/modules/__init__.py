@@ -16,7 +16,7 @@ from .blocks import (
 )
 
 from .loss import WeightedEnergyForcesLoss
-from .models import GeneralMACE, MACE, ScaleShiftMACE
+from .models import GeneralMACE, MACE
 from .symmetric_contraction import SymmetricContraction
 
 from .utils import (
@@ -56,7 +56,6 @@ __all__ = [
     "WeightedEnergyForcesLoss",
     "GeneralMACE",
     "MACE",
-    "ScaleShiftMACE",
     "SymmetricContraction",
     "compute_avg_num_neighbors",
     "compute_mean_rms_energy_forces",

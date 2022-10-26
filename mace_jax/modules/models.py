@@ -31,7 +31,7 @@ class GeneralMACE(hk.Module):
         r_max: float,
         num_interactions: int,  # Number of interactions (layers), default 2
         hidden_irreps: e3nn.Irreps,  # 256x0e or 128x0e + 128x1o
-        MLP_irreps: e3nn.Irreps,  # Hidden irreps of the MLP in last readout, default 16x0e
+        readout_mlp_irreps: e3nn.Irreps,  # Hidden irreps of the MLP in last readout, default 16x0e
         avg_num_neighbors: float,
         num_bessel: int = 8,  # Number of Bessel functions, default 8
         num_deriv_in_zero: Optional[int] = None,
@@ -51,14 +51,14 @@ class GeneralMACE(hk.Module):
 
         output_irreps = e3nn.Irreps(output_irreps)
         hidden_irreps = e3nn.Irreps(hidden_irreps)
-        MLP_irreps = e3nn.Irreps(MLP_irreps)
+        readout_mlp_irreps = e3nn.Irreps(readout_mlp_irreps)
 
         self.r_max = r_max
         self.correlation = correlation
         self.hidden_irreps = hidden_irreps
         self.avg_num_neighbors = avg_num_neighbors
         self.epsilon = epsilon
-        self.MLP_irreps = MLP_irreps
+        self.readout_mlp_irreps = readout_mlp_irreps
         self.gate = gate
         self.interaction_cls_first = interaction_cls_first
         self.interaction_cls = interaction_cls
@@ -143,7 +143,7 @@ class GeneralMACE(hk.Module):
 
             if i == self.num_interactions - 1:  # Non linear readout for last layer
                 node_outputs = NonLinearReadoutBlock(
-                    self.MLP_irreps, self.output_irreps, activation=self.gate
+                    self.readout_mlp_irreps, self.output_irreps, activation=self.gate
                 )(
                     node_feats
                 )  # [n_nodes, output_irreps]
@@ -161,81 +161,8 @@ class MACE(hk.Module):
     def __init__(
         self,
         *,
-        r_max: float,
-        num_bessel: int,
-        num_deriv_in_zero: int,
-        num_deriv_in_one: int,
-        max_ell: int,
-        interaction_cls: Type[InteractionBlock],
-        interaction_cls_first: Type[InteractionBlock],
-        num_interactions: int,
-        hidden_irreps: e3nn.Irreps,
-        MLP_irreps: e3nn.Irreps,
-        avg_num_neighbors: float,
-        epsilon: Optional[float],
-        correlation: int,
-        gate: Optional[Callable],
-        atomic_energies: np.ndarray,
-    ):
-        super().__init__()
-        self.energy_model = GeneralMACE(
-            r_max=r_max,
-            num_bessel=num_bessel,
-            num_deriv_in_zero=num_deriv_in_zero,
-            num_deriv_in_one=num_deriv_in_one,
-            max_ell=max_ell,
-            interaction_cls=interaction_cls,
-            interaction_cls_first=interaction_cls_first,
-            num_interactions=num_interactions,
-            hidden_irreps=hidden_irreps,
-            MLP_irreps=MLP_irreps,
-            avg_num_neighbors=avg_num_neighbors,
-            epsilon=epsilon,
-            correlation=correlation,
-            gate=gate,
-            output_irreps="0e",
-        )
-        self.atomic_energies_fn = AtomicEnergiesBlock(atomic_energies)
-
-    def __call__(self, graph: jraph.GraphsTuple) -> Dict[str, jnp.ndarray]:
-        def energy_fn(positions):
-            vectors = get_edge_relative_vectors(
-                positions=positions,
-                senders=graph.senders,
-                receivers=graph.receivers,
-                shifts=graph.edges.shifts,
-                cell=graph.globals.cell,
-                n_edge=graph.n_edge,
-            )
-
-            node_e0 = self.atomic_energies_fn(graph.nodes.attrs)  # [n_nodes, ]
-            contributions = self.energy_model(
-                vectors, graph.nodes.attrs, graph.senders, graph.receivers
-            )  # [n_nodes, num_interactions, 0e]
-            contributions = contributions.array[:, :, 0]  # [n_nodes, num_interactions]
-
-            node_energies = node_e0 + jnp.sum(contributions, axis=1)  # [n_nodes, ]
-            return jnp.sum(node_energies), node_energies
-
-        minus_forces, node_energies = jax.grad(energy_fn, has_aux=True)(
-            graph.nodes.positions
-        )
-
-        graph_energies = sum_nodes_of_the_same_graph(
-            graph, node_energies
-        )  # [ n_graphs,]
-
-        return {
-            "energy": graph_energies,  # [n_graphs,]
-            "forces": -minus_forces,  # [n_nodes, 3]
-        }
-
-
-class ScaleShiftMACE(hk.Module):
-    def __init__(
-        self,
-        atomic_inter_scale: float,
-        atomic_inter_shift: float,
+        atomic_inter_scale: float = 1.0,
+        atomic_inter_shift: float = 0.0,
         atomic_energies: np.ndarray,
         **kwargs,
     ):
@@ -257,7 +184,7 @@ class ScaleShiftMACE(hk.Module):
                 n_edge=graph.n_edge,
             )
 
-            node_e0 = self.atomic_energies_fn(graph.nodes.attrs)
+            node_e0 = self.atomic_energies_fn(graph.nodes.attrs)  # [n_nodes, ]
             contributions = self.energy_model(
                 vectors, graph.nodes.attrs, graph.senders, graph.receivers
             )  # [n_nodes, num_interactions, 0e]
@@ -276,9 +203,7 @@ class ScaleShiftMACE(hk.Module):
             graph, node_energies
         )  # [ n_graphs,]
 
-        output = {
+        return {
             "energy": graph_energies,  # [n_graphs,]
             "forces": -minus_forces,  # [n_nodes, 3]
         }
-
-        return output

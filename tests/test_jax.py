@@ -21,7 +21,6 @@ def test_symmetric_contraction():
         hk.transform(lambda x, y: SymmetricContraction(3, ["0e", "1o", "2e"])(x, y))
     )
     w = model.init(jax.random.PRNGKey(2), x, y)
-    out = model.apply(w, x, y)
 
     assert_equivariant(lambda x: model.apply(w, x, y), jax.random.PRNGKey(3), (x,))
 
@@ -41,7 +40,7 @@ def test_mace():
         ],
         num_interactions=5,
         hidden_irreps=e3nn.Irreps("32x0e + 32x1o"),
-        MLP_irreps=e3nn.Irreps("16x0e"),
+        readout_mlp_irreps=e3nn.Irreps("16x0e"),
         gate=jax.nn.silu,
         atomic_energies=atomic_energies,
         avg_num_neighbors=8,
@@ -71,7 +70,6 @@ def test_mace():
     )
 
     w = model.init(jax.random.PRNGKey(0), graph)
-    out = model.apply(w, graph)
 
     def wrapper(positions):
         graph = jraph.GraphsTuple(
