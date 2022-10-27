@@ -133,9 +133,10 @@ class EquivariantProductBasisBlock(hk.Module):
         node_attrs: e3nn.IrrepsArray,  # [n_nodes, irreps] with only scalars
     ) -> e3nn.IrrepsArray:
         assert node_attrs.irreps.is_scalar()
+        node_feats = node_feats.remove_nones()
         node_feats = self.symmetric_contractions(
-            node_feats.factor_mul_to_last_axis(), node_attrs.array
-        ).repeat_mul_by_last_axis()
+            node_feats.mul_to_axis(), node_attrs.array
+        ).axis_to_mul()
         return e3nn.Linear(self.target_irreps)(node_feats)
 
 
@@ -184,8 +185,12 @@ class AgnosticResidualInteractionBlock(InteractionBlock):
         assert len({mul for mul, _ in node_feats.irreps}) == 1
 
         # Convolution weights
-        mji = e3nn.tensor_product(
-            node_feats.mul_to_axis()[senders], edge_attrs[:, None, :]
+        mji = (
+            e3nn.tensor_product(
+                node_feats.mul_to_axis()[senders], edge_attrs[:, None, :]
+            )
+            .remove_nones()
+            .simplify()
         )  # [n_edges, channels, irreps]
         linear = e3nn.FunctionalLinear(mji.irreps, [ir for _, ir in self.target_irreps])
 
