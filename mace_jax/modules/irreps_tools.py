@@ -3,6 +3,7 @@ from typing import List, Tuple
 import e3nn_jax as e3nn
 
 
+# TODO (mario): Remove
 # Based on mir-group/nequip
 def tp_out_irreps_with_instructions(
     irreps1: e3nn.Irreps, irreps2: e3nn.Irreps, target_irreps: e3nn.Irreps

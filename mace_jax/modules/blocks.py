@@ -7,7 +7,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from .irreps_tools import tp_out_irreps_with_instructions
 from .symmetric_contraction import SymmetricContraction
 
 
@@ -181,36 +180,30 @@ class AgnosticResidualInteractionBlock(InteractionBlock):
         )  # [n_nodes, hidden_irreps]
         # First linear
         node_feats = e3nn.Linear(node_feats.irreps)(node_feats)
-        # Tensor product
-        irreps_mid, instructions = tp_out_irreps_with_instructions(
-            node_feats.irreps,
-            edge_attrs.irreps,
-            self.target_irreps,
-        )
-        # assert irreps_mid.simplify() == self.target_irreps.simplify()
-        conv_tp = e3nn.FunctionalTensorProduct(
-            node_feats.irreps,
-            edge_attrs.irreps,
-            irreps_mid,
-            instructions=instructions,
-        )
-        del irreps_mid
-        weight_numel = sum(
-            np.prod(i.path_shape) for i in conv_tp.instructions if i.has_weight
-        )
+
+        assert len({mul for mul, _ in node_feats.irreps}) == 1
+
+        # Convolution weights
+        mji = e3nn.tensor_product(
+            node_feats.mul_to_axis()[senders], edge_attrs[:, None, :]
+        )  # [n_edges, channels, irreps]
+        linear = e3nn.FunctionalLinear(mji.irreps, [ir for _, ir in self.target_irreps])
 
         # Learnable Radial
         assert edge_feats.irreps.is_scalar()
-        tp_weights = e3nn.MultiLayerPerceptron(3 * [64] + [weight_numel], jax.nn.silu)(
+        lin_weights = e3nn.MultiLayerPerceptron(
+            3 * [64] + [linear.num_weights],  # TODO (mario): make this configurable?
+            jax.nn.silu,
+        )(
             edge_feats.array
-        )  # [n_edges, weight_numel]
-        assert tp_weights.shape == (edge_feats.shape[0], weight_numel)
+        )  # [n_edges, linear.num_weights]
+        assert lin_weights.shape == (edge_feats.shape[0], linear.num_weights)
+        lin_weights = jax.vmap(linear.split_weights)(lin_weights)
 
-        # Convolution weights
-        mji = jax.vmap(conv_tp.left_right)(
-            tp_weights, node_feats[senders], edge_attrs
-        )  # [n_edges, irreps]
-        mji = mji.simplify()
+        mji = jax.vmap(lambda w, mji: jax.vmap(lambda m: linear(w, m))(mji))(
+            lin_weights, mji
+        )  # [n_edges, channels, irreps]
+        mji = mji.axis_to_mul().simplify()  # [n_edges, channels*irreps]
 
         # Scatter sum
         message = e3nn.IrrepsArray.zeros(mji.irreps, (node_feats.shape[0],))
