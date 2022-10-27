@@ -77,9 +77,7 @@ class GeneralMACE(hk.Module):
         self.sh_irreps = e3nn.Irreps.spherical_harmonics(max_ell)
         num_features = hidden_irreps.count(e3nn.Irrep("0e"))
         self.interaction_irreps = e3nn.Irreps(
-            [
-                (num_features, ir) for _, ir in self.sh_irreps
-            ]  # TODO (mario): add the missing parity
+            [(num_features, ir) for ir in e3nn.Irrep.iterator(max_ell)]
         )
 
     def __call__(
