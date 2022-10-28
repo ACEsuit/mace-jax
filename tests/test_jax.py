@@ -1,3 +1,5 @@
+from collections import namedtuple
+
 import e3nn_jax as e3nn
 import haiku as hk
 import jax
@@ -8,9 +10,6 @@ from e3nn_jax.util import assert_equivariant
 
 from mace_jax import modules
 from mace_jax.modules import MACE, SymmetricContraction
-from mace_jax.tools import AtomicNumberTable
-
-from collections import namedtuple
 
 
 def test_symmetric_contraction():
@@ -22,11 +21,12 @@ def test_symmetric_contraction():
     )
     w = model.init(jax.random.PRNGKey(2), x, y)
 
-    assert_equivariant(lambda x: model.apply(w, x, y), jax.random.PRNGKey(3), (x,))
+    assert_equivariant(
+        lambda x: model.apply(w, x, y), jax.random.PRNGKey(3), args_in=(x,)
+    )
 
 
 def test_mace():
-    table = AtomicNumberTable([1, 8])
     atomic_energies = np.array([1.0, 3.0], dtype=float)
     model_config = dict(
         r_max=5,
@@ -44,7 +44,6 @@ def test_mace():
         gate=jax.nn.silu,
         atomic_energies=atomic_energies,
         avg_num_neighbors=8,
-        atomic_numbers=table.zs,
         correlation=3,
     )
 
@@ -55,6 +54,7 @@ def test_mace():
 
     Node = namedtuple("Node", ["positions", "attrs"])
     Edge = namedtuple("Edge", ["shifts"])
+    Globals = namedtuple("Globals", ["cell"])
 
     graph = jraph.GraphsTuple(
         nodes=Node(
@@ -62,7 +62,7 @@ def test_mace():
             attrs=jax.nn.one_hot(jnp.array([0, 1]), 2),
         ),
         edges=Edge(shifts=jnp.array([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]])),
-        globals=None,
+        globals=Globals(cell=None),
         senders=jnp.array([0, 1]),
         receivers=jnp.array([1, 0]),
         n_edge=jnp.array([2]),
@@ -78,7 +78,7 @@ def test_mace():
                 attrs=jax.nn.one_hot(jnp.array([0, 1]), 2),
             ),
             edges=Edge(shifts=jnp.array([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]])),
-            globals=None,
+            globals=Globals(cell=None),
             senders=jnp.array([0, 1]),
             receivers=jnp.array([1, 0]),
             n_edge=jnp.array([2]),
@@ -88,7 +88,7 @@ def test_mace():
         return e3nn.IrrepsArray("0e", energy)
 
     positions = e3nn.normal("1o", jax.random.PRNGKey(1), (2,))
-    assert_equivariant(wrapper, jax.random.PRNGKey(1), (positions,))
+    assert_equivariant(wrapper, jax.random.PRNGKey(1), args_in=(positions,))
 
 
 if __name__ == "__main__":

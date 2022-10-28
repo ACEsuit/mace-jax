@@ -166,6 +166,42 @@ class InteractionBlock(ABC, hk.Module):
         raise NotImplementedError
 
 
+def message_passing_convolution(
+    node_feats: e3nn.IrrepsArray,  # [n_nodes, irreps]
+    edge_attrs: e3nn.IrrepsArray,  # [n_edges, irreps]
+    edge_feats: e3nn.IrrepsArray,  # [n_edges, irreps]
+    senders: jnp.ndarray,  # [n_edges, ]
+    receivers: jnp.ndarray,  # [n_edges, ]
+    avg_num_neighbors: float,
+    target_irreps: e3nn.Irreps,
+) -> e3nn.IrrepsArray:
+    messages = (
+        e3nn.tensor_product(node_feats[senders], edge_attrs).remove_nones().simplify()
+    )  # [n_edges, irreps]
+    linear = e3nn.FunctionalLinear(messages.irreps, target_irreps)
+
+    # Learnable Radial
+    assert edge_feats.irreps.is_scalar()
+    w = e3nn.MultiLayerPerceptron(
+        3 * [64] + [linear.num_weights],  # TODO (mario): make this configurable?
+        jax.nn.silu,
+    )(
+        edge_feats.array
+    )  # [n_edges, linear.num_weights]
+    assert w.shape == (edge_feats.shape[0], linear.num_weights)
+    w = jax.vmap(linear.split_weights)(w)  # List of [n_edges, *path_shape]
+
+    messages = jax.vmap(linear)(w, messages).simplify()  # [n_edges, irreps]
+
+    # Scatter sum
+    message = e3nn.IrrepsArray.zeros(messages.irreps, (node_feats.shape[0],))
+    node_feats = message.at[receivers].add(messages) / jnp.sqrt(
+        avg_num_neighbors
+    )  # [n_nodes, irreps]
+
+    return node_feats
+
+
 class AgnosticResidualInteractionBlock(InteractionBlock):
     def __call__(
         self,
@@ -182,45 +218,40 @@ class AgnosticResidualInteractionBlock(InteractionBlock):
         # First linear
         node_feats = e3nn.Linear(node_feats.irreps)(node_feats)
 
-        assert len({mul for mul, _ in node_feats.irreps}) == 1
+        mul = next(iter({mul for mul, _ in node_feats.irreps}))
+        assert all(mul == m for m, _ in node_feats.irreps)
+        assert all(mul == m for m, _ in self.target_irreps)
 
-        # Convolution weights
-        mji = (
-            e3nn.tensor_product(
-                node_feats.mul_to_axis()[senders], edge_attrs[:, None, :]
-            )
-            .remove_nones()
-            .simplify()
-        )  # [n_edges, channels, irreps]
-        linear = e3nn.FunctionalLinear(mji.irreps, [ir for _, ir in self.target_irreps])
+        node_feats = node_feats.mul_to_axis()  # [n_nodes, channels, irreps]
 
-        # Learnable Radial
-        assert edge_feats.irreps.is_scalar()
-        lin_weights = e3nn.MultiLayerPerceptron(
-            3 * [64] + [linear.num_weights],  # TODO (mario): make this configurable?
-            jax.nn.silu,
+        node_feats = hk.vmap(
+            lambda x: message_passing_convolution(
+                x,
+                edge_attrs,
+                edge_feats,
+                senders,
+                receivers,
+                self.avg_num_neighbors,
+                e3nn.Irreps([(1, ir) for _, ir in self.target_irreps]),
+            ),
+            in_axes=1,
+            out_axes=1,
+            split_rng=False,
         )(
-            edge_feats.array
-        )  # [n_edges, linear.num_weights]
-        assert lin_weights.shape == (edge_feats.shape[0], linear.num_weights)
-        lin_weights = jax.vmap(linear.split_weights)(lin_weights)
+            node_feats
+        )  # [n_nodes, channels, irreps]
 
-        mji = jax.vmap(lambda w, mji: jax.vmap(lambda m: linear(w, m))(mji))(
-            lin_weights, mji
-        )  # [n_edges, channels, irreps]
-        mji = mji.axis_to_mul().simplify()  # [n_edges, channels*irreps]
-
-        # Scatter sum
-        message = e3nn.IrrepsArray.zeros(mji.irreps, (node_feats.shape[0],))
-        message = message.at[receivers].add(mji) / jnp.sqrt(
-            self.avg_num_neighbors
-        )  # [n_nodes, irreps]
+        node_feats = node_feats.axis_to_mul()  # [n_nodes, irreps]
+        assert node_feats.irreps == self.target_irreps, (
+            node_feats.irreps,
+            self.target_irreps,
+        )
 
         # Linear
-        message = e3nn.Linear(self.target_irreps)(message)
+        node_feats = e3nn.Linear(self.target_irreps)(node_feats)
 
         return (
-            message,  # [n_nodes, target_irreps]
+            node_feats,  # [n_nodes, target_irreps]
             sc,  # [n_nodes, hidden_irreps]
         )
 
