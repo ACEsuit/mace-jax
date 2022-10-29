@@ -3,10 +3,10 @@ from typing import Callable, Optional, Tuple, Union
 
 import e3nn_jax as e3nn
 import haiku as hk
-import jax
 import jax.numpy as jnp
 import numpy as np
 
+from .message_passing import message_passing_convolution
 from .symmetric_contraction import SymmetricContraction
 
 
@@ -166,42 +166,6 @@ class InteractionBlock(ABC, hk.Module):
         raise NotImplementedError
 
 
-def message_passing_convolution(
-    node_feats: e3nn.IrrepsArray,  # [n_nodes, irreps]
-    edge_attrs: e3nn.IrrepsArray,  # [n_edges, irreps]
-    edge_feats: e3nn.IrrepsArray,  # [n_edges, irreps]
-    senders: jnp.ndarray,  # [n_edges, ]
-    receivers: jnp.ndarray,  # [n_edges, ]
-    avg_num_neighbors: float,
-    target_irreps: e3nn.Irreps,
-) -> e3nn.IrrepsArray:
-    messages = (
-        e3nn.tensor_product(node_feats[senders], edge_attrs).remove_nones().simplify()
-    )  # [n_edges, irreps]
-    linear = e3nn.FunctionalLinear(messages.irreps, target_irreps)
-
-    # Learnable Radial
-    assert edge_feats.irreps.is_scalar()
-    w = e3nn.MultiLayerPerceptron(
-        3 * [64] + [linear.num_weights],  # TODO (mario): make this configurable?
-        jax.nn.silu,
-    )(
-        edge_feats.array
-    )  # [n_edges, linear.num_weights]
-    assert w.shape == (edge_feats.shape[0], linear.num_weights)
-    w = jax.vmap(linear.split_weights)(w)  # List of [n_edges, *path_shape]
-
-    messages = jax.vmap(linear)(w, messages).simplify()  # [n_edges, irreps]
-
-    # Scatter sum
-    message = e3nn.IrrepsArray.zeros(messages.irreps, (node_feats.shape[0],))
-    node_feats = message.at[receivers].add(messages) / jnp.sqrt(
-        avg_num_neighbors
-    )  # [n_nodes, irreps]
-
-    return node_feats
-
-
 class AgnosticResidualInteractionBlock(InteractionBlock):
     def __call__(
         self,
@@ -215,7 +179,7 @@ class AgnosticResidualInteractionBlock(InteractionBlock):
         sc = e3nn.Linear(self.hidden_irreps)(
             e3nn.tensor_product(node_feats, node_attrs)
         )  # [n_nodes, hidden_irreps]
-        # First linear
+
         node_feats = e3nn.Linear(node_feats.irreps)(node_feats)
 
         mul = next(iter({mul for mul, _ in node_feats.irreps}))
@@ -247,7 +211,6 @@ class AgnosticResidualInteractionBlock(InteractionBlock):
             self.target_irreps,
         )
 
-        # Linear
         node_feats = e3nn.Linear(self.target_irreps)(node_feats)
 
         return (
@@ -266,18 +229,18 @@ class AgnosticInteractionBlock(InteractionBlock):
         senders: jnp.ndarray,  # [n_edges, ]
         receivers: jnp.ndarray,  # [n_edges, ]
     ) -> Tuple[e3nn.IrrepsArray, Optional[e3nn.IrrepsArray]]:
-        message, _ = AgnosticResidualInteractionBlock(
+        node_feats, _ = AgnosticResidualInteractionBlock(
             target_irreps=self.target_irreps,
             hidden_irreps=self.hidden_irreps,
             avg_num_neighbors=self.avg_num_neighbors,
         )(node_attrs, node_feats, edge_attrs, edge_feats, senders, receivers)
 
         # Selector TensorProduct
-        message = e3nn.Linear(self.target_irreps)(
-            e3nn.tensor_product(message, node_attrs)
+        node_feats = e3nn.Linear(self.target_irreps)(
+            e3nn.tensor_product(node_feats, node_attrs)
         )
         return (
-            message,  # [n_nodes, target_irreps]
+            node_feats,  # [n_nodes, target_irreps]
             None,
         )
 
