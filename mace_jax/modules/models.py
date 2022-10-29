@@ -43,9 +43,7 @@ class GeneralMACE(hk.Module):
         interaction_cls_first: Type[InteractionBlock] = AgnosticInteractionBlock,
         epsilon: Optional[float] = 0.5,
         correlation: int = 3,  # Correlation order at each layer (~ node_features^correlation), default 3
-        gate: Optional[
-            Callable
-        ] = jax.nn.silu,  # Gate function for the MLP in last readout
+        gate: Callable = jax.nn.silu,  # activation function
     ):
         super().__init__()
 
@@ -53,31 +51,36 @@ class GeneralMACE(hk.Module):
         hidden_irreps = e3nn.Irreps(hidden_irreps)
         readout_mlp_irreps = e3nn.Irreps(readout_mlp_irreps)
 
+        self.num_features = hidden_irreps.count(e3nn.Irrep("0e"))
+        if not all(mul == self.num_features for mul, _ in hidden_irreps):
+            raise ValueError(
+                f"All hidden irrep must have the same multiplicity, got {hidden_irreps}"
+            )
+
+        self.sh_irreps = e3nn.Irreps.spherical_harmonics(max_ell)
+        self.hidden_irreps = e3nn.Irreps([ir for _, ir in hidden_irreps])
+        self.interaction_irreps = e3nn.Irreps(e3nn.Irrep.iterator(max_ell))
+
         self.r_max = r_max
         self.correlation = correlation
-        self.hidden_irreps = hidden_irreps
         self.avg_num_neighbors = avg_num_neighbors
         self.epsilon = epsilon
         self.readout_mlp_irreps = readout_mlp_irreps
-        self.gate = gate
+        self.activation = gate
         self.interaction_cls_first = interaction_cls_first
         self.interaction_cls = interaction_cls
         self.num_interactions = num_interactions
         self.output_irreps = output_irreps
 
         # Embeddings
-        self.node_embedding = LinearNodeEmbeddingBlock(self.hidden_irreps)
+        self.node_embedding = LinearNodeEmbeddingBlock(
+            self.num_features, self.hidden_irreps
+        )
         self.radial_embedding = RadialEmbeddingBlock(
             r_max=r_max,
             num_bessel=num_bessel,
             num_deriv_in_zero=num_deriv_in_zero,
             num_deriv_in_one=num_deriv_in_one,
-        )
-
-        self.sh_irreps = e3nn.Irreps.spherical_harmonics(max_ell)
-        num_features = hidden_irreps.count(e3nn.Irrep("0e"))
-        self.interaction_irreps = e3nn.Irreps(
-            [(num_features, ir) for ir in e3nn.Irrep.iterator(max_ell)]
         )
 
     def __call__(
@@ -88,8 +91,10 @@ class GeneralMACE(hk.Module):
         receivers: jnp.ndarray,  # [n_edges]
     ) -> e3nn.IrrepsArray:
         # Embeddings
-        node_attrs = e3nn.IrrepsArray(f"{node_attrs.shape[-1]}x0e", node_attrs)
-        node_feats = self.node_embedding(node_attrs)
+        node_attrs = e3nn.IrrepsArray(
+            f"{node_attrs.shape[-1]}x0e", node_attrs
+        )  # [n_nodes, feature, irreps]
+        node_feats = self.node_embedding(node_attrs)  # [n_nodes, feature, irreps]
 
         # TODO (mario): use jax_md formalism to compute the relative vectors and lengths
 
@@ -114,12 +119,14 @@ class GeneralMACE(hk.Module):
             else:
                 inter = self.interaction_cls
 
-            node_feats: e3nn.IrrepsArray
-            sc: Optional[e3nn.IrrepsArray]
+            node_feats: e3nn.IrrepsArray  # [n_nodes, feature, interaction_irreps]
+            sc: Optional[e3nn.IrrepsArray]  # [n_nodes, feature, hidden_irreps]
             node_feats, sc = inter(
+                num_features=self.num_features,
                 target_irreps=self.interaction_irreps,
                 hidden_irreps=self.hidden_irreps,
                 avg_num_neighbors=self.avg_num_neighbors,
+                activation=self.activation,
             )(
                 node_attrs=node_attrs,
                 node_feats=node_feats,
@@ -135,21 +142,25 @@ class GeneralMACE(hk.Module):
                 node_feats /= jnp.sqrt(self.avg_num_neighbors)
 
             node_feats = EquivariantProductBasisBlock(
-                target_irreps=self.hidden_irreps, correlation=self.correlation
+                num_features=self.num_features,
+                target_irreps=self.hidden_irreps,
+                correlation=self.correlation,
             )(node_feats=node_feats, node_attrs=node_attrs)
 
             if sc is not None:
-                node_feats = node_feats + sc
+                node_feats = node_feats + sc  # [n_nodes, feature, hidden_irreps]
 
-            if i == self.num_interactions - 1:  # Non linear readout for last layer
-                node_outputs = NonLinearReadoutBlock(
-                    self.readout_mlp_irreps, self.output_irreps, activation=self.gate
-                )(
-                    node_feats
-                )  # [n_nodes, output_irreps]
-            else:
+            if i < self.num_interactions - 1:
                 node_outputs = LinearReadoutBlock(self.output_irreps)(
-                    node_feats
+                    node_feats.axis_to_mul()
+                )  # [n_nodes, output_irreps]
+            else:  # Non linear readout for last layer
+                node_outputs = NonLinearReadoutBlock(
+                    self.readout_mlp_irreps,
+                    self.output_irreps,
+                    activation=self.activation,
+                )(
+                    node_feats.axis_to_mul()
                 )  # [n_nodes, output_irreps]
 
             outputs += [node_outputs]  # list of [n_nodes, output_irreps]

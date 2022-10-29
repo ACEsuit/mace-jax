@@ -11,15 +11,15 @@ from .symmetric_contraction import SymmetricContraction
 
 
 class LinearNodeEmbeddingBlock(hk.Module):
-    def __init__(self, irreps_out: e3nn.Irreps):
+    def __init__(self, num_features: int, irreps_out: e3nn.Irreps):
         super().__init__()
-        self.linear = e3nn.Linear(irreps_out=irreps_out)
+        self.linear = e3nn.Linear(irreps_out=irreps_out, channel_out=num_features)
 
     def __call__(
         self,
         node_attrs: e3nn.IrrepsArray,  # [n_nodes, irreps]
     ) -> e3nn.IrrepsArray:
-        return self.linear(node_attrs)
+        return self.linear(node_attrs[:, None, :])  # [n_nodes, num_features, irreps]
 
 
 class LinearReadoutBlock(hk.Module):
@@ -117,10 +117,12 @@ class RadialEmbeddingBlock:
 class EquivariantProductBasisBlock(hk.Module):
     def __init__(
         self,
+        num_features: int,
         target_irreps: e3nn.Irreps,
         correlation: int,
     ) -> None:
         super().__init__()
+        self.num_features = num_features
         self.target_irreps = e3nn.Irreps(target_irreps)
         self.symmetric_contractions = SymmetricContraction(
             keep_irrep_out={ir for _, ir in self.target_irreps},
@@ -129,35 +131,37 @@ class EquivariantProductBasisBlock(hk.Module):
 
     def __call__(
         self,
-        node_feats: e3nn.IrrepsArray,  # [n_nodes, irreps] with identical multiplicities
+        node_feats: e3nn.IrrepsArray,  # [n_nodes, feature, irreps]
         node_attrs: e3nn.IrrepsArray,  # [n_nodes, irreps] with only scalars
     ) -> e3nn.IrrepsArray:
         assert node_attrs.irreps.is_scalar()
         node_feats = node_feats.remove_nones()
-        node_feats = self.symmetric_contractions(
-            node_feats.mul_to_axis(), node_attrs.array
-        ).axis_to_mul()
-        return e3nn.Linear(self.target_irreps)(node_feats)
+        node_feats = self.symmetric_contractions(node_feats, node_attrs.array)
+        return e3nn.Linear(self.target_irreps, self.num_features)(node_feats)
 
 
 class InteractionBlock(ABC, hk.Module):
     def __init__(
         self,
         *,
+        num_features: int,
         target_irreps: e3nn.Irreps,
         hidden_irreps: e3nn.Irreps,
         avg_num_neighbors: float,
+        activation: Callable,
     ) -> None:
         super().__init__()
+        self.num_features = num_features
         self.target_irreps = target_irreps
         self.hidden_irreps = hidden_irreps
         self.avg_num_neighbors = avg_num_neighbors
+        self.activation = activation
 
     @abstractmethod
     def __call__(
         self,
         node_attrs: e3nn.IrrepsArray,  # [n_nodes, irreps]
-        node_feats: e3nn.IrrepsArray,  # [n_nodes, irreps]
+        node_feats: e3nn.IrrepsArray,  # [n_nodes, feature, irreps]
         edge_attrs: e3nn.IrrepsArray,  # [n_edges, irreps]
         edge_feats: e3nn.IrrepsArray,  # [n_edges, irreps]
         senders: jnp.ndarray,  # [n_edges, ]
@@ -170,23 +174,17 @@ class AgnosticResidualInteractionBlock(InteractionBlock):
     def __call__(
         self,
         node_attrs: e3nn.IrrepsArray,  # [n_nodes, irreps]
-        node_feats: e3nn.IrrepsArray,  # [n_nodes, irreps]
+        node_feats: e3nn.IrrepsArray,  # [n_nodes, feature, irreps]
         edge_attrs: e3nn.IrrepsArray,  # [n_edges, irreps]
         edge_feats: e3nn.IrrepsArray,  # [n_edges, irreps]
         senders: jnp.ndarray,  # [n_edges, ]
         receivers: jnp.ndarray,  # [n_edges, ]
     ) -> Tuple[e3nn.IrrepsArray, e3nn.IrrepsArray]:
-        sc = e3nn.Linear(self.hidden_irreps)(
-            e3nn.tensor_product(node_feats, node_attrs)
-        )  # [n_nodes, hidden_irreps]
+        sc = e3nn.Linear(self.hidden_irreps, self.num_features)(
+            e3nn.tensor_product(node_feats, node_attrs[:, None, :])
+        )  # [n_nodes, feature, hidden_irreps]
 
-        node_feats = e3nn.Linear(node_feats.irreps)(node_feats)
-
-        mul = next(iter({mul for mul, _ in node_feats.irreps}))
-        assert all(mul == m for m, _ in node_feats.irreps)
-        assert all(mul == m for m, _ in self.target_irreps)
-
-        node_feats = node_feats.mul_to_axis()  # [n_nodes, channels, irreps]
+        node_feats = e3nn.Linear(node_feats.irreps, self.num_features)(node_feats)
 
         node_feats = hk.vmap(
             lambda x: message_passing_convolution(
@@ -196,26 +194,19 @@ class AgnosticResidualInteractionBlock(InteractionBlock):
                 senders,
                 receivers,
                 self.avg_num_neighbors,
-                e3nn.Irreps([(1, ir) for _, ir in self.target_irreps]),
+                self.target_irreps,
+                self.activation,
             ),
             in_axes=1,
             out_axes=1,
             split_rng=False,
-        )(
-            node_feats
-        )  # [n_nodes, channels, irreps]
+        )(node_feats)
 
-        node_feats = node_feats.axis_to_mul()  # [n_nodes, irreps]
-        assert node_feats.irreps == self.target_irreps, (
-            node_feats.irreps,
-            self.target_irreps,
-        )
-
-        node_feats = e3nn.Linear(self.target_irreps)(node_feats)
+        node_feats = e3nn.Linear(self.target_irreps, self.num_features)(node_feats)
 
         return (
-            node_feats,  # [n_nodes, target_irreps]
-            sc,  # [n_nodes, hidden_irreps]
+            node_feats,  # [n_nodes, feature, target_irreps]
+            sc,  # [n_nodes, feature, hidden_irreps]
         )
 
 
@@ -223,7 +214,7 @@ class AgnosticInteractionBlock(InteractionBlock):
     def __call__(
         self,
         node_attrs: e3nn.IrrepsArray,  # [n_nodes, irreps]
-        node_feats: e3nn.IrrepsArray,  # [n_nodes, irreps]
+        node_feats: e3nn.IrrepsArray,  # [n_nodes, feature, irreps]
         edge_attrs: e3nn.IrrepsArray,  # [n_edges, irreps]
         edge_feats: e3nn.IrrepsArray,  # [n_edges, irreps]
         senders: jnp.ndarray,  # [n_edges, ]
@@ -236,11 +227,11 @@ class AgnosticInteractionBlock(InteractionBlock):
         )(node_attrs, node_feats, edge_attrs, edge_feats, senders, receivers)
 
         # Selector TensorProduct
-        node_feats = e3nn.Linear(self.target_irreps)(
-            e3nn.tensor_product(node_feats, node_attrs)
+        node_feats = e3nn.Linear(self.target_irreps, self.num_features)(
+            e3nn.tensor_product(node_feats, node_attrs[:, None, :])
         )
         return (
-            node_feats,  # [n_nodes, target_irreps]
+            node_feats,  # [n_nodes, feature, target_irreps]
             None,
         )
 
