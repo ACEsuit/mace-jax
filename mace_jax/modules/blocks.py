@@ -121,6 +121,7 @@ class EquivariantProductBasisBlock(hk.Module):
         target_irreps: e3nn.Irreps,
         correlation: int,
         max_poly_order: Optional[int],
+        input_poly_order: int = 0,
     ) -> None:
         super().__init__()
         self.num_features = num_features
@@ -129,6 +130,7 @@ class EquivariantProductBasisBlock(hk.Module):
             keep_irrep_out={ir for _, ir in self.target_irreps},
             correlation=correlation,
             max_poly_order=max_poly_order,
+            input_poly_order=input_poly_order,
         )
 
     def __call__(

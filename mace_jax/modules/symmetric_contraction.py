@@ -11,6 +11,7 @@ class SymmetricContraction(hk.Module):
         correlation: int,
         keep_irrep_out: Set[e3nn.Irrep],
         max_poly_order: Optional[int] = None,
+        input_poly_order: int = 0,
     ):
         super().__init__()
         self.correlation = correlation
@@ -21,6 +22,7 @@ class SymmetricContraction(hk.Module):
 
         self.keep_irrep_out = {e3nn.Irrep(ir) for ir in keep_irrep_out}
         self.max_poly_order = max_poly_order
+        self.input_poly_order = input_poly_order
 
     def __call__(self, x: e3nn.IrrepsArray, y: jnp.ndarray) -> e3nn.IrrepsArray:
         def fn(x: e3nn.IrrepsArray, y: jnp.ndarray):
@@ -39,7 +41,7 @@ class SymmetricContraction(hk.Module):
                     x.irreps,
                     order,
                     keep_ir=self.keep_irrep_out,
-                    max_order=self.max_poly_order,
+                    max_order=self.max_poly_order - order * self.input_poly_order,
                 )
 
                 # ((w3 x + w2) x + w1) x

@@ -97,6 +97,8 @@ class GeneralMACE(hk.Module):
             f"{node_attrs.shape[-1]}x0e", node_attrs
         )  # [n_nodes, feature, irreps]
         node_feats = self.node_embedding(node_attrs)  # [n_nodes, feature, irreps]
+        poly_order = 0  # polynomial order in atom positions of the node features
+        # NOTE: we assume hidden_irreps to be scalar only
 
         # TODO (mario): use jax_md formalism to compute the relative vectors and lengths
 
@@ -143,12 +145,20 @@ class GeneralMACE(hk.Module):
             else:
                 node_feats /= jnp.sqrt(self.avg_num_neighbors)
 
+            if self.max_poly_order is None:
+                new_poly_order = self.correlation * (poly_order + self.sh_irreps.lmax)
+            else:
+                new_poly_order = self.correlation * poly_order + self.max_poly_order
+
             node_feats = EquivariantProductBasisBlock(
                 num_features=self.num_features,
                 target_irreps=self.hidden_irreps,
                 correlation=self.correlation,
-                max_poly_order=self.max_poly_order,
+                max_poly_order=new_poly_order,
+                input_poly_order=poly_order,
             )(node_feats=node_feats, node_attrs=node_attrs)
+
+            poly_order = new_poly_order
 
             if sc is not None:
                 node_feats = node_feats + sc  # [n_nodes, feature, hidden_irreps]
@@ -165,6 +175,8 @@ class GeneralMACE(hk.Module):
                 )(
                     node_feats.axis_to_mul()
                 )  # [n_nodes, output_irreps]
+
+                # polynomial order of node outputs is infinite in the last layer because of the non-polynomial activation function
 
             outputs += [node_outputs]  # list of [n_nodes, output_irreps]
 
