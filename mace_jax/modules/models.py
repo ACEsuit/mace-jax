@@ -43,6 +43,7 @@ class GeneralMACE(hk.Module):
         interaction_cls_first: Type[InteractionBlock] = AgnosticInteractionBlock,
         epsilon: Optional[float] = 0.5,
         correlation: int = 3,  # Correlation order at each layer (~ node_features^correlation), default 3
+        max_poly_order: Optional[int] = None,
         gate: Callable = jax.nn.silu,  # activation function
     ):
         super().__init__()
@@ -63,6 +64,7 @@ class GeneralMACE(hk.Module):
 
         self.r_max = r_max
         self.correlation = correlation
+        self.max_poly_order = max_poly_order
         self.avg_num_neighbors = avg_num_neighbors
         self.epsilon = epsilon
         self.readout_mlp_irreps = readout_mlp_irreps
@@ -145,6 +147,7 @@ class GeneralMACE(hk.Module):
                 num_features=self.num_features,
                 target_irreps=self.hidden_irreps,
                 correlation=self.correlation,
+                max_poly_order=self.max_poly_order,
             )(node_feats=node_feats, node_attrs=node_attrs)
 
             if sc is not None:

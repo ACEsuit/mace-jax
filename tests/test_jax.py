@@ -28,29 +28,31 @@ def test_symmetric_contraction():
 
 def test_mace():
     atomic_energies = np.array([1.0, 3.0], dtype=float)
-    model_config = dict(
-        r_max=5,
-        num_bessel=8,
-        num_deriv_in_zero=5,
-        num_deriv_in_one=2,
-        max_ell=2,
-        interaction_cls=modules.interaction_classes["AgnosticResidualInteractionBlock"],
-        interaction_cls_first=modules.interaction_classes[
-            "AgnosticResidualInteractionBlock"
-        ],
-        num_interactions=5,
-        hidden_irreps=e3nn.Irreps("32x0e + 32x1o"),
-        readout_mlp_irreps=e3nn.Irreps("16x0e"),
-        gate=jax.nn.silu,
-        atomic_energies=atomic_energies,
-        avg_num_neighbors=8,
-        correlation=3,
-    )
 
     @hk.without_apply_rng
     @hk.transform
     def model(graph):
-        return MACE(**model_config)(graph)
+        return MACE(
+            r_max=5,
+            num_bessel=8,
+            num_deriv_in_zero=5,
+            num_deriv_in_one=2,
+            max_ell=2,
+            interaction_cls=modules.interaction_classes[
+                "AgnosticResidualInteractionBlock"
+            ],
+            interaction_cls_first=modules.interaction_classes[
+                "AgnosticResidualInteractionBlock"
+            ],
+            num_interactions=5,
+            hidden_irreps=e3nn.Irreps("32x0e"),
+            readout_mlp_irreps=e3nn.Irreps("16x0e"),
+            gate=jax.nn.silu,
+            atomic_energies=atomic_energies,
+            avg_num_neighbors=8,
+            correlation=3,
+            max_poly_order=4,
+        )(graph)
 
     Node = namedtuple("Node", ["positions", "attrs"])
     Edge = namedtuple("Edge", ["shifts"])

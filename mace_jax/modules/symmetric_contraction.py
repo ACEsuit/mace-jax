@@ -1,4 +1,4 @@
-from typing import Set
+from typing import Set, Optional
 
 import e3nn_jax as e3nn
 import haiku as hk
@@ -6,7 +6,12 @@ import jax.numpy as jnp
 
 
 class SymmetricContraction(hk.Module):
-    def __init__(self, correlation: int, keep_irrep_out: Set[e3nn.Irrep]):
+    def __init__(
+        self,
+        correlation: int,
+        keep_irrep_out: Set[e3nn.Irrep],
+        max_poly_order: Optional[int] = None,
+    ):
         super().__init__()
         self.correlation = correlation
 
@@ -15,6 +20,7 @@ class SymmetricContraction(hk.Module):
             assert all(mul == 1 for mul, _ in keep_irrep_out)
 
         self.keep_irrep_out = {e3nn.Irrep(ir) for ir in keep_irrep_out}
+        self.max_poly_order = max_poly_order
 
     def __call__(self, x: e3nn.IrrepsArray, y: jnp.ndarray) -> e3nn.IrrepsArray:
         def fn(x: e3nn.IrrepsArray, y: jnp.ndarray):
@@ -30,7 +36,10 @@ class SymmetricContraction(hk.Module):
 
             for order in range(self.correlation, 0, -1):  # correlation, ..., 1
                 U = e3nn.reduced_symmetric_tensor_product_basis(
-                    x.irreps, order, keep_ir=self.keep_irrep_out
+                    x.irreps,
+                    order,
+                    keep_ir=self.keep_irrep_out,
+                    max_order=self.max_poly_order,
                 )
 
                 # ((w3 x + w2) x + w1) x
