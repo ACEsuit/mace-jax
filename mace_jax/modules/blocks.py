@@ -225,9 +225,11 @@ class AgnosticInteractionBlock(InteractionBlock):
         receivers: jnp.ndarray,  # [n_edges, ]
     ) -> Tuple[e3nn.IrrepsArray, Optional[e3nn.IrrepsArray]]:
         node_feats, _ = AgnosticResidualInteractionBlock(
+            num_features=self.num_features,
             target_irreps=self.target_irreps,
             hidden_irreps=self.hidden_irreps,
             avg_num_neighbors=self.avg_num_neighbors,
+            activation=self.activation,
         )(node_attrs, node_feats, edge_attrs, edge_feats, senders, receivers)
 
         # Selector TensorProduct
