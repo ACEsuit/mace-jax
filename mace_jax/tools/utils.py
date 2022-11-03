@@ -112,6 +112,10 @@ def setup_logger(
     logger = logging.getLogger()
     logger.setLevel(level)
 
+    # remove all handlers
+    for handler in logger.handlers:
+        logger.removeHandler(handler)
+
     formatter = logging.Formatter(
         "%(asctime)s.%(msecs)03d %(levelname)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
@@ -148,10 +152,7 @@ class AtomicNumberTable:
 
 
 def get_atomic_number_table_from_zs(zs: Iterable[int]) -> AtomicNumberTable:
-    z_set = set()
-    for z in zs:
-        z_set.add(z)
-    return AtomicNumberTable(sorted(list(z_set)))
+    return AtomicNumberTable(sorted(set(zs)))
 
 
 def atomic_numbers_to_indices(

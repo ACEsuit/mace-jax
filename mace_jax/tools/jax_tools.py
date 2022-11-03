@@ -27,8 +27,8 @@ def pad_graph_to_nearest_ceil_mantissa(
         A graphs_tuple batched to the nearest power of two.
     """
     # Add 1 since we need at least one padding node for pad_with_graphs.
-    pad_nodes_to = ceil_mantissa(jnp.sum(graphs_tuple.n_node) + 1, 1)
-    pad_edges_to = ceil_mantissa(jnp.sum(graphs_tuple.n_edge), 1)
+    pad_nodes_to = ceil_mantissa(jnp.sum(graphs_tuple.n_node) + 1, 2)
+    pad_edges_to = ceil_mantissa(jnp.sum(graphs_tuple.n_edge), 2)
     # Add 1 since we need at least one padding graph for pad_with_graphs.
     # We do not pad to nearest power of two because the batch size is fixed.
     pad_graphs_to = graphs_tuple.n_node.shape[0] + 1

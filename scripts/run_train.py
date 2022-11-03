@@ -192,7 +192,7 @@ def main() -> None:
         return mace(graph)
 
     params = jax.jit(model.init)(
-        jax.random.PRNGKey(0),
+        jax.random.PRNGKey(args.seed),
         get_batched_padded_graph_tuples(next(iter(train_loader))),
     )
     # Optimizer
@@ -225,9 +225,9 @@ def main() -> None:
 
     optimizer_state = gradient_transform.init(params)
 
-    checkpoint_handler = tools.CheckpointHandler(
-        directory=args.checkpoints_dir, tag=tag, keep=args.keep_checkpoints
-    )
+    # checkpoint_handler = tools.CheckpointHandler(
+    #     directory=args.checkpoints_dir, tag=tag, keep=args.keep_checkpoints
+    # )
 
     start_epoch = 0
     # if args.restart_latest:
@@ -249,13 +249,12 @@ def main() -> None:
         valid_loader=valid_loader,
         gradient_transform=gradient_transform,
         optimizer_state=optimizer_state,
-        checkpoint_handler=checkpoint_handler,
+        # checkpoint_handler=checkpoint_handler,
         eval_interval=args.eval_interval,
         start_epoch=start_epoch,
         max_num_epochs=args.max_num_epochs,
         logger=logger,
         patience=args.patience,
-        swa=None,
         ema_decay=args.ema_decay,
         max_grad_norm=args.clip_grad,
         log_errors=args.error_table,

@@ -12,7 +12,7 @@ import torch
 from torch.optim.swa_utils import SWALR, AveragedModel
 from torch.utils.data import DataLoader
 
-from .checkpoint import CheckpointHandler
+# from .checkpoint import CheckpointHandler
 from .jax_tools import get_batched_padded_graph_tuples
 from .utils import (
     MetricsLogger,
@@ -43,18 +43,16 @@ def train(
     start_epoch: int,
     max_num_epochs: int,
     patience: int,
-    checkpoint_handler: CheckpointHandler,
+    # checkpoint_handler: CheckpointHandler,
     logger: MetricsLogger,
     eval_interval: int,
     log_errors: str,
-    swa: Optional[SWAContainer] = None,
     ema_decay: Optional[float] = None,
     max_grad_norm: Optional[float] = 10.0,
 ):
     lowest_loss = np.inf
     patience_counter = 0
     num_updates = 0
-    swa_start = True
     ema_params = params  # TODO (mario)
 
     if max_grad_norm is not None:
@@ -150,17 +148,17 @@ def train(
                 #     epochs=epoch,
                 # )
 
-        # LR scheduler and SWA update
-        if swa is None or epoch < swa.start:
-            pass
-        else:
-            raise NotImplementedError
-            if swa_start:
-                logging.info("Changing loss based on SWA")
-                swa_start = False
-            loss_fn = swa.loss_fn
-            swa.model.update_parameters(model)
-            swa.scheduler.step()
+        # # LR scheduler and SWA update
+        # if swa is None or epoch < swa.start:
+        #     pass
+        # else:
+        #     raise NotImplementedError
+        #     if swa_start:
+        #         logging.info("Changing loss based on SWA")
+        #         swa_start = False
+        #     loss_fn = swa.loss_fn
+        #     swa.model.update_parameters(model)
+        #     swa.scheduler.step()
 
     logging.info("Training complete")
     return params, optimizer_state
