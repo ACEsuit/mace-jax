@@ -113,25 +113,25 @@ def train(
                 error_e = eval_metrics["rmse_e_per_atom"] * 1e3
                 error_f = eval_metrics["rmse_f"] * 1e3
                 logging.info(
-                    f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_E_per_atom={error_e:.1f} meV, RMSE_F={error_f:.1f} meV / A"
+                    f"Epoch {epoch}: Validation loss={valid_loss:.4f}, RMSE_E_per_atom={error_e:.1f} meV, RMSE_F={error_f:.1f} meV / A"
                 )
             elif log_errors == "TotalRMSE":
                 error_e = eval_metrics["rmse_e"] * 1e3
                 error_f = eval_metrics["rmse_f"] * 1e3
                 logging.info(
-                    f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_E={error_e:.1f} meV, RMSE_F={error_f:.1f} meV / A"
+                    f"Epoch {epoch}: Validation loss={valid_loss:.4f}, RMSE_E={error_e:.1f} meV, RMSE_F={error_f:.1f} meV / A"
                 )
             elif log_errors == "PerAtomMAE":
                 error_e = eval_metrics["mae_e_per_atom"] * 1e3
                 error_f = eval_metrics["mae_f"] * 1e3
                 logging.info(
-                    f"Epoch {epoch}: loss={valid_loss:.4f}, MAE_E_per_atom={error_e:.1f} meV, MAE_F={error_f:.1f} meV / A"
+                    f"Epoch {epoch}: Validation loss={valid_loss:.4f}, MAE_E_per_atom={error_e:.1f} meV, MAE_F={error_f:.1f} meV / A"
                 )
             elif log_errors == "TotalMAE":
                 error_e = eval_metrics["mae_e"] * 1e3
                 error_f = eval_metrics["mae_f"] * 1e3
                 logging.info(
-                    f"Epoch {epoch}: loss={valid_loss:.4f}, MAE_E={error_e:.1f} meV, MAE_F={error_f:.1f} meV / A"
+                    f"Epoch {epoch}: Validation loss={valid_loss:.4f}, MAE_E={error_e:.1f} meV, MAE_F={error_f:.1f} meV / A"
                 )
             if valid_loss >= lowest_loss:
                 patience_counter += 1
