@@ -124,14 +124,23 @@ def test_config_types(
 
 def load_from_xyz(
     file_path: str,
-    config_type_weights: Dict,
+    config_type_weights: Dict = None,
     energy_key: str = "energy",
     forces_key: str = "forces",
     extract_atomic_energies: bool = False,
+    num_configs: int = None,
 ) -> Tuple[Dict[int, float], Configurations]:
     assert file_path[-4:] == ".xyz", NameError("Specify file with extension .xyz")
 
-    atoms_list = ase.io.read(file_path, format="extxyz", index=":")
+    if num_configs is None:
+        atoms_list = ase.io.read(file_path, format="extxyz", index=":")
+    else:
+        atoms_list = ase.io.read(file_path, format="extxyz", index=f":{num_configs}")
+        if len(atoms_list) < num_configs:
+            logging.warning(
+                f"Only {len(atoms_list)} configurations found in {file_path}."
+            )
+
     if not isinstance(atoms_list, list):
         atoms_list = [atoms_list]
 
