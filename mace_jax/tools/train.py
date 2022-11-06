@@ -79,6 +79,8 @@ def train(
             )
         return loss, params, optimizer_state, ema_params
 
+    last_cache_size = update_fn._cache_size()
+
     for epoch in range(start_epoch, max_num_epochs):
         # Train
         for batch in train_loader:
@@ -97,6 +99,19 @@ def train(
             opt_metrics["mode"] = "opt"
             opt_metrics["epoch"] = epoch
             logger.log(opt_metrics)
+
+            if last_cache_size != update_fn._cache_size():
+                last_cache_size = update_fn._cache_size()
+
+                logging.info(f"Jitted update_fn cache size: {last_cache_size}")
+                logging.info(f"Compilation time: {opt_metrics['time']:.3f}s")
+                logging.info(
+                    f"Size of the graph: n_node={graph.n_node} total={graph.n_node.sum()}"
+                )
+                logging.info(
+                    f"Size of the graph: n_edge={graph.n_edge} total={graph.n_edge.sum()}"
+                )
+                logging.info(f"Value of the loss: {loss:.3f}")
 
         # Validate
         if epoch % eval_interval == 0:
