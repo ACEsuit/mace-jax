@@ -63,7 +63,7 @@ class NonLinearReadoutBlock(hk.Module):
         return e3nn.Linear(self.output_irreps)(x)  # [n_nodes, output_irreps]
 
 
-class AtomicEnergiesBlock(hk.Module):
+class AtomicEnergiesBlock:
     atomic_energies: jnp.ndarray
 
     def __init__(self, atomic_energies: Union[np.ndarray, jnp.ndarray]):
