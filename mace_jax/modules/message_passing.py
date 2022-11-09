@@ -1,7 +1,6 @@
 from typing import Callable
 
 import e3nn_jax as e3nn
-import jax
 import jax.numpy as jnp
 
 
@@ -15,27 +14,13 @@ def message_passing_convolution(
     target_irreps: e3nn.Irreps,
     activation: Callable,
 ) -> e3nn.IrrepsArray:
-    messages = (
-        e3nn.tensor_product(node_feats[senders], edge_attrs).remove_nones().simplify()
+    messages = e3nn.Linear(target_irreps)(
+        e3nn.MultiLayerPerceptron(3 * [64], activation)(edge_feats),  # [n_edges, 64]
+        e3nn.tensor_product(node_feats[senders], edge_attrs),  # [n_edges, irreps]
     )  # [n_edges, irreps]
-    linear = e3nn.FunctionalLinear(messages.irreps, target_irreps)
 
-    # Learnable Radial
-    assert edge_feats.irreps.is_scalar()
-    w = e3nn.MultiLayerPerceptron(
-        3 * [64] + [linear.num_weights],  # TODO (mario): make this configurable?
-        activation,
-    )(
-        edge_feats.array
-    )  # [n_edges, linear.num_weights]
-    assert w.shape == (edge_feats.shape[0], linear.num_weights)
-    w = jax.vmap(linear.split_weights)(w)  # List of [n_edges, *path_shape]
-
-    messages = jax.vmap(linear)(w, messages).simplify()  # [n_edges, irreps]
-
-    # Scatter sum
-    message = e3nn.IrrepsArray.zeros(messages.irreps, (node_feats.shape[0],))
-    node_feats = message.at[receivers].add(messages) / jnp.sqrt(
+    zeros = e3nn.IrrepsArray.zeros(messages.irreps, (node_feats.shape[0],))
+    node_feats = zeros.at[receivers].add(messages) / jnp.sqrt(
         avg_num_neighbors
     )  # [n_nodes, irreps]
 
