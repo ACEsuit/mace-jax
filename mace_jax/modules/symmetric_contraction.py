@@ -10,6 +10,7 @@ class SymmetricContraction(hk.Module):
         self,
         correlation: int,
         keep_irrep_out: Set[e3nn.Irrep],
+        num_species: int,
         max_poly_order: Optional[int] = None,
         input_poly_order: int = 0,
     ):
@@ -21,6 +22,7 @@ class SymmetricContraction(hk.Module):
             assert all(mul == 1 for mul, _ in keep_irrep_out)
 
         self.keep_irrep_out = {e3nn.Irrep(ir) for ir in keep_irrep_out}
+        self.num_species = num_species
         self.max_poly_order = max_poly_order
         self.input_poly_order = input_poly_order
 
@@ -32,7 +34,7 @@ class SymmetricContraction(hk.Module):
             # vmap(lambda w, x: FunctionalLinear(irreps_out)(w, concatenate([x, tensor_product(x, x), tensor_product(x, x, x), ...])))(w, x)
             # up to x power self.correlation
             assert x.ndim == 2  # [num_features, irreps_x.dim]
-            assert y.ndim == 1  # [num_elements]
+            assert y.ndim == 0  # int
 
             out = dict()
 
@@ -43,6 +45,7 @@ class SymmetricContraction(hk.Module):
                     keep_ir=self.keep_irrep_out,
                     max_order=self.max_poly_order - order * self.input_poly_order,
                 )
+                # TODO(mario) implement norm_p
 
                 # ((w3 x + w2) x + w1) x
                 #  \-----------/
@@ -53,19 +56,21 @@ class SymmetricContraction(hk.Module):
 
                     w = hk.get_parameter(
                         f"w{order}_{ir_out}",
-                        (mul, y.shape[0], x.shape[0]),
+                        (self.num_species, mul, x.shape[0]),
                         dtype=jnp.float32,
                         init=hk.initializers.RandomNormal(),
-                    )  # [multiplicity, num_elements, num_features]
+                    )[
+                        y
+                    ]  # [multiplicity, num_features]
                     w = w / w.shape[0]  # normalize
                     if ir_out not in out:
                         out[ir_out] = (
                             "special",
-                            jnp.einsum("...jki,kec,e,cj->c...i", u, w, y, x.array),
+                            jnp.einsum("...jki,kc,cj->c...i", u, w, x.array),
                         )  # [num_features, (irreps_x.dim)^(oder-1), ir_out.dim]
                     else:
                         out[ir_out] += jnp.einsum(
-                            "...ki,kec,e->c...i", u, w, y
+                            "...ki,kc->c...i", u, w
                         )  # [num_features, (irreps_x.dim)^order, ir_out.dim]
 
                 # ((w3 x + w2) x + w1) x
@@ -94,9 +99,9 @@ class SymmetricContraction(hk.Module):
             )
 
         # Treat batch indices using vmap
-        shape = jnp.broadcast_shapes(x.shape[:-2], y.shape[:-1])
+        shape = jnp.broadcast_shapes(x.shape[:-2], y.shape)
         x = x.broadcast_to(shape + x.shape[-2:])
-        y = jnp.broadcast_to(y, shape + y.shape[-1:])
+        y = jnp.broadcast_to(y, shape)
 
         fn_mapped = fn
         for _ in range(x.ndim - 2):

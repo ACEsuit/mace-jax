@@ -33,6 +33,7 @@ class GeneralMACE(hk.Module):
         hidden_irreps: e3nn.Irreps,  # 256x0e or 128x0e + 128x1o
         readout_mlp_irreps: e3nn.Irreps,  # Hidden irreps of the MLP in last readout, default 16x0e
         avg_num_neighbors: float,
+        num_species: int,
         num_bessel: int = 8,  # Number of Bessel functions, default 8
         num_deriv_in_zero: Optional[int] = None,
         num_deriv_in_one: Optional[int] = None,
@@ -73,10 +74,11 @@ class GeneralMACE(hk.Module):
         self.interaction_cls = interaction_cls
         self.num_interactions = num_interactions
         self.output_irreps = output_irreps
+        self.num_species = num_species
 
         # Embeddings
         self.node_embedding = LinearNodeEmbeddingBlock(
-            self.num_features, self.hidden_irreps
+            self.num_species, self.num_features, self.hidden_irreps
         )
         self.radial_embedding = RadialEmbeddingBlock(
             r_max=r_max,
@@ -88,15 +90,12 @@ class GeneralMACE(hk.Module):
     def __call__(
         self,
         vectors: jnp.ndarray,  # [n_edges, 3]
-        node_attrs: jnp.ndarray,  # [n_nodes, #scalar_features]
+        node_specie: jnp.ndarray,  # [n_nodes] int between 0 and num_species-1
         senders: jnp.ndarray,  # [n_edges]
         receivers: jnp.ndarray,  # [n_edges]
     ) -> e3nn.IrrepsArray:
         # Embeddings
-        node_attrs = e3nn.IrrepsArray(
-            f"{node_attrs.shape[-1]}x0e", node_attrs
-        )  # [n_nodes, feature, irreps]
-        node_feats = self.node_embedding(node_attrs)  # [n_nodes, feature, irreps]
+        node_feats = self.node_embedding(node_specie)  # [n_nodes, feature, irreps]
         poly_order = 0  # polynomial order in atom positions of the node features
         # NOTE: we assume hidden_irreps to be scalar only
 
@@ -131,8 +130,9 @@ class GeneralMACE(hk.Module):
                 hidden_irreps=self.hidden_irreps,
                 avg_num_neighbors=self.avg_num_neighbors,
                 activation=self.activation,
+                num_species=self.num_species,
             )(
-                node_attrs=node_attrs,
+                node_specie=node_specie,
                 node_feats=node_feats,
                 edge_attrs=edge_attrs,
                 edge_feats=edge_feats,
@@ -156,7 +156,8 @@ class GeneralMACE(hk.Module):
                 correlation=self.correlation,
                 max_poly_order=new_poly_order,
                 input_poly_order=poly_order,
-            )(node_feats=node_feats, node_attrs=node_attrs)
+                num_species=self.num_species,
+            )(node_feats=node_feats, node_specie=node_specie)
 
             poly_order = new_poly_order
 

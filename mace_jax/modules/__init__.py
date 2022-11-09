@@ -26,7 +26,7 @@ from .utils import (
     sum_nodes_of_the_same_graph,
 )
 
-from .message_passing import message_passing_convolution
+from .message_passing import MessagePassingConvolution
 
 interaction_classes: Dict[str, Type[InteractionBlock]] = {
     "AgnosticResidualInteractionBlock": AgnosticResidualInteractionBlock,
@@ -64,7 +64,7 @@ __all__ = [
     "compute_mean_rms_energy_forces",
     "compute_mean_std_atomic_inter_energy",
     "sum_nodes_of_the_same_graph",
-    "message_passing_convolution",
+    "MessagePassingConvolution",
     "interaction_classes",
     "scaling_classes",
     "gate_dict",

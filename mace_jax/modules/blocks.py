@@ -6,20 +6,38 @@ import haiku as hk
 import jax.numpy as jnp
 import numpy as np
 
-from .message_passing import message_passing_convolution
+from .message_passing import MessagePassingConvolution
 from .symmetric_contraction import SymmetricContraction
 
 
 class LinearNodeEmbeddingBlock(hk.Module):
-    def __init__(self, num_features: int, irreps_out: e3nn.Irreps):
+    def __init__(self, num_species: int, num_features: int, irreps_out: e3nn.Irreps):
         super().__init__()
-        self.linear = e3nn.Linear(irreps_out=irreps_out, channel_out=num_features)
+        self.num_species = num_species
+        self.num_features = num_features
+        self.irreps_out = e3nn.Irreps(irreps_out)
 
     def __call__(
         self,
-        node_attrs: e3nn.IrrepsArray,  # [n_nodes, irreps]
+        node_specie: jnp.ndarray,  # [n_nodes, ]
     ) -> e3nn.IrrepsArray:
-        return self.linear(node_attrs[:, None, :])  # [n_nodes, num_features, irreps]
+        new_list = []
+
+        for i, (mul, ir) in enumerate(self.irreps_out):
+            if ir == "0e":
+                w = hk.get_parameter(
+                    f"embeddings_{i}",
+                    shape=(self.num_species, self.num_features, mul, ir.dim),
+                    dtype=jnp.float32,
+                    init=hk.initializers.RandomNormal(),
+                )
+                new_list.append(w[node_specie])  # [n_nodes, num_features, mul, ir.dim]
+            else:
+                new_list.append(None)
+
+        return e3nn.IrrepsArray.from_list(
+            self.irreps_out, new_list, (node_specie.shape[0], self.num_features)
+        )
 
 
 class LinearReadoutBlock(hk.Module):
@@ -120,6 +138,7 @@ class EquivariantProductBasisBlock(hk.Module):
         num_features: int,
         target_irreps: e3nn.Irreps,
         correlation: int,
+        num_species: int,
         max_poly_order: Optional[int],
         input_poly_order: int = 0,
     ) -> None:
@@ -131,16 +150,16 @@ class EquivariantProductBasisBlock(hk.Module):
             correlation=correlation,
             max_poly_order=max_poly_order,
             input_poly_order=input_poly_order,
+            num_species=num_species,
         )
 
     def __call__(
         self,
         node_feats: e3nn.IrrepsArray,  # [n_nodes, feature, irreps]
-        node_attrs: e3nn.IrrepsArray,  # [n_nodes, irreps] with only scalars
+        node_specie: jnp.ndarray,  # [n_nodes, ] int
     ) -> e3nn.IrrepsArray:
-        assert node_attrs.irreps.is_scalar()
         node_feats = node_feats.remove_nones()
-        node_feats = self.symmetric_contractions(node_feats, node_attrs.array)
+        node_feats = self.symmetric_contractions(node_feats, node_specie)
         return e3nn.Linear(self.target_irreps, self.num_features)(node_feats)
 
 
@@ -148,6 +167,7 @@ class InteractionBlock(ABC, hk.Module):
     def __init__(
         self,
         *,
+        num_species: int,
         num_features: int,
         target_irreps: e3nn.Irreps,
         hidden_irreps: e3nn.Irreps,
@@ -155,6 +175,7 @@ class InteractionBlock(ABC, hk.Module):
         activation: Callable,
     ) -> None:
         super().__init__()
+        self.num_species = num_species
         self.num_features = num_features
         self.target_irreps = target_irreps
         self.hidden_irreps = hidden_irreps
@@ -164,7 +185,7 @@ class InteractionBlock(ABC, hk.Module):
     @abstractmethod
     def __call__(
         self,
-        node_attrs: e3nn.IrrepsArray,  # [n_nodes, irreps]
+        node_specie: jnp.ndarray,  # [n_nodes] int
         node_feats: e3nn.IrrepsArray,  # [n_nodes, feature, irreps]
         edge_attrs: e3nn.IrrepsArray,  # [n_edges, irreps]
         edge_feats: e3nn.IrrepsArray,  # [n_edges, irreps]
@@ -177,37 +198,44 @@ class InteractionBlock(ABC, hk.Module):
 class AgnosticResidualInteractionBlock(InteractionBlock):
     def __call__(
         self,
-        node_attrs: e3nn.IrrepsArray,  # [n_nodes, irreps]
+        node_specie: e3nn.IrrepsArray,  # [n_nodes] int
         node_feats: e3nn.IrrepsArray,  # [n_nodes, feature, irreps]
         edge_attrs: e3nn.IrrepsArray,  # [n_edges, irreps]
         edge_feats: e3nn.IrrepsArray,  # [n_edges, irreps]
         senders: jnp.ndarray,  # [n_edges, ]
         receivers: jnp.ndarray,  # [n_edges, ]
     ) -> Tuple[e3nn.IrrepsArray, e3nn.IrrepsArray]:
-        sc = e3nn.Linear(self.hidden_irreps, self.num_features)(
-            e3nn.tensor_product(node_feats, node_attrs[:, None, :])
+        assert node_specie.ndim == 1
+        assert node_feats.ndim == 3
+
+        sc = e3nn.Linear(
+            self.hidden_irreps,
+            self.num_features,
+            num_weights=self.num_species,
+            name="linear_sc",
+        )(
+            node_specie, node_feats
         )  # [n_nodes, feature, hidden_irreps]
 
-        node_feats = e3nn.Linear(node_feats.irreps, self.num_features)(node_feats)
+        node_feats = e3nn.Linear(
+            node_feats.irreps, self.num_features, name="linear_premp"
+        )(node_feats)
 
+        m = MessagePassingConvolution(
+            self.avg_num_neighbors, self.target_irreps, self.activation
+        )
         node_feats = hk.vmap(
-            lambda x: message_passing_convolution(
-                x,
-                edge_attrs,
-                edge_feats,
-                senders,
-                receivers,
-                self.avg_num_neighbors,
-                self.target_irreps,
-                self.activation,
-            ),
+            lambda x: m(x, edge_attrs, edge_feats, senders, receivers),
             in_axes=1,
             out_axes=1,
             split_rng=False,
         )(node_feats)
 
-        node_feats = e3nn.Linear(self.target_irreps, self.num_features)(node_feats)
+        node_feats = e3nn.Linear(
+            self.target_irreps, self.num_features, name="linear_postmp"
+        )(node_feats)
 
+        assert node_feats.ndim == 3
         return (
             node_feats,  # [n_nodes, feature, target_irreps]
             sc,  # [n_nodes, feature, hidden_irreps]
@@ -217,25 +245,31 @@ class AgnosticResidualInteractionBlock(InteractionBlock):
 class AgnosticInteractionBlock(InteractionBlock):
     def __call__(
         self,
-        node_attrs: e3nn.IrrepsArray,  # [n_nodes, irreps]
+        node_specie: e3nn.IrrepsArray,  # [n_nodes] int
         node_feats: e3nn.IrrepsArray,  # [n_nodes, feature, irreps]
         edge_attrs: e3nn.IrrepsArray,  # [n_edges, irreps]
         edge_feats: e3nn.IrrepsArray,  # [n_edges, irreps]
         senders: jnp.ndarray,  # [n_edges, ]
         receivers: jnp.ndarray,  # [n_edges, ]
     ) -> Tuple[e3nn.IrrepsArray, Optional[e3nn.IrrepsArray]]:
+        assert node_specie.ndim == 1
+        assert node_feats.ndim == 3
+
         node_feats, _ = AgnosticResidualInteractionBlock(
+            num_species=self.num_species,
             num_features=self.num_features,
             target_irreps=self.target_irreps,
             hidden_irreps=self.hidden_irreps,
             avg_num_neighbors=self.avg_num_neighbors,
             activation=self.activation,
-        )(node_attrs, node_feats, edge_attrs, edge_feats, senders, receivers)
+        )(node_specie, node_feats, edge_attrs, edge_feats, senders, receivers)
 
         # Selector TensorProduct
-        node_feats = e3nn.Linear(self.target_irreps, self.num_features)(
-            e3nn.tensor_product(node_feats, node_attrs[:, None, :])
-        )
+        node_feats = e3nn.Linear(
+            self.target_irreps, self.num_features, num_weights=self.num_species
+        )(node_specie, node_feats)
+
+        assert node_feats.ndim == 3
         return (
             node_feats,  # [n_nodes, feature, target_irreps]
             None,
