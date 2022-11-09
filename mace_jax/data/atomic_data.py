@@ -72,8 +72,8 @@ class AtomicData(torch_geometric.data.Data):
     def from_config(
         cls,
         config: Configuration,
-        z_table: AtomicNumberTable,
         cutoff: float,
+        z_table: AtomicNumberTable = None,
         one_hot: bool = True,
     ) -> "AtomicData":
         edge_index, shifts, cell = get_neighborhood(
