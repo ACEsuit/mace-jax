@@ -48,7 +48,7 @@ class AtomicData(torch_geometric.data.Data):
         assert edge_index.shape[0] == 2 and len(edge_index.shape) == 2
         assert positions.shape == (num_nodes, 3)
         assert shifts.shape == (n_edge, 3)
-        assert len(node_attrs.shape) == 2
+        assert len(node_attrs.shape) in [1, 2]  # one-hot or not
         assert weight is None or len(weight.shape) == 0
         assert cell is None or cell.shape == (3, 3)
         assert forces is None or forces.shape == (num_nodes, 3)
@@ -70,16 +70,21 @@ class AtomicData(torch_geometric.data.Data):
 
     @classmethod
     def from_config(
-        cls, config: Configuration, z_table: AtomicNumberTable, cutoff: float
+        cls,
+        config: Configuration,
+        z_table: AtomicNumberTable,
+        cutoff: float,
+        one_hot: bool = True,
     ) -> "AtomicData":
         edge_index, shifts, cell = get_neighborhood(
             positions=config.positions, cutoff=cutoff, pbc=config.pbc, cell=config.cell
         )
-        indices = atomic_numbers_to_indices(config.atomic_numbers, z_table=z_table)
-        one_hot = to_one_hot(
-            torch.tensor(indices, dtype=torch.long).unsqueeze(-1),
-            num_classes=len(z_table),
-        )
+        if one_hot:
+            indices = atomic_numbers_to_indices(config.atomic_numbers, z_table=z_table)
+            one_hot_ = to_one_hot(
+                torch.tensor(indices, dtype=torch.long).unsqueeze(-1),
+                num_classes=len(z_table),
+            )
 
         cell = (
             torch.tensor(cell, dtype=torch.get_default_dtype())
@@ -109,7 +114,9 @@ class AtomicData(torch_geometric.data.Data):
             positions=torch.tensor(config.positions, dtype=torch.get_default_dtype()),
             shifts=torch.tensor(shifts, dtype=torch.long),
             cell=cell,
-            node_attrs=one_hot,
+            node_attrs=one_hot_
+            if one_hot
+            else torch.tensor(config.atomic_numbers, dtype=torch.long),
             weight=weight,
             forces=forces,
             energy=energy,
