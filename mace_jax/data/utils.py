@@ -1,4 +1,5 @@
 import logging
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -110,16 +111,10 @@ def test_config_types(
     test_configs: Configurations,
 ) -> List[Tuple[Optional[str], List[Configuration]]]:
     """Split test set based on config_type-s"""
-    test_by_ct = []
-    all_cts = []
+    test_by_ct = defaultdict(list)
     for conf in test_configs:
-        if conf.config_type not in all_cts:
-            all_cts.append(conf.config_type)
-            test_by_ct.append((conf.config_type, [conf]))
-        else:
-            ind = all_cts.index(conf.config_type)
-            test_by_ct[ind][1].append(conf)
-    return test_by_ct
+        test_by_ct[conf.config_type].append(conf)
+    return list(test_by_ct.items())
 
 
 def load_from_xyz(

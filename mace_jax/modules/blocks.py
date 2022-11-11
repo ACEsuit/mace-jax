@@ -1,10 +1,9 @@
-from typing import Callable, Optional, Tuple, Union
+from typing import Callable, Optional, Tuple
 
 import e3nn_jax as e3nn
 import haiku as hk
-import jax.numpy as jnp
-import numpy as np
 import jax
+import jax.numpy as jnp
 
 from .message_passing import MessagePassingConvolution
 from .symmetric_contraction import SymmetricContraction
@@ -79,24 +78,6 @@ class NonLinearReadoutBlock(hk.Module):
         )(x)
         x = e3nn.gate(x, even_act=self.activation, even_gate_act=self.gate)
         return e3nn.Linear(self.output_irreps)(x)  # [n_nodes, output_irreps]
-
-
-class AtomicEnergiesBlock:
-    atomic_energies: jnp.ndarray
-
-    def __init__(self, atomic_energies: Union[np.ndarray, jnp.ndarray]):
-        super().__init__()
-        assert atomic_energies.ndim == 1
-        self.atomic_energies = atomic_energies  # [n_elements, ]
-
-    def __call__(
-        self, x: jnp.ndarray  # one-hot of elements [..., n_elements]
-    ) -> jnp.ndarray:  # [..., ]
-        return x @ self.atomic_energies
-
-    def __repr__(self):
-        formatted_energies = ", ".join([f"{x:.4f}" for x in self.atomic_energies])
-        return f"{self.__class__.__name__}(energies=[{formatted_energies}])"
 
 
 class RadialEmbeddingBlock:

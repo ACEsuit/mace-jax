@@ -8,7 +8,7 @@ import jax.numpy as jnp
 import numpy as np
 import torch
 
-from .torch_tools import to_numpy
+from .tools import to_numpy
 
 
 def get_edge_vectors(
@@ -100,10 +100,6 @@ def compute_c(delta: np.ndarray, eta: float) -> float:
     return np.mean(np.abs(delta) < eta).item()
 
 
-def get_tag(name: str, seed: int) -> str:
-    return f"{name}_run-{seed}"
-
-
 def setup_logger(
     level: Union[int, str] = logging.INFO,
     filename: Optional[str] = None,
@@ -161,26 +157,6 @@ def atomic_numbers_to_indices(
 ) -> np.ndarray:
     to_index_fn = np.vectorize(z_table.z_to_index)
     return to_index_fn(atomic_numbers)
-
-
-def get_optimizer(
-    name: str,
-    amsgrad: bool,
-    learning_rate: float,
-    weight_decay: float,
-    parameters: Iterable[torch.Tensor],
-) -> torch.optim.Optimizer:
-    if name == "adam":
-        return torch.optim.Adam(
-            parameters, lr=learning_rate, amsgrad=amsgrad, weight_decay=weight_decay
-        )
-
-    if name == "adamw":
-        return torch.optim.AdamW(
-            parameters, lr=learning_rate, amsgrad=amsgrad, weight_decay=weight_decay
-        )
-
-    raise RuntimeError(f"Unknown optimizer '{name}'")
 
 
 class UniversalEncoder(json.JSONEncoder):

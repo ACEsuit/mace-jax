@@ -1,8 +1,52 @@
 from collections import namedtuple
+from typing import Dict
 
+import jax
 import jax.numpy as jnp
 import jraph
+import numpy as np
+import torch
 from roundmantissa import ceil_mantissa
+
+TensorDict = Dict[str, torch.Tensor]
+
+
+def to_one_hot(indices: torch.Tensor, num_classes: int) -> torch.Tensor:
+    """
+    Generates one-hot encoding with <num_classes> classes from <indices>
+    :param indices: (N x 1) tensor
+    :param num_classes: number of classes
+    :param device: torch device
+    :return: (N x num_classes) tensor
+    """
+    shape = indices.shape[:-1] + (num_classes,)
+    oh = torch.zeros(shape, device=indices.device).view(shape)
+
+    # scatter_ is the in-place version of scatter
+    oh.scatter_(dim=-1, index=indices, value=1)
+
+    return oh.view(*shape)
+
+
+def count_parameters(parameters) -> int:
+    return sum(x.size for x in jax.tree_util.tree_leaves(parameters))
+
+
+def set_seeds(seed: int) -> None:
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+
+def to_numpy(t: torch.Tensor) -> np.ndarray:
+    return t.cpu().detach().numpy()
+
+
+dtype_dict = {"float32": torch.float32, "float64": torch.float64}
+
+
+def set_default_dtype(dtype: str) -> None:
+    torch.set_default_dtype(dtype_dict[dtype])
+    jax.config.update("jax_enable_x64", dtype == "float64")
 
 
 def pad_graph_to_nearest_ceil_mantissa(
