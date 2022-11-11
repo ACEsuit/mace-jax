@@ -10,7 +10,6 @@ import numpy as np
 from ..tools import get_edge_relative_vectors
 from .blocks import (
     AgnosticResidualInteractionBlock,
-    AtomicEnergiesBlock,
     EquivariantProductBasisBlock,
     LinearNodeEmbeddingBlock,
     LinearReadoutBlock,
@@ -278,7 +277,7 @@ class MACE(hk.Module):
             scale=atomic_inter_scale, shift=atomic_inter_shift
         )
         self.energy_model = GeneralMACE(output_irreps="0e", **kwargs)
-        self.atomic_energies_fn = AtomicEnergiesBlock(atomic_energies)
+        self.atomic_energies = jnp.asarray(atomic_energies)
 
     def __call__(self, graph: jraph.GraphsTuple) -> Dict[str, jnp.ndarray]:
         def energy_fn(positions):
@@ -291,9 +290,9 @@ class MACE(hk.Module):
                 n_edge=graph.n_edge,
             )
 
-            node_e0 = self.atomic_energies_fn(graph.nodes.attrs)  # [n_nodes, ]
+            node_e0 = self.atomic_energies[graph.nodes.specie]  # [n_nodes, ]
             contributions = self.energy_model(
-                vectors, graph.nodes.attrs, graph.senders, graph.receivers
+                vectors, graph.nodes.specie, graph.senders, graph.receivers
             )  # [n_nodes, num_interactions, 0e]
             contributions = contributions.array[:, :, 0]  # [n_nodes, num_interactions]
 

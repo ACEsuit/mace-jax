@@ -1,87 +1,98 @@
+from collections import namedtuple
+
+import e3nn_jax as e3nn
+import haiku as hk
+import jax
+import jax.numpy as jnp
+import jraph
 import numpy as np
-import torch
-import torch.nn.functional
-from e3nn import o3
-from scipy.spatial.transform import Rotation as R
+from e3nn_jax.util import assert_equivariant
 
-from mace_jax import data, modules, tools
-from mace_jax.tools import torch_geometric
+from mace_jax import modules
+from mace_jax.modules import MACE, SymmetricContraction
 
-torch.set_default_dtype(torch.float64)
-config = data.Configuration(
-    atomic_numbers=np.array([8, 1, 1]),
-    positions=np.array(
-        [
-            [0.0, -2.0, 0.0],
-            [1.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-        ]
-    ),
-    forces=np.array(
-        [
-            [0.0, -1.3, 0.0],
-            [1.0, 0.2, 0.0],
-            [0.0, 1.1, 0.3],
-        ]
-    ),
-    energy=-1.5,
-)
-table = tools.AtomicNumberTable([1, 8])
+
+def test_symmetric_contraction():
+    x = e3nn.normal("0e + 0o + 1o + 1e + 2e + 2o", jax.random.PRNGKey(0), (32, 128))
+    y = jax.random.normal(jax.random.PRNGKey(1), (32, 4))
+
+    model = hk.without_apply_rng(
+        hk.transform(lambda x, y: SymmetricContraction(3, ["0e", "1o", "2e"])(x, y))
+    )
+    w = model.init(jax.random.PRNGKey(2), x, y)
+
+    assert_equivariant(
+        lambda x: model.apply(w, x, y), jax.random.PRNGKey(3), args_in=(x,)
+    )
 
 
 def test_mace():
-    # Create MACE model
     atomic_energies = np.array([1.0, 3.0], dtype=float)
-    model_config = dict(
-        r_max=5,
-        num_bessel=8,
-        num_deriv_in_one=5,
-        num_deriv_in_zero=2,
-        max_ell=2,
-        interaction_cls=modules.interaction_classes["AgnosticResidualInteractionBlock"],
-        interaction_cls_first=modules.interaction_classes[
-            "AgnosticResidualInteractionBlock"
-        ],
-        num_interactions=5,
-        num_elements=2,
-        hidden_irreps=o3.Irreps("32x0e + 32x1o"),
-        readout_mlp_irreps=o3.Irreps("16x0e"),
-        gate=torch.nn.functional.silu,
-        atomic_energies=atomic_energies,
-        avg_num_neighbors=8,
-        atomic_numbers=table.zs,
-        correlation=3,
-    )
-    model = modules.MACE(**model_config)
 
-    # Created the rotated environment
-    rot = R.from_euler("z", 60, degrees=True).as_matrix()
-    positions_rotated = np.array(rot @ config.positions.T).T
-    config_rotated = data.Configuration(
-        atomic_numbers=np.array([8, 1, 1]),
-        positions=positions_rotated,
-        forces=np.array(
-            [
-                [0.0, -1.3, 0.0],
-                [1.0, 0.2, 0.0],
-                [0.0, 1.1, 0.3],
-            ]
+    @hk.without_apply_rng
+    @hk.transform
+    def model(graph):
+        return MACE(
+            r_max=5,
+            num_bessel=8,
+            num_deriv_in_zero=5,
+            num_deriv_in_one=2,
+            max_ell=2,
+            interaction_cls=modules.interaction_classes[
+                "AgnosticResidualInteractionBlock"
+            ],
+            interaction_cls_first=modules.interaction_classes[
+                "AgnosticResidualInteractionBlock"
+            ],
+            num_interactions=5,
+            hidden_irreps=e3nn.Irreps("32x0e"),
+            readout_mlp_irreps=e3nn.Irreps("16x0e"),
+            gate=jax.nn.silu,
+            atomic_energies=atomic_energies,
+            avg_num_neighbors=8,
+            correlation=3,
+            max_poly_order=4,
+        )(graph)
+
+    Node = namedtuple("Node", ["positions", "attrs"])
+    Edge = namedtuple("Edge", ["shifts"])
+    Globals = namedtuple("Globals", ["cell"])
+
+    graph = jraph.GraphsTuple(
+        nodes=Node(
+            positions=jnp.array([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]]),
+            attrs=jax.nn.one_hot(jnp.array([0, 1]), 2),
         ),
-        energy=-1.5,
+        edges=Edge(shifts=jnp.array([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]])),
+        globals=Globals(cell=None),
+        senders=jnp.array([0, 1]),
+        receivers=jnp.array([1, 0]),
+        n_edge=jnp.array([2]),
+        n_node=jnp.array([2]),
     )
 
-    atomic_data = data.AtomicData.from_config(config, z_table=table, cutoff=3.0)
-    atomic_data2 = data.AtomicData.from_config(
-        config_rotated, z_table=table, cutoff=3.0
-    )
+    w = model.init(jax.random.PRNGKey(0), graph)
 
-    data_loader = torch_geometric.dataloader.DataLoader(
-        dataset=[atomic_data, atomic_data2],
-        batch_size=2,
-        shuffle=True,
-        drop_last=False,
-    )
-    batch = next(iter(data_loader))
+    def wrapper(positions):
+        graph = jraph.GraphsTuple(
+            nodes=Node(
+                positions=positions.array,
+                attrs=jax.nn.one_hot(jnp.array([0, 1]), 2),
+            ),
+            edges=Edge(shifts=jnp.array([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]])),
+            globals=Globals(cell=None),
+            senders=jnp.array([0, 1]),
+            receivers=jnp.array([1, 0]),
+            n_edge=jnp.array([2]),
+            n_node=jnp.array([2]),
+        )
+        energy = model.apply(w, graph)["energy"]
+        return e3nn.IrrepsArray("0e", energy)
 
-    output = model(batch, training=True)
-    assert torch.allclose(output["energy"][0], output["energy"][1])
+    positions = e3nn.normal("1o", jax.random.PRNGKey(1), (2,))
+    assert_equivariant(wrapper, jax.random.PRNGKey(1), args_in=(positions,))
+
+
+if __name__ == "__main__":
+    test_mace()
+    # test_symmetric_contraction()

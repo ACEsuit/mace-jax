@@ -12,7 +12,7 @@ import torch
 from torch.optim.swa_utils import SWALR, AveragedModel
 from torch.utils.data import DataLoader
 
-from .jax_tools import get_batched_padded_graph_tuples
+from .tools import get_batched_padded_graph_tuples
 from .utils import (
     MetricsLogger,
     compute_mae,

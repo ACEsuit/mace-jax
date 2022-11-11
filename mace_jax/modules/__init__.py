@@ -3,7 +3,6 @@ from typing import Callable, Dict, Optional
 import jax
 
 from .blocks import (
-    AtomicEnergiesBlock,
     EquivariantProductBasisBlock,
     LinearNodeEmbeddingBlock,
     LinearReadoutBlock,
@@ -41,7 +40,6 @@ gate_dict: Dict[str, Optional[Callable]] = {
 }
 
 __all__ = [
-    "AtomicEnergiesBlock",
     "EquivariantProductBasisBlock",
     "LinearNodeEmbeddingBlock",
     "LinearReadoutBlock",

@@ -9,8 +9,6 @@ import torch
 from mace_jax.tools import to_numpy
 from mace_jax.tools.scatter import scatter_sum
 
-from .blocks import AtomicEnergiesBlock
-
 
 def safe_norm(x: jnp.ndarray, axis: int = None, keepdims=False) -> jnp.ndarray:
     """nan-safe norm."""
@@ -22,14 +20,14 @@ def compute_mean_std_atomic_inter_energy(
     data_loader,
     atomic_energies: np.ndarray,
 ) -> Tuple[float, float]:
-    atomic_energies_fn = AtomicEnergiesBlock(atomic_energies=atomic_energies)
+    # atomic_energies_fn = AtomicEnergiesBlock(atomic_energies=atomic_energies)
 
     avg_atom_inter_es_list = []
 
     for batch in data_loader:
-        node_e0 = atomic_energies_fn(batch.node_attrs)
+        # node_e0 = atomic_energies_fn(batch.node_attrs)
         graph_e0s = scatter_sum(
-            src=node_e0, index=batch.batch, dim=-1, dim_size=batch.num_graphs
+            # src=node_e0, index=batch.batch, dim=-1, dim_size=batch.num_graphs
         )
         graph_sizes = batch.ptr[1:] - batch.ptr[:-1]
         avg_atom_inter_es_list.append(
@@ -47,15 +45,15 @@ def compute_mean_rms_energy_forces(
     data_loader: torch.utils.data.DataLoader,
     atomic_energies: np.ndarray,
 ) -> Tuple[float, float]:
-    atomic_energies_fn = AtomicEnergiesBlock(atomic_energies=atomic_energies)
+    # atomic_energies_fn = AtomicEnergiesBlock(atomic_energies=atomic_energies)
 
     atom_energy_list = []
     forces_list = []
 
     for batch in data_loader:
-        node_e0 = atomic_energies_fn(batch.node_attrs)
+        # node_e0 = atomic_energies_fn(batch.node_attrs)
         graph_e0s = scatter_sum(
-            src=node_e0, index=batch.batch, dim=-1, dim_size=batch.num_graphs
+            # src=node_e0, index=batch.batch, dim=-1, dim_size=batch.num_graphs
         )
         graph_sizes = batch.ptr[1:] - batch.ptr[:-1]
         atom_energy_list.append(
