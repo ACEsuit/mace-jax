@@ -56,6 +56,10 @@ class SymmetricContraction(hk.Module):
                     if self.max_poly_order is not None
                     else None,
                 )
+                U = U / order  # normalization
+                # NOTE(mario): The normalization constants (/order and /mul**0.5)
+                # has been numerically checked to be correct.
+
                 # TODO(mario) implement norm_p
 
                 # ((w3 x + w2) x + w1) x
@@ -78,7 +82,7 @@ class SymmetricContraction(hk.Module):
                     w = (
                         w * (mul**-0.5) ** self.gradient_normalization
                     )  # normalize weights
-                    w = w * (mul**-0.5)  # normalize U
+
                     if ir_out not in out:
                         out[ir_out] = (
                             "special",
