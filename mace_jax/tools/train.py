@@ -12,7 +12,6 @@ import torch
 from torch.optim.swa_utils import SWALR, AveragedModel
 from torch.utils.data import DataLoader
 
-# from .checkpoint import CheckpointHandler
 from .jax_tools import get_batched_padded_graph_tuples
 from .utils import (
     MetricsLogger,
@@ -37,26 +36,16 @@ def train(
     params: Dict[str, Any],
     loss_fn: Any,
     train_loader: DataLoader,
-    valid_loader: DataLoader,
     gradient_transform: Any,
     optimizer_state: Dict[str, Any],
     start_epoch: int,
     max_num_epochs: int,
-    patience: int,
-    # checkpoint_handler: CheckpointHandler,
     logger: MetricsLogger,
-    eval_interval: int,
-    log_errors: str,
     ema_decay: Optional[float] = None,
-    max_grad_norm: Optional[float] = 10.0,
 ):
-    lowest_loss = np.inf
-    patience_counter = 0
     num_updates = 0
-    ema_params = params  # TODO (mario)
+    ema_params = params
 
-    if max_grad_norm is not None:
-        logging.info(f"Using gradient clipping with tolerance={max_grad_norm:.3f}")
     logging.info("Started training")
 
     @jax.jit
@@ -77,13 +66,18 @@ def train(
             ema_params = jax.tree_util.tree_map(
                 lambda x, y: x * decay + y * (1 - decay), ema_params, params
             )
+        else:
+            ema_params = params
         return loss, params, optimizer_state, ema_params
 
     last_cache_size = update_fn._cache_size()
 
     for epoch in range(start_epoch, max_num_epochs):
-        # Train
+        yield epoch, params, optimizer_state, ema_params
+
+        # Train one epoch
         for batch in train_loader:
+
             graph = get_batched_padded_graph_tuples(batch)
             num_updates += 1
             start_time = time.time()
@@ -98,6 +92,8 @@ def train(
 
             opt_metrics["mode"] = "opt"
             opt_metrics["epoch"] = epoch
+            opt_metrics["num_updates"] = num_updates
+            opt_metrics["epoch_"] = start_epoch + num_updates / len(train_loader)
             logger.log(opt_metrics)
 
             if last_cache_size != update_fn._cache_size():
@@ -112,71 +108,6 @@ def train(
                     f"Size of the graph: n_edge={graph.n_edge} total={graph.n_edge.sum()}"
                 )
                 logging.info(f"Value of the loss: {loss:.3f}")
-
-        # Validate
-        if epoch % eval_interval == 0:
-            valid_loss, eval_metrics = evaluate(
-                model=model,
-                params=params if ema_decay is not None else ema_params,
-                loss_fn=loss_fn,
-                data_loader=valid_loader,
-            )
-            eval_metrics["mode"] = "eval"
-            eval_metrics["epoch"] = epoch
-            logger.log(eval_metrics)
-            if log_errors == "PerAtomRMSE":
-                error_e = eval_metrics["rmse_e_per_atom"] * 1e3
-                error_f = eval_metrics["rmse_f"] * 1e3
-                logging.info(
-                    f"Epoch {epoch}: Validation loss={valid_loss:.4f}, RMSE_E_per_atom={error_e:.1f} meV, RMSE_F={error_f:.1f} meV / A"
-                )
-            elif log_errors == "TotalRMSE":
-                error_e = eval_metrics["rmse_e"] * 1e3
-                error_f = eval_metrics["rmse_f"] * 1e3
-                logging.info(
-                    f"Epoch {epoch}: Validation loss={valid_loss:.4f}, RMSE_E={error_e:.1f} meV, RMSE_F={error_f:.1f} meV / A"
-                )
-            elif log_errors == "PerAtomMAE":
-                error_e = eval_metrics["mae_e_per_atom"] * 1e3
-                error_f = eval_metrics["mae_f"] * 1e3
-                logging.info(
-                    f"Epoch {epoch}: Validation loss={valid_loss:.4f}, MAE_E_per_atom={error_e:.1f} meV, MAE_F={error_f:.1f} meV / A"
-                )
-            elif log_errors == "TotalMAE":
-                error_e = eval_metrics["mae_e"] * 1e3
-                error_f = eval_metrics["mae_f"] * 1e3
-                logging.info(
-                    f"Epoch {epoch}: Validation loss={valid_loss:.4f}, MAE_E={error_e:.1f} meV, MAE_F={error_f:.1f} meV / A"
-                )
-            if valid_loss >= lowest_loss:
-                patience_counter += 1
-                if patience_counter >= patience:
-                    logging.info(
-                        f"Stopping optimization after {patience_counter} epochs without improvement"
-                    )
-                    break
-            else:
-                lowest_loss = valid_loss
-                patience_counter = 0
-                # checkpoint_handler.save(
-                #     state=CheckpointState(params, optimizer_state),
-                #     epochs=epoch,
-                # )
-
-        # # LR scheduler and SWA update
-        # if swa is None or epoch < swa.start:
-        #     pass
-        # else:
-        #     raise NotImplementedError
-        #     if swa_start:
-        #         logging.info("Changing loss based on SWA")
-        #         swa_start = False
-        #     loss_fn = swa.loss_fn
-        #     swa.model.update_parameters(model)
-        #     swa.scheduler.step()
-
-    logging.info("Training complete")
-    return params, optimizer_state
 
 
 def evaluate(

@@ -1,16 +1,14 @@
-from typing import Callable, Dict, Optional, Type
+from typing import Callable, Dict, Optional
 
 import jax
 
 from .blocks import (
     AtomicEnergiesBlock,
     EquivariantProductBasisBlock,
-    InteractionBlock,
     LinearNodeEmbeddingBlock,
     LinearReadoutBlock,
     NonLinearReadoutBlock,
     RadialEmbeddingBlock,
-    AgnosticInteractionBlock,
     AgnosticResidualInteractionBlock,
     ScaleShiftBlock,
 )
@@ -28,10 +26,6 @@ from .utils import (
 
 from .message_passing import MessagePassingConvolution
 
-interaction_classes: Dict[str, Type[InteractionBlock]] = {
-    "AgnosticResidualInteractionBlock": AgnosticResidualInteractionBlock,
-    "AgnosticInteractionBlock": AgnosticInteractionBlock,
-}
 
 scaling_classes: Dict[str, Callable] = {
     "std_scaling": compute_mean_std_atomic_inter_energy,
@@ -48,12 +42,10 @@ gate_dict: Dict[str, Optional[Callable]] = {
 __all__ = [
     "AtomicEnergiesBlock",
     "EquivariantProductBasisBlock",
-    "InteractionBlock",
     "LinearNodeEmbeddingBlock",
     "LinearReadoutBlock",
     "NonLinearReadoutBlock",
     "RadialEmbeddingBlock",
-    "AgnosticInteractionBlock",
     "AgnosticResidualInteractionBlock",
     "ScaleShiftBlock",
     "WeightedEnergyForcesLoss",

@@ -43,7 +43,9 @@ class SymmetricContraction(hk.Module):
                     x.irreps,
                     order,
                     keep_ir=self.keep_irrep_out,
-                    max_order=self.max_poly_order - order * self.input_poly_order,
+                    max_order=self.max_poly_order - order * self.input_poly_order
+                    if self.max_poly_order is not None
+                    else None,
                 )
                 # TODO(mario) implement norm_p
 

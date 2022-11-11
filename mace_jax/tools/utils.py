@@ -106,7 +106,7 @@ def get_tag(name: str, seed: int) -> str:
 
 def setup_logger(
     level: Union[int, str] = logging.INFO,
-    tag: Optional[str] = None,
+    filename: Optional[str] = None,
     directory: Optional[str] = None,
 ):
     logger = logging.getLogger()
@@ -125,9 +125,9 @@ def setup_logger(
     ch.setFormatter(formatter)
     logger.addHandler(ch)
 
-    if (directory is not None) and (tag is not None):
+    if (directory is not None) and (filename is not None):
         os.makedirs(name=directory, exist_ok=True)
-        path = os.path.join(directory, tag + ".log")
+        path = os.path.join(directory, filename)
         fh = logging.FileHandler(path)
         fh.setFormatter(formatter)
 
@@ -196,9 +196,9 @@ class UniversalEncoder(json.JSONEncoder):
 
 
 class MetricsLogger:
-    def __init__(self, directory: str, tag: str) -> None:
+    def __init__(self, directory: str, filename: str) -> None:
         self.directory = directory
-        self.filename = tag + ".txt"
+        self.filename = filename
         self.path = os.path.join(self.directory, self.filename)
 
     def log(self, d: Dict[str, Any]) -> None:

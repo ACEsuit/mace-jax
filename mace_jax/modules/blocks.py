@@ -1,10 +1,10 @@
-from abc import ABC, abstractmethod
 from typing import Callable, Optional, Tuple, Union
 
 import e3nn_jax as e3nn
 import haiku as hk
 import jax.numpy as jnp
 import numpy as np
+import jax
 
 from .message_passing import MessagePassingConvolution
 from .symmetric_contraction import SymmetricContraction
@@ -107,29 +107,39 @@ class RadialEmbeddingBlock:
         num_bessel: int,
         num_deriv_in_zero: Optional[int],
         num_deriv_in_one: Optional[int],
+        avg_r_min: float = 0.0,
     ):
         self.num_bessel = num_bessel
         self.r_max = r_max
         self.num_deriv_in_zero = num_deriv_in_zero
         self.num_deriv_in_one = num_deriv_in_one
+        self.avg_r_min = avg_r_min
 
     def __call__(
         self,
         edge_lengths: jnp.ndarray,  # [n_edges, 1]
     ) -> jnp.ndarray:  # [n_edges, num_bessel]
-        bessel = e3nn.bessel(
-            edge_lengths[..., 0], self.num_bessel, x_max=self.r_max
-        )  # [n_edges, num_bessel]
+        def func(lengths):
+            bessel = e3nn.bessel(
+                lengths[..., 0], self.num_bessel, x_max=self.r_max
+            )  # [n_edges, num_bessel]
 
-        if self.num_deriv_in_zero is None and self.num_deriv_in_one is None:
-            cutoff = e3nn.soft_envelope(edge_lengths, x_max=self.r_max)  # [n_edges, 1]
-        else:
-            cutoff = e3nn.poly_envelope(
-                self.num_deriv_in_zero, self.num_deriv_in_one, x_max=self.r_max
-            )(
-                edge_lengths
-            )  # [n_edges, 1]
-        return bessel * cutoff  # [n_edges, num_bessel]
+            if self.num_deriv_in_zero is None and self.num_deriv_in_one is None:
+                cutoff = e3nn.soft_envelope(lengths, x_max=self.r_max)  # [n_edges, 1]
+            else:
+                cutoff = e3nn.poly_envelope(
+                    self.num_deriv_in_zero, self.num_deriv_in_one, x_max=self.r_max
+                )(
+                    lengths
+                )  # [n_edges, 1]
+
+            return bessel * cutoff  # [n_edges, num_bessel]
+
+        with jax.ensure_compile_time_eval():
+            samples = jnp.linspace(self.avg_r_min, self.r_max, 1000).reshape(-1, 1)
+            factor = jnp.mean(func(samples) ** 2) ** -0.5
+
+        return factor * func(edge_lengths)  # [n_edges, num_bessel]
 
 
 class EquivariantProductBasisBlock(hk.Module):
@@ -139,7 +149,7 @@ class EquivariantProductBasisBlock(hk.Module):
         target_irreps: e3nn.Irreps,
         correlation: int,
         num_species: int,
-        max_poly_order: Optional[int],
+        max_poly_order: Optional[int] = None,
         input_poly_order: int = 0,
     ) -> None:
         super().__init__()
@@ -163,7 +173,7 @@ class EquivariantProductBasisBlock(hk.Module):
         return e3nn.Linear(self.target_irreps, self.num_features)(node_feats)
 
 
-class InteractionBlock(ABC, hk.Module):
+class AgnosticResidualInteractionBlock(hk.Module):
     def __init__(
         self,
         *,
@@ -182,20 +192,6 @@ class InteractionBlock(ABC, hk.Module):
         self.avg_num_neighbors = avg_num_neighbors
         self.activation = activation
 
-    @abstractmethod
-    def __call__(
-        self,
-        node_specie: jnp.ndarray,  # [n_nodes] int
-        node_feats: e3nn.IrrepsArray,  # [n_nodes, feature, irreps]
-        edge_attrs: e3nn.IrrepsArray,  # [n_edges, irreps]
-        edge_feats: e3nn.IrrepsArray,  # [n_edges, irreps]
-        senders: jnp.ndarray,  # [n_edges, ]
-        receivers: jnp.ndarray,  # [n_edges, ]
-    ) -> Tuple[e3nn.IrrepsArray, Optional[e3nn.IrrepsArray]]:
-        raise NotImplementedError
-
-
-class AgnosticResidualInteractionBlock(InteractionBlock):
     def __call__(
         self,
         node_specie: e3nn.IrrepsArray,  # [n_nodes] int
@@ -239,40 +235,6 @@ class AgnosticResidualInteractionBlock(InteractionBlock):
         return (
             node_feats,  # [n_nodes, feature, target_irreps]
             sc,  # [n_nodes, feature, hidden_irreps]
-        )
-
-
-class AgnosticInteractionBlock(InteractionBlock):
-    def __call__(
-        self,
-        node_specie: e3nn.IrrepsArray,  # [n_nodes] int
-        node_feats: e3nn.IrrepsArray,  # [n_nodes, feature, irreps]
-        edge_attrs: e3nn.IrrepsArray,  # [n_edges, irreps]
-        edge_feats: e3nn.IrrepsArray,  # [n_edges, irreps]
-        senders: jnp.ndarray,  # [n_edges, ]
-        receivers: jnp.ndarray,  # [n_edges, ]
-    ) -> Tuple[e3nn.IrrepsArray, Optional[e3nn.IrrepsArray]]:
-        assert node_specie.ndim == 1
-        assert node_feats.ndim == 3
-
-        node_feats, _ = AgnosticResidualInteractionBlock(
-            num_species=self.num_species,
-            num_features=self.num_features,
-            target_irreps=self.target_irreps,
-            hidden_irreps=self.hidden_irreps,
-            avg_num_neighbors=self.avg_num_neighbors,
-            activation=self.activation,
-        )(node_specie, node_feats, edge_attrs, edge_feats, senders, receivers)
-
-        # Selector TensorProduct
-        node_feats = e3nn.Linear(
-            self.target_irreps, self.num_features, num_weights=self.num_species
-        )(node_specie, node_feats)
-
-        assert node_feats.ndim == 3
-        return (
-            node_feats,  # [n_nodes, feature, target_irreps]
-            None,
         )
 
 

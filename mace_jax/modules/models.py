@@ -1,4 +1,4 @@
-from typing import Callable, Dict, Optional, Type
+from typing import Callable, Dict, Optional
 
 import e3nn_jax as e3nn
 import haiku as hk
@@ -9,11 +9,9 @@ import numpy as np
 
 from ..tools import get_edge_relative_vectors
 from .blocks import (
-    AgnosticInteractionBlock,
     AgnosticResidualInteractionBlock,
     AtomicEnergiesBlock,
     EquivariantProductBasisBlock,
-    InteractionBlock,
     LinearNodeEmbeddingBlock,
     LinearReadoutBlock,
     NonLinearReadoutBlock,
@@ -21,6 +19,12 @@ from .blocks import (
     ScaleShiftBlock,
 )
 from .utils import safe_norm, sum_nodes_of_the_same_graph
+
+
+try:
+    from profile_nn_jax import profile
+except ImportError:
+    profile = lambda _, x: x
 
 
 class GeneralMACE(hk.Module):
@@ -34,17 +38,16 @@ class GeneralMACE(hk.Module):
         readout_mlp_irreps: e3nn.Irreps,  # Hidden irreps of the MLP in last readout, default 16x0e
         avg_num_neighbors: float,
         num_species: int,
+        avg_r_min: float = 0.0,
         num_bessel: int = 8,  # Number of Bessel functions, default 8
         num_deriv_in_zero: Optional[int] = None,
         num_deriv_in_one: Optional[int] = None,
         # Number of zero derivatives at small and large distances, default 4 and 2
         # If both are None, it uses a smooth C^inf envelope function
         max_ell: int = 3,  # Max spherical harmonic degree, default 3
-        interaction_cls: Type[InteractionBlock] = AgnosticResidualInteractionBlock,
-        interaction_cls_first: Type[InteractionBlock] = AgnosticInteractionBlock,
         epsilon: Optional[float] = 0.5,
         correlation: int = 3,  # Correlation order at each layer (~ node_features^correlation), default 3
-        max_poly_order: Optional[int] = None,
+        max_poly_order: Optional[int] = None,  # TODO (mario): implement it back?
         gate: Callable = jax.nn.silu,  # activation function
     ):
         super().__init__()
@@ -70,8 +73,6 @@ class GeneralMACE(hk.Module):
         self.epsilon = epsilon
         self.readout_mlp_irreps = readout_mlp_irreps
         self.activation = gate
-        self.interaction_cls_first = interaction_cls_first
-        self.interaction_cls = interaction_cls
         self.num_interactions = num_interactions
         self.output_irreps = output_irreps
         self.num_species = num_species
@@ -85,6 +86,7 @@ class GeneralMACE(hk.Module):
             num_bessel=num_bessel,
             num_deriv_in_zero=num_deriv_in_zero,
             num_deriv_in_one=num_deriv_in_one,
+            avg_r_min=avg_r_min,
         )
 
     def __call__(
@@ -96,8 +98,9 @@ class GeneralMACE(hk.Module):
     ) -> e3nn.IrrepsArray:
         # Embeddings
         node_feats = self.node_embedding(node_specie)  # [n_nodes, feature, irreps]
-        poly_order = 0  # polynomial order in atom positions of the node features
+        # poly_order = 0  # polynomial order in atom positions of the node features
         # NOTE: we assume hidden_irreps to be scalar only
+        node_feats = profile("embedding: node_feats", node_feats)
 
         # TODO (mario): use jax_md formalism to compute the relative vectors and lengths
 
@@ -113,75 +116,152 @@ class GeneralMACE(hk.Module):
             f"{edge_feats.shape[-1]}x0e", edge_feats
         )  # [n_edges, irreps]
 
+        edge_attrs = profile("embedding: edge_attrs", edge_attrs)
+        edge_feats = profile("embedding: edge_feats", edge_feats)
+
         # Interactions
         outputs = []
         for i in range(self.num_interactions):
-
-            if i == 0:  # No residual connection for first layer
-                inter = self.interaction_cls_first
-            else:
-                inter = self.interaction_cls
-
-            node_feats: e3nn.IrrepsArray  # [n_nodes, feature, interaction_irreps]
-            sc: Optional[e3nn.IrrepsArray]  # [n_nodes, feature, hidden_irreps]
-            node_feats, sc = inter(
+            node_outputs, node_feats = MACELayer(
+                first=i == 0,
+                last=i == self.num_interactions - 1,
                 num_features=self.num_features,
-                target_irreps=self.interaction_irreps,
+                interaction_irreps=self.interaction_irreps,
                 hidden_irreps=self.hidden_irreps,
                 avg_num_neighbors=self.avg_num_neighbors,
                 activation=self.activation,
                 num_species=self.num_species,
-            )(
-                node_specie=node_specie,
-                node_feats=node_feats,
-                edge_attrs=edge_attrs,
-                edge_feats=edge_feats,
-                receivers=receivers,
-                senders=senders,
-            )
-
-            if self.epsilon is not None:
-                node_feats *= self.epsilon
-            else:
-                node_feats /= jnp.sqrt(self.avg_num_neighbors)
-
-            if self.max_poly_order is None:
-                new_poly_order = self.correlation * (poly_order + self.sh_irreps.lmax)
-            else:
-                new_poly_order = self.correlation * poly_order + self.max_poly_order
-
-            node_feats = EquivariantProductBasisBlock(
-                num_features=self.num_features,
-                target_irreps=self.hidden_irreps,
+                epsilon=self.epsilon,
                 correlation=self.correlation,
-                max_poly_order=new_poly_order,
-                input_poly_order=poly_order,
-                num_species=self.num_species,
-            )(node_feats=node_feats, node_specie=node_specie)
-
-            poly_order = new_poly_order
-
-            if sc is not None:
-                node_feats = node_feats + sc  # [n_nodes, feature, hidden_irreps]
-
-            if i < self.num_interactions - 1:
-                node_outputs = LinearReadoutBlock(self.output_irreps)(
-                    node_feats.axis_to_mul()
-                )  # [n_nodes, output_irreps]
-            else:  # Non linear readout for last layer
-                node_outputs = NonLinearReadoutBlock(
-                    self.readout_mlp_irreps,
-                    self.output_irreps,
-                    activation=self.activation,
-                )(
-                    node_feats.axis_to_mul()
-                )  # [n_nodes, output_irreps]
-
-                # polynomial order of node outputs is infinite in the last layer because of the non-polynomial activation function
-
+                output_irreps=self.output_irreps,
+                readout_mlp_irreps=self.readout_mlp_irreps,
+                name=f"layer_{i}",
+            )(
+                node_feats,
+                node_specie,
+                edge_attrs,
+                edge_feats,
+                senders,
+                receivers,
+            )
             outputs += [node_outputs]  # list of [n_nodes, output_irreps]
 
         return e3nn.stack(outputs, axis=1)  # [n_nodes, num_interactions, output_irreps]
+
+
+class MACELayer(hk.Module):
+    def __init__(
+        self,
+        *,
+        first: bool,
+        last: bool,
+        num_features: int,
+        interaction_irreps: e3nn.Irreps,
+        hidden_irreps: e3nn.Irreps,
+        avg_num_neighbors: float,
+        activation: Callable,
+        num_species: int,
+        epsilon: Optional[float],
+        correlation: int,
+        output_irreps: e3nn.Irreps,
+        readout_mlp_irreps: e3nn.Irreps,
+        name: Optional[str],
+    ) -> None:
+        super().__init__(name=name)
+
+        self.first = first
+        self.last = last
+        self.num_features = num_features
+        self.interaction_irreps = interaction_irreps
+        self.hidden_irreps = hidden_irreps
+        self.avg_num_neighbors = avg_num_neighbors
+        self.activation = activation
+        self.num_species = num_species
+        self.epsilon = epsilon
+        self.correlation = correlation
+        self.output_irreps = output_irreps
+        self.readout_mlp_irreps = readout_mlp_irreps
+
+    def __call__(
+        self,
+        node_feats: e3nn.IrrepsArray,  # [n_nodes, feature, irreps]
+        node_specie: jnp.ndarray,  # [n_nodes] int between 0 and num_species-1
+        edge_attrs: e3nn.IrrepsArray,  # [n_edges, irreps]
+        edge_feats: e3nn.IrrepsArray,  # [n_edges, irreps]
+        senders: jnp.ndarray,  # [n_edges]
+        receivers: jnp.ndarray,  # [n_edges]
+    ):
+        node_feats = profile(f"{self.name}: node_feats", node_feats)
+
+        node_feats, sc = AgnosticResidualInteractionBlock(
+            num_features=self.num_features,
+            target_irreps=self.interaction_irreps,
+            hidden_irreps=self.hidden_irreps,
+            avg_num_neighbors=self.avg_num_neighbors,
+            activation=self.activation,
+            num_species=self.num_species,
+        )(
+            node_specie=node_specie,
+            node_feats=node_feats,
+            edge_attrs=edge_attrs,
+            edge_feats=edge_feats,
+            receivers=receivers,
+            senders=senders,
+        )
+
+        if self.first:
+            # Selector TensorProduct
+            node_feats = e3nn.Linear(
+                self.interaction_irreps, self.num_features, num_weights=self.num_species
+            )(node_specie, node_feats)
+            sc = None
+
+        node_feats = profile(f"{self.name}: node_feats after interaction", node_feats)
+        if sc is not None:
+            sc = profile(f"{self.name}: self-connexion", sc)
+
+        if self.epsilon is not None:
+            node_feats *= self.epsilon
+        else:
+            node_feats /= jnp.sqrt(self.avg_num_neighbors)
+
+        # if self.max_poly_order is None:
+        #     new_poly_order = self.correlation * (poly_order + self.sh_irreps.lmax)
+        # else:
+        #     new_poly_order = self.correlation * poly_order + self.max_poly_order
+
+        node_feats = EquivariantProductBasisBlock(
+            num_features=self.num_features,
+            target_irreps=self.hidden_irreps,
+            correlation=self.correlation,
+            # max_poly_order=new_poly_order,
+            # input_poly_order=poly_order,
+            num_species=self.num_species,
+        )(node_feats=node_feats, node_specie=node_specie)
+        node_feats = profile(f"{self.name}: node_feats after tensor power", node_feats)
+
+        # poly_order = new_poly_order
+
+        if sc is not None:
+            node_feats = node_feats + sc  # [n_nodes, feature, hidden_irreps]
+
+        if not self.last:
+            node_outputs = LinearReadoutBlock(self.output_irreps)(
+                node_feats.axis_to_mul()
+            )  # [n_nodes, output_irreps]
+        else:  # Non linear readout for last layer
+            node_outputs = NonLinearReadoutBlock(
+                self.readout_mlp_irreps,
+                self.output_irreps,
+                activation=self.activation,
+            )(
+                node_feats.axis_to_mul()
+            )  # [n_nodes, output_irreps]
+
+            # polynomial order of node outputs is infinite in the last layer because of the non-polynomial activation function
+
+        node_outputs = profile(f"{self.name}: node_outputs", node_outputs)
+        return node_outputs, node_feats
 
 
 class MACE(hk.Module):
