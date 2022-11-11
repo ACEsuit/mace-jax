@@ -86,6 +86,23 @@ def compute_avg_num_neighbors(data_loader: torch.utils.data.DataLoader) -> float
     return to_numpy(avg_num_neighbors).item()
 
 
+def compute_avg_min_neighbor_distance(
+    data_loader: torch.utils.data.DataLoader,
+) -> float:
+    min_neighbor_distances = []
+
+    for batch in data_loader:
+        pos = batch.positions
+        senders, receivers = batch.edge_index
+        distances = torch.norm(pos[receivers] - pos[senders], dim=-1)
+        min_neighbor_distances.append(distances.min())
+
+    avg_min_neighbor_distance = torch.mean(
+        torch.stack(min_neighbor_distances, dim=0).type(torch.get_default_dtype())
+    )
+    return to_numpy(avg_min_neighbor_distance).item()
+
+
 def sum_nodes_of_the_same_graph(
     graph: jraph.GraphsTuple, node_quantities: jnp.ndarray
 ) -> jnp.ndarray:

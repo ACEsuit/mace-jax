@@ -108,6 +108,7 @@ def setup_logger(
     level: Union[int, str] = logging.INFO,
     filename: Optional[str] = None,
     directory: Optional[str] = None,
+    uid: Optional[str] = None,
 ):
     logger = logging.getLogger()
     logger.setLevel(level)
@@ -116,10 +117,10 @@ def setup_logger(
     for handler in logger.handlers:
         logger.removeHandler(handler)
 
-    formatter = logging.Formatter(
-        "%(asctime)s.%(msecs)03d %(levelname)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+    fmt = "%(asctime)s.%(msecs)03d %(levelname)s: %(message)s"
+    if uid is not None:
+        fmt = f"{uid} {fmt}"
+    formatter = logging.Formatter(fmt, datefmt="%Y-%m-%d %H:%M:%S")
 
     ch = logging.StreamHandler(stream=sys.stdout)
     ch.setFormatter(formatter)
