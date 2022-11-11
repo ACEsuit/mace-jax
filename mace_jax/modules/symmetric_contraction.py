@@ -1,4 +1,4 @@
-from typing import Set, Optional
+from typing import Set, Optional, Union
 
 import e3nn_jax as e3nn
 import haiku as hk
@@ -13,9 +13,18 @@ class SymmetricContraction(hk.Module):
         num_species: int,
         max_poly_order: Optional[int] = None,
         input_poly_order: int = 0,
+        gradient_normalization: Union[str, float] = None,
     ):
         super().__init__()
         self.correlation = correlation
+
+        if gradient_normalization is None:
+            gradient_normalization = e3nn.config("gradient_normalization")
+        if isinstance(gradient_normalization, str):
+            gradient_normalization = {"element": 0.0, "path": 1.0}[
+                gradient_normalization
+            ]
+        self.gradient_normalization = gradient_normalization
 
         if isinstance(keep_irrep_out, str):
             keep_irrep_out = e3nn.Irreps(keep_irrep_out)
@@ -60,11 +69,16 @@ class SymmetricContraction(hk.Module):
                         f"w{order}_{ir_out}",
                         (self.num_species, mul, x.shape[0]),
                         dtype=jnp.float32,
-                        init=hk.initializers.RandomNormal(),
+                        init=hk.initializers.RandomNormal(
+                            stddev=(mul**-0.5) ** (1.0 - self.gradient_normalization)
+                        ),
                     )[
                         y
                     ]  # [multiplicity, num_features]
-                    w = w / w.shape[0]  # normalize
+                    w = (
+                        w * (mul**-0.5) ** self.gradient_normalization
+                    )  # normalize weights
+                    w = w * (mul**-0.5)  # normalize U
                     if ir_out not in out:
                         out[ir_out] = (
                             "special",
