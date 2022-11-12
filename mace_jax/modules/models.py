@@ -95,6 +95,11 @@ class GeneralMACE(hk.Module):
         senders: jnp.ndarray,  # [n_edges]
         receivers: jnp.ndarray,  # [n_edges]
     ) -> e3nn.IrrepsArray:
+        assert vectors.ndim == 2 and vectors.shape[1] == 3
+        assert node_specie.ndim == 1
+        assert senders.ndim == 1 and receivers.ndim == 1
+        assert vectors.shape[0] == senders.shape[0] == receivers.shape[0]
+
         # Embeddings
         node_feats = self.node_embedding(node_specie)  # [n_nodes, feature, irreps]
         # poly_order = 0  # polynomial order in atom positions of the node features
