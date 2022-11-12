@@ -32,7 +32,7 @@ class MessagePassingConvolution(hk.Module):
             e3nn.tensor_product(node_feats[senders], edge_attrs),  # [n_edges, irreps]
         )  # [n_edges, irreps]
 
-        zeros = e3nn.IrrepsArray.zeros(messages.irreps, (node_feats.shape[0],))
+        zeros = e3nn.IrrepsArray.zeros_like(messages)
         node_feats = zeros.at[receivers].add(messages) / jnp.sqrt(
             self.avg_num_neighbors
         )  # [n_nodes, irreps]
