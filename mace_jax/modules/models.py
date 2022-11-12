@@ -1,3 +1,5 @@
+import functools
+import math
 from typing import Callable, Dict, Optional
 
 import e3nn_jax as e3nn
@@ -18,7 +20,6 @@ from .blocks import (
     ScaleShiftBlock,
 )
 from .utils import safe_norm, sum_nodes_of_the_same_graph
-
 
 try:
     from profile_nn_jax import profile
@@ -55,14 +56,14 @@ class GeneralMACE(hk.Module):
         hidden_irreps = e3nn.Irreps(hidden_irreps)
         readout_mlp_irreps = e3nn.Irreps(readout_mlp_irreps)
 
-        self.num_features = hidden_irreps.count(e3nn.Irrep("0e"))
-        if not all(mul == self.num_features for mul, _ in hidden_irreps):
-            raise ValueError(
-                f"All hidden irrep must have the same multiplicity, got {hidden_irreps}"
-            )
+        self.num_features = functools.reduce(
+            math.gcd, (mul for mul, _ in hidden_irreps)
+        )
 
         self.sh_irreps = e3nn.Irreps.spherical_harmonics(max_ell)
-        self.hidden_irreps = e3nn.Irreps([ir for _, ir in hidden_irreps])
+        self.hidden_irreps = e3nn.Irreps(
+            [(mul // self.num_features, ir) for mul, ir in hidden_irreps]
+        )
         self.interaction_irreps = e3nn.Irreps(e3nn.Irrep.iterator(max_ell))
 
         self.r_max = r_max
