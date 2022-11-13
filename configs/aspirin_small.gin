@@ -27,7 +27,7 @@ model.readout_mlp_irreps = "16x0e"
 model.num_deriv_in_zero = 6  # = p - 1  to use the u_p polynomial
 model.num_deriv_in_one = 2  # = 2  to use the u_p polynomial
 model.num_species = 10
-model.scaling = @compute_mean_rms_energy_forces
+model.scaling = @rms_forces_scaling
 model.path_normalization = "element"  # "element" or "path", it affects the weights when mixing the different paths
 model.gradient_normalization = "element"  # "element" or "path", it affects the relative learning rate of the parameters
 # path_normalization = "element"     =>  out = (path1 + path2) / sqrt(len(path1) + len(path2))

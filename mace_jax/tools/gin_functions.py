@@ -20,14 +20,6 @@ from mace_jax.tools import torch_geometric
 loss = gin.configurable("loss")(modules.WeightedEnergyForcesLoss)
 
 
-gin.register(jax.nn.silu)
-gin.register(jax.nn.relu)
-gin.register(jax.nn.gelu)
-
-gin.register(tools.compute_mean_std_atomic_inter_energy)
-gin.register(tools.compute_mean_rms_energy_forces)
-
-
 @gin.configurable
 def flags(debug: bool, dtype: str, seed: int, profile: bool = False):
     jax.config.update("jax_debug_nans", debug)
@@ -181,6 +173,22 @@ def datasets(
     )
 
 
+gin.register(jax.nn.silu)
+gin.register(jax.nn.relu)
+gin.register(jax.nn.gelu)
+gin.register(jnp.abs)
+gin.register(jnp.tanh)
+gin.register("identity")(lambda x: x)
+
+gin.register("std_scaling")(tools.compute_mean_std_atomic_inter_energy)
+gin.register("rms_forces_scaling")(tools.compute_mean_rms_energy_forces)
+
+
+@gin.configurable
+def constant_scaling(train_loader, atomic_energies, *, mean=0.0, std=1.0):
+    return mean, std
+
+
 @gin.configurable
 def model(
     seed: int,
@@ -253,7 +261,9 @@ def model(
         mean, std = 0.0, 1.0
     else:
         mean, std = scaling(train_loader, atomic_energies)
-    logging.info(f"Scaling: mean={mean:.2f}, std={std:.2f}")
+        logging.info(
+            f"Scaling with {scaling.__qualname__}: mean={mean:.2f}, std={std:.2f}"
+        )
 
     @hk.without_apply_rng
     @hk.transform
