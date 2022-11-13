@@ -2,7 +2,7 @@ import datetime
 import logging
 import pickle
 import time
-from typing import Dict, List, Optional, Union
+from typing import Callable, Dict, List, Optional, Union
 
 import e3nn_jax as e3nn
 import gin
@@ -23,6 +23,9 @@ loss = gin.configurable("loss")(modules.WeightedEnergyForcesLoss)
 gin.register(jax.nn.silu)
 gin.register(jax.nn.relu)
 gin.register(jax.nn.gelu)
+
+gin.register(tools.compute_mean_std_atomic_inter_energy)
+gin.register(tools.compute_mean_rms_energy_forces)
 
 
 @gin.configurable
@@ -187,6 +190,7 @@ def model(
     train_configs=None,
     z_table=None,
     *,
+    scaling: Callable = None,
     atomic_energies: Union[str, np.ndarray] = None,
     avg_num_neighbors: float = None,
     avg_r_min: float = None,
@@ -245,6 +249,12 @@ def model(
             )
             raise ValueError
 
+    if scaling is None:
+        mean, std = 0.0, 1.0
+    else:
+        mean, std = scaling(train_loader, atomic_energies)
+    logging.info(f"Scaling: mean={mean:.2f}, std={std:.2f}")
+
     @hk.without_apply_rng
     @hk.transform
     def model_(
@@ -280,6 +290,8 @@ def model(
         )  # [n_nodes, num_interactions, 0e]
         contributions = contributions.array[:, :, 0]  # [n_nodes, num_interactions]
         node_energies = jnp.sum(contributions, axis=1)  # [n_nodes, ]
+
+        node_energies = mean + std * node_energies
 
         if learnable_atomic_energies:
             atomic_energies_ = hk.get_parameter(
