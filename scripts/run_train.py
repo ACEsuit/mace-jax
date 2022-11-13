@@ -17,6 +17,7 @@ from mace_jax.tools.gin_functions import (
     loss,
     model,
     optimizer,
+    parse_argv,
     reload,
     train,
 )
@@ -118,13 +119,5 @@ def main():
 
 
 if __name__ == "__main__":
-    for arg in sys.argv[1:]:
-        if arg.endswith(".gin"):
-            gin.parse_config_file(arg)
-        elif arg.startswith("--"):
-            gin.parse_config(arg[2:])
-        else:
-            raise ValueError(
-                f"Unknown argument: '{arg}'. Expected a .gin file or a --key=value pair."
-            )
+    parse_argv(sys.argv)
     main()

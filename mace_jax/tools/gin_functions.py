@@ -2,7 +2,7 @@ import datetime
 import logging
 import pickle
 import time
-from typing import Dict, Optional, Union
+from typing import Dict, List, Optional, Union
 
 import e3nn_jax as e3nn
 import gin
@@ -493,3 +493,38 @@ def train(
 
     logging.info("Training complete")
     return epoch, ema_params
+
+
+def parse_argv(argv: List[str]):
+    def gin_bind_parameter(key: str, value: str):
+        # We need to guess if value is a string or not
+        value = value.strip()
+        if value[0] == value[-1] and value[0] in ('"', "'"):
+            gin.parse_config(f"{key} = {value}")
+        if value[0] == "@":
+            gin.parse_config(f"{key} = {value}")
+        if value in ["True", "False", "None"]:
+            gin.parse_config(f"{key} = {value}")
+        if any(c.isalpha() for c in value):
+            gin.parse_config(f'{key} = "{value}"')
+        else:
+            gin.parse_config(f"{key} = {value}")
+
+    only_the_key = None
+    for arg in argv[1:]:
+        if only_the_key is None:
+            if arg.endswith(".gin"):
+                gin.parse_config_file(arg)
+            elif arg.startswith("--"):
+                if "=" in arg:
+                    key, value = arg[2:].split("=")
+                    gin_bind_parameter(key, value)
+                else:
+                    only_the_key = arg[2:]
+            else:
+                raise ValueError(
+                    f"Unknown argument: '{arg}'. Expected a .gin file or a --key \"some value\" pair."
+                )
+        else:
+            gin_bind_parameter(only_the_key, arg)
+            only_the_key = None
