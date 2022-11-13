@@ -413,7 +413,6 @@ def optimizer(
     return (
         optax.chain(
             algorithm(),
-            optax.scale_by_adam(),
             optax.add_decayed_weights(weight_decay, mask=weight_decay_mask),
             optax.scale_by_schedule(scheduler(lr, steps_per_epoch)),
             optax.scale(-1.0),  # Gradient descent.
