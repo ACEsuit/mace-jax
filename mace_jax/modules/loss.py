@@ -1,7 +1,7 @@
 import jax.numpy as jnp
 import jraph
 
-from .utils import sum_nodes_of_the_same_graph
+from ..tools import sum_nodes_of_the_same_graph
 
 
 def weighted_mean_squared_error_energy(graph, energy_pred) -> jnp.ndarray:

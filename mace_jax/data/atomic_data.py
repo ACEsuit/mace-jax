@@ -3,12 +3,7 @@ from typing import Optional, Sequence
 import torch
 import torch.utils.data
 
-from mace_jax.tools import (
-    AtomicNumberTable,
-    atomic_numbers_to_indices,
-    to_one_hot,
-    torch_geometric,
-)
+from mace_jax.tools import torch_geometric
 
 from .neighborhood import get_neighborhood
 from .utils import Configuration
@@ -73,18 +68,10 @@ class AtomicData(torch_geometric.data.Data):
         cls,
         config: Configuration,
         cutoff: float,
-        z_table: AtomicNumberTable = None,
-        one_hot: bool = True,
     ) -> "AtomicData":
         edge_index, shifts, cell = get_neighborhood(
             positions=config.positions, cutoff=cutoff, pbc=config.pbc, cell=config.cell
         )
-        if one_hot:
-            indices = atomic_numbers_to_indices(config.atomic_numbers, z_table=z_table)
-            one_hot_ = to_one_hot(
-                torch.tensor(indices, dtype=torch.long).unsqueeze(-1),
-                num_classes=len(z_table),
-            )
 
         cell = (
             torch.tensor(cell, dtype=torch.get_default_dtype())
@@ -114,9 +101,7 @@ class AtomicData(torch_geometric.data.Data):
             positions=torch.tensor(config.positions, dtype=torch.get_default_dtype()),
             shifts=torch.tensor(shifts, dtype=torch.long),
             cell=cell,
-            node_attrs=one_hot_
-            if one_hot
-            else torch.tensor(config.atomic_numbers, dtype=torch.long),
+            node_attrs=torch.tensor(config.atomic_numbers, dtype=torch.long),
             weight=weight,
             forces=forces,
             energy=energy,

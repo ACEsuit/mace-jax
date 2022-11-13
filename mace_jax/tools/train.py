@@ -1,4 +1,3 @@
-import dataclasses
 import logging
 import time
 from typing import Any, Callable, Dict, Optional, Tuple
@@ -8,11 +7,8 @@ import jax.numpy as jnp
 import jraph
 import numpy as np
 import optax
-import torch
-from torch.optim.swa_utils import SWALR, AveragedModel
 from torch.utils.data import DataLoader
 
-from .tools import get_batched_padded_graph_tuples
 from .utils import (
     MetricsLogger,
     compute_mae,
@@ -20,15 +16,8 @@ from .utils import (
     compute_rel_mae,
     compute_rel_rmse,
     compute_rmse,
+    get_batched_padded_graph_tuples,
 )
-
-
-@dataclasses.dataclass
-class SWAContainer:
-    model: AveragedModel
-    scheduler: SWALR
-    start: int
-    loss_fn: torch.nn.Module
 
 
 def train(

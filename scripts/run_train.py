@@ -3,7 +3,7 @@ import logging
 import pickle
 import sys
 import time
-from typing import Dict, Optional
+from typing import Dict, Optional, Union
 
 import e3nn_jax as e3nn
 import gin
@@ -52,7 +52,7 @@ def logs(
 
     tag = f"{date}_{name}"
 
-    tools.setup_logger(level, directory=directory, filename=f"{tag}.log", uid=name)
+    tools.setup_logger(level, directory=directory, filename=f"{tag}.log", name=name)
     logger = tools.MetricsLogger(directory=directory, filename=f"{tag}.metrics")
 
     return directory, tag, logger
@@ -137,13 +137,9 @@ def datasets(
         f"test={len(test_configs)}"
     )
 
-    atomic_energies = compute_atomic_energies(
-        atomic_energies_dict, train_configs, z_table
-    )
-
     train_loader = torch_geometric.dataloader.DataLoader(
         dataset=[
-            data.AtomicData.from_config(train_config, cutoff=r_max, one_hot=False)
+            data.AtomicData.from_config(train_config, cutoff=r_max)
             for train_config in train_configs
         ],
         batch_size=batch_size,
@@ -152,7 +148,7 @@ def datasets(
     )
     valid_loader = torch_geometric.dataloader.DataLoader(
         dataset=[
-            data.AtomicData.from_config(valid_config, cutoff=r_max, one_hot=False)
+            data.AtomicData.from_config(valid_config, cutoff=r_max)
             for valid_config in valid_configs
         ],
         batch_size=valid_batch_size,
@@ -161,47 +157,87 @@ def datasets(
     )
     test_loader = torch_geometric.dataloader.DataLoader(
         dataset=[
-            data.AtomicData.from_config(test_config, cutoff=r_max, one_hot=False)
+            data.AtomicData.from_config(test_config, cutoff=r_max)
             for test_config in test_configs
         ],
         batch_size=valid_batch_size,
         shuffle=False,
         drop_last=False,
     )
-    return (train_loader, valid_loader, test_loader, atomic_energies, r_max)
+    return dict(
+        train_loader=train_loader,
+        valid_loader=valid_loader,
+        test_loader=test_loader,
+        atomic_energies_dict=atomic_energies_dict,
+        r_max=r_max,
+        z_table=z_table,
+        train_configs=train_configs,
+        valid_configs=valid_configs,
+        test_configs=test_configs,
+    )
 
 
 @gin.configurable
 def model(
     seed: int,
     r_max: float,
-    atomic_energies_from_dataset: np.ndarray = None,
+    atomic_energies_dict: Dict[int, float] = None,
     train_loader=None,
+    train_configs=None,
+    z_table=None,
     *,
-    atomic_energies: np.ndarray = None,
+    atomic_energies: Union[str, np.ndarray] = None,
     avg_num_neighbors: float = None,
     avg_r_min: float = None,
+    num_species: int = None,
     num_interactions=3,
     path_normalization="element",
     gradient_normalization="element",
     **kwargs,
 ):
     if avg_num_neighbors is None:
-        avg_num_neighbors = modules.compute_avg_num_neighbors(train_loader)
-        logging.info(f"Average number of neighbors: {avg_num_neighbors:.3f}")
+        avg_num_neighbors = tools.compute_avg_num_neighbors(train_loader)
+        logging.info(
+            f"Compute the average number of neighbors: {avg_num_neighbors:.3f}"
+        )
+    else:
+        logging.info(f"Use the average number of neighbors: {avg_num_neighbors:.3f}")
 
     if avg_r_min is None:
-        avg_r_min = modules.compute_avg_min_neighbor_distance(train_loader)
-        logging.info(f"Average r_min: {avg_r_min:.3f}")
+        avg_r_min = tools.compute_avg_min_neighbor_distance(train_loader)
+        logging.info(f"Compute the average min neighbor distance: {avg_r_min:.3f}")
+    else:
+        logging.info(f"Use the average min neighbor distance: {avg_r_min:.3f}")
 
     if atomic_energies is None:
-        if atomic_energies_from_dataset is not None:
-            logging.info("Using atomic energies from dataset")
-            atomic_energies = atomic_energies_from_dataset
+        if atomic_energies_dict is None or len(atomic_energies_dict) == 0:
+            atomic_energies = "average"
         else:
-            logging.info("Not using atomic energies in model")
+            atomic_energies = "isolated_atom"
+
+    if atomic_energies == "average":
+        atomic_energies_dict = data.compute_average_E0s(train_configs, z_table)
+        logging.info(
+            f"Computed average Atomic Energies using least squares: {atomic_energies_dict}"
+        )
+        atomic_energies = np.array(
+            [atomic_energies_dict.get(z, 0.0) for z in range(num_species)]
+        )
+    elif atomic_energies == "isolated_atom":
+        logging.info(
+            f"Using atomic energies from isolated atoms in the dataset: {atomic_energies_dict}"
+        )
+        atomic_energies = np.array(
+            [atomic_energies_dict.get(z, 0.0) for z in range(num_species)]
+        )
+    elif atomic_energies == "zero":
+        logging.info("Not using atomic energies")
+        atomic_energies = None
     else:
-        logging.info(f"Using atomic energies from config: {atomic_energies.tolist()}")
+        logging.info(
+            f"Use Atomic Energies that are provided: {atomic_energies.tolist()}"
+        )
+        assert len(atomic_energies) == num_species
 
     @hk.without_apply_rng
     @hk.transform
@@ -220,6 +256,7 @@ def model(
             avg_num_neighbors=avg_num_neighbors,
             num_interactions=num_interactions,
             avg_r_min=avg_r_min,
+            num_species=num_species,
             **kwargs,
         )
 
@@ -343,21 +380,6 @@ def optimizer(
     )
 
 
-def compute_atomic_energies(
-    atomic_energies_dict: Dict[int, float],
-    collections: data.Configurations,
-    z_table: tools.AtomicNumberTable,
-):
-    if atomic_energies_dict is None or len(atomic_energies_dict) == 0:
-        atomic_energies_dict = data.compute_average_E0s(collections, z_table)
-        logging.info(
-            f"Computed average Atomic Energies using least squares: {atomic_energies_dict}"
-        )
-
-    atomic_energies = np.array([atomic_energies_dict.get(z, 0.0) for z in range(119)])
-    return atomic_energies
-
-
 def main():
     seed = flags()
 
@@ -368,9 +390,20 @@ def main():
 
     logging.info(f"MACE version: {mace_jax.__version__}")
 
-    train_loader, valid_loader, test_loader, atomic_energies, r_max = datasets()
+    dd = datasets()
+    train_loader, valid_loader, test_loader = (
+        dd["train_loader"],
+        dd["valid_loader"],
+        dd["test_loader"],
+    )
+
     model_fn, params, num_message_passing = model(
-        seed, r_max, atomic_energies, train_loader
+        seed,
+        dd["r_max"],
+        dd["atomic_energies_dict"],
+        dd["train_loader"],
+        dd["train_configs"],
+        dd["z_table"],
     )
 
     params = reload(params)
@@ -403,7 +436,7 @@ def main():
             graph.nodes.positions
         )
 
-        graph_energies = modules.sum_nodes_of_the_same_graph(
+        graph_energies = tools.sum_nodes_of_the_same_graph(
             graph, node_energies
         )  # [ n_graphs,]
 

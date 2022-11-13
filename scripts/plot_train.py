@@ -32,10 +32,11 @@ colors = [
 @dataclasses.dataclass
 class RunInfo:
     name: str
-    seed: int
+    day: int
+    hour: int
 
 
-name_re = re.compile(r"(?P<name>.+)_run-(?P<seed>\d+)_train.txt")
+name_re = re.compile(r"(?P<day>\d+)_(?P<hour>\d+)_(?P<name>[a-z\-]+).metrics")
 
 
 def parse_path(path: str) -> RunInfo:
@@ -43,7 +44,11 @@ def parse_path(path: str) -> RunInfo:
     if not match:
         raise RuntimeError(f"Cannot parse {path}")
 
-    return RunInfo(name=match.group("name"), seed=int(match.group("seed")))
+    return RunInfo(
+        name=match.group("name"),
+        day=int(match.group("day")),
+        hour=int(match.group("hour")),
+    )
 
 
 def parse_training_results(path: str) -> List[dict]:
@@ -53,7 +58,8 @@ def parse_training_results(path: str) -> List[dict]:
         for line in f:
             d = json.loads(line)
             d["name"] = run_info.name
-            d["seed"] = run_info.seed
+            d["day"] = run_info.day
+            d["hour"] = run_info.hour
             results.append(d)
 
     return results

@@ -9,7 +9,7 @@ import jax.numpy as jnp
 import jraph
 import numpy as np
 
-from ..tools import get_edge_relative_vectors
+from ..tools import get_edge_relative_vectors, safe_norm, sum_nodes_of_the_same_graph
 from .blocks import (
     AgnosticResidualInteractionBlock,
     EquivariantProductBasisBlock,
@@ -19,7 +19,6 @@ from .blocks import (
     RadialEmbeddingBlock,
     ScaleShiftBlock,
 )
-from .utils import safe_norm, sum_nodes_of_the_same_graph
 
 try:
     from profile_nn_jax import profile
@@ -296,15 +295,16 @@ class MACE(hk.Module):
                 n_edge=graph.n_edge,
             )
 
-            node_e0 = self.atomic_energies[graph.nodes.specie]  # [n_nodes, ]
             contributions = self.energy_model(
                 vectors, graph.nodes.specie, graph.senders, graph.receivers
             )  # [n_nodes, num_interactions, 0e]
-            contributions = contributions.array[:, :, 0]  # [n_nodes, num_interactions]
 
-            node_energies = node_e0 + self.scale_shift(
+            contributions = contributions.array[:, :, 0]  # [n_nodes, num_interactions]
+            node_energies = self.scale_shift(
                 jnp.sum(contributions, axis=1)
             )  # [n_nodes, ]
+
+            node_energies += self.atomic_energies[graph.nodes.specie]  # [n_nodes, ]
             return jnp.sum(node_energies), node_energies
 
         minus_forces, node_energies = jax.grad(energy_fn, has_aux=True)(
