@@ -33,7 +33,7 @@ setup(
     packages=find_packages(exclude=["tests"]),
     install_requires=[
         "torch",
-        "e3nn_jax",
+        "e3nn_jax==0.11.1",
         "numpy",
         "ase",
         "prettytable",
