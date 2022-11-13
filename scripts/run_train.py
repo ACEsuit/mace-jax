@@ -69,7 +69,7 @@ def main():
                 n_edge=graph.n_edge,
             )
             node_energies = model_fn(
-                w, vectors, graph.nodes.attrs, graph.senders, graph.receivers
+                w, vectors, graph.nodes.species, graph.senders, graph.receivers
             )  # [n_nodes, ]
             return jnp.sum(node_energies), node_energies
 

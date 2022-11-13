@@ -89,7 +89,7 @@ def pad_graph_to_nearest_ceil_mantissa(
     )
 
 
-Node = namedtuple("Node", ["positions", "attrs", "forces"])
+Node = namedtuple("Node", ["positions", "species", "forces"])
 Edge = namedtuple("Edge", ["shifts"])
 Global = namedtuple("Global", ["energy", "weight", "cell"])
 
@@ -98,7 +98,7 @@ def get_jraph_graph_from_pyg(batch):
     return jraph.GraphsTuple(
         nodes=Node(
             positions=batch.positions.numpy(),
-            attrs=batch.node_attrs.numpy(),
+            species=batch.node_species.numpy(),
             forces=batch.forces.numpy(),
         ),
         edges=Edge(shifts=batch.shifts.numpy()),
@@ -239,12 +239,13 @@ def compute_mean_std_atomic_inter_energy(
     data_loader,
     atomic_energies: np.ndarray,
 ) -> Tuple[float, float]:
+    raise NotImplementedError
     # atomic_energies_fn = AtomicEnergiesBlock(atomic_energies=atomic_energies)
 
     avg_atom_inter_es_list = []
 
     for batch in data_loader:
-        # node_e0 = atomic_energies_fn(batch.node_attrs)
+        # node_e0 = atomic_energies_fn(batch.node_species)
         graph_e0s = scatter_sum(
             # src=node_e0, index=batch.batch, dim=-1, dim_size=batch.num_graphs
         )
@@ -264,13 +265,14 @@ def compute_mean_rms_energy_forces(
     data_loader: torch.utils.data.DataLoader,
     atomic_energies: np.ndarray,
 ) -> Tuple[float, float]:
+    raise NotImplementedError
     # atomic_energies_fn = AtomicEnergiesBlock(atomic_energies=atomic_energies)
 
     atom_energy_list = []
     forces_list = []
 
     for batch in data_loader:
-        # node_e0 = atomic_energies_fn(batch.node_attrs)
+        # node_e0 = atomic_energies_fn(batch.node_species)
         graph_e0s = scatter_sum(
             # src=node_e0, index=batch.batch, dim=-1, dim_size=batch.num_graphs
         )
