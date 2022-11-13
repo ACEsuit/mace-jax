@@ -1,300 +1,553 @@
-import ast
+import datetime
 import logging
-import os
-from typing import Dict
+import pickle
+import sys
+import time
+from typing import Dict, Optional
 
 import e3nn_jax as e3nn
+import gin
 import haiku as hk
 import jax
 import jax.numpy as jnp
 import jraph
 import numpy as np
 import optax
-import torch.nn.functional
-from utils import create_error_table, get_dataset_from_xyz
+import profile_nn_jax
+from unique_names_generator import get_random_name
+from unique_names_generator.data import ADJECTIVES, NAMES
 
 import mace_jax
 from mace_jax import data, modules, tools
-from mace_jax.tools import (
-    flatten_dict,
-    get_batched_padded_graph_tuples,
-    torch_geometric,
-    unflatten_dict,
-)
+from mace_jax.tools import torch_geometric
+
+gin.register(jax.nn.silu)
+gin.register(jax.nn.relu)
 
 
-def main() -> None:
-    args = tools.build_default_arg_parser().parse_args()
-    tag = tools.get_tag(name=args.name, seed=args.seed)
+@gin.configurable
+def flags(debug: bool, dtype: str, seed: int, profile: bool = False):
+    jax.config.update("jax_debug_nans", debug)
+    jax.config.update("jax_debug_infs", debug)
+    tools.set_default_dtype(dtype)
+    tools.set_seeds(seed)
+    if profile:
+        profile_nn_jax.enable(timing=True, statistics=True)
+    return seed
 
-    # Setup
-    jax.config.update("jax_debug_nans", args.debug_nans)
-    tools.set_seeds(args.seed)
-    tools.setup_logger(level=args.log_level, tag=tag, directory=args.log_dir)
-    try:
-        logging.info(f"MACE version: {mace_jax.__version__}")
-    except AttributeError:
-        logging.info("Cannot find MACE version, please install MACE via pip")
-    logging.info(f"Configuration: {args}")
-    tools.set_default_dtype(args.default_dtype)
 
-    try:
-        config_type_weights = ast.literal_eval(args.config_type_weights)
-        assert isinstance(config_type_weights, dict)
-    except Exception as e:  # pylint: disable=W0703
-        logging.warning(
-            f"Config type weights not specified correctly ({e}), using Default"
-        )
-        config_type_weights = {"Default": 1.0}
+@gin.configurable
+def logs(
+    name: str = None,
+    level=logging.INFO,
+    directory: str = "results",
+):
+    date = datetime.datetime.now().strftime("%Y%m%d_%H%M")
+    uid = get_random_name(separator="-", style="lowercase", combo=[ADJECTIVES, NAMES])
 
-    # Data preparation
-    collections, atomic_energies_dict = get_dataset_from_xyz(
-        train_path=args.train_file,
-        valid_path=args.valid_file,
-        valid_fraction=args.valid_fraction,
+    if name is None:
+        tag = f"{date}_{uid}"
+    else:
+        tag = f"{date}_{name}_{uid}"
+
+    tools.setup_logger(level, directory=directory, filename=f"{tag}.log", uid=uid)
+    logger = tools.MetricsLogger(directory=directory, filename=f"{tag}.metrics")
+
+    return directory, tag, logger
+
+
+@gin.configurable
+def datasets(
+    *,
+    r_max: float,
+    train_path: str,
+    config_type_weights: Dict = None,
+    num_train: int = None,
+    valid_path: str = None,
+    valid_fraction: float = None,
+    test_path: str = None,
+    seed: int = 1234,
+    energy_key: str = "energy",
+    forces_key: str = "forces",
+    batch_size: int,
+    valid_batch_size: int,
+):
+    """Load training and test dataset from xyz file"""
+
+    atomic_energies_dict, all_train_configs = data.load_from_xyz(
+        file_path=train_path,
         config_type_weights=config_type_weights,
-        test_path=args.test_file,
-        seed=args.seed,
-        energy_key=args.energy_key,
-        forces_key=args.forces_key,
+        energy_key=energy_key,
+        forces_key=forces_key,
+        extract_atomic_energies=True,
+        num_configs=num_train,
     )
-
     logging.info(
-        f"Total number of configurations: train={len(collections.train)}, valid={len(collections.valid)}, "
-        f"tests=[{', '.join([name + ': ' + str(len(test_configs)) for name, test_configs in collections.tests])}]"
+        f"Loaded {len(all_train_configs)} training configurations from '{train_path}'"
     )
 
-    # Atomic number table
-    # yapf: disable
+    if valid_path is not None:
+        _, valid_configs = data.load_from_xyz(
+            file_path=valid_path,
+            config_type_weights=config_type_weights,
+            energy_key=energy_key,
+            forces_key=forces_key,
+            extract_atomic_energies=False,
+        )
+        logging.info(
+            f"Loaded {len(valid_configs)} validation configurations from '{valid_path}'"
+        )
+        train_configs = all_train_configs
+    else:
+        logging.info(
+            "Using random %s%% of training set for validation", 100 * valid_fraction
+        )
+        train_configs, valid_configs = data.random_train_valid_split(
+            all_train_configs, valid_fraction, seed
+        )
+
+    if test_path is not None:
+        _, test_configs = data.load_from_xyz(
+            file_path=test_path,
+            config_type_weights=config_type_weights,
+            energy_key=energy_key,
+            forces_key=forces_key,
+            extract_atomic_energies=False,
+        )
+        logging.info(
+            f"Loaded {len(test_configs)} test configurations from '{test_path}'"
+        )
+    else:
+        test_configs = []
+
     z_table = tools.get_atomic_number_table_from_zs(
         z
-        for configs in (collections.train, collections.valid)
+        for configs in (train_configs, valid_configs)
         for config in configs
         for z in config.atomic_numbers
     )
-    # yapf: enable
-    logging.info(z_table)
-    if atomic_energies_dict is None or len(atomic_energies_dict) == 0:
-        if args.E0s is not None:
-            logging.info(
-                "Atomic Energies not in training file, using command line argument E0s"
-            )
-            if args.E0s.lower() == "average":
-                logging.info(
-                    "Computing average Atomic Energies using least squares regression"
-                )
-                atomic_energies_dict = data.compute_average_E0s(
-                    collections.train, z_table
-                )
-            else:
-                try:
-                    atomic_energies_dict = ast.literal_eval(args.E0s)
-                    assert isinstance(atomic_energies_dict, dict)
-                except Exception as e:
-                    raise RuntimeError(
-                        f"E0s specified invalidly, error {e} occured"
-                    ) from e
-        else:
-            raise RuntimeError(
-                "E0s not found in training file and not specified in command line"
-            )
-    atomic_energies: np.ndarray = np.array(
-        [atomic_energies_dict[z] for z in z_table.zs]
+    logging.info(f"z_table= {z_table}")
+
+    logging.info(
+        f"Total number of configurations: "
+        f"train={len(train_configs)}, "
+        f"valid={len(valid_configs)}, "
+        f"test={len(test_configs)}"
     )
-    logging.info(f"Atomic energies: {atomic_energies.tolist()}")
+
+    atomic_energies = compute_atomic_energies(
+        atomic_energies_dict, train_configs, z_table
+    )
 
     train_loader = torch_geometric.dataloader.DataLoader(
         dataset=[
-            data.AtomicData.from_config(config, z_table=z_table, cutoff=args.r_max)
-            for config in collections.train
+            data.AtomicData.from_config(train_config, cutoff=r_max, one_hot=False)
+            for train_config in train_configs
         ],
-        batch_size=args.batch_size,
+        batch_size=batch_size,
         shuffle=True,
         drop_last=True,
     )
     valid_loader = torch_geometric.dataloader.DataLoader(
         dataset=[
-            data.AtomicData.from_config(config, z_table=z_table, cutoff=args.r_max)
-            for config in collections.valid
+            data.AtomicData.from_config(valid_config, cutoff=r_max, one_hot=False)
+            for valid_config in valid_configs
         ],
-        batch_size=args.valid_batch_size,
+        batch_size=valid_batch_size,
         shuffle=False,
         drop_last=False,
     )
-
-    loss_fn = modules.WeightedEnergyForcesLoss(
-        energy_weight=args.energy_weight, forces_weight=args.forces_weight
+    test_loader = torch_geometric.dataloader.DataLoader(
+        dataset=[
+            data.AtomicData.from_config(test_config, cutoff=r_max, one_hot=False)
+            for test_config in test_configs
+        ],
+        batch_size=valid_batch_size,
+        shuffle=False,
+        drop_last=False,
     )
-    logging.info(loss_fn)
+    return (train_loader, valid_loader, test_loader, atomic_energies, r_max)
 
-    if args.compute_avg_num_neighbors:
-        args.avg_num_neighbors = modules.compute_avg_num_neighbors(train_loader)
-    logging.info(f"Average number of neighbors: {args.avg_num_neighbors:.3f}")
 
-    # Build model
-    logging.info("Building model")
-    model_config = dict(
-        r_max=args.r_max,
-        num_bessel=args.num_radial_basis,
-        num_deriv_in_zero=args.num_cutoff_basis - 1,
-        num_deriv_in_one=2,
-        max_ell=args.max_ell,
-        interaction_cls=modules.interaction_classes[args.interaction],
-        num_interactions=args.num_interactions,
-        hidden_irreps=e3nn.Irreps(args.hidden_irreps),
-        atomic_energies=atomic_energies,
-        avg_num_neighbors=args.avg_num_neighbors,
-        epsilon=args.epsilon,
-    )
+@gin.configurable
+def model(
+    seed: int,
+    r_max: float,
+    atomic_energies_from_dataset: np.ndarray = None,
+    train_loader=None,
+    *,
+    atomic_energies: np.ndarray = None,
+    avg_num_neighbors: float = None,
+    avg_r_min: float = None,
+    num_interactions=3,
+    path_normalization="element",
+    gradient_normalization="element",
+    **kwargs,
+):
+    if avg_num_neighbors is None:
+        avg_num_neighbors = modules.compute_avg_num_neighbors(train_loader)
+        logging.info(f"Average number of neighbors: {avg_num_neighbors:.3f}")
 
-    model: hk.Transformed
+    if avg_r_min is None:
+        avg_r_min = modules.compute_avg_min_neighbor_distance(train_loader)
+        logging.info(f"Average r_min: {avg_r_min:.3f}")
+
+    if atomic_energies is None:
+        if atomic_energies_from_dataset is not None:
+            logging.info("Using atomic energies from dataset")
+            atomic_energies = atomic_energies_from_dataset
+        else:
+            logging.info("Not using atomic energies in model")
+    else:
+        logging.info(f"Using atomic energies from config: {atomic_energies.tolist()}")
 
     @hk.without_apply_rng
     @hk.transform
-    def model(graph: jraph.GraphsTuple) -> Dict[str, jnp.ndarray]:
-        if args.model == "MACE":
-            if args.scaling == "no_scaling":
-                std = 1.0
-                logging.info("No scaling selected")
-            else:
-                mean, std = modules.scaling_classes[args.scaling](
-                    train_loader, atomic_energies
-                )
-            mace = modules.MACE(
-                **model_config,
-                correlation=args.correlation,
-                gate=modules.gate_dict[args.gate],
-                interaction_cls_first=modules.interaction_classes[
-                    "RealAgnosticInteractionBlock"
-                ],
-                readout_mlp_irreps=e3nn.Irreps(args.MLP_irreps),
-                atomic_inter_scale=std,
-                atomic_inter_shift=0.0,
-            )
-        elif args.model == "ScaleShiftMACE":
-            mean, std = modules.scaling_classes[args.scaling](
-                train_loader, atomic_energies
-            )
-            mace = modules.MACE(
-                **model_config,
-                correlation=args.correlation,
-                gate=modules.gate_dict[args.gate],
-                interaction_cls_first=modules.interaction_classes[
-                    args.interaction_first
-                ],
-                readout_mlp_irreps=e3nn.Irreps(args.MLP_irreps),
-                atomic_inter_scale=std,
-                atomic_inter_shift=mean,
-            )
-        else:
-            raise RuntimeError(f"Unknown model: '{args.model}'")
+    def model_(
+        vectors: jnp.ndarray,  # [n_edges, 3]
+        node_z: jnp.ndarray,  # [n_nodes]
+        senders: jnp.ndarray,  # [n_edges]
+        receivers: jnp.ndarray,  # [n_edges]
+    ) -> jnp.ndarray:
+        e3nn.config("path_normalization", path_normalization)
+        e3nn.config("gradient_normalization", gradient_normalization)
 
-        return mace(graph)
+        mace = modules.GeneralMACE(
+            output_irreps="0e",
+            r_max=r_max,
+            avg_num_neighbors=avg_num_neighbors,
+            num_interactions=num_interactions,
+            avg_r_min=avg_r_min,
+            **kwargs,
+        )
 
-    params = jax.jit(model.init)(
-        jax.random.PRNGKey(args.seed),
-        get_batched_padded_graph_tuples(next(iter(train_loader))),
+        if hk.running_init():
+            logging.info(
+                "model: "
+                f"num_features={mace.num_features} "
+                f"hidden_irreps={mace.hidden_irreps} "
+                f"sh_irreps={mace.sh_irreps} "
+                f"interaction_irreps={mace.interaction_irreps} ",
+            )
+
+        contributions = mace(
+            vectors, node_z, senders, receivers
+        )  # [n_nodes, num_interactions, 0e]
+        contributions = contributions.array[:, :, 0]  # [n_nodes, num_interactions]
+        node_energies = jnp.sum(contributions, axis=1)  # [n_nodes, ]
+        if atomic_energies is not None:
+            node_energies += jnp.asarray(atomic_energies)[node_z]
+        return node_energies
+
+    params = jax.jit(model_.init)(
+        jax.random.PRNGKey(seed),
+        jnp.zeros((1, 3)),
+        jnp.array([16]),
+        jnp.array([0]),
+        jnp.array([0]),
     )
-    # Optimizer
+    return model_.apply, params, num_interactions
 
+
+@gin.configurable
+def reload(params, path=None):
+    if path is not None:
+        logging.info(f"Reloading parameters from '{path}'")
+        with open(path, "rb") as f:
+            _ = pickle.load(f)
+            new_params = pickle.load(f)
+
+        # check compatibility
+        if jax.tree_util.tree_structure(params) != jax.tree_util.tree_structure(
+            new_params
+        ):
+            logging.warning(
+                f"Parameters from '{path}' are not compatible with current model"
+            )
+
+        return new_params
+    return params
+
+
+@gin.configurable
+def exponential_decay(
+    lr: float,
+    steps_per_epoch: int,
+    *,
+    transition_steps: float = 0.0,
+    decay_rate: float = 0.5,
+    transition_begin: float = 0.0,
+    staircase: bool = True,
+    end_value: Optional[float] = None,
+):
+    return optax.exponential_decay(
+        init_value=lr,
+        transition_steps=transition_steps * steps_per_epoch,
+        decay_rate=decay_rate,
+        transition_begin=transition_begin * steps_per_epoch,
+        staircase=staircase,
+        end_value=end_value,
+    )
+
+
+@gin.configurable
+def piecewise_constant_schedule(
+    lr: float, steps_per_epoch: int, *, boundaries_and_scales: Dict[float, float]
+):
+    boundaries_and_scales = {
+        boundary * steps_per_epoch: scale
+        for boundary, scale in boundaries_and_scales.items()
+    }
+    return optax.piecewise_constant_schedule(
+        init_value=lr, boundaries_and_scales=boundaries_and_scales
+    )
+
+
+@gin.configurable
+def optimizer(
+    steps_per_epoch: int,
+    weight_decay=0.0,
+    lr=0.01,
+    max_num_epochs: int = 2048,
+    scheduler=None,
+):
     def weight_decay_mask(params):
-        params = flatten_dict(params)
+        params = tools.flatten_dict(params)
         mask = {
-            k: "linear_2" in k
-            and "multi_layer_perceptron" not in k
-            or "symmetric_contraction" in k
-            for k, _ in params.items()
-        }
-        return unflatten_dict(mask)
-
-    logger = tools.MetricsLogger(directory=args.results_dir, tag=tag + "_train")
-
-    gradient_transform: optax.GradientTransformation = optax.chain(
-        optax.clip_by_global_norm(np.inf if args.clip_grad is None else args.clip_grad),
-        tools.scale_by_amsgrad() if args.amsgrad == "True" else optax.scale_by_adam(),
-        optax.add_decayed_weights(args.weight_decay, mask=weight_decay_mask),
-        optax.scale_by_schedule(
-            optax.exponential_decay(
-                init_value=args.lr,
-                transition_steps=4 * len(train_loader) * args.max_num_epochs // 5,
-                decay_rate=args.lr_factor,
+            k: any(
+                ("linear_postmp" in ki) or ("symmetric_contraction" in ki) for ki in k
             )
-        ),  # Use the learning rate from the scheduler.), TODO: reduce on plateau scheduler
-        optax.scale(-1.0),  # Gradient descent.
+            for k in params
+        }
+        assert any(any(("linear_postmp" in ki) for ki in k) for k in params)
+        assert any(any(("symmetric_contraction" in ki) for ki in k) for k in params)
+        return tools.unflatten_dict(mask)
+
+    if scheduler is None:
+
+        def scheduler(lr, steps_per_epoch):
+            return lambda count: lr
+
+    return (
+        optax.chain(
+            # # optax.clip_by_global_norm(np.inf if clip_grad is None else clip_grad),
+            # tools.scale_by_amsgrad() if amsgrad else optax.scale_by_adam(),
+            optax.scale_by_adam(),
+            optax.add_decayed_weights(weight_decay, mask=weight_decay_mask),
+            optax.scale_by_schedule(scheduler(lr, steps_per_epoch)),
+            optax.scale(-1.0),  # Gradient descent.
+        ),
+        max_num_epochs,
     )
 
+
+def compute_atomic_energies(
+    atomic_energies_dict: Dict[int, float],
+    collections: data.Configurations,
+    z_table: tools.AtomicNumberTable,
+):
+    if atomic_energies_dict is None or len(atomic_energies_dict) == 0:
+        atomic_energies_dict = data.compute_average_E0s(collections, z_table)
+        logging.info(
+            f"Computed average Atomic Energies using least squares: {atomic_energies_dict}"
+        )
+
+    atomic_energies = np.array([atomic_energies_dict.get(z, 0.0) for z in range(119)])
+    return atomic_energies
+
+
+def main():
+    seed = flags()
+
+    directory, tag, logger = logs()
+
+    with open(f"{directory}/{tag}.gin", "wt") as f:
+        f.write(gin.config_str())
+
+    logging.info(f"MACE version: {mace_jax.__version__}")
+
+    train_loader, valid_loader, test_loader, atomic_energies, r_max = datasets()
+    model_fn, params, num_message_passing = model(
+        seed, r_max, atomic_energies, train_loader
+    )
+
+    params = reload(params)
+
+    gradient_transform, max_num_epochs = optimizer(steps_per_epoch=len(train_loader))
     optimizer_state = gradient_transform.init(params)
 
-    # checkpoint_handler = tools.CheckpointHandler(
-    #     directory=args.checkpoints_dir, tag=tag, keep=args.keep_checkpoints
-    # )
-
-    start_epoch = 0
-    # if args.restart_latest:
-    #     opt_start_epoch = checkpoint_handler.load_latest(
-    #         state=tools.CheckpointState(model, optimizer, lr_scheduler), device=device
-    #     )
-    #     if opt_start_epoch is not None:
-    #         start_epoch = opt_start_epoch
-
-    logging.info(model)
     logging.info(f"Number of parameters: {tools.count_parameters(params)}")
-    logging.info(f"Optimizer: {gradient_transform}")
+    logging.info(
+        f"Number of parameters in optimizer: {tools.count_parameters(optimizer_state)}"
+    )
 
-    params, optimizer_state = tools.train(
-        model=jax.jit(model.apply),
+    @jax.jit
+    def energy_forces_predictor(w, graph: jraph.GraphsTuple) -> Dict[str, jnp.ndarray]:
+        def energy_fn(positions):
+            vectors = tools.get_edge_relative_vectors(
+                positions=positions,
+                senders=graph.senders,
+                receivers=graph.receivers,
+                shifts=graph.edges.shifts,
+                cell=graph.globals.cell,
+                n_edge=graph.n_edge,
+            )
+            node_energies = model_fn(
+                w, vectors, graph.nodes.attrs, graph.senders, graph.receivers
+            )  # [n_nodes, ]
+            return jnp.sum(node_energies), node_energies
+
+        minus_forces, node_energies = jax.grad(energy_fn, has_aux=True)(
+            graph.nodes.positions
+        )
+
+        graph_energies = modules.sum_nodes_of_the_same_graph(
+            graph, node_energies
+        )  # [ n_graphs,]
+
+        return {
+            "energy": graph_energies,  # [n_graphs,]
+            "forces": -minus_forces,  # [n_nodes, 3]
+        }
+
+    epoch, params = train(
+        energy_forces_predictor,
+        params,
+        optimizer_state,
+        train_loader,
+        valid_loader,
+        gradient_transform,
+        max_num_epochs,
+        logger,
+    )
+
+    with open(f"{directory}/{tag}.pkl", "wb") as f:
+        pickle.dump(gin.operative_config_str(), f)
+        pickle.dump(params, f)
+
+    test_loss, eval_metrics = tools.evaluate(
+        model=energy_forces_predictor,
+        params=params,
+        loss_fn=loss(),
+        data_loader=test_loader,
+    )
+    eval_metrics["mode"] = "test"
+    eval_metrics["epoch"] = epoch
+    logger.log(eval_metrics)
+
+    error_e = eval_metrics["rmse_e_per_atom"] * 1e3
+    error_f = eval_metrics["rmse_f"] * 1e3
+    logging.info(
+        f"Final Test loss={test_loss:.4f}, RMSE_E_per_atom={error_e:.1f} meV, RMSE_F={error_f:.1f} meV / A"
+    )
+
+
+loss = gin.configurable("loss")(modules.WeightedEnergyForcesLoss)
+
+
+@gin.configurable
+def train(
+    model,
+    params,
+    optimizer_state,
+    train_loader,
+    valid_loader,
+    gradient_transform,
+    max_num_epochs,
+    logger,
+    patience: int,
+    eval_train: bool,
+    eval_interval: int = 1,
+    log_errors: str = "PerAtomRMSE",
+    **kwargs,
+):
+    lowest_loss = np.inf
+    patience_counter = 0
+    loss_fn = loss()
+    start_time = time.perf_counter()
+
+    for epoch, params, optimizer_state, ema_params in tools.train(
+        model=model,
         params=params,
         loss_fn=loss_fn,
         train_loader=train_loader,
-        valid_loader=valid_loader,
         gradient_transform=gradient_transform,
         optimizer_state=optimizer_state,
-        # checkpoint_handler=checkpoint_handler,
-        eval_interval=args.eval_interval,
-        start_epoch=start_epoch,
-        max_num_epochs=args.max_num_epochs,
+        start_epoch=0,
+        max_num_epochs=max_num_epochs,
         logger=logger,
-        patience=args.patience,
-        ema_decay=args.ema_decay,
-        max_grad_norm=args.clip_grad,
-        log_errors=args.error_table,
-    )
+        **kwargs,
+    ):
+        profile_nn_jax.restart_timer()
 
-    # epoch = checkpoint_handler.load_latest(
-    #     state=tools.CheckpointState(model, optimizer, lr_scheduler), device=device
-    # )
-    # logging.info(f"Loaded model from epoch {epoch}")
+        if epoch % eval_interval == 0:
+            if eval_train:
+                valid_loss, eval_metrics = tools.evaluate(
+                    model=model,
+                    params=ema_params,
+                    loss_fn=loss_fn,
+                    data_loader=train_loader,
+                )
+                eval_metrics["mode"] = "eval_train"
+                eval_metrics["epoch"] = epoch
+                logger.log(eval_metrics)
 
-    # Evaluation on test datasets
-    logging.info("Computing metrics for training, validation, and test sets")
+            valid_loss, eval_metrics = tools.evaluate(
+                model=model,
+                params=ema_params,
+                loss_fn=loss_fn,
+                data_loader=valid_loader,
+            )
+            eval_metrics["mode"] = "eval"
+            eval_metrics["epoch"] = epoch
+            logger.log(eval_metrics)
 
-    all_collections = [
-        ("train", collections.train),
-        ("valid", collections.valid),
-    ] + collections.tests
+            avg_time_per_epoch = (time.perf_counter() - start_time) / (epoch + 1)
 
-    table = create_error_table(
-        args.error_table,
-        all_collections,
-        z_table,
-        args.r_max,
-        args.valid_batch_size,
-        model,
-        loss_fn,
-        params,
-    )
+            if log_errors == "PerAtomRMSE":
+                error_e = "rmse_e_per_atom"
+                error_f = "rmse_f"
+            elif log_errors == "TotalRMSE":
+                error_e = "rmse_e"
+                error_f = "rmse_f"
+            elif log_errors == "PerAtomMAE":
+                error_e = "mae_e_per_atom"
+                error_f = "mae_f"
+            elif log_errors == "TotalMAE":
+                error_e = "mae_e"
+                error_f = "mae_f"
 
-    logging.info("\n" + str(table))
+            logging.info(
+                f"Epoch {epoch}: Validation: "
+                f"avg_time_per_epoch={avg_time_per_epoch:.1f}s "
+                f"loss={valid_loss:.4f}, "
+                f"{error_e}={1e3 * eval_metrics[error_e]:.1f} meV, "
+                f"{error_f}={1e3 * eval_metrics[error_f]:.1f} meV/A"
+            )
 
-    # Save entire model
-    model_path = os.path.join(args.checkpoints_dir, tag + ".model")
-    logging.info(f"Saving model to {model_path}")
-    if args.save_cpu:
-        model = model.to("cpu")
-    torch.save(model, model_path)
+            if valid_loss >= lowest_loss:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    logging.info(
+                        f"Stopping optimization after {patience_counter} epochs without improvement"
+                    )
+                    break
+            else:
+                lowest_loss = valid_loss
+                patience_counter = 0
 
-    logging.info("Done")
+    logging.info("Training complete")
+    return epoch, ema_params
 
 
 if __name__ == "__main__":
+    for arg in sys.argv[1:]:
+        if arg.endswith(".gin"):
+            gin.parse_config_file(arg)
+        elif arg.startswith("--"):
+            gin.parse_config(arg[2:])
+        else:
+            raise ValueError(
+                f"Unknown argument: '{arg}'. Expected a .gin file or a --key=value pair."
+            )
     main()
