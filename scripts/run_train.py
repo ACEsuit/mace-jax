@@ -13,7 +13,6 @@ import jax.numpy as jnp
 import jraph
 import numpy as np
 import optax
-import profile_nn_jax
 from unique_names_generator import get_random_name
 from unique_names_generator.data import ADJECTIVES, NAMES
 
@@ -32,6 +31,8 @@ def flags(debug: bool, dtype: str, seed: int, profile: bool = False):
     tools.set_default_dtype(dtype)
     tools.set_seeds(seed)
     if profile:
+        import profile_nn_jax
+
         profile_nn_jax.enable(timing=True, statistics=True)
     return seed
 
@@ -43,14 +44,15 @@ def logs(
     directory: str = "results",
 ):
     date = datetime.datetime.now().strftime("%Y%m%d_%H%M")
-    uid = get_random_name(separator="-", style="lowercase", combo=[ADJECTIVES, NAMES])
 
     if name is None:
-        tag = f"{date}_{uid}"
-    else:
-        tag = f"{date}_{name}_{uid}"
+        name = get_random_name(
+            separator="-", style="lowercase", combo=[ADJECTIVES, NAMES]
+        )
 
-    tools.setup_logger(level, directory=directory, filename=f"{tag}.log", uid=uid)
+    tag = f"{date}_{name}"
+
+    tools.setup_logger(level, directory=directory, filename=f"{tag}.log", uid=name)
     logger = tools.MetricsLogger(directory=directory, filename=f"{tag}.metrics")
 
     return directory, tag, logger
@@ -478,7 +480,12 @@ def train(
         logger=logger,
         **kwargs,
     ):
-        profile_nn_jax.restart_timer()
+        try:
+            import profile_nn_jax
+        except ImportError:
+            pass
+        else:
+            profile_nn_jax.restart_timer()
 
         if epoch % eval_interval == 0:
             if eval_train:
