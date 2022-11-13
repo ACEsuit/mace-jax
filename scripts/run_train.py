@@ -14,11 +14,11 @@ from mace_jax.tools.gin_functions import (
     datasets,
     flags,
     logs,
+    loss,
     model,
     optimizer,
     reload,
     train,
-    loss,
 )
 
 
@@ -33,11 +33,9 @@ def main():
     logging.info(f"MACE version: {mace_jax.__version__}")
 
     dd = datasets()
-    train_loader, valid_loader, test_loader = (
-        dd["train_loader"],
-        dd["valid_loader"],
-        dd["test_loader"],
-    )
+    train_loader = dd["train_loader"]
+    valid_loader = dd["valid_loader"]
+    test_loader = dd["test_loader"]
 
     model_fn, params, num_message_passing = model(
         seed,
