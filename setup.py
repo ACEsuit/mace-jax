@@ -32,11 +32,15 @@ setup(
     url="https://github.com/ilyes319/mace-jax",
     packages=find_packages(exclude=["tests"]),
     install_requires=[
+        "torch",
         "e3nn_jax",
         "numpy",
         "ase",
         "prettytable",
         "roundmantissa",
+        "jraph",
+        "gin-config",
+        "unique_names_generator",
         # for plotting:
         "matplotlib",
         "pandas",

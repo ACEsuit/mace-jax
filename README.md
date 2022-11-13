@@ -5,15 +5,9 @@ Mario Geiger and Ilyes Batatia.
 
 ## Installation
 
-Requirements: TODO
-
-### conda installation
-
-TODO
-
-### pip installation
-
-TODO
+```sh
+pip install . -v
+```
 
 ## Usage
 
@@ -22,7 +16,7 @@ TODO
 To train a MACE model, you can use the `run_train.py` script:
 
 ```sh
-python ./mace-jax/scripts/run_train.py ./mace-jax/scripts/config.gin
+python ./mace-jax/scripts/run_train.py ./mace-jax/configs/aspirin.gin
 ```
 
 To control the model's size, you need to change `model.hidden_irreps`. For most applications, the recommended default model size is `model.hidden_irreps='256x0e'` (meaning 256 invariant messages) or `model.hidden_irreps='128x0e + 128x1o'`. If the model is not accurate enough, you can include higher order features, e.g., `128x0e + 128x1o + 128x2e`, or increase the number of channels to `256`.
