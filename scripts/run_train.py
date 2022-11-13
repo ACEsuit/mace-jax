@@ -193,6 +193,7 @@ def model(
     num_interactions=3,
     path_normalization="element",
     gradient_normalization="element",
+    learnable_atomic_energies=False,
     **kwargs,
 ):
     if avg_num_neighbors is None:
@@ -232,12 +233,16 @@ def model(
         )
     elif atomic_energies == "zero":
         logging.info("Not using atomic energies")
-        atomic_energies = None
+        atomic_energies = np.zeros(num_species)
     else:
         logging.info(
             f"Use Atomic Energies that are provided: {atomic_energies.tolist()}"
         )
-        assert len(atomic_energies) == num_species
+        if atomic_energies.shape != (num_species,):
+            logging.error(
+                f"atomic_energies.shape={atomic_energies.shape} != (num_species={num_species},)"
+            )
+            raise ValueError
 
     @hk.without_apply_rng
     @hk.transform
@@ -274,8 +279,17 @@ def model(
         )  # [n_nodes, num_interactions, 0e]
         contributions = contributions.array[:, :, 0]  # [n_nodes, num_interactions]
         node_energies = jnp.sum(contributions, axis=1)  # [n_nodes, ]
-        if atomic_energies is not None:
-            node_energies += jnp.asarray(atomic_energies)[node_z]
+
+        if learnable_atomic_energies:
+            atomic_energies_ = hk.get_parameter(
+                "atomic_energies",
+                shape=(num_species,),
+                init=hk.initializers.Constant(atomic_energies),
+            )
+        else:
+            atomic_energies_ = jnp.asarray(atomic_energies)
+        node_energies += atomic_energies_[node_z]  # [n_nodes, ]
+
         return node_energies
 
     params = jax.jit(model_.init)(
