@@ -379,12 +379,18 @@ def piecewise_constant_schedule(
     )
 
 
+gin.configurable("adam")(optax.scale_by_adam)
+gin.configurable("amsgrad")(tools.scale_by_amsgrad)
+gin.register("sgd")(optax.identity)
+
+
 @gin.configurable
 def optimizer(
     steps_per_epoch: int,
     weight_decay=0.0,
     lr=0.01,
     max_num_epochs: int = 2048,
+    algorithm: Callable = optax.scale_by_adam,
     scheduler=None,
 ):
     def weight_decay_mask(params):
@@ -406,8 +412,7 @@ def optimizer(
 
     return (
         optax.chain(
-            # # optax.clip_by_global_norm(np.inf if clip_grad is None else clip_grad),
-            # tools.scale_by_amsgrad() if amsgrad else optax.scale_by_adam(),
+            algorithm(),
             optax.scale_by_adam(),
             optax.add_decayed_weights(weight_decay, mask=weight_decay_mask),
             optax.scale_by_schedule(scheduler(lr, steps_per_epoch)),
