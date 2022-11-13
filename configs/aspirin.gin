@@ -16,7 +16,12 @@ datasets.valid_batch_size = 10
 
 
 
-model.num_bessel = 8
+model.radial_basis = @bessel_basis
+bessel_basis.number = 8
+
+model.radial_envelope = @u_envelope
+u_envelope.p = 5
+
 model.max_ell = 3
 model.num_interactions = 2
 model.hidden_irreps = "32x0e + 16x1o"  # will be converted into num_features=16 and hidden_irreps="2x0e + 1x1o"
@@ -24,8 +29,6 @@ model.epsilon = 0.03  # the coefficient applied right before the EquivariantProd
 model.correlation = 3
 model.gate = @silu
 model.readout_mlp_irreps = "16x0e"
-model.num_deriv_in_zero = 6  # = p - 1  to use the u_p polynomial
-model.num_deriv_in_one = 2  # = 2  to use the u_p polynomial
 model.num_species = 119
 model.path_normalization = "element"  # "element" or "path", it affects the weights when mixing the different paths
 model.gradient_normalization = "element"  # "element" or "path", it affects the relative learning rate of the parameters

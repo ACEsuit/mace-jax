@@ -190,6 +190,28 @@ def constant_scaling(train_loader, atomic_energies, *, mean=0.0, std=1.0):
 
 
 @gin.configurable
+def bessel_basis(length, number: int):
+    return e3nn.bessel(length, number)
+
+
+@gin.configurable
+def soft_envelope(length, arg_multiplicator: float = 2.0, value_at_origin: float = 1.2):
+    return e3nn.soft_envelope(
+        length, arg_multiplicator=arg_multiplicator, value_at_origin=value_at_origin
+    )
+
+
+@gin.configurable
+def polynomial_envelope(length, degree0: int, degree1: int):
+    return e3nn.poly_envelope(degree0, degree1)(length)
+
+
+@gin.configurable
+def u_envelope(length, p: int):
+    return e3nn.poly_envelope(p - 1, 2)(length)
+
+
+@gin.configurable
 def model(
     seed: int,
     r_max: float,
@@ -207,6 +229,8 @@ def model(
     path_normalization="element",
     gradient_normalization="element",
     learnable_atomic_energies=False,
+    radial_basis: Callable[[jnp.ndarray], jnp.ndarray] = bessel_basis,
+    radial_envelope: Callable[[jnp.ndarray], jnp.ndarray] = soft_envelope,
     **kwargs,
 ):
     if avg_num_neighbors is None:
@@ -283,6 +307,8 @@ def model(
             num_interactions=num_interactions,
             avg_r_min=avg_r_min,
             num_species=num_species,
+            radial_basis=radial_basis,
+            radial_envelope=radial_envelope,
             **kwargs,
         )
 

@@ -85,42 +85,29 @@ class RadialEmbeddingBlock:
         self,
         *,
         r_max: float,
-        num_bessel: int,
-        num_deriv_in_zero: Optional[int],
-        num_deriv_in_one: Optional[int],
         avg_r_min: float = 0.0,
+        basis_functions: Callable[[jnp.ndarray], jnp.ndarray],
+        envelope_function: Callable[[jnp.ndarray], jnp.ndarray],
     ):
-        self.num_bessel = num_bessel
         self.r_max = r_max
-        self.num_deriv_in_zero = num_deriv_in_zero
-        self.num_deriv_in_one = num_deriv_in_one
         self.avg_r_min = avg_r_min
+        self.basis_functions = basis_functions
+        self.envelope_function = envelope_function
 
     def __call__(
         self,
-        edge_lengths: jnp.ndarray,  # [n_edges, 1]
-    ) -> jnp.ndarray:  # [n_edges, num_bessel]
+        edge_lengths: jnp.ndarray,  # [n_edges]
+    ) -> jnp.ndarray:  # [n_edges, num_basis]
         def func(lengths):
-            bessel = e3nn.bessel(
-                lengths[..., 0], self.num_bessel, x_max=self.r_max
-            )  # [n_edges, num_bessel]
-
-            if self.num_deriv_in_zero is None and self.num_deriv_in_one is None:
-                cutoff = e3nn.soft_envelope(lengths, x_max=self.r_max)  # [n_edges, 1]
-            else:
-                cutoff = e3nn.poly_envelope(
-                    self.num_deriv_in_zero, self.num_deriv_in_one, x_max=self.r_max
-                )(
-                    lengths
-                )  # [n_edges, 1]
-
-            return bessel * cutoff  # [n_edges, num_bessel]
+            basis = self.basis_functions(lengths / self.r_max)  # [n_edges, num_basis]
+            cutoff = self.envelope_function(lengths / self.r_max)  # [n_edges]
+            return basis * cutoff[:, None]  # [n_edges, num_basis]
 
         with jax.ensure_compile_time_eval():
-            samples = jnp.linspace(self.avg_r_min, self.r_max, 1000).reshape(-1, 1)
+            samples = jnp.linspace(self.avg_r_min, self.r_max, 1000)
             factor = jnp.mean(func(samples) ** 2) ** -0.5
 
-        return factor * func(edge_lengths)  # [n_edges, num_bessel]
+        return factor * func(edge_lengths)  # [n_edges, num_basis]
 
 
 class EquivariantProductBasisBlock(hk.Module):

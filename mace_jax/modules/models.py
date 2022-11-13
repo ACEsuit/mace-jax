@@ -38,9 +38,8 @@ class GeneralMACE(hk.Module):
         avg_num_neighbors: float,
         num_species: int,
         avg_r_min: float = 0.0,
-        num_bessel: int = 8,  # Number of Bessel functions, default 8
-        num_deriv_in_zero: Optional[int] = None,
-        num_deriv_in_one: Optional[int] = None,
+        radial_basis: Callable[[jnp.ndarray], jnp.ndarray],
+        radial_envelope: Callable[[jnp.ndarray], jnp.ndarray],
         # Number of zero derivatives at small and large distances, default 4 and 2
         # If both are None, it uses a smooth C^inf envelope function
         max_ell: int = 3,  # Max spherical harmonic degree, default 3
@@ -82,10 +81,9 @@ class GeneralMACE(hk.Module):
         )
         self.radial_embedding = RadialEmbeddingBlock(
             r_max=r_max,
-            num_bessel=num_bessel,
-            num_deriv_in_zero=num_deriv_in_zero,
-            num_deriv_in_one=num_deriv_in_one,
             avg_r_min=avg_r_min,
+            basis_functions=radial_basis,
+            envelope_function=radial_envelope,
         )
 
     def __call__(
@@ -108,10 +106,10 @@ class GeneralMACE(hk.Module):
 
         # TODO (mario): use jax_md formalism to compute the relative vectors and lengths
 
-        lengths = safe_norm(vectors, axis=-1, keepdims=True)
+        lengths = safe_norm(vectors, axis=-1)
         edge_attrs = e3nn.spherical_harmonics(
             self.sh_irreps,
-            vectors / lengths,
+            vectors / lengths[..., None],
             normalize=False,
             normalization="component",
         )
