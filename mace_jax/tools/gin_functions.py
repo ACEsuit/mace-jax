@@ -379,6 +379,11 @@ def piecewise_constant_schedule(
     )
 
 
+@gin.register
+def constant_schedule(lr, steps_per_epoch):
+    return optax.constant_schedule(lr)
+
+
 gin.configurable("adam")(optax.scale_by_adam)
 gin.configurable("amsgrad")(tools.scale_by_amsgrad)
 gin.register("sgd")(optax.identity)
@@ -391,7 +396,7 @@ def optimizer(
     lr=0.01,
     max_num_epochs: int = 2048,
     algorithm: Callable = optax.scale_by_adam,
-    scheduler=None,
+    scheduler: Callable = constant_schedule,
 ):
     def weight_decay_mask(params):
         params = tools.flatten_dict(params)
@@ -404,11 +409,6 @@ def optimizer(
         assert any(any(("linear_postmp" in ki) for ki in k) for k in params)
         assert any(any(("symmetric_contraction" in ki) for ki in k) for k in params)
         return tools.unflatten_dict(mask)
-
-    if scheduler is None:
-
-        def scheduler(lr, steps_per_epoch):
-            return lambda count: lr
 
     return (
         optax.chain(
