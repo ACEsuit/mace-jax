@@ -1,9 +1,7 @@
 import argparse
-import dataclasses
 import glob
 import json
 import os
-import re
 from typing import List
 
 import matplotlib.pyplot as plt
@@ -29,37 +27,13 @@ colors = [
 ]
 
 
-@dataclasses.dataclass
-class RunInfo:
-    name: str
-    day: int
-    hour: int
-
-
-name_re = re.compile(r"(?P<day>\d+)_(?P<hour>\d+)_(?P<name>[a-z\-]+).metrics")
-
-
-def parse_path(path: str) -> RunInfo:
-    match = name_re.match(os.path.basename(path))
-    if not match:
-        raise RuntimeError(f"Cannot parse {path}")
-
-    return RunInfo(
-        name=match.group("name"),
-        day=int(match.group("day")),
-        hour=int(match.group("hour")),
-    )
-
-
 def parse_training_results(path: str) -> List[dict]:
-    run_info = parse_path(path)
     results = []
     with open(path, mode="r", encoding="utf-8") as f:
         for line in f:
             d = json.loads(line)
-            d["name"] = run_info.name
-            d["day"] = run_info.day
-            d["hour"] = run_info.hour
+            d["path"] = os.path.dirname(path)
+            d["name"] = os.path.basename(path).split(".")[0]
             results.append(d)
 
     return results
@@ -79,7 +53,11 @@ def parse_args() -> argparse.Namespace:
 def plot(data: pd.DataFrame, min_epoch: int, output_path: str) -> None:
     data = data[data["epoch"] > min_epoch]
 
-    data = data.groupby(["name", "mode", "epoch"]).agg([np.mean, np.std]).reset_index()
+    data = (
+        data.groupby(["path", "name", "mode", "epoch"])
+        .agg([np.mean, np.std])
+        .reset_index()
+    )
 
     valid_data = data[data["mode"] == "eval"]
     train_data = data[data["mode"] == "opt"]
@@ -168,7 +146,7 @@ def plot(data: pd.DataFrame, min_epoch: int, output_path: str) -> None:
 def get_paths(path: str) -> List[str]:
     if os.path.isfile(path):
         return [path]
-    paths = glob.glob(os.path.join(path, "*_train.txt"))
+    paths = glob.glob(os.path.join(path, "*.metrics"))
 
     if len(paths) == 0:
         raise RuntimeError(f"Cannot find results in '{path}'")
@@ -184,8 +162,8 @@ def main():
         for results in parse_training_results(path)
     )
 
-    for name, group in data.groupby(["name"]):
-        plot(group, min_epoch=args.min_epoch, output_path=f"{name}.pdf")
+    for (path, name), group in data.groupby(["path", "name"]):
+        plot(group, min_epoch=args.min_epoch, output_path=f"{path}/{name}.pdf")
 
 
 if __name__ == "__main__":
