@@ -467,6 +467,7 @@ def train(
     patience_counter = 0
     loss_fn = loss()
     start_time = time.perf_counter()
+    time_per_epoch = []
 
     for epoch, params, optimizer_state, ema_params in tools.train(
         model=model,
@@ -480,6 +481,9 @@ def train(
         logger=logger,
         **kwargs,
     ):
+        time_per_epoch += [time.perf_counter() - start_time]
+        start_time = time.perf_counter()
+
         try:
             import profile_nn_jax
         except ImportError:
@@ -509,7 +513,7 @@ def train(
             eval_metrics["epoch"] = epoch
             logger.log(eval_metrics)
 
-            avg_time_per_epoch = (time.perf_counter() - start_time) / (epoch + 1)
+            avg_time_per_epoch = np.mean(time_per_epoch[-4 * eval_interval :])
 
             if log_errors == "PerAtomRMSE":
                 error_e = "rmse_e_per_atom"
