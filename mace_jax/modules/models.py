@@ -37,6 +37,7 @@ class GeneralMACE(hk.Module):
         readout_mlp_irreps: e3nn.Irreps,  # Hidden irreps of the MLP in last readout, default 16x0e
         avg_num_neighbors: float,
         num_species: int,
+        num_features: int = None,  # Number of features per node, default gcd of hidden_irreps multiplicities
         avg_r_min: float = 0.0,
         radial_basis: Callable[[jnp.ndarray], jnp.ndarray],
         radial_envelope: Callable[[jnp.ndarray], jnp.ndarray],
@@ -54,14 +55,18 @@ class GeneralMACE(hk.Module):
         hidden_irreps = e3nn.Irreps(hidden_irreps)
         readout_mlp_irreps = e3nn.Irreps(readout_mlp_irreps)
 
-        self.num_features = functools.reduce(
-            math.gcd, (mul for mul, _ in hidden_irreps)
-        )
+        if num_features is None:
+            self.num_features = functools.reduce(
+                math.gcd, (mul for mul, _ in hidden_irreps)
+            )
+            self.hidden_irreps = e3nn.Irreps(
+                [(mul // self.num_features, ir) for mul, ir in hidden_irreps]
+            )
+        else:
+            self.num_features = num_features
+            self.hidden_irreps = hidden_irreps
 
         self.sh_irreps = e3nn.Irreps.spherical_harmonics(max_ell)
-        self.hidden_irreps = e3nn.Irreps(
-            [(mul // self.num_features, ir) for mul, ir in hidden_irreps]
-        )
         self.interaction_irreps = e3nn.Irreps(e3nn.Irrep.iterator(max_ell))
 
         self.r_max = r_max
