@@ -59,6 +59,7 @@ def set_default_dtype(dtype: str) -> None:
 
 def pad_graph_to_nearest_ceil_mantissa(
     graphs_tuple: jraph.GraphsTuple,
+    n_mantissa_bits: int = 2,
 ) -> jraph.GraphsTuple:
     """Pads a batched `GraphsTuple` to the nearest power of two.
 
@@ -79,11 +80,10 @@ def pad_graph_to_nearest_ceil_mantissa(
         A graphs_tuple batched to the nearest power of two.
     """
     # Add 1 since we need at least one padding node for pad_with_graphs.
-    pad_nodes_to = ceil_mantissa(jnp.sum(graphs_tuple.n_node) + 1, 2)
-    pad_edges_to = ceil_mantissa(jnp.sum(graphs_tuple.n_edge), 2)
+    pad_nodes_to = ceil_mantissa(jnp.sum(graphs_tuple.n_node) + 1, n_mantissa_bits)
+    pad_edges_to = ceil_mantissa(jnp.sum(graphs_tuple.n_edge), n_mantissa_bits)
     # Add 1 since we need at least one padding graph for pad_with_graphs.
-    # We do not pad to nearest power of two because the batch size is fixed.
-    pad_graphs_to = graphs_tuple.n_node.shape[0] + 1
+    pad_graphs_to = ceil_mantissa(graphs_tuple.n_node.shape[0] + 1, n_mantissa_bits)
     return jraph.pad_with_graphs(
         graphs_tuple, pad_nodes_to, pad_edges_to, pad_graphs_to
     )
@@ -114,9 +114,11 @@ def get_jraph_graph_from_pyg(batch):
     )
 
 
-def get_batched_padded_graph_tuples(batch):
+def get_batched_padded_graph_tuples(batch, n_mantissa_bits: int = 2):
     graphs = get_jraph_graph_from_pyg(batch)
-    graphs = pad_graph_to_nearest_ceil_mantissa(graphs)  # padd the whole batch once
+    graphs = pad_graph_to_nearest_ceil_mantissa(
+        graphs, n_mantissa_bits
+    )  # padd the whole batch once
     return graphs
 
 

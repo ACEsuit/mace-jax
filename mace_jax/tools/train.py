@@ -31,6 +31,7 @@ def train(
     max_num_epochs: int,
     logger: MetricsLogger,
     ema_decay: Optional[float] = None,
+    n_mantissa_bits: int = 2,
 ):
     num_updates = 0
     ema_params = params
@@ -67,7 +68,7 @@ def train(
         # Train one epoch
         for batch in train_loader:
 
-            graph = get_batched_padded_graph_tuples(batch)
+            graph = get_batched_padded_graph_tuples(batch, n_mantissa_bits)
             num_updates += 1
             start_time = time.time()
             loss, params, optimizer_state, ema_params = update_fn(
@@ -104,6 +105,7 @@ def evaluate(
     params: Any,
     loss_fn: Any,
     data_loader: DataLoader,
+    n_mantissa_bits: int = 2,
 ) -> Tuple[float, Dict[str, Any]]:
     total_loss = 0.0
     delta_es_list = []
@@ -113,7 +115,7 @@ def evaluate(
 
     start_time = time.time()
     for batch in data_loader:
-        ref_graph = get_batched_padded_graph_tuples(batch)
+        ref_graph = get_batched_padded_graph_tuples(batch, n_mantissa_bits)
 
         output = model(params, ref_graph)
         pred_graph = ref_graph._replace(
