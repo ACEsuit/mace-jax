@@ -4,21 +4,24 @@ import jraph
 from ..tools import sum_nodes_of_the_same_graph
 
 
+def _safe_divide(x, y):
+    return jnp.where(y == 0.0, 0.0, x / jnp.where(y == 0.0, 1.0, y))
+
+
 def weighted_mean_squared_error_energy(graph, energy_pred) -> jnp.ndarray:
     energy_ref = graph.globals.energy  # [n_graphs, ]
     return graph.globals.weight * jnp.square(
-        (energy_ref - energy_pred) / graph.n_node
+        _safe_divide(energy_ref - energy_pred, graph.n_node)
     )  # [n_graphs, ]
 
 
 def mean_squared_error_forces(graph, forces_pred) -> jnp.ndarray:
     forces_ref = graph.nodes.forces  # [n_nodes, 3]
-    return (
-        graph.globals.weight
-        * sum_nodes_of_the_same_graph(
+    return graph.globals.weight * _safe_divide(
+        sum_nodes_of_the_same_graph(
             graph, jnp.mean(jnp.square(forces_ref - forces_pred), axis=1)
-        )
-        / graph.n_node
+        ),
+        graph.n_node,
     )  # [n_graphs, ]
 
 
