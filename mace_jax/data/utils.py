@@ -87,6 +87,10 @@ def config_from_atoms(
         config_type_weights = DEFAULT_CONFIG_TYPE_WEIGHTS
 
     energy = atoms.info.get(energy_key, None)  # eV
+
+    if energy is None:
+        energy = 0.0
+
     forces = atoms.arrays.get(forces_key, None)  # eV / Ang
     atomic_numbers = np.array(
         [ase.data.atomic_numbers[symbol] for symbol in atoms.symbols]
