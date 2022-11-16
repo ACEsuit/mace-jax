@@ -83,7 +83,8 @@ def pad_graph_to_nearest_ceil_mantissa(
     pad_nodes_to = ceil_mantissa(jnp.sum(graphs_tuple.n_node) + 1, n_mantissa_bits)
     pad_edges_to = ceil_mantissa(jnp.sum(graphs_tuple.n_edge), n_mantissa_bits)
     # Add 1 since we need at least one padding graph for pad_with_graphs.
-    pad_graphs_to = ceil_mantissa(graphs_tuple.n_node.shape[0] + 1, n_mantissa_bits)
+    # pad_graphs_to = ceil_mantissa(graphs_tuple.n_node.shape[0] + 1, n_mantissa_bits)
+    pad_graphs_to = graphs_tuple.n_node.shape[0] + 1
     return jraph.pad_with_graphs(
         graphs_tuple, pad_nodes_to, pad_edges_to, pad_graphs_to
     )
@@ -302,7 +303,12 @@ def compute_avg_min_neighbor_distance(
     for batch in data_loader:
         pos = batch.positions
         senders, receivers = batch.edge_index
-        distances = torch.norm(pos[receivers] - pos[senders], dim=-1)
+        shift = torch.einsum(
+            "zi,zij->zj",
+            batch.shifts.type(batch.cell.dtype),
+            batch.cell[batch.batch][senders],
+        )
+        distances = torch.norm(pos[senders] + shift - pos[receivers], dim=-1)
         min_neighbor_distances.append(distances.min())
 
     avg_min_neighbor_distance = torch.mean(
