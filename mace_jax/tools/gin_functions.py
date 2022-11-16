@@ -75,7 +75,7 @@ def datasets(
     energy_key: str = "energy",
     forces_key: str = "forces",
     batch_size: int,
-    valid_batch_size: int,
+    valid_batch_size: int = None,
 ):
     """Load training and test dataset from xyz file"""
 
@@ -154,7 +154,7 @@ def datasets(
             data.AtomicData.from_config(valid_config, cutoff=r_max)
             for valid_config in valid_configs
         ],
-        batch_size=valid_batch_size,
+        batch_size=valid_batch_size or batch_size,
         shuffle=False,
         drop_last=False,
     )
@@ -163,7 +163,7 @@ def datasets(
             data.AtomicData.from_config(test_config, cutoff=r_max)
             for test_config in test_configs
         ],
-        batch_size=valid_batch_size,
+        batch_size=valid_batch_size or batch_size,
         shuffle=False,
         drop_last=False,
     )

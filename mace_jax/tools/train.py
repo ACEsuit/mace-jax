@@ -89,15 +89,13 @@ def train(
             if last_cache_size != update_fn._cache_size():
                 last_cache_size = update_fn._cache_size()
 
-                logging.info(f"Jitted update_fn cache size: {last_cache_size}")
-                logging.info(f"Compilation time: {opt_metrics['time']:.3f}s")
+                logging.info("Compiled function `update_fn` for args:")
+                logging.info(f"- n_node={graph.n_node} total={graph.n_node.sum()}")
+                logging.info(f"- n_edge={graph.n_edge} total={graph.n_edge.sum()}")
+                logging.info(f"Outout: loss= {loss:.3f}")
                 logging.info(
-                    f"Size of the graph: n_node={graph.n_node} total={graph.n_node.sum()}"
+                    f"Compilation time: {opt_metrics['time']:.3f}s, cache size: {last_cache_size}"
                 )
-                logging.info(
-                    f"Size of the graph: n_edge={graph.n_edge} total={graph.n_edge.sum()}"
-                )
-                logging.info(f"Value of the loss: {loss:.3f}")
 
 
 def evaluate(
