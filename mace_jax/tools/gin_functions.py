@@ -9,8 +9,10 @@ import gin
 import haiku as hk
 import jax
 import jax.numpy as jnp
+import jraph
 import numpy as np
 import optax
+from tqdm import tqdm
 from unique_names_generator import get_random_name
 from unique_names_generator.data import ADJECTIVES, NAMES
 
@@ -21,7 +23,12 @@ loss = gin.configurable("loss")(modules.WeightedEnergyForcesLoss)
 
 
 @gin.configurable
-def flags(debug: bool, dtype: str, seed: int, profile: bool = False):
+def flags(
+    debug: bool,
+    dtype: str,
+    seed: int,
+    profile: bool = False,
+):
     jax.config.update("jax_debug_nans", debug)
     jax.config.update("jax_debug_infs", debug)
     tools.set_default_dtype(dtype)
@@ -372,6 +379,36 @@ def reload(params, path=None):
 
 
 @gin.configurable
+def checks(
+    energy_forces_predictor, params, train_loader, *, enabled: bool = False
+) -> bool:
+    if not enabled:
+        return False
+
+    logging.info("We will check the normalization of the model and exit.")
+    energies = []
+    forces = []
+    for batch in tqdm(train_loader):
+        graph = tools.get_batched_padded_graph_tuples(batch, 0)
+        out = energy_forces_predictor(params, graph)
+        node_mask = jraph.get_node_padding_mask(graph)
+        graph_mask = jraph.get_graph_padding_mask(graph)
+        energies += [out["energy"][graph_mask]]
+        forces += [out["forces"][node_mask]]
+    en = jnp.concatenate(energies)
+    fo = jnp.concatenate(forces)
+    fo = jnp.linalg.norm(fo, axis=1)
+
+    logging.info(f"Energy: {jnp.mean(en):.3f} +/- {jnp.std(en):.3f}")
+    logging.info(f"        min/max: {jnp.min(en):.3f}/{jnp.max(en):.3f}")
+    logging.info(f"        median: {jnp.median(en):.3f}")
+    logging.info(f"Forces: {jnp.mean(fo):.3f} +/- {jnp.std(fo):.3f}")
+    logging.info(f"        min/max: {jnp.min(fo):.3f}/{jnp.max(fo):.3f}")
+    logging.info(f"        median: {jnp.median(fo):.3f}")
+    return True
+
+
+@gin.configurable
 def exponential_decay(
     lr: float,
     steps_per_epoch: int,
@@ -438,8 +475,8 @@ def optimizer(
 
     return (
         optax.chain(
-            algorithm(),
             optax.add_decayed_weights(weight_decay, mask=weight_decay_mask),
+            algorithm(),
             optax.scale_by_schedule(scheduler(lr, steps_per_epoch)),
             optax.scale(-1.0),  # Gradient descent.
         ),
