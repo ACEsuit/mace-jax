@@ -24,7 +24,7 @@ def get_neighborhood(
     # j = senders, i = receivers instead of the other way around
     # such that the receivers are always in the central cell.
     # This is important to propagate message passing towards the center which can be useful in some cases.
-    receiver, sender, unit_shifts = ase.neighborlist.primitive_neighbor_list(
+    receivers, senders, senders_unit_shifts = ase.neighborlist.primitive_neighbor_list(
         quantities="ijS",
         pbc=pbc,
         cell=cell,
@@ -36,19 +36,19 @@ def get_neighborhood(
 
     if not true_self_interaction:
         # Eliminate self-edges that don't cross periodic boundaries
-        true_self_edge = sender == receiver
-        true_self_edge &= np.all(unit_shifts == 0, axis=1)
+        true_self_edge = senders == receivers
+        true_self_edge &= np.all(senders_unit_shifts == 0, axis=1)
         keep_edge = ~true_self_edge
 
         # Note: after eliminating self-edges, it can be that no edges remain in this system
-        sender = sender[keep_edge]
-        receiver = receiver[keep_edge]
-        unit_shifts = unit_shifts[keep_edge]
+        senders = senders[keep_edge]
+        receivers = receivers[keep_edge]
+        senders_unit_shifts = senders_unit_shifts[keep_edge]
 
     # Build output
-    edge_index = np.stack((sender, receiver))  # [2, n_edges]
+    edge_index = np.stack((senders, receivers))  # [2, n_edges]
 
     # From the docs: With the shift vector S, the distances D between atoms can be computed from
     # D = positions[j]-positions[i]+S.dot(cell)
     # Note (mario): this is done in the function get_edge_relative_vectors
-    return edge_index, unit_shifts, cell
+    return edge_index, senders_unit_shifts, cell
