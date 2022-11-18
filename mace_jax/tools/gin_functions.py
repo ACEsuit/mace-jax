@@ -226,6 +226,7 @@ def model(
     train_loader=None,
     train_configs=None,
     z_table=None,
+    initialize: bool = True,
     *,
     scaling: Callable = None,
     atomic_energies: Union[str, np.ndarray] = None,
@@ -348,13 +349,17 @@ def model(
 
         return node_energies
 
-    params = jax.jit(model_.init)(
-        jax.random.PRNGKey(seed),
-        jnp.zeros((1, 3)),
-        jnp.array([16]),
-        jnp.array([0]),
-        jnp.array([0]),
-    )
+    if initialize:
+        params = jax.jit(model_.init)(
+            jax.random.PRNGKey(seed),
+            jnp.zeros((1, 3)),
+            jnp.array([16]),
+            jnp.array([0]),
+            jnp.array([0]),
+        )
+    else:
+        params = None
+
     return model_.apply, params, num_interactions
 
 
