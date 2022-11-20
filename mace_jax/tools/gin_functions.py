@@ -469,12 +469,10 @@ def optimizer(
     def weight_decay_mask(params):
         params = tools.flatten_dict(params)
         mask = {
-            k: any(
-                ("linear_postmp" in ki) or ("symmetric_contraction" in ki) for ki in k
-            )
+            k: any(("linear_down" in ki) or ("symmetric_contraction" in ki) for ki in k)
             for k in params
         }
-        assert any(any(("linear_postmp" in ki) for ki in k) for k in params)
+        assert any(any(("linear_down" in ki) for ki in k) for k in params)
         assert any(any(("symmetric_contraction" in ki) for ki in k) for k in params)
         return tools.unflatten_dict(mask)
 

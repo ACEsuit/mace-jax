@@ -36,7 +36,7 @@ class LinearNodeEmbeddingBlock(hk.Module):
 
         return e3nn.IrrepsArray.from_list(
             self.irreps_out, new_list, (node_specie.shape[0], self.num_features)
-        )
+        ).remove_nones()
 
 
 class LinearReadoutBlock(hk.Module):
@@ -141,22 +141,18 @@ class EquivariantProductBasisBlock(hk.Module):
         return e3nn.Linear(self.target_irreps, self.num_features)(node_feats)
 
 
-class AgnosticResidualInteractionBlock(hk.Module):
+class InteractionBlock(hk.Module):
     def __init__(
         self,
         *,
-        num_species: int,
         num_features: int,
         target_irreps: e3nn.Irreps,
-        hidden_irreps: e3nn.Irreps,
         avg_num_neighbors: float,
         activation: Callable,
     ) -> None:
         super().__init__()
-        self.num_species = num_species
         self.num_features = num_features
         self.target_irreps = target_irreps
-        self.hidden_irreps = hidden_irreps
         self.avg_num_neighbors = avg_num_neighbors
         self.activation = activation
 
@@ -172,38 +168,20 @@ class AgnosticResidualInteractionBlock(hk.Module):
         assert node_specie.ndim == 1
         assert node_feats.ndim == 3
 
-        sc = e3nn.Linear(
-            self.hidden_irreps,
-            self.num_features,
-            num_weights=self.num_species,
-            name="linear_sc",
-        )(
-            node_specie, node_feats
-        )  # [n_nodes, feature, hidden_irreps]
-
         node_feats = e3nn.Linear(
-            node_feats.irreps, self.num_features, name="linear_premp"
+            node_feats.irreps, self.num_features, name="linear_up"
         )(node_feats)
 
-        m = MessagePassingConvolution(
+        node_feats = MessagePassingConvolution(
             self.avg_num_neighbors, self.target_irreps, self.activation
-        )
-        node_feats = hk.vmap(
-            lambda x: m(x, edge_attrs, edge_feats, senders, receivers),
-            in_axes=1,
-            out_axes=1,
-            split_rng=False,
-        )(node_feats)
+        )(node_feats, edge_attrs, edge_feats, senders, receivers)
 
         node_feats = e3nn.Linear(
-            self.target_irreps, self.num_features, name="linear_postmp"
+            self.target_irreps, self.num_features, name="linear_down"
         )(node_feats)
 
         assert node_feats.ndim == 3
-        return (
-            node_feats,  # [n_nodes, feature, target_irreps]
-            sc,  # [n_nodes, feature, hidden_irreps]
-        )
+        return node_feats  # [n_nodes, feature, target_irreps]
 
 
 class ScaleShiftBlock(hk.Module):

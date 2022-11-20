@@ -11,7 +11,7 @@ import numpy as np
 
 from ..tools import get_edge_relative_vectors, safe_norm, sum_nodes_of_the_same_graph
 from .blocks import (
-    AgnosticResidualInteractionBlock,
+    InteractionBlock,
     EquivariantProductBasisBlock,
     LinearNodeEmbeddingBlock,
     LinearReadoutBlock,
@@ -51,6 +51,7 @@ class GeneralMACE(hk.Module):
     ):
         super().__init__()
 
+        assert max_poly_order is None, "max_poly_order is not implemented yet"
         output_irreps = e3nn.Irreps(output_irreps)
         hidden_irreps = e3nn.Irreps(hidden_irreps)
         readout_mlp_irreps = e3nn.Irreps(readout_mlp_irreps)
@@ -67,7 +68,10 @@ class GeneralMACE(hk.Module):
             self.hidden_irreps = hidden_irreps
 
         self.sh_irreps = e3nn.Irreps.spherical_harmonics(max_ell)
+
+        # TODO (mario): propose both
         self.interaction_irreps = e3nn.Irreps(e3nn.Irrep.iterator(max_ell))
+        self.interaction_irreps = e3nn.Irreps.spherical_harmonics(max_ell)
 
         self.r_max = r_max
         self.correlation = correlation
@@ -200,13 +204,21 @@ class MACELayer(hk.Module):
     ):
         node_feats = profile(f"{self.name}: node_feats", node_feats)
 
-        node_feats, sc = AgnosticResidualInteractionBlock(
+        if not self.first:
+            sc = e3nn.Linear(
+                self.hidden_irreps,
+                self.num_features,
+                num_weights=self.num_species,
+                name="skip_tp",
+            )(
+                node_specie, node_feats
+            )  # [n_nodes, feature, hidden_irreps]
+
+        node_feats = InteractionBlock(
             num_features=self.num_features,
             target_irreps=self.interaction_irreps,
-            hidden_irreps=self.hidden_irreps,
             avg_num_neighbors=self.avg_num_neighbors,
             activation=self.activation,
-            num_species=self.num_species,
         )(
             node_specie=node_specie,
             node_feats=node_feats,
@@ -219,7 +231,10 @@ class MACELayer(hk.Module):
         if self.first:
             # Selector TensorProduct
             node_feats = e3nn.Linear(
-                self.interaction_irreps, self.num_features, num_weights=self.num_species
+                self.interaction_irreps,
+                self.num_features,
+                num_weights=self.num_species,
+                name="skip_tp_first",
             )(node_specie, node_feats)
             sc = None
 

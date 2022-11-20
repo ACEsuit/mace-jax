@@ -1,5 +1,5 @@
 from .blocks import (
-    AgnosticResidualInteractionBlock,
+    InteractionBlock,
     EquivariantProductBasisBlock,
     LinearNodeEmbeddingBlock,
     LinearReadoutBlock,
@@ -13,7 +13,7 @@ from .models import MACE, GeneralMACE
 from .symmetric_contraction import SymmetricContraction
 
 __all__ = [
-    "AgnosticResidualInteractionBlock",
+    "InteractionBlock",
     "EquivariantProductBasisBlock",
     "LinearNodeEmbeddingBlock",
     "LinearReadoutBlock",
