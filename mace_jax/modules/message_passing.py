@@ -29,22 +29,29 @@ class MessagePassingConvolution(hk.Module):
         assert edge_attrs.ndim == 2
         assert edge_feats.ndim == 2
 
-        messages = e3nn.Linear(self.target_irreps, weights_per_channel=True)(
-            e3nn.MultiLayerPerceptron(
-                3 * [64], self.activation, output_activation=True
-            )(
-                edge_feats
-            ),  # [n_edges, 64]
-            e3nn.tensor_product(
-                node_feats[senders], edge_attrs[:, None, :]
-            ),  # [n_edges, feature, irreps]
+        messages = e3nn.tensor_product(
+            node_feats[senders], edge_attrs[:, None, :]
+        ).filter(
+            self.target_irreps
+        )  # [n_edges, feature, irreps]
+
+        mix = e3nn.MultiLayerPerceptron(
+            3 * [64] + [messages.shape[1] * messages.irreps.num_irreps],
+            self.activation,
+            output_activation=False,
+        )(
+            edge_feats
+        )  # [n_edges, feature * num_irreps]
+
+        mix = mix.mul_to_axis(messages.shape[1])  # [n_edges, feature, irreps]
+
+        messages = e3nn.elementwise_tensor_product(
+            messages, mix
         )  # [n_edges, feature, irreps]
 
         zeros = e3nn.IrrepsArray.zeros(
             messages.irreps, node_feats.shape[:1] + messages.shape[1:2], messages.dtype
         )
-        node_feats = zeros.at[receivers].add(messages) / jnp.sqrt(
-            self.avg_num_neighbors
-        )  # [n_nodes, feature, irreps]
+        node_feats = zeros.at[receivers].add(messages)  # [n_nodes, feature, irreps]
 
-        return node_feats
+        return node_feats / jnp.sqrt(self.avg_num_neighbors)

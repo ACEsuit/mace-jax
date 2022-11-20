@@ -197,25 +197,30 @@ def constant_scaling(train_loader, atomic_energies, *, mean=0.0, std=1.0):
 
 
 @gin.configurable
-def bessel_basis(length, number: int):
-    return e3nn.bessel(length, number)
+def bessel_basis(length, max_length, number: int):
+    return e3nn.bessel(length, number, max_length)
 
 
 @gin.configurable
-def soft_envelope(length, arg_multiplicator: float = 2.0, value_at_origin: float = 1.2):
+def soft_envelope(
+    length, max_length, arg_multiplicator: float = 2.0, value_at_origin: float = 1.2
+):
     return e3nn.soft_envelope(
-        length, arg_multiplicator=arg_multiplicator, value_at_origin=value_at_origin
+        length,
+        max_length,
+        arg_multiplicator=arg_multiplicator,
+        value_at_origin=value_at_origin,
     )
 
 
 @gin.configurable
-def polynomial_envelope(length, degree0: int, degree1: int):
-    return e3nn.poly_envelope(degree0, degree1)(length)
+def polynomial_envelope(length, max_length, degree0: int, degree1: int):
+    return e3nn.poly_envelope(degree0, degree1, max_length)(length)
 
 
 @gin.configurable
-def u_envelope(length, p: int):
-    return e3nn.poly_envelope(p - 1, 2)(length)
+def u_envelope(length, max_length, p: int):
+    return e3nn.poly_envelope(p - 1, 2, max_length)(length)
 
 
 @gin.configurable
@@ -249,9 +254,11 @@ def model(
     else:
         logging.info(f"Use the average number of neighbors: {avg_num_neighbors:.3f}")
 
-    if avg_r_min is None:
+    if avg_r_min == "average":
         avg_r_min = tools.compute_avg_min_neighbor_distance(train_loader)
         logging.info(f"Compute the average min neighbor distance: {avg_r_min:.3f}")
+    elif avg_r_min is None:
+        logging.info(f"Do not normalize the radial basis (avg_r_min=None)")
     else:
         logging.info(f"Use the average min neighbor distance: {avg_r_min:.3f}")
 

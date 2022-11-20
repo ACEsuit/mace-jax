@@ -38,13 +38,13 @@ class GeneralMACE(hk.Module):
         avg_num_neighbors: float,
         num_species: int,
         num_features: int = None,  # Number of features per node, default gcd of hidden_irreps multiplicities
-        avg_r_min: float = 0.0,
+        avg_r_min: float = None,
         radial_basis: Callable[[jnp.ndarray], jnp.ndarray],
         radial_envelope: Callable[[jnp.ndarray], jnp.ndarray],
         # Number of zero derivatives at small and large distances, default 4 and 2
         # If both are None, it uses a smooth C^inf envelope function
         max_ell: int = 3,  # Max spherical harmonic degree, default 3
-        epsilon: Optional[float] = 0.5,
+        epsilon: Optional[float] = None,
         correlation: int = 3,  # Correlation order at each layer (~ node_features^correlation), default 3
         max_poly_order: Optional[int] = None,  # TODO (mario): implement it back?
         gate: Callable = jax.nn.silu,  # activation function
@@ -133,12 +133,21 @@ class GeneralMACE(hk.Module):
         # Interactions
         outputs = []
         for i in range(self.num_interactions):
+            first = i == 0
+            last = i == self.num_interactions - 1
+
+            hidden_irreps = (
+                self.hidden_irreps
+                if not last
+                else self.hidden_irreps.filter(self.output_irreps)
+            )
+
             node_outputs, node_feats = MACELayer(
-                first=i == 0,
-                last=i == self.num_interactions - 1,
+                first=first,
+                last=last,
                 num_features=self.num_features,
                 interaction_irreps=self.interaction_irreps,
-                hidden_irreps=self.hidden_irreps,
+                hidden_irreps=hidden_irreps,
                 avg_num_neighbors=self.avg_num_neighbors,
                 activation=self.activation,
                 num_species=self.num_species,
@@ -204,6 +213,7 @@ class MACELayer(hk.Module):
     ):
         node_feats = profile(f"{self.name}: node_feats", node_feats)
 
+        sc = None
         if not self.first:
             sc = e3nn.Linear(
                 self.hidden_irreps,
@@ -228,6 +238,11 @@ class MACELayer(hk.Module):
             senders=senders,
         )
 
+        if self.epsilon is not None:
+            node_feats *= self.epsilon
+        else:
+            node_feats /= jnp.sqrt(self.avg_num_neighbors)
+
         if self.first:
             # Selector TensorProduct
             node_feats = e3nn.Linear(
@@ -241,11 +256,6 @@ class MACELayer(hk.Module):
         node_feats = profile(f"{self.name}: node_feats after interaction", node_feats)
         if sc is not None:
             sc = profile(f"{self.name}: self-connexion", sc)
-
-        if self.epsilon is not None:
-            node_feats *= self.epsilon
-        else:
-            node_feats /= jnp.sqrt(self.avg_num_neighbors)
 
         # if self.max_poly_order is None:
         #     new_poly_order = self.correlation * (poly_order + self.sh_irreps.lmax)

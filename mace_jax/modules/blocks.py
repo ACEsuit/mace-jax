@@ -85,7 +85,7 @@ class RadialEmbeddingBlock:
         self,
         *,
         r_max: float,
-        avg_r_min: float = 0.0,
+        avg_r_min: Optional[float] = None,
         basis_functions: Callable[[jnp.ndarray], jnp.ndarray],
         envelope_function: Callable[[jnp.ndarray], jnp.ndarray],
     ):
@@ -99,13 +99,16 @@ class RadialEmbeddingBlock:
         edge_lengths: jnp.ndarray,  # [n_edges]
     ) -> jnp.ndarray:  # [n_edges, num_basis]
         def func(lengths):
-            basis = self.basis_functions(lengths / self.r_max)  # [n_edges, num_basis]
-            cutoff = self.envelope_function(lengths / self.r_max)  # [n_edges]
+            basis = self.basis_functions(lengths, self.r_max)  # [n_edges, num_basis]
+            cutoff = self.envelope_function(lengths, self.r_max)  # [n_edges]
             return basis * cutoff[:, None]  # [n_edges, num_basis]
 
         with jax.ensure_compile_time_eval():
-            samples = jnp.linspace(self.avg_r_min, self.r_max, 1000)
-            factor = jnp.mean(func(samples) ** 2) ** -0.5
+            if self.avg_r_min is None:
+                factor = 1.0
+            else:
+                samples = jnp.linspace(self.avg_r_min, self.r_max, 1000)
+                factor = jnp.mean(func(samples) ** 2) ** -0.5
 
         return factor * func(edge_lengths)  # [n_edges, num_basis]
 
@@ -129,6 +132,7 @@ class EquivariantProductBasisBlock(hk.Module):
             max_poly_order=max_poly_order,
             input_poly_order=input_poly_order,
             num_species=num_species,
+            gradient_normalization="element",  # NOTE: This is to copy mace-torch
         )
 
     def __call__(
