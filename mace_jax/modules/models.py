@@ -1,6 +1,6 @@
 import functools
 import math
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, Optional, Union
 
 import e3nn_jax as e3nn
 import haiku as hk
@@ -11,8 +11,8 @@ import numpy as np
 
 from ..tools import get_edge_relative_vectors, safe_norm, sum_nodes_of_the_same_graph
 from .blocks import (
-    InteractionBlock,
     EquivariantProductBasisBlock,
+    InteractionBlock,
     LinearNodeEmbeddingBlock,
     LinearReadoutBlock,
     NonLinearReadoutBlock,
@@ -49,6 +49,7 @@ class GeneralMACE(hk.Module):
         max_poly_order: Optional[int] = None,  # TODO (mario): implement it back?
         gate: Callable = jax.nn.silu,  # activation function
         symmetric_tensor_product_basis: bool = True,
+        interaction_irreps: Union[str, e3nn.Irreps] = "o3_restricted",  # or o3_full
     ):
         super().__init__()
 
@@ -70,9 +71,12 @@ class GeneralMACE(hk.Module):
 
         self.sh_irreps = e3nn.Irreps.spherical_harmonics(max_ell)
 
-        # TODO (mario): propose both
-        self.interaction_irreps = e3nn.Irreps(e3nn.Irrep.iterator(max_ell))
-        self.interaction_irreps = e3nn.Irreps.spherical_harmonics(max_ell)
+        if interaction_irreps == "o3_restricted":
+            self.interaction_irreps = e3nn.Irreps.spherical_harmonics(max_ell)
+        elif interaction_irreps == "o3_full":
+            self.interaction_irreps = e3nn.Irreps(e3nn.Irrep.iterator(max_ell))
+        else:
+            self.interaction_irreps = e3nn.Irreps(interaction_irreps)
 
         self.r_max = r_max
         self.correlation = correlation
@@ -114,8 +118,6 @@ class GeneralMACE(hk.Module):
         # poly_order = 0  # polynomial order in atom positions of the node features
         # NOTE: we assume hidden_irreps to be scalar only
         node_feats = profile("embedding: node_feats", node_feats)
-
-        # TODO (mario): use jax_md formalism to compute the relative vectors and lengths
 
         lengths = safe_norm(vectors, axis=-1)
         edge_attrs = e3nn.spherical_harmonics(
