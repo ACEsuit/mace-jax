@@ -11,7 +11,7 @@ datasets.test_path = "data/rmd17_aspirin_test.xyz"
 datasets.r_max = 5.0
 datasets.valid_fraction = 0.208
 datasets.batch_size = 5
-datasets.valid_batch_size = 10
+datasets.valid_batch_size = 20
 
 
 
@@ -24,7 +24,7 @@ u_envelope.p = 5
 model.max_ell = 3
 model.num_interactions = 2
 model.hidden_irreps = "256x0e + 256x1o"
-model.epsilon = 0.03  # the coefficient applied right before the EquivariantProductBasisBlock, if not specified, use 1.0 / sqrt(avg_num_neighbors)
+model.epsilon = None
 model.correlation = 3
 model.gate = @silu
 model.readout_mlp_irreps = "16x0e"
@@ -37,7 +37,8 @@ model.gradient_normalization = "path"  # "element" or "path", it affects the rel
 # gradient_normalization = "path"    =>  out = W @ path / sqrt(len(path))  with W initialized with stddev = 1
 # gradient_normalization="element" corresponds to the more traditional approach (e.g. in torch.nn.Linear or haiku.Linear)
 # In e3nn pytorch, the two options were "path" by default.
-
+model.atomic_energies = "average"
+model.avg_num_neighbors = "average"
 # model.atomic_energies = {
 #     1: -13.587222780835477,
 #     6: -1029.4889999855063,
@@ -58,8 +59,9 @@ optimizer.max_num_epochs = 2048
 #     1000: 0.1,  # divide the learning rate by 10 after 1000 epochs
 # }
 
-train.eval_interval = 2
+train.eval_interval = 5
 train.patience = 2048
 train.ema_decay = 0.99
-train.eval_train = False  # if True, evaluates the whole training set at each eval_interval
+train.eval_train = True  # if True, evaluates the whole training set at each eval_interval
+train.eval_test = True
 train.log_errors = "PerAtomMAE"

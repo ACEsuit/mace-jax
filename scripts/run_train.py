@@ -92,6 +92,7 @@ def main():
         optimizer_state,
         train_loader,
         valid_loader,
+        test_loader,
         gradient_transform,
         max_num_epochs,
         logger,

@@ -235,7 +235,7 @@ def model(
     *,
     scaling: Callable = None,
     atomic_energies: Union[str, np.ndarray] = None,
-    avg_num_neighbors: float = None,
+    avg_num_neighbors: float = "average",
     avg_r_min: float = None,
     num_species: int = None,
     num_interactions=3,
@@ -246,7 +246,7 @@ def model(
     radial_envelope: Callable[[jnp.ndarray], jnp.ndarray] = soft_envelope,
     **kwargs,
 ):
-    if avg_num_neighbors is None:
+    if avg_num_neighbors == "average":
         avg_num_neighbors = tools.compute_avg_num_neighbors(train_loader)
         logging.info(
             f"Compute the average number of neighbors: {avg_num_neighbors:.3f}"
@@ -501,20 +501,36 @@ def train(
     optimizer_state,
     train_loader,
     valid_loader,
+    test_loader,
     gradient_transform,
     max_num_epochs,
     logger,
     patience: int,
     eval_train: bool,
+    eval_test: bool,
     eval_interval: int = 1,
     log_errors: str = "PerAtomRMSE",
     **kwargs,
 ):
+    if log_errors == "PerAtomRMSE":
+        error_e = "rmse_e_per_atom"
+        error_f = "rmse_f"
+    elif log_errors == "TotalRMSE":
+        error_e = "rmse_e"
+        error_f = "rmse_f"
+    elif log_errors == "PerAtomMAE":
+        error_e = "mae_e_per_atom"
+        error_f = "mae_f"
+    elif log_errors == "TotalMAE":
+        error_e = "mae_e"
+        error_f = "mae_f"
+
     lowest_loss = np.inf
     patience_counter = 0
     loss_fn = loss()
     start_time = time.perf_counter()
-    time_per_epoch = []
+    total_time_per_epoch = []
+    eval_time_per_epoch = []
 
     for epoch, params, optimizer_state, ema_params in tools.train(
         model=model,
@@ -528,7 +544,7 @@ def train(
         logger=logger,
         **kwargs,
     ):
-        time_per_epoch += [time.perf_counter() - start_time]
+        total_time_per_epoch += [time.perf_counter() - start_time]
         start_time = time.perf_counter()
 
         try:
@@ -539,51 +555,63 @@ def train(
             profile_nn_jax.restart_timer()
 
         if epoch % eval_interval == 0:
+            avg_time_per_epoch = np.mean(total_time_per_epoch[-4 * eval_interval :])
+            avg_eval_time_per_epoch = np.mean(eval_time_per_epoch[-4 * eval_interval :])
+
             if eval_train:
-                valid_loss, eval_metrics = tools.evaluate(
+                loss_, metrics_ = tools.evaluate(
                     model=model,
                     params=ema_params,
                     loss_fn=loss_fn,
                     data_loader=train_loader,
                 )
-                eval_metrics["mode"] = "eval_train"
-                eval_metrics["epoch"] = epoch
-                logger.log(eval_metrics)
+                metrics_["mode"] = "eval_train"
+                metrics_["epoch"] = epoch
+                logger.log(metrics_)
 
-            valid_loss, eval_metrics = tools.evaluate(
+                logging.info(
+                    f"Epoch {epoch}: Train: "
+                    f"loss={loss_:.4f}, "
+                    f"{error_e}={1e3 * metrics_[error_e]:.1f} meV, "
+                    f"{error_f}={1e3 * metrics_[error_f]:.1f} meV/A"
+                )
+
+            if eval_test:
+                loss_, metrics_ = tools.evaluate(
+                    model=model,
+                    params=ema_params,
+                    loss_fn=loss_fn,
+                    data_loader=test_loader,
+                )
+                metrics_["mode"] = "eval_test"
+                metrics_["epoch"] = epoch
+                logger.log(metrics_)
+
+                logging.info(
+                    f"Epoch {epoch}: Test: "
+                    f"loss={loss_:.4f}, "
+                    f"{error_e}={1e3 * metrics_[error_e]:.1f} meV, "
+                    f"{error_f}={1e3 * metrics_[error_f]:.1f} meV/A"
+                )
+
+            loss_, metrics_ = tools.evaluate(
                 model=model,
                 params=ema_params,
                 loss_fn=loss_fn,
                 data_loader=valid_loader,
             )
-            eval_metrics["mode"] = "eval"
-            eval_metrics["epoch"] = epoch
-            logger.log(eval_metrics)
-
-            avg_time_per_epoch = np.mean(time_per_epoch[-4 * eval_interval :])
-
-            if log_errors == "PerAtomRMSE":
-                error_e = "rmse_e_per_atom"
-                error_f = "rmse_f"
-            elif log_errors == "TotalRMSE":
-                error_e = "rmse_e"
-                error_f = "rmse_f"
-            elif log_errors == "PerAtomMAE":
-                error_e = "mae_e_per_atom"
-                error_f = "mae_f"
-            elif log_errors == "TotalMAE":
-                error_e = "mae_e"
-                error_f = "mae_f"
+            metrics_["mode"] = "eval"
+            metrics_["epoch"] = epoch
+            logger.log(metrics_)
 
             logging.info(
                 f"Epoch {epoch}: Validation: "
-                f"avg_time_per_epoch={avg_time_per_epoch:.1f}s "
-                f"loss={valid_loss:.4f}, "
-                f"{error_e}={1e3 * eval_metrics[error_e]:.1f} meV, "
-                f"{error_f}={1e3 * eval_metrics[error_f]:.1f} meV/A"
+                f"loss={loss_:.4f}, "
+                f"{error_e}={1e3 * metrics_[error_e]:.1f} meV, "
+                f"{error_f}={1e3 * metrics_[error_f]:.1f} meV/A"
             )
 
-            if valid_loss >= lowest_loss:
+            if loss_ >= lowest_loss:
                 patience_counter += 1
                 if patience_counter >= patience:
                     logging.info(
@@ -591,8 +619,15 @@ def train(
                     )
                     break
             else:
-                lowest_loss = valid_loss
+                lowest_loss = loss_
                 patience_counter = 0
+
+            logging.info(
+                f"Epoch {epoch}: Time per epoch: {avg_time_per_epoch:.1f}s, "
+                f"among which {avg_eval_time_per_epoch:.1f}s for evaluation."
+            )
+
+        eval_time_per_epoch += [time.perf_counter() - start_time]
 
     logging.info("Training complete")
     return epoch, ema_params

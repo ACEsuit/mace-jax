@@ -60,7 +60,7 @@ def plot(data: pd.DataFrame, min_epoch: int, output_path: str) -> None:
     )
 
     valid_data = data[data["mode"] == "eval"]
-    train_data = data[data["mode"] == "opt"]
+    train_data = data[data["mode"] == "eval_train"]
 
     fig, axes = plt.subplots(
         nrows=1, ncols=2, figsize=(2 * fig_width, fig_height), constrained_layout=True
