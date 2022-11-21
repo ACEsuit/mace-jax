@@ -60,6 +60,8 @@ def set_default_dtype(dtype: str) -> None:
 def pad_graph_to_nearest_ceil_mantissa(
     graphs_tuple: jraph.GraphsTuple,
     n_mantissa_bits: int = 2,
+    n_min_nodes: int = 1,
+    n_min_edges: int = 1,
 ) -> jraph.GraphsTuple:
     """Pads a batched `GraphsTuple` to the nearest power of two.
 
@@ -81,7 +83,9 @@ def pad_graph_to_nearest_ceil_mantissa(
     """
     # Add 1 since we need at least one padding node for pad_with_graphs.
     pad_nodes_to = ceil_mantissa(jnp.sum(graphs_tuple.n_node) + 1, n_mantissa_bits)
+    pad_nodes_to = max(pad_nodes_to, n_min_nodes)
     pad_edges_to = ceil_mantissa(jnp.sum(graphs_tuple.n_edge), n_mantissa_bits)
+    pad_edges_to = max(pad_edges_to, n_min_edges)
     # Add 1 since we need at least one padding graph for pad_with_graphs.
     # pad_graphs_to = ceil_mantissa(graphs_tuple.n_node.shape[0] + 1, n_mantissa_bits)
     pad_graphs_to = graphs_tuple.n_node.shape[0] + 1
@@ -115,10 +119,12 @@ def get_jraph_graph_from_pyg(batch):
     )
 
 
-def get_batched_padded_graph_tuples(batch, n_mantissa_bits: int = 2):
+def get_batched_padded_graph_tuples(
+    batch, n_mantissa_bits: int = 2, n_min_nodes: int = 1, n_min_edges: int = 1
+):
     graphs = get_jraph_graph_from_pyg(batch)
     graphs = pad_graph_to_nearest_ceil_mantissa(
-        graphs, n_mantissa_bits
+        graphs, n_mantissa_bits, n_min_nodes, n_min_edges
     )  # padd the whole batch once
     return graphs
 
@@ -284,15 +290,12 @@ def compute_mean_rms_energy_forces(
 def compute_avg_num_neighbors(data_loader: torch.utils.data.DataLoader) -> float:
     num_neighbors = []
 
-    for batch in data_loader:
-        _, receivers = batch.edge_index
-        _, counts = torch.unique(receivers, return_counts=True)
+    for graph in data_loader:
+        graph = jraph.unpad_with_graphs(graph)
+        _, counts = np.unique(graph.receivers, return_counts=True)
         num_neighbors.append(counts)
 
-    avg_num_neighbors = torch.mean(
-        torch.cat(num_neighbors, dim=0).type(torch.get_default_dtype())
-    )
-    return to_numpy(avg_num_neighbors).item()
+    return np.mean(np.concatenate(num_neighbors)).item()
 
 
 def compute_avg_min_neighbor_distance(
@@ -300,21 +303,20 @@ def compute_avg_min_neighbor_distance(
 ) -> float:
     min_neighbor_distances = []
 
-    for batch in data_loader:
-        pos = batch.positions
-        senders, receivers = batch.edge_index
-        shift = torch.einsum(
-            "zi,zij->zj",
-            batch.shifts.type(batch.cell.dtype),
-            batch.cell[batch.batch][senders],
+    for graph in data_loader:
+        graph = jraph.unpad_with_graphs(graph)
+        vectors = get_edge_relative_vectors(
+            graph.nodes.positions,
+            graph.senders,
+            graph.receivers,
+            graph.edges.shifts,
+            graph.globals.cell,
+            graph.n_edge,
         )
-        distances = torch.norm(pos[senders] + shift - pos[receivers], dim=-1)
-        min_neighbor_distances.append(distances.min())
+        length = np.linalg.norm(vectors, axis=-1)
+        min_neighbor_distances.append(length.min())
 
-    avg_min_neighbor_distance = torch.mean(
-        torch.stack(min_neighbor_distances, dim=0).type(torch.get_default_dtype())
-    )
-    return to_numpy(avg_min_neighbor_distance).item()
+    return np.mean(min_neighbor_distances).item()
 
 
 def sum_nodes_of_the_same_graph(

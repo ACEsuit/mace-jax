@@ -76,6 +76,9 @@ def datasets(
     forces_key: str = "forces",
     batch_size: int,
     valid_batch_size: int = None,
+    n_mantissa_bits: int = 2,
+    n_min_nodes: int = 1,
+    n_min_edges: int = 1,
 ):
     """Load training and test dataset from xyz file"""
 
@@ -148,6 +151,9 @@ def datasets(
         batch_size=batch_size,
         shuffle=True,
         drop_last=True,
+        overwrapper=lambda x: tools.get_batched_padded_graph_tuples(
+            x, n_mantissa_bits, n_min_nodes, n_min_edges
+        ),
     )
     valid_loader = torch_geometric.dataloader.DataLoader(
         dataset=[
@@ -157,6 +163,9 @@ def datasets(
         batch_size=valid_batch_size or batch_size,
         shuffle=False,
         drop_last=False,
+        overwrapper=lambda x: tools.get_batched_padded_graph_tuples(
+            x, n_mantissa_bits, n_min_nodes, n_min_edges
+        ),
     )
     test_loader = torch_geometric.dataloader.DataLoader(
         dataset=[
@@ -166,6 +175,9 @@ def datasets(
         batch_size=valid_batch_size or batch_size,
         shuffle=False,
         drop_last=False,
+        overwrapper=lambda x: tools.get_batched_padded_graph_tuples(
+            x, n_mantissa_bits, n_min_nodes, n_min_edges
+        ),
     )
     return dict(
         train_loader=train_loader,
@@ -234,7 +246,7 @@ def model(
     initialize: bool = True,
     *,
     scaling: Callable = None,
-    atomic_energies: Union[str, np.ndarray] = None,
+    atomic_energies: Union[str, np.ndarray, Dict[int, float]] = None,
     avg_num_neighbors: float = "average",
     avg_r_min: float = None,
     num_species: int = None,
@@ -286,7 +298,7 @@ def model(
     elif atomic_energies == "zero":
         logging.info("Not using atomic energies")
         atomic_energies = np.zeros(num_species)
-    else:
+    elif isinstance(atomic_energies, np.ndarray):
         logging.info(
             f"Use Atomic Energies that are provided: {atomic_energies.tolist()}"
         )
@@ -295,6 +307,14 @@ def model(
                 f"atomic_energies.shape={atomic_energies.shape} != (num_species={num_species},)"
             )
             raise ValueError
+    elif isinstance(atomic_energies, dict):
+        atomic_energies_dict = atomic_energies
+        logging.info(f"Use Atomic Energies that are provided: {atomic_energies_dict}")
+        atomic_energies = np.array(
+            [atomic_energies_dict.get(z, 0.0) for z in range(num_species)]
+        )
+    else:
+        raise ValueError(f"atomic_energies={atomic_energies} is not supported")
 
     if scaling is None:
         mean, std = 0.0, 1.0
@@ -400,8 +420,7 @@ def checks(
     logging.info("We will check the normalization of the model and exit.")
     energies = []
     forces = []
-    for batch in tqdm(train_loader):
-        graph = tools.get_batched_padded_graph_tuples(batch, 0)
+    for graph in tqdm(train_loader):
         out = energy_forces_predictor(params, graph)
         node_mask = jraph.get_node_padding_mask(graph)
         graph_mask = jraph.get_graph_padding_mask(graph)
@@ -505,9 +524,10 @@ def train(
     gradient_transform,
     max_num_epochs,
     logger,
+    *,
     patience: int,
-    eval_train: bool,
-    eval_test: bool,
+    eval_train: bool = False,
+    eval_test: bool = False,
     eval_interval: int = 1,
     log_errors: str = "PerAtomRMSE",
     **kwargs,
@@ -555,8 +575,6 @@ def train(
             profile_nn_jax.restart_timer()
 
         if epoch % eval_interval == 0:
-            avg_time_per_epoch = np.mean(total_time_per_epoch[-4 * eval_interval :])
-            avg_eval_time_per_epoch = np.mean(eval_time_per_epoch[-4 * eval_interval :])
 
             if eval_train:
                 loss_, metrics_ = tools.evaluate(
@@ -622,12 +640,16 @@ def train(
                 lowest_loss = loss_
                 patience_counter = 0
 
+            eval_time_per_epoch += [time.perf_counter() - start_time]
+            avg_time_per_epoch = np.mean(total_time_per_epoch[-4 * eval_interval :])
+            avg_eval_time_per_epoch = np.mean(eval_time_per_epoch[-4 * eval_interval :])
+
             logging.info(
                 f"Epoch {epoch}: Time per epoch: {avg_time_per_epoch:.1f}s, "
                 f"among which {avg_eval_time_per_epoch:.1f}s for evaluation."
             )
-
-        eval_time_per_epoch += [time.perf_counter() - start_time]
+        else:
+            eval_time_per_epoch += [time.perf_counter() - start_time]
 
     logging.info("Training complete")
     return epoch, ema_params

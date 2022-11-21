@@ -16,7 +16,6 @@ from .utils import (
     compute_rel_mae,
     compute_rel_rmse,
     compute_rmse,
-    get_batched_padded_graph_tuples,
 )
 
 
@@ -31,7 +30,6 @@ def train(
     max_num_epochs: int,
     logger: MetricsLogger,
     ema_decay: Optional[float] = None,
-    n_mantissa_bits: int = 2,
 ):
     num_updates = 0
     ema_params = params
@@ -66,9 +64,7 @@ def train(
         yield epoch, params, optimizer_state, ema_params
 
         # Train one epoch
-        for batch in train_loader:
-
-            graph = get_batched_padded_graph_tuples(batch, n_mantissa_bits)
+        for graph in train_loader:
             num_updates += 1
             start_time = time.time()
             loss, params, optimizer_state, ema_params = update_fn(
@@ -103,18 +99,16 @@ def evaluate(
     params: Any,
     loss_fn: Any,
     data_loader: DataLoader,
-    n_mantissa_bits: int = 2,
 ) -> Tuple[float, Dict[str, Any]]:
     total_loss = 0.0
+    num_graphs = 0
     delta_es_list = []
     delta_es_per_atom_list = []
     delta_fs_list = []
     fs_list = []
 
     start_time = time.time()
-    for batch in data_loader:
-        ref_graph = get_batched_padded_graph_tuples(batch, n_mantissa_bits)
-
+    for ref_graph in data_loader:
         output = model(params, ref_graph)
         pred_graph = ref_graph._replace(
             nodes=ref_graph.nodes._replace(forces=output["forces"]),
@@ -124,7 +118,7 @@ def evaluate(
         ref_graph = jraph.unpad_with_graphs(ref_graph)
         pred_graph = jraph.unpad_with_graphs(pred_graph)
 
-        loss = jnp.mean(
+        loss = jnp.sum(
             loss_fn(
                 graph=ref_graph,
                 energy=pred_graph.globals.energy,
@@ -132,6 +126,7 @@ def evaluate(
             )
         )
         total_loss += float(loss)
+        num_graphs += len(ref_graph.n_edge)
 
         delta_es_list.append(ref_graph.globals.energy - pred_graph.globals.energy)
         delta_es_per_atom_list.append(
@@ -140,7 +135,7 @@ def evaluate(
         delta_fs_list.append(ref_graph.nodes.forces - pred_graph.nodes.forces)
         fs_list.append(ref_graph.nodes.forces)
 
-    avg_loss = total_loss / len(data_loader)
+    avg_loss = total_loss / num_graphs
 
     delta_es = np.concatenate(delta_es_list, axis=0)
     delta_es_per_atom = np.concatenate(delta_es_per_atom_list, axis=0)
