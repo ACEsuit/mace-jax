@@ -19,39 +19,35 @@ class MessagePassingConvolution(hk.Module):
 
     def __call__(
         self,
-        node_feats: e3nn.IrrepsArray,  # [n_nodes, feature, irreps]
+        node_feats: e3nn.IrrepsArray,  # [n_nodes, irreps]
         edge_attrs: e3nn.IrrepsArray,  # [n_edges, irreps]
         edge_feats: e3nn.IrrepsArray,  # [n_edges, irreps]
         senders: jnp.ndarray,  # [n_edges, ]
         receivers: jnp.ndarray,  # [n_edges, ]
     ) -> e3nn.IrrepsArray:
-        assert node_feats.ndim == 3
+        assert node_feats.ndim == 2
         assert edge_attrs.ndim == 2
         assert edge_feats.ndim == 2
 
         messages = e3nn.tensor_product(
-            node_feats[senders], edge_attrs[:, None, :]
-        ).filter(
-            self.target_irreps
-        )  # [n_edges, feature, irreps]
+            node_feats[senders],
+            edge_attrs,
+            filter_ir_out=self.target_irreps,
+        )  # [n_edges, irreps]
 
         mix = e3nn.MultiLayerPerceptron(
-            3 * [64] + [messages.shape[1] * messages.irreps.num_irreps],
+            3 * [64] + [messages.irreps.num_irreps],
             self.activation,
             output_activation=False,
         )(
             edge_feats
-        )  # [n_edges, feature * num_irreps]
+        )  # [n_edges, num_irreps]
 
-        mix = mix.mul_to_axis(messages.shape[1])  # [n_edges, feature, irreps]
-
-        messages = e3nn.elementwise_tensor_product(
-            messages, mix
-        )  # [n_edges, feature, irreps]
+        messages = e3nn.elementwise_tensor_product(messages, mix)  # [n_edges, irreps]
 
         zeros = e3nn.IrrepsArray.zeros(
-            messages.irreps, node_feats.shape[:1] + messages.shape[1:2], messages.dtype
+            messages.irreps, node_feats.shape[:1], messages.dtype
         )
-        node_feats = zeros.at[receivers].add(messages)  # [n_nodes, feature, irreps]
+        node_feats = zeros.at[receivers].add(messages)  # [n_nodes, irreps]
 
         return node_feats / jnp.sqrt(self.avg_num_neighbors)

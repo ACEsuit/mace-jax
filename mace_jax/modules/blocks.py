@@ -163,18 +163,16 @@ class InteractionBlock(hk.Module):
     def __call__(
         self,
         node_specie: e3nn.IrrepsArray,  # [n_nodes] int
-        node_feats: e3nn.IrrepsArray,  # [n_nodes, feature, irreps]
+        node_feats: e3nn.IrrepsArray,  # [n_nodes, irreps]
         edge_attrs: e3nn.IrrepsArray,  # [n_edges, irreps]
         edge_feats: e3nn.IrrepsArray,  # [n_edges, irreps]
         senders: jnp.ndarray,  # [n_edges, ]
         receivers: jnp.ndarray,  # [n_edges, ]
     ) -> Tuple[e3nn.IrrepsArray, e3nn.IrrepsArray]:
         assert node_specie.ndim == 1
-        assert node_feats.ndim == 3
+        assert node_feats.ndim == 2
 
-        node_feats = e3nn.Linear(
-            node_feats.irreps, self.num_features, name="linear_up"
-        )(node_feats)
+        node_feats = e3nn.Linear(node_feats.irreps, name="linear_up")(node_feats)
 
         node_feats = MessagePassingConvolution(
             self.avg_num_neighbors, self.target_irreps, self.activation
@@ -182,7 +180,7 @@ class InteractionBlock(hk.Module):
 
         node_feats = e3nn.Linear(
             self.target_irreps, self.num_features, name="linear_down"
-        )(node_feats)
+        )(node_feats[:, None, :])
 
         assert node_feats.ndim == 3
         return node_feats  # [n_nodes, feature, target_irreps]

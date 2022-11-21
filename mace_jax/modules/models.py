@@ -224,6 +224,7 @@ class MACELayer(hk.Module):
                 node_specie, node_feats
             )  # [n_nodes, feature, hidden_irreps]
 
+        node_feats = node_feats.axis_to_mul()
         node_feats = InteractionBlock(
             num_features=self.num_features,
             target_irreps=self.interaction_irreps,
