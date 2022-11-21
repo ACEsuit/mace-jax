@@ -524,6 +524,8 @@ def train(
     gradient_transform,
     max_num_epochs,
     logger,
+    directory,
+    tag,
     *,
     patience: int,
     eval_train: bool = False,
@@ -575,6 +577,9 @@ def train(
             profile_nn_jax.restart_timer()
 
         if epoch % eval_interval == 0:
+            with open(f"{directory}/{tag}.pkl", "wb") as f:
+                pickle.dump(gin.operative_config_str(), f)
+                pickle.dump(params, f)
 
             if eval_train:
                 loss_, metrics_ = tools.evaluate(

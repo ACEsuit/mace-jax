@@ -82,6 +82,9 @@ def train(
             opt_metrics["epoch_"] = start_epoch + num_updates / len(train_loader)
             logger.log(opt_metrics)
 
+            if epoch == start_epoch:
+                logging.info(f"First epoch: {opt_metrics['time']:.3f}s loss={loss:.3f}")
+
             if last_cache_size != update_fn._cache_size():
                 last_cache_size = update_fn._cache_size()
 

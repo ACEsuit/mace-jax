@@ -96,6 +96,8 @@ def main():
         gradient_transform,
         max_num_epochs,
         logger,
+        directory,
+        tag,
     )
 
     with open(f"{directory}/{tag}.pkl", "wb") as f:

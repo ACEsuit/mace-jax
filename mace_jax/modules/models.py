@@ -225,7 +225,7 @@ class MACELayer(hk.Module):
             sc = e3nn.Linear(
                 self.hidden_irreps,
                 self.num_features,
-                num_weights=self.num_species,
+                num_indexed_weights=self.num_species,
                 name="skip_tp",
             )(
                 node_specie, node_feats
@@ -256,7 +256,7 @@ class MACELayer(hk.Module):
             node_feats = e3nn.Linear(
                 self.interaction_irreps,
                 self.num_features,
-                num_weights=self.num_species,
+                num_indexed_weights=self.num_species,
                 name="skip_tp_first",
             )(node_specie, node_feats)
             sc = None
