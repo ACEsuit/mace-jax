@@ -74,14 +74,14 @@ def plot(data: pd.DataFrame, min_epoch: int, output_path: str) -> None:
         zorder=1,
         label="Validation",
     )
-    ax.fill_between(
-        x=valid_data["epoch"],
-        y1=valid_data["loss"]["mean"] - valid_data["loss"]["std"],
-        y2=valid_data["loss"]["mean"] + valid_data["loss"]["std"],
-        alpha=0.5,
-        zorder=-1,
-        color=colors[0],
-    )
+    # ax.fill_between(
+    #     x=valid_data["epoch"],
+    #     y1=valid_data["loss"]["mean"] - valid_data["loss"]["std"],
+    #     y2=valid_data["loss"]["mean"] + valid_data["loss"]["std"],
+    #     alpha=0.5,
+    #     zorder=-1,
+    #     color=colors[0],
+    # )
     ax.plot(
         train_data["epoch"],
         train_data["loss"]["mean"],
@@ -89,16 +89,17 @@ def plot(data: pd.DataFrame, min_epoch: int, output_path: str) -> None:
         zorder=1,
         label="Training",
     )
-    ax.fill_between(
-        x=train_data["epoch"],
-        y1=train_data["loss"]["mean"] - train_data["loss"]["std"],
-        y2=train_data["loss"]["mean"] + train_data["loss"]["std"],
-        alpha=0.5,
-        zorder=-1,
-        color=colors[3],
-    )
+    # ax.fill_between(
+    #     x=train_data["epoch"],
+    #     y1=train_data["loss"]["mean"] - train_data["loss"]["std"],
+    #     y2=train_data["loss"]["mean"] + train_data["loss"]["std"],
+    #     alpha=0.5,
+    #     zorder=-1,
+    #     color=colors[3],
+    # )
 
-    ax.set_ylim(bottom=0.0)
+    ax.set_xscale("log")
+    ax.set_yscale("log")
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Loss")
     ax.legend()
@@ -111,14 +112,14 @@ def plot(data: pd.DataFrame, min_epoch: int, output_path: str) -> None:
         zorder=1,
         label="MAE Energy [eV]",
     )
-    ax.fill_between(
-        x=valid_data["epoch"],
-        y1=valid_data["mae_e"]["mean"] - valid_data["mae_e"]["std"],
-        y2=valid_data["mae_e"]["mean"] + valid_data["mae_e"]["std"],
-        alpha=0.5,
-        zorder=-1,
-        color=colors[1],
-    )
+    # ax.fill_between(
+    #     x=valid_data["epoch"],
+    #     y1=valid_data["mae_e"]["mean"] - valid_data["mae_e"]["std"],
+    #     y2=valid_data["mae_e"]["mean"] + valid_data["mae_e"]["std"],
+    #     alpha=0.5,
+    #     zorder=-1,
+    #     color=colors[1],
+    # )
     ax.plot(
         valid_data["epoch"],
         valid_data["mae_f"]["mean"],
@@ -126,16 +127,18 @@ def plot(data: pd.DataFrame, min_epoch: int, output_path: str) -> None:
         zorder=1,
         label="MAE Forces [eV/Å]",
     )
-    ax.fill_between(
-        x=valid_data["epoch"],
-        y1=valid_data["mae_f"]["mean"] - valid_data["mae_f"]["std"],
-        y2=valid_data["mae_f"]["mean"] + valid_data["mae_f"]["std"],
-        alpha=0.5,
-        zorder=-1,
-        color=colors[2],
-    )
+    # ax.fill_between(
+    #     x=valid_data["epoch"],
+    #     y1=valid_data["mae_f"]["mean"] - valid_data["mae_f"]["std"],
+    #     y2=valid_data["mae_f"]["mean"] + valid_data["mae_f"]["std"],
+    #     alpha=0.5,
+    #     zorder=-1,
+    #     color=colors[2],
+    # )
 
-    ax.set_ylim(bottom=0.0)
+    # ax.set_ylim(bottom=0.0)
+    ax.set_xscale("log")
+    ax.set_yscale("log")
     ax.set_xlabel("Epoch")
     ax.legend()
 
