@@ -48,6 +48,7 @@ class GeneralMACE(hk.Module):
         correlation: int = 3,  # Correlation order at each layer (~ node_features^correlation), default 3
         max_poly_order: Optional[int] = None,  # TODO (mario): implement it back?
         gate: Callable = jax.nn.silu,  # activation function
+        symmetric_tensor_product_basis: bool = True,
     ):
         super().__init__()
 
@@ -83,6 +84,7 @@ class GeneralMACE(hk.Module):
         self.num_interactions = num_interactions
         self.output_irreps = output_irreps
         self.num_species = num_species
+        self.symmetric_tensor_product_basis = symmetric_tensor_product_basis
 
         # Embeddings
         self.node_embedding = LinearNodeEmbeddingBlock(
@@ -155,6 +157,7 @@ class GeneralMACE(hk.Module):
                 correlation=self.correlation,
                 output_irreps=self.output_irreps,
                 readout_mlp_irreps=self.readout_mlp_irreps,
+                symmetric_tensor_product_basis=self.symmetric_tensor_product_basis,
                 name=f"layer_{i}",
             )(
                 node_feats,
@@ -185,6 +188,7 @@ class MACELayer(hk.Module):
         correlation: int,
         output_irreps: e3nn.Irreps,
         readout_mlp_irreps: e3nn.Irreps,
+        symmetric_tensor_product_basis: bool,
         name: Optional[str],
     ) -> None:
         super().__init__(name=name)
@@ -201,6 +205,7 @@ class MACELayer(hk.Module):
         self.correlation = correlation
         self.output_irreps = output_irreps
         self.readout_mlp_irreps = readout_mlp_irreps
+        self.symmetric_tensor_product_basis = symmetric_tensor_product_basis
 
     def __call__(
         self,
@@ -270,6 +275,7 @@ class MACELayer(hk.Module):
             # max_poly_order=new_poly_order,
             # input_poly_order=poly_order,
             num_species=self.num_species,
+            symmetric_tensor_product_basis=self.symmetric_tensor_product_basis,
         )(node_feats=node_feats, node_specie=node_specie)
         node_feats = profile(f"{self.name}: node_feats after tensor power", node_feats)
 

@@ -14,6 +14,7 @@ class SymmetricContraction(hk.Module):
         max_poly_order: Optional[int] = None,
         input_poly_order: int = 0,
         gradient_normalization: Union[str, float] = None,
+        symmetric_tensor_product_basis: bool = True,
     ):
         super().__init__()
         self.correlation = correlation
@@ -34,6 +35,7 @@ class SymmetricContraction(hk.Module):
         self.num_species = num_species
         self.max_poly_order = max_poly_order
         self.input_poly_order = input_poly_order
+        self.symmetric_tensor_product_basis = symmetric_tensor_product_basis
 
     def __call__(self, x: e3nn.IrrepsArray, y: jnp.ndarray) -> e3nn.IrrepsArray:
         def fn(x: e3nn.IrrepsArray, y: jnp.ndarray):
@@ -48,21 +50,23 @@ class SymmetricContraction(hk.Module):
             out = dict()
 
             for order in range(self.correlation, 0, -1):  # correlation, ..., 1
-                # U = e3nn.reduced_symmetric_tensor_product_basis(
-                #     x.irreps,
-                #     order,
-                #     keep_ir=self.keep_irrep_out,
-                #     max_order=self.max_poly_order - order * self.input_poly_order
-                #     if self.max_poly_order is not None
-                #     else None,
-                # )  TODO(mario): put back optimized version
-                U = e3nn.reduced_tensor_product_basis(
-                    [x.irreps] * order,
-                    keep_ir=self.keep_irrep_out,
-                    max_order=self.max_poly_order - order * self.input_poly_order
-                    if self.max_poly_order is not None
-                    else None,
-                )
+                if self.symmetric_tensor_product_basis:
+                    U = e3nn.reduced_symmetric_tensor_product_basis(
+                        x.irreps,
+                        order,
+                        keep_ir=self.keep_irrep_out,
+                        max_order=self.max_poly_order - order * self.input_poly_order
+                        if self.max_poly_order is not None
+                        else None,
+                    )
+                else:
+                    U = e3nn.reduced_tensor_product_basis(
+                        [x.irreps] * order,
+                        keep_ir=self.keep_irrep_out,
+                        max_order=self.max_poly_order - order * self.input_poly_order
+                        if self.max_poly_order is not None
+                        else None,
+                    )
                 # U = U / order  # normalization TODO(mario): put back after testing
                 # NOTE(mario): The normalization constants (/order and /mul**0.5)
                 # has been numerically checked to be correct.

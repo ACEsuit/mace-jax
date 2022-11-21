@@ -122,6 +122,7 @@ class EquivariantProductBasisBlock(hk.Module):
         num_species: int,
         max_poly_order: Optional[int] = None,
         input_poly_order: int = 0,
+        symmetric_tensor_product_basis: bool = True,
     ) -> None:
         super().__init__()
         self.num_features = num_features
@@ -133,6 +134,7 @@ class EquivariantProductBasisBlock(hk.Module):
             input_poly_order=input_poly_order,
             num_species=num_species,
             gradient_normalization="element",  # NOTE: This is to copy mace-torch
+            symmetric_tensor_product_basis=symmetric_tensor_product_basis,
         )
 
     def __call__(
