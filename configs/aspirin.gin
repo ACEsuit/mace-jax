@@ -18,8 +18,9 @@ datasets.valid_batch_size = 20
 model.radial_basis = @bessel_basis
 bessel_basis.number = 8
 
-model.radial_envelope = @u_envelope
-u_envelope.p = 5
+# model.radial_envelope = @u_envelope  # 10. @ epoch 350
+# u_envelope.p = 5
+model.radial_envelope = @soft_envelope  # 9.5 @ epoch 350
 
 model.max_ell = 3
 model.num_interactions = 2
@@ -50,6 +51,8 @@ model.avg_num_neighbors = "average"
 loss.energy_weight = 1.0
 loss.forces_weight = 10.0
 
+
+optimizer.algorithm = @amsgrad
 optimizer.lr = 0.01
 optimizer.max_num_epochs = 2048
 # optimizer.weight_decay = 1e-3

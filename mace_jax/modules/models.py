@@ -233,18 +233,17 @@ class MACELayer(hk.Module):
 
         node_feats = node_feats.axis_to_mul()
         node_feats = InteractionBlock(
-            num_features=self.num_features,
-            target_irreps=self.interaction_irreps,
+            target_irreps=self.num_features * self.interaction_irreps,
             avg_num_neighbors=self.avg_num_neighbors,
             activation=self.activation,
         )(
-            node_specie=node_specie,
             node_feats=node_feats,
             edge_attrs=edge_attrs,
             edge_feats=edge_feats,
             receivers=receivers,
             senders=senders,
         )
+        node_feats = node_feats.mul_to_axis()
 
         if self.epsilon is not None:
             node_feats *= self.epsilon
