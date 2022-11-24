@@ -10,33 +10,19 @@ from .symmetric_contraction import SymmetricContraction
 
 
 class LinearNodeEmbeddingBlock(hk.Module):
-    def __init__(self, num_species: int, num_features: int, irreps_out: e3nn.Irreps):
+    def __init__(self, num_species: int, irreps_out: e3nn.Irreps):
         super().__init__()
         self.num_species = num_species
-        self.num_features = num_features
-        self.irreps_out = e3nn.Irreps(irreps_out)
+        self.irreps_out = e3nn.Irreps(irreps_out).filter("0e").regroup()
 
-    def __call__(
-        self,
-        node_specie: jnp.ndarray,  # [n_nodes, ]
-    ) -> e3nn.IrrepsArray:
-        new_list = []
-
-        for i, (mul, ir) in enumerate(self.irreps_out):
-            if ir == "0e":
-                w = hk.get_parameter(
-                    f"embeddings_{i}",
-                    shape=(self.num_species, self.num_features, mul, ir.dim),
-                    dtype=jnp.float32,
-                    init=hk.initializers.RandomNormal(),
-                )
-                new_list.append(w[node_specie])  # [n_nodes, num_features, mul, ir.dim]
-            else:
-                new_list.append(None)
-
-        return e3nn.IrrepsArray.from_list(
-            self.irreps_out, new_list, (node_specie.shape[0], self.num_features)
-        ).remove_nones()
+    def __call__(self, node_specie: jnp.ndarray) -> e3nn.IrrepsArray:
+        w = hk.get_parameter(
+            f"embeddings",
+            shape=(self.num_species, self.irreps_out.dim),
+            dtype=jnp.float32,
+            init=hk.initializers.RandomNormal(),
+        )
+        return e3nn.IrrepsArray(self.irreps_out, w[node_specie])
 
 
 class LinearReadoutBlock(hk.Module):
