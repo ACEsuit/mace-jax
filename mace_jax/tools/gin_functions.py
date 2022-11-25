@@ -646,8 +646,8 @@ def train(
                 patience_counter = 0
 
             eval_time_per_epoch += [time.perf_counter() - start_time]
-            avg_time_per_epoch = np.mean(total_time_per_epoch[-4 * eval_interval :])
-            avg_eval_time_per_epoch = np.mean(eval_time_per_epoch[-4 * eval_interval :])
+            avg_time_per_epoch = np.mean(total_time_per_epoch[-eval_interval:])
+            avg_eval_time_per_epoch = np.mean(eval_time_per_epoch[-eval_interval:])
 
             logging.info(
                 f"Epoch {epoch}: Time per epoch: {avg_time_per_epoch:.1f}s, "
