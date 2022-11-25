@@ -70,7 +70,7 @@ class GeneralMACE(hk.Module):
             self.num_features = num_features
             self.hidden_irreps = hidden_irreps
 
-        self.sh_irreps = e3nn.Irreps.spherical_harmonics(max_ell)
+        self.sh_irreps = e3nn.Irreps.spherical_harmonics(max_ell)[1:]  # discard 0e
 
         if interaction_irreps == "o3_restricted":
             self.interaction_irreps = e3nn.Irreps.spherical_harmonics(max_ell)
@@ -121,19 +121,20 @@ class GeneralMACE(hk.Module):
         node_feats = profile("embedding: node_feats", node_feats)
 
         lengths = safe_norm(vectors, axis=-1)
-        edge_attrs = e3nn.spherical_harmonics(
-            self.sh_irreps,
-            vectors / lengths[..., None],
-            normalize=False,
-            normalization="component",
-        )
-        edge_feats = self.radial_embedding(lengths)
-        edge_feats = e3nn.IrrepsArray(
-            f"{edge_feats.shape[-1]}x0e", edge_feats
+
+        edge_attrs = e3nn.concatenate(
+            [
+                self.radial_embedding(lengths),
+                e3nn.spherical_harmonics(
+                    self.sh_irreps,
+                    vectors / lengths[..., None],
+                    normalize=False,
+                    normalization="component",
+                ),
+            ]
         )  # [n_edges, irreps]
 
         edge_attrs = profile("embedding: edge_attrs", edge_attrs)
-        edge_feats = profile("embedding: edge_feats", edge_feats)
 
         # Interactions
         outputs = []
@@ -166,7 +167,6 @@ class GeneralMACE(hk.Module):
                 node_feats,
                 node_specie,
                 edge_attrs,
-                edge_feats,
                 senders,
                 receivers,
             )
@@ -215,7 +215,6 @@ class MACELayer(hk.Module):
         node_feats: e3nn.IrrepsArray,  # [n_nodes, irreps]
         node_specie: jnp.ndarray,  # [n_nodes] int between 0 and num_species-1
         edge_attrs: e3nn.IrrepsArray,  # [n_edges, irreps]
-        edge_feats: e3nn.IrrepsArray,  # [n_edges, irreps]
         senders: jnp.ndarray,  # [n_edges]
         receivers: jnp.ndarray,  # [n_edges]
     ):
@@ -238,7 +237,6 @@ class MACELayer(hk.Module):
         )(
             node_feats=node_feats,
             edge_attrs=edge_attrs,
-            edge_feats=edge_feats,
             receivers=receivers,
             senders=senders,
         )
