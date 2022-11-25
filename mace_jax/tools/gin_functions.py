@@ -670,15 +670,15 @@ def train(
                 patience_counter = 0
 
             eval_time_per_epoch += [time.perf_counter() - start_time]
-            avg_time_per_epoch = np.mean(total_time_per_epoch[-4 * eval_interval :])
-            avg_eval_time_per_epoch = np.mean(eval_time_per_epoch[-4 * eval_interval :])
+            avg_time_per_epoch = np.mean(total_time_per_epoch[-eval_interval:])
+            avg_eval_time_per_epoch = np.mean(eval_time_per_epoch[-eval_interval:])
 
             logging.info(
                 f"Epoch {epoch}: Time per epoch: {avg_time_per_epoch:.1f}s, "
                 f"among which {avg_eval_time_per_epoch:.1f}s for evaluation."
             )
         else:
-            eval_time_per_epoch += [time.perf_counter() - start_time]
+            eval_time_per_epoch += [time.perf_counter() - start_time]  # basically 0
 
     logging.info("Training complete")
     return epoch, ema_params
