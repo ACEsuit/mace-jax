@@ -83,7 +83,7 @@ class RadialEmbeddingBlock:
     def __call__(
         self,
         edge_lengths: jnp.ndarray,  # [n_edges]
-    ) -> jnp.ndarray:  # [n_edges, num_basis]
+    ) -> e3nn.IrrepsArray:  # [n_edges, num_basis]
         def func(lengths):
             basis = self.basis_functions(lengths, self.r_max)  # [n_edges, num_basis]
             cutoff = self.envelope_function(lengths, self.r_max)  # [n_edges]
@@ -96,7 +96,8 @@ class RadialEmbeddingBlock:
                 samples = jnp.linspace(self.avg_r_min, self.r_max, 1000)
                 factor = jnp.mean(func(samples) ** 2) ** -0.5
 
-        return factor * func(edge_lengths)  # [n_edges, num_basis]
+        embedding = factor * func(edge_lengths)  # [n_edges, num_basis]
+        return e3nn.IrrepsArray(f"{embedding.shape[-1]}x0e", embedding)
 
 
 class EquivariantProductBasisBlock(hk.Module):
@@ -150,7 +151,6 @@ class InteractionBlock(hk.Module):
         self,
         node_feats: e3nn.IrrepsArray,  # [n_nodes, irreps]
         edge_attrs: e3nn.IrrepsArray,  # [n_edges, irreps]
-        edge_feats: e3nn.IrrepsArray,  # [n_edges, irreps]
         senders: jnp.ndarray,  # [n_edges, ]
         receivers: jnp.ndarray,  # [n_edges, ]
     ) -> Tuple[e3nn.IrrepsArray, e3nn.IrrepsArray]:
@@ -160,7 +160,7 @@ class InteractionBlock(hk.Module):
 
         node_feats = MessagePassingConvolution(
             self.avg_num_neighbors, self.target_irreps, self.activation
-        )(node_feats, edge_attrs, edge_feats, senders, receivers)
+        )(node_feats, edge_attrs, senders, receivers)
 
         node_feats = e3nn.Linear(self.target_irreps, name="linear_down")(node_feats)
 
