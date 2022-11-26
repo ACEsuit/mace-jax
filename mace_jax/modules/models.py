@@ -49,6 +49,7 @@ class GeneralMACE(hk.Module):
         max_poly_order: Optional[int] = None,  # TODO (mario): implement it back?
         gate: Callable = jax.nn.silu,  # activation function
         symmetric_tensor_product_basis: bool = True,
+        off_diagonal: bool = False,
         interaction_irreps: Union[str, e3nn.Irreps] = "o3_restricted",  # or o3_full
         node_embedding: hk.Module = LinearNodeEmbeddingBlock,
     ):
@@ -90,6 +91,7 @@ class GeneralMACE(hk.Module):
         self.output_irreps = output_irreps
         self.num_species = num_species
         self.symmetric_tensor_product_basis = symmetric_tensor_product_basis
+        self.off_diagonal = off_diagonal
 
         # Embeddings
         self.node_embedding = node_embedding(
@@ -162,6 +164,7 @@ class GeneralMACE(hk.Module):
                 output_irreps=self.output_irreps,
                 readout_mlp_irreps=self.readout_mlp_irreps,
                 symmetric_tensor_product_basis=self.symmetric_tensor_product_basis,
+                off_diagonal=self.off_diagonal,
                 name=f"layer_{i}",
             )(
                 node_feats,
@@ -192,6 +195,7 @@ class MACELayer(hk.Module):
         output_irreps: e3nn.Irreps,
         readout_mlp_irreps: e3nn.Irreps,
         symmetric_tensor_product_basis: bool,
+        off_diagonal: bool,
         name: Optional[str],
     ) -> None:
         super().__init__(name=name)
@@ -209,6 +213,7 @@ class MACELayer(hk.Module):
         self.output_irreps = output_irreps
         self.readout_mlp_irreps = readout_mlp_irreps
         self.symmetric_tensor_product_basis = symmetric_tensor_product_basis
+        self.off_diagonal = off_diagonal
 
     def __call__(
         self,
@@ -264,17 +269,15 @@ class MACELayer(hk.Module):
         # else:
         #     new_poly_order = self.correlation * poly_order + self.max_poly_order
 
-        node_feats = node_feats.mul_to_axis()
         node_feats = EquivariantProductBasisBlock(
-            num_features=self.num_features,
-            target_irreps=self.hidden_irreps,
+            target_irreps=self.num_features * self.hidden_irreps,
             correlation=self.correlation,
             # max_poly_order=new_poly_order,
             # input_poly_order=poly_order,
             num_species=self.num_species,
             symmetric_tensor_product_basis=self.symmetric_tensor_product_basis,
+            off_diagonal=self.off_diagonal,
         )(node_feats=node_feats, node_specie=node_specie)
-        node_feats = node_feats.axis_to_mul()
 
         node_feats = profile(f"{self.name}: node_feats after tensor power", node_feats)
 

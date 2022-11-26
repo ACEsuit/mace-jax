@@ -103,16 +103,15 @@ class RadialEmbeddingBlock:
 class EquivariantProductBasisBlock(hk.Module):
     def __init__(
         self,
-        num_features: int,
         target_irreps: e3nn.Irreps,
         correlation: int,
         num_species: int,
         max_poly_order: Optional[int] = None,
         input_poly_order: int = 0,
         symmetric_tensor_product_basis: bool = True,
+        off_diagonal: bool = False,
     ) -> None:
         super().__init__()
-        self.num_features = num_features
         self.target_irreps = e3nn.Irreps(target_irreps)
         self.symmetric_contractions = SymmetricContraction(
             keep_irrep_out={ir for _, ir in self.target_irreps},
@@ -122,16 +121,18 @@ class EquivariantProductBasisBlock(hk.Module):
             num_species=num_species,
             gradient_normalization="element",  # NOTE: This is to copy mace-torch
             symmetric_tensor_product_basis=symmetric_tensor_product_basis,
+            off_diagonal=off_diagonal,
         )
 
     def __call__(
         self,
-        node_feats: e3nn.IrrepsArray,  # [n_nodes, feature, irreps]
+        node_feats: e3nn.IrrepsArray,  # [n_nodes, feature * irreps]
         node_specie: jnp.ndarray,  # [n_nodes, ] int
     ) -> e3nn.IrrepsArray:
-        node_feats = node_feats.remove_nones()
+        node_feats = node_feats.mul_to_axis().remove_nones()
         node_feats = self.symmetric_contractions(node_feats, node_specie)
-        return e3nn.Linear(self.target_irreps, self.num_features)(node_feats)
+        node_feats = node_feats.axis_to_mul()
+        return e3nn.Linear(self.target_irreps)(node_feats)
 
 
 class InteractionBlock(hk.Module):
