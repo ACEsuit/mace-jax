@@ -187,16 +187,19 @@ class MACELayer(hk.Module):
         num_features: int,
         interaction_irreps: e3nn.Irreps,
         hidden_irreps: e3nn.Irreps,
-        avg_num_neighbors: float,
         activation: Callable,
         num_species: int,
         epsilon: Optional[float],
+        name: Optional[str],
+        # InteractionBlock:
+        avg_num_neighbors: float,
+        # EquivariantProductBasisBlock:
         correlation: int,
-        output_irreps: e3nn.Irreps,
-        readout_mlp_irreps: e3nn.Irreps,
         symmetric_tensor_product_basis: bool,
         off_diagonal: bool,
-        name: Optional[str],
+        # ReadoutBlock:
+        output_irreps: e3nn.Irreps,
+        readout_mlp_irreps: e3nn.Irreps,
     ) -> None:
         super().__init__(name=name)
 
