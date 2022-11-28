@@ -623,7 +623,7 @@ def train(
                     f"{error_f}={1e3 * metrics_[error_f]:.1f} meV/A"
                 )
 
-            if eval_test:
+            if eval_test and test_loader is not None and len(test_loader) > 0:
                 loss_, metrics_ = tools.evaluate(
                     model=model,
                     params=ema_params,
