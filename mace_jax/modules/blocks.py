@@ -93,10 +93,14 @@ class RadialEmbeddingBlock:
             if self.avg_r_min is None:
                 factor = 1.0
             else:
-                samples = jnp.linspace(self.avg_r_min, self.r_max, 1000)
+                samples = jnp.linspace(
+                    self.avg_r_min, self.r_max, 1000, dtype=jnp.float64
+                )
                 factor = jnp.mean(func(samples) ** 2) ** -0.5
 
-        embedding = factor * func(edge_lengths)  # [n_edges, num_basis]
+        embedding = factor.astype(edge_lengths.dtype) * func(
+            edge_lengths
+        )  # [n_edges, num_basis]
         return e3nn.IrrepsArray(f"{embedding.shape[-1]}x0e", embedding)
 
 
