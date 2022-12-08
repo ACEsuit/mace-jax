@@ -23,7 +23,9 @@ from .blocks import (
 try:
     from profile_nn_jax import profile
 except ImportError:
-    profile = lambda _, x: x
+
+    def profile(_, x):
+        return x
 
 
 class GeneralMACE(hk.Module):
@@ -237,6 +239,7 @@ class MACELayer(hk.Module):
             )(
                 node_specie, node_feats
             )  # [n_nodes, feature * hidden_irreps]
+            sc = profile(f"{self.name}: self-connexion", sc)
 
         node_feats = InteractionBlock(
             target_irreps=self.num_features * self.interaction_irreps,
@@ -254,6 +257,8 @@ class MACELayer(hk.Module):
         else:
             node_feats /= jnp.sqrt(self.avg_num_neighbors)
 
+        node_feats = profile(f"{self.name}: node_feats after interaction", node_feats)
+
         if self.first:
             # Selector TensorProduct
             node_feats = e3nn.Linear(
@@ -261,11 +266,10 @@ class MACELayer(hk.Module):
                 num_indexed_weights=self.num_species,
                 name="skip_tp_first",
             )(node_specie, node_feats)
+            node_feats = profile(
+                f"{self.name}: node_feats after skip_tp_first", node_feats
+            )
             sc = None
-
-        node_feats = profile(f"{self.name}: node_feats after interaction", node_feats)
-        if sc is not None:
-            sc = profile(f"{self.name}: self-connexion", sc)
 
         # if self.max_poly_order is None:
         #     new_poly_order = self.correlation * (poly_order + self.sh_irreps.lmax)

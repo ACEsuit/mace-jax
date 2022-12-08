@@ -87,6 +87,7 @@ class SymmetricContraction(hk.Module):
                 #       out
 
                 for (mul, ir_out), u in zip(U.irreps, U.list):
+                    u = u.astype(x_.dtype)
                     # u: ndarray [(irreps_x.dim)^order, multiplicity, ir_out.dim]
 
                     w = hk.get_parameter(

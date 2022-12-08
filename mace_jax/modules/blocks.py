@@ -17,7 +17,7 @@ class LinearNodeEmbeddingBlock(hk.Module):
 
     def __call__(self, node_specie: jnp.ndarray) -> e3nn.IrrepsArray:
         w = hk.get_parameter(
-            f"embeddings",
+            "embeddings",
             shape=(self.num_species, self.irreps_out.dim),
             dtype=jnp.float32,
             init=hk.initializers.RandomNormal(),
