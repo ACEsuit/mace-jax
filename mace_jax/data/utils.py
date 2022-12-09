@@ -13,6 +13,7 @@ Vector = np.ndarray  # [3,]
 Positions = np.ndarray  # [..., 3]
 Forces = np.ndarray  # [..., 3]
 Cell = np.ndarray  # [3,3]
+Stress = np.ndarray  # [3,3]
 Pbc = tuple  # (3,)
 
 DEFAULT_CONFIG_TYPE = "Default"
@@ -25,6 +26,7 @@ class Configuration:
     positions: Positions  # Angstrom
     energy: Optional[float] = None  # eV
     forces: Optional[Forces] = None  # eV/Angstrom
+    stress: Optional[Stress] = None  # eV/Angstrom^3
     cell: Optional[Cell] = None
     pbc: Optional[Pbc] = None
 
@@ -53,33 +55,11 @@ def random_train_valid_split(
     )
 
 
-def config_from_atoms_list(
-    atoms_list: List[ase.Atoms],
-    energy_key="energy",
-    forces_key="forces",
-    config_type_weights: Dict[str, float] = None,
-) -> Configurations:
-    """Convert list of ase.Atoms into Configurations"""
-    if config_type_weights is None:
-        config_type_weights = DEFAULT_CONFIG_TYPE_WEIGHTS
-
-    all_configs = []
-    for atoms in atoms_list:
-        all_configs.append(
-            config_from_atoms(
-                atoms,
-                energy_key=energy_key,
-                forces_key=forces_key,
-                config_type_weights=config_type_weights,
-            )
-        )
-    return all_configs
-
-
 def config_from_atoms(
     atoms: ase.Atoms,
     energy_key="energy",
     forces_key="forces",
+    stress_key="stress",
     config_type_weights: Dict[str, float] = None,
 ) -> Configuration:
     """Convert ase.Atoms to Configuration"""
@@ -87,6 +67,7 @@ def config_from_atoms(
         config_type_weights = DEFAULT_CONFIG_TYPE_WEIGHTS
 
     energy = atoms.info.get(energy_key, None)  # eV
+    stress = atoms.info.get(stress_key, None)  # eV / Ang^3
 
     if energy is None:
         energy = 0.0
@@ -104,6 +85,7 @@ def config_from_atoms(
         positions=atoms.get_positions(),
         energy=energy,
         forces=forces,
+        stress=stress,
         weight=weight,
         config_type=config_type,
         pbc=pbc,
@@ -126,6 +108,7 @@ def load_from_xyz(
     config_type_weights: Dict = None,
     energy_key: str = "energy",
     forces_key: str = "forces",
+    stress_key: str = "stress",
     extract_atomic_energies: bool = False,
     num_configs: int = None,
 ) -> Tuple[Dict[int, float], Configurations]:
@@ -166,12 +149,12 @@ def load_from_xyz(
 
         atoms_list = atoms_without_iso_atoms
 
-    configs = config_from_atoms_list(
-        atoms_list,
-        config_type_weights=config_type_weights,
-        energy_key=energy_key,
-        forces_key=forces_key,
-    )
+    configs = [
+        config_from_atoms(
+            atoms, energy_key, forces_key, stress_key, config_type_weights
+        )
+        for atoms in atoms_list
+    ]
     return atomic_energies_dict, configs
 
 

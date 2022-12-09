@@ -8,7 +8,7 @@ def _safe_divide(x, y):
     return jnp.where(y == 0.0, 0.0, x / jnp.where(y == 0.0, 1.0, y))
 
 
-def weighted_mean_squared_error_energy(graph, energy_pred) -> jnp.ndarray:
+def mean_squared_error_energy(graph, energy_pred) -> jnp.ndarray:
     energy_ref = graph.globals.energy  # [n_graphs, ]
     return graph.globals.weight * jnp.square(
         _safe_divide(energy_ref - energy_pred, graph.n_node)
@@ -25,21 +25,40 @@ def mean_squared_error_forces(graph, forces_pred) -> jnp.ndarray:
     )  # [n_graphs, ]
 
 
-class WeightedEnergyForcesLoss:
-    def __init__(self, energy_weight=1.0, forces_weight=1.0) -> None:
+def mean_squared_error_stress(graph, stress_pred) -> jnp.ndarray:
+    stress_ref = graph.globals.stress  # [n_graphs, 3, 3]
+    return graph.globals.weight * jnp.mean(
+        jnp.square(stress_ref - stress_pred), axis=(1, 2)
+    )  # [n_graphs, ]
+
+
+class WeightedEnergyFrocesStressLoss:
+    def __init__(self, energy_weight=1.0, forces_weight=1.0, stress_weight=1.0) -> None:
         super().__init__()
         self.energy_weight = energy_weight
         self.forces_weight = forces_weight
+        self.stress_weight = stress_weight
 
-    def __call__(self, graph: jraph.GraphsTuple, energy, forces) -> jnp.ndarray:
-        loss_energy = weighted_mean_squared_error_energy(graph, energy)
-        loss_forces = mean_squared_error_forces(graph, forces)
-        return (
-            self.energy_weight * loss_energy + self.forces_weight * loss_forces
-        )  # [n_graphs, ]
+    def __call__(self, graph: jraph.GraphsTuple, predictions) -> jnp.ndarray:
+        loss = 0
+
+        if self.energy_weight > 0.0:
+            energy = predictions["energy"]
+            loss += self.energy_weight * mean_squared_error_energy(graph, energy)
+
+        if self.forces_weight > 0.0:
+            forces = predictions["forces"]
+            loss += self.forces_weight * mean_squared_error_forces(graph, forces)
+
+        if self.stress_weight > 0.0:
+            stress = predictions["stress"]
+            loss += self.stress_weight * mean_squared_error_stress(graph, stress)
+
+        return loss  # [n_graphs, ]
 
     def __repr__(self):
         return (
             f"{self.__class__.__name__}(energy_weight={self.energy_weight:.3f}, "
-            f"forces_weight={self.forces_weight:.3f})"
+            f"forces_weight={self.forces_weight:.3f}, "
+            f"stress_weight={self.stress_weight:.3f})"
         )

@@ -55,6 +55,7 @@ model.avg_num_neighbors = "average"
 
 loss.energy_weight = 1.0
 loss.forces_weight = 10.0
+loss.stress_weight = 0.0
 
 
 optimizer.algorithm = @amsgrad

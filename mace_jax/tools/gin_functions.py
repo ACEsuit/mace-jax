@@ -20,7 +20,7 @@ from unique_names_generator.data import ADJECTIVES, NAMES
 from mace_jax import data, modules, tools
 from mace_jax.tools import torch_geometric
 
-loss = gin.configurable("loss")(modules.WeightedEnergyForcesLoss)
+loss = gin.configurable("loss")(modules.WeightedEnergyFrocesStressLoss)
 
 
 @gin.configurable
@@ -600,12 +600,13 @@ def train(
         else:
             profile_nn_jax.restart_timer()
 
-        if epoch % eval_interval == 0:
+        last_epoch = epoch == max_num_epochs - 1
+        if epoch % eval_interval == 0 or last_epoch:
             with open(f"{directory}/{tag}.pkl", "wb") as f:
                 pickle.dump(gin.operative_config_str(), f)
                 pickle.dump(params, f)
 
-            if eval_train:
+            if eval_train or last_epoch:
                 loss_, metrics_ = tools.evaluate(
                     model=model,
                     params=ema_params,
@@ -623,7 +624,11 @@ def train(
                     f"{error_f}={1e3 * metrics_[error_f]:.1f} meV/A"
                 )
 
-            if eval_test and test_loader is not None and len(test_loader) > 0:
+            if (
+                (eval_test or last_epoch)
+                and test_loader is not None
+                and len(test_loader) > 0
+            ):
                 loss_, metrics_ = tools.evaluate(
                     model=model,
                     params=ema_params,

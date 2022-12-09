@@ -5,7 +5,6 @@ from .utils import (
     Configurations,
     compute_average_E0s,
     config_from_atoms,
-    config_from_atoms_list,
     load_from_xyz,
     random_train_valid_split,
     test_config_types,
@@ -19,7 +18,6 @@ __all__ = [
     "load_from_xyz",
     "test_config_types",
     "config_from_atoms",
-    "config_from_atoms_list",
     "AtomicData",
     "compute_average_E0s",
 ]
