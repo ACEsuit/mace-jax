@@ -1,3 +1,5 @@
+# best run: rude-adiana
+
 flags.dtype = "float32"
 flags.debug = False  # If True, enables flags jax_debug_nans and jax_debug_infs
 flags.seed = 7
@@ -22,11 +24,14 @@ bessel_basis.number = 8
 # u_envelope.p = 5
 model.radial_envelope = @soft_envelope  # 9.5 @ epoch 350
 
+model.symmetric_tensor_product_basis = True  # symmetric is slightly worse but slightly faster
+model.off_diagonal = False
 model.max_ell = 3
 model.num_interactions = 2
 model.hidden_irreps = "256x0e + 256x1o"
-model.epsilon = None
-model.correlation = 3
+# model.interaction_irreps = "o3_full"  # "o3_restricted" seems to be better
+model.epsilon = 0.4
+model.correlation = 3  # 4 is better but 5x slower
 model.gate = @silu
 model.readout_mlp_irreps = "16x0e"
 model.num_species = 11
@@ -55,7 +60,7 @@ loss.forces_weight = 10.0
 optimizer.algorithm = @amsgrad
 optimizer.lr = 0.01
 optimizer.max_num_epochs = 2048
-# optimizer.weight_decay = 1e-3
+# optimizer.weight_decay = 5e-7
 # optimizer.scheduler = @piecewise_constant_schedule
 # piecewise_constant_schedule.boundaries_and_scales = {
 #     100: 0.1,  # divide the learning rate by 10 after 100 epochs

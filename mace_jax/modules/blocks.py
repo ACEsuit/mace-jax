@@ -10,33 +10,19 @@ from .symmetric_contraction import SymmetricContraction
 
 
 class LinearNodeEmbeddingBlock(hk.Module):
-    def __init__(self, num_species: int, num_features: int, irreps_out: e3nn.Irreps):
+    def __init__(self, num_species: int, irreps_out: e3nn.Irreps):
         super().__init__()
         self.num_species = num_species
-        self.num_features = num_features
-        self.irreps_out = e3nn.Irreps(irreps_out)
+        self.irreps_out = e3nn.Irreps(irreps_out).filter("0e").regroup()
 
-    def __call__(
-        self,
-        node_specie: jnp.ndarray,  # [n_nodes, ]
-    ) -> e3nn.IrrepsArray:
-        new_list = []
-
-        for i, (mul, ir) in enumerate(self.irreps_out):
-            if ir == "0e":
-                w = hk.get_parameter(
-                    f"embeddings_{i}",
-                    shape=(self.num_species, self.num_features, mul, ir.dim),
-                    dtype=jnp.float32,
-                    init=hk.initializers.RandomNormal(),
-                )
-                new_list.append(w[node_specie])  # [n_nodes, num_features, mul, ir.dim]
-            else:
-                new_list.append(None)
-
-        return e3nn.IrrepsArray.from_list(
-            self.irreps_out, new_list, (node_specie.shape[0], self.num_features)
-        ).remove_nones()
+    def __call__(self, node_specie: jnp.ndarray) -> e3nn.IrrepsArray:
+        w = hk.get_parameter(
+            "embeddings",
+            shape=(self.num_species, self.irreps_out.dim),
+            dtype=jnp.float32,
+            init=hk.initializers.RandomNormal(),
+        )
+        return e3nn.IrrepsArray(self.irreps_out, w[node_specie])
 
 
 class LinearReadoutBlock(hk.Module):
@@ -97,7 +83,7 @@ class RadialEmbeddingBlock:
     def __call__(
         self,
         edge_lengths: jnp.ndarray,  # [n_edges]
-    ) -> jnp.ndarray:  # [n_edges, num_basis]
+    ) -> e3nn.IrrepsArray:  # [n_edges, num_basis]
         def func(lengths):
             basis = self.basis_functions(lengths, self.r_max)  # [n_edges, num_basis]
             cutoff = self.envelope_function(lengths, self.r_max)  # [n_edges]
@@ -107,25 +93,27 @@ class RadialEmbeddingBlock:
             if self.avg_r_min is None:
                 factor = 1.0
             else:
-                samples = jnp.linspace(self.avg_r_min, self.r_max, 1000)
-                factor = jnp.mean(func(samples) ** 2) ** -0.5
+                samples = jnp.linspace(
+                    self.avg_r_min, self.r_max, 1000, dtype=jnp.float64
+                )
+                factor = jnp.mean(func(samples) ** 2).item() ** -0.5
 
-        return factor * func(edge_lengths)  # [n_edges, num_basis]
+        embedding = factor * func(edge_lengths)  # [n_edges, num_basis]
+        return e3nn.IrrepsArray(f"{embedding.shape[-1]}x0e", embedding)
 
 
 class EquivariantProductBasisBlock(hk.Module):
     def __init__(
         self,
-        num_features: int,
         target_irreps: e3nn.Irreps,
         correlation: int,
         num_species: int,
         max_poly_order: Optional[int] = None,
         input_poly_order: int = 0,
         symmetric_tensor_product_basis: bool = True,
+        off_diagonal: bool = False,
     ) -> None:
         super().__init__()
-        self.num_features = num_features
         self.target_irreps = e3nn.Irreps(target_irreps)
         self.symmetric_contractions = SymmetricContraction(
             keep_irrep_out={ir for _, ir in self.target_irreps},
@@ -135,16 +123,18 @@ class EquivariantProductBasisBlock(hk.Module):
             num_species=num_species,
             gradient_normalization="element",  # NOTE: This is to copy mace-torch
             symmetric_tensor_product_basis=symmetric_tensor_product_basis,
+            off_diagonal=off_diagonal,
         )
 
     def __call__(
         self,
-        node_feats: e3nn.IrrepsArray,  # [n_nodes, feature, irreps]
+        node_feats: e3nn.IrrepsArray,  # [n_nodes, feature * irreps]
         node_specie: jnp.ndarray,  # [n_nodes, ] int
     ) -> e3nn.IrrepsArray:
-        node_feats = node_feats.remove_nones()
+        node_feats = node_feats.mul_to_axis().remove_nones()
         node_feats = self.symmetric_contractions(node_feats, node_specie)
-        return e3nn.Linear(self.target_irreps, self.num_features)(node_feats)
+        node_feats = node_feats.axis_to_mul()
+        return e3nn.Linear(self.target_irreps)(node_feats)
 
 
 class InteractionBlock(hk.Module):
@@ -164,7 +154,6 @@ class InteractionBlock(hk.Module):
         self,
         node_feats: e3nn.IrrepsArray,  # [n_nodes, irreps]
         edge_attrs: e3nn.IrrepsArray,  # [n_edges, irreps]
-        edge_feats: e3nn.IrrepsArray,  # [n_edges, irreps]
         senders: jnp.ndarray,  # [n_edges, ]
         receivers: jnp.ndarray,  # [n_edges, ]
     ) -> Tuple[e3nn.IrrepsArray, e3nn.IrrepsArray]:
@@ -174,7 +163,7 @@ class InteractionBlock(hk.Module):
 
         node_feats = MessagePassingConvolution(
             self.avg_num_neighbors, self.target_irreps, self.activation
-        )(node_feats, edge_attrs, edge_feats, senders, receivers)
+        )(node_feats, edge_attrs, senders, receivers)
 
         node_feats = e3nn.Linear(self.target_irreps, name="linear_down")(node_feats)
 

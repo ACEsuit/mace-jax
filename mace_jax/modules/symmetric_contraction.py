@@ -5,6 +5,9 @@ import haiku as hk
 import jax.numpy as jnp
 
 
+A025582 = [0, 1, 3, 7, 12, 20, 30, 44, 65, 80, 96, 122, 147, 181, 203, 251, 289]
+
+
 class SymmetricContraction(hk.Module):
     def __init__(
         self,
@@ -15,6 +18,7 @@ class SymmetricContraction(hk.Module):
         input_poly_order: int = 0,
         gradient_normalization: Union[str, float] = None,
         symmetric_tensor_product_basis: bool = True,
+        off_diagonal: bool = False,
     ):
         super().__init__()
         self.correlation = correlation
@@ -36,23 +40,28 @@ class SymmetricContraction(hk.Module):
         self.max_poly_order = max_poly_order
         self.input_poly_order = input_poly_order
         self.symmetric_tensor_product_basis = symmetric_tensor_product_basis
+        self.off_diagonal = off_diagonal
 
-    def __call__(self, x: e3nn.IrrepsArray, y: jnp.ndarray) -> e3nn.IrrepsArray:
-        def fn(x: e3nn.IrrepsArray, y: jnp.ndarray):
+    def __call__(self, input: e3nn.IrrepsArray, index: jnp.ndarray) -> e3nn.IrrepsArray:
+        def fn(input: e3nn.IrrepsArray, index: jnp.ndarray):
             # - This operation is parallel on the feature dimension (but each feature has its own parameters)
-            # - y is trivially contracted with the parameters
             # This operation is an efficient implementation of
             # vmap(lambda w, x: FunctionalLinear(irreps_out)(w, concatenate([x, tensor_product(x, x), tensor_product(x, x, x), ...])))(w, x)
             # up to x power self.correlation
-            assert x.ndim == 2  # [num_features, irreps_x.dim]
-            assert y.ndim == 0  # int
+            assert input.ndim == 2  # [num_features, irreps_x.dim]
+            assert index.ndim == 0  # int
 
             out = dict()
 
             for order in range(self.correlation, 0, -1):  # correlation, ..., 1
+                if self.off_diagonal:
+                    x_ = jnp.roll(input.array, A025582[order - 1])
+                else:
+                    x_ = input.array
+
                 if self.symmetric_tensor_product_basis:
                     U = e3nn.reduced_symmetric_tensor_product_basis(
-                        x.irreps,
+                        input.irreps,
                         order,
                         keep_ir=self.keep_irrep_out,
                         max_order=self.max_poly_order - order * self.input_poly_order
@@ -61,7 +70,7 @@ class SymmetricContraction(hk.Module):
                     )
                 else:
                     U = e3nn.reduced_tensor_product_basis(
-                        [x.irreps] * order,
+                        [input.irreps] * order,
                         keep_ir=self.keep_irrep_out,
                         max_order=self.max_poly_order - order * self.input_poly_order
                         if self.max_poly_order is not None
@@ -78,17 +87,18 @@ class SymmetricContraction(hk.Module):
                 #       out
 
                 for (mul, ir_out), u in zip(U.irreps, U.list):
+                    u = u.astype(x_.dtype)
                     # u: ndarray [(irreps_x.dim)^order, multiplicity, ir_out.dim]
 
                     w = hk.get_parameter(
                         f"w{order}_{ir_out}",
-                        (self.num_species, mul, x.shape[0]),
+                        (self.num_species, mul, input.shape[0]),
                         dtype=jnp.float32,
                         init=hk.initializers.RandomNormal(
                             stddev=(mul**-0.5) ** (1.0 - self.gradient_normalization)
                         ),
                     )[
-                        y
+                        index
                     ]  # [multiplicity, num_features]
                     w = (
                         w * (mul**-0.5) ** self.gradient_normalization
@@ -97,7 +107,7 @@ class SymmetricContraction(hk.Module):
                     if ir_out not in out:
                         out[ir_out] = (
                             "special",
-                            jnp.einsum("...jki,kc,cj->c...i", u, w, x.array),
+                            jnp.einsum("...jki,kc,cj->c...i", u, w, x_),
                         )  # [num_features, (irreps_x.dim)^(oder-1), ir_out.dim]
                     else:
                         out[ir_out] += jnp.einsum(
@@ -114,7 +124,7 @@ class SymmetricContraction(hk.Module):
                         continue  # already done (special case optimization above)
 
                     out[ir_out] = jnp.einsum(
-                        "c...ji,cj->c...i", out[ir_out], x.array
+                        "c...ji,cj->c...i", out[ir_out], x_
                     )  # [num_features, (irreps_x.dim)^(oder-1), ir_out.dim]
 
                 # ((w3 x + w2) x + w1) x
@@ -126,16 +136,16 @@ class SymmetricContraction(hk.Module):
             return e3nn.IrrepsArray.from_list(
                 irreps_out,
                 [out[ir][:, None, :] for (_, ir) in irreps_out],
-                (x.shape[0],),
+                (input.shape[0],),
             )
 
         # Treat batch indices using vmap
-        shape = jnp.broadcast_shapes(x.shape[:-2], y.shape)
-        x = x.broadcast_to(shape + x.shape[-2:])
-        y = jnp.broadcast_to(y, shape)
+        shape = jnp.broadcast_shapes(input.shape[:-2], index.shape)
+        input = input.broadcast_to(shape + input.shape[-2:])
+        index = jnp.broadcast_to(index, shape)
 
         fn_mapped = fn
-        for _ in range(x.ndim - 2):
+        for _ in range(input.ndim - 2):
             fn_mapped = hk.vmap(fn_mapped, split_rng=False)
 
-        return fn_mapped(x, y)
+        return fn_mapped(input, index)

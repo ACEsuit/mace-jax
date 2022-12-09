@@ -23,7 +23,9 @@ from .blocks import (
 try:
     from profile_nn_jax import profile
 except ImportError:
-    profile = lambda _, x: x
+
+    def profile(_, x):
+        return x
 
 
 class GeneralMACE(hk.Module):
@@ -49,7 +51,9 @@ class GeneralMACE(hk.Module):
         max_poly_order: Optional[int] = None,  # TODO (mario): implement it back?
         gate: Callable = jax.nn.silu,  # activation function
         symmetric_tensor_product_basis: bool = True,
+        off_diagonal: bool = False,
         interaction_irreps: Union[str, e3nn.Irreps] = "o3_restricted",  # or o3_full
+        node_embedding: hk.Module = LinearNodeEmbeddingBlock,
     ):
         super().__init__()
 
@@ -69,7 +73,7 @@ class GeneralMACE(hk.Module):
             self.num_features = num_features
             self.hidden_irreps = hidden_irreps
 
-        self.sh_irreps = e3nn.Irreps.spherical_harmonics(max_ell)
+        self.sh_irreps = e3nn.Irreps.spherical_harmonics(max_ell)[1:]  # discard 0e
 
         if interaction_irreps == "o3_restricted":
             self.interaction_irreps = e3nn.Irreps.spherical_harmonics(max_ell)
@@ -89,10 +93,11 @@ class GeneralMACE(hk.Module):
         self.output_irreps = output_irreps
         self.num_species = num_species
         self.symmetric_tensor_product_basis = symmetric_tensor_product_basis
+        self.off_diagonal = off_diagonal
 
         # Embeddings
-        self.node_embedding = LinearNodeEmbeddingBlock(
-            self.num_species, self.num_features, self.hidden_irreps
+        self.node_embedding = node_embedding(
+            self.num_species, self.num_features * self.hidden_irreps
         )
         self.radial_embedding = RadialEmbeddingBlock(
             r_max=r_max,
@@ -114,25 +119,26 @@ class GeneralMACE(hk.Module):
         assert vectors.shape[0] == senders.shape[0] == receivers.shape[0]
 
         # Embeddings
-        node_feats = self.node_embedding(node_specie)  # [n_nodes, feature, irreps]
+        node_feats = self.node_embedding(node_specie)  # [n_nodes, feature * irreps]
         # poly_order = 0  # polynomial order in atom positions of the node features
         # NOTE: we assume hidden_irreps to be scalar only
         node_feats = profile("embedding: node_feats", node_feats)
 
         lengths = safe_norm(vectors, axis=-1)
-        edge_attrs = e3nn.spherical_harmonics(
-            self.sh_irreps,
-            vectors / lengths[..., None],
-            normalize=False,
-            normalization="component",
-        )
-        edge_feats = self.radial_embedding(lengths)
-        edge_feats = e3nn.IrrepsArray(
-            f"{edge_feats.shape[-1]}x0e", edge_feats
+
+        edge_attrs = e3nn.concatenate(
+            [
+                self.radial_embedding(lengths),
+                e3nn.spherical_harmonics(
+                    self.sh_irreps,
+                    vectors / lengths[..., None],
+                    normalize=False,
+                    normalization="component",
+                ),
+            ]
         )  # [n_edges, irreps]
 
         edge_attrs = profile("embedding: edge_attrs", edge_attrs)
-        edge_feats = profile("embedding: edge_feats", edge_feats)
 
         # Interactions
         outputs = []
@@ -160,12 +166,12 @@ class GeneralMACE(hk.Module):
                 output_irreps=self.output_irreps,
                 readout_mlp_irreps=self.readout_mlp_irreps,
                 symmetric_tensor_product_basis=self.symmetric_tensor_product_basis,
+                off_diagonal=self.off_diagonal,
                 name=f"layer_{i}",
             )(
                 node_feats,
                 node_specie,
                 edge_attrs,
-                edge_feats,
                 senders,
                 receivers,
             )
@@ -183,15 +189,19 @@ class MACELayer(hk.Module):
         num_features: int,
         interaction_irreps: e3nn.Irreps,
         hidden_irreps: e3nn.Irreps,
-        avg_num_neighbors: float,
         activation: Callable,
         num_species: int,
         epsilon: Optional[float],
+        name: Optional[str],
+        # InteractionBlock:
+        avg_num_neighbors: float,
+        # EquivariantProductBasisBlock:
         correlation: int,
+        symmetric_tensor_product_basis: bool,
+        off_diagonal: bool,
+        # ReadoutBlock:
         output_irreps: e3nn.Irreps,
         readout_mlp_irreps: e3nn.Irreps,
-        symmetric_tensor_product_basis: bool,
-        name: Optional[str],
     ) -> None:
         super().__init__(name=name)
 
@@ -208,13 +218,13 @@ class MACELayer(hk.Module):
         self.output_irreps = output_irreps
         self.readout_mlp_irreps = readout_mlp_irreps
         self.symmetric_tensor_product_basis = symmetric_tensor_product_basis
+        self.off_diagonal = off_diagonal
 
     def __call__(
         self,
-        node_feats: e3nn.IrrepsArray,  # [n_nodes, feature, irreps]
+        node_feats: e3nn.IrrepsArray,  # [n_nodes, irreps]
         node_specie: jnp.ndarray,  # [n_nodes] int between 0 and num_species-1
         edge_attrs: e3nn.IrrepsArray,  # [n_edges, irreps]
-        edge_feats: e3nn.IrrepsArray,  # [n_edges, irreps]
         senders: jnp.ndarray,  # [n_edges]
         receivers: jnp.ndarray,  # [n_edges]
     ):
@@ -223,15 +233,14 @@ class MACELayer(hk.Module):
         sc = None
         if not self.first:
             sc = e3nn.Linear(
-                self.hidden_irreps,
-                self.num_features,
+                self.num_features * self.hidden_irreps,
                 num_indexed_weights=self.num_species,
                 name="skip_tp",
             )(
                 node_specie, node_feats
-            )  # [n_nodes, feature, hidden_irreps]
+            )  # [n_nodes, feature * hidden_irreps]
+            sc = profile(f"{self.name}: self-connexion", sc)
 
-        node_feats = node_feats.axis_to_mul()
         node_feats = InteractionBlock(
             target_irreps=self.num_features * self.interaction_irreps,
             avg_num_neighbors=self.avg_num_neighbors,
@@ -239,30 +248,28 @@ class MACELayer(hk.Module):
         )(
             node_feats=node_feats,
             edge_attrs=edge_attrs,
-            edge_feats=edge_feats,
             receivers=receivers,
             senders=senders,
         )
-        node_feats = node_feats.mul_to_axis()
 
         if self.epsilon is not None:
             node_feats *= self.epsilon
         else:
             node_feats /= jnp.sqrt(self.avg_num_neighbors)
 
+        node_feats = profile(f"{self.name}: node_feats after interaction", node_feats)
+
         if self.first:
             # Selector TensorProduct
             node_feats = e3nn.Linear(
-                self.interaction_irreps,
-                self.num_features,
+                self.num_features * self.interaction_irreps,
                 num_indexed_weights=self.num_species,
                 name="skip_tp_first",
             )(node_specie, node_feats)
+            node_feats = profile(
+                f"{self.name}: node_feats after skip_tp_first", node_feats
+            )
             sc = None
-
-        node_feats = profile(f"{self.name}: node_feats after interaction", node_feats)
-        if sc is not None:
-            sc = profile(f"{self.name}: self-connexion", sc)
 
         # if self.max_poly_order is None:
         #     new_poly_order = self.correlation * (poly_order + self.sh_irreps.lmax)
@@ -270,24 +277,25 @@ class MACELayer(hk.Module):
         #     new_poly_order = self.correlation * poly_order + self.max_poly_order
 
         node_feats = EquivariantProductBasisBlock(
-            num_features=self.num_features,
-            target_irreps=self.hidden_irreps,
+            target_irreps=self.num_features * self.hidden_irreps,
             correlation=self.correlation,
             # max_poly_order=new_poly_order,
             # input_poly_order=poly_order,
             num_species=self.num_species,
             symmetric_tensor_product_basis=self.symmetric_tensor_product_basis,
+            off_diagonal=self.off_diagonal,
         )(node_feats=node_feats, node_specie=node_specie)
+
         node_feats = profile(f"{self.name}: node_feats after tensor power", node_feats)
 
         # poly_order = new_poly_order
 
         if sc is not None:
-            node_feats = node_feats + sc  # [n_nodes, feature, hidden_irreps]
+            node_feats = node_feats + sc  # [n_nodes, feature * hidden_irreps]
 
         if not self.last:
             node_outputs = LinearReadoutBlock(self.output_irreps)(
-                node_feats.axis_to_mul()
+                node_feats
             )  # [n_nodes, output_irreps]
         else:  # Non linear readout for last layer
             node_outputs = NonLinearReadoutBlock(
@@ -295,7 +303,7 @@ class MACELayer(hk.Module):
                 self.output_irreps,
                 activation=self.activation,
             )(
-                node_feats.axis_to_mul()
+                node_feats
             )  # [n_nodes, output_irreps]
 
             # polynomial order of node outputs is infinite in the last layer because of the non-polynomial activation function

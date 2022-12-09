@@ -4,6 +4,7 @@ import pickle
 import time
 from typing import Callable, Dict, List, Optional, Union
 
+import ase.data
 import e3nn_jax as e3nn
 import gin
 import haiku as hk
@@ -233,6 +234,29 @@ def polynomial_envelope(length, max_length, degree0: int, degree1: int):
 @gin.configurable
 def u_envelope(length, max_length, p: int):
     return e3nn.poly_envelope(p - 1, 2, max_length)(length)
+
+
+gin.external_configurable(modules.LinearNodeEmbeddingBlock, "LinearEmbedding")
+
+
+@gin.configurable
+class LinearMassEmbedding(hk.Module):
+    def __init__(self, num_species: int, irreps_out: e3nn.Irreps):
+        super().__init__()
+        self.num_species = num_species
+        self.irreps_out = e3nn.Irreps(irreps_out).filter("0e").regroup()
+
+    def __call__(self, node_specie: jnp.ndarray) -> e3nn.IrrepsArray:
+        w = hk.get_parameter(
+            f"embeddings",
+            shape=(self.num_species, self.irreps_out.dim),
+            dtype=jnp.float32,
+            init=hk.initializers.RandomNormal(),
+        )
+        atomic_masses = jnp.asarray(ase.data.atomic_masses)[node_specie] / 90.0  # [...]
+        return e3nn.IrrepsArray(
+            self.irreps_out, w[node_specie] * atomic_masses[..., None]
+        )
 
 
 @gin.configurable
@@ -599,7 +623,7 @@ def train(
                     f"{error_f}={1e3 * metrics_[error_f]:.1f} meV/A"
                 )
 
-            if eval_test:
+            if eval_test and test_loader is not None and len(test_loader) > 0:
                 loss_, metrics_ = tools.evaluate(
                     model=model,
                     params=ema_params,
@@ -654,7 +678,7 @@ def train(
                 f"among which {avg_eval_time_per_epoch:.1f}s for evaluation."
             )
         else:
-            eval_time_per_epoch += [time.perf_counter() - start_time]
+            eval_time_per_epoch += [time.perf_counter() - start_time]  # basically 0
 
     logging.info("Training complete")
     return epoch, ema_params

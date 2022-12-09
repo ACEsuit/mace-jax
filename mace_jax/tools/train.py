@@ -7,6 +7,7 @@ import jax.numpy as jnp
 import jraph
 import numpy as np
 import optax
+import tqdm
 from torch.utils.data import DataLoader
 
 from .utils import (
@@ -64,13 +65,15 @@ def train(
         yield epoch, params, optimizer_state, ema_params
 
         # Train one epoch
-        for graph in train_loader:
+        p_bar = tqdm.tqdm(train_loader, desc="Epoch {}".format(epoch))
+        for graph in p_bar:
             num_updates += 1
             start_time = time.time()
             loss, params, optimizer_state, ema_params = update_fn(
                 params, optimizer_state, ema_params, num_updates, graph
             )
             loss = float(loss)
+            p_bar.set_postfix({"loss": loss})
             opt_metrics = {
                 "loss": loss,
                 "time": time.time() - start_time,
@@ -81,9 +84,6 @@ def train(
             opt_metrics["num_updates"] = num_updates
             opt_metrics["epoch_"] = start_epoch + num_updates / len(train_loader)
             logger.log(opt_metrics)
-
-            if epoch == start_epoch:
-                logging.info(f"First epoch: {opt_metrics['time']:.3f}s loss={loss:.3f}")
 
             if last_cache_size != update_fn._cache_size():
                 last_cache_size = update_fn._cache_size()
@@ -111,7 +111,8 @@ def evaluate(
     fs_list = []
 
     start_time = time.time()
-    for ref_graph in data_loader:
+    p_bar = tqdm.tqdm(data_loader, desc="Evaluating")
+    for ref_graph in p_bar:
         output = model(params, ref_graph)
         pred_graph = ref_graph._replace(
             nodes=ref_graph.nodes._replace(forces=output["forces"]),
@@ -130,6 +131,7 @@ def evaluate(
         )
         total_loss += float(loss)
         num_graphs += len(ref_graph.n_edge)
+        p_bar.set_postfix({"n": num_graphs})
 
         delta_es_list.append(ref_graph.globals.energy - pred_graph.globals.energy)
         delta_es_per_atom_list.append(
