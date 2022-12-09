@@ -45,10 +45,7 @@ def get_neighborhood(
         receivers = receivers[keep_edge]
         senders_unit_shifts = senders_unit_shifts[keep_edge]
 
-    # Build output
-    edge_index = np.stack((senders, receivers))  # [2, n_edges]
-
     # From the docs: With the shift vector S, the distances D between atoms can be computed from
     # D = positions[j]-positions[i]+S.dot(cell)
     # Note (mario): this is done in the function get_edge_relative_vectors
-    return edge_index, senders_unit_shifts, cell
+    return senders, receivers, senders_unit_shifts

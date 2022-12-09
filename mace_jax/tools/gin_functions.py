@@ -18,7 +18,6 @@ from unique_names_generator import get_random_name
 from unique_names_generator.data import ADJECTIVES, NAMES
 
 from mace_jax import data, modules, tools
-from mace_jax.tools import torch_geometric
 
 loss = gin.configurable("loss")(modules.WeightedEnergyFrocesStressLoss)
 
@@ -75,11 +74,9 @@ def datasets(
     seed: int = 1234,
     energy_key: str = "energy",
     forces_key: str = "forces",
-    batch_size: int,
-    valid_batch_size: int = None,
-    n_mantissa_bits: int = 2,
-    n_min_nodes: int = 1,
-    n_min_edges: int = 1,
+    n_node: int = 1,
+    n_edge: int = 1,
+    n_graph: int = 1,
 ):
     """Load training and test dataset from xyz file"""
 
@@ -129,7 +126,7 @@ def datasets(
     else:
         test_configs = []
 
-    z_table = tools.get_atomic_number_table_from_zs(
+    z_table = data.get_atomic_number_table_from_zs(
         z
         for configs in (train_configs, valid_configs)
         for config in configs
@@ -144,41 +141,26 @@ def datasets(
         f"test={len(test_configs)}"
     )
 
-    train_loader = torch_geometric.dataloader.DataLoader(
-        dataset=[
-            data.AtomicData.from_config(train_config, cutoff=r_max)
-            for train_config in train_configs
-        ],
-        batch_size=batch_size,
+    train_loader = data.GraphDataLoader(
+        graphs=[data.graph_from_configuration(c, cutoff=r_max) for c in train_configs],
+        n_node=n_node,
+        n_edge=n_edge,
+        n_graph=n_graph,
         shuffle=True,
-        drop_last=True,
-        overwrapper=lambda x: tools.get_batched_padded_graph_tuples(
-            x, n_mantissa_bits, n_min_nodes, n_min_edges
-        ),
     )
-    valid_loader = torch_geometric.dataloader.DataLoader(
-        dataset=[
-            data.AtomicData.from_config(valid_config, cutoff=r_max)
-            for valid_config in valid_configs
-        ],
-        batch_size=valid_batch_size or batch_size,
+    valid_loader = data.GraphDataLoader(
+        graphs=[data.graph_from_configuration(c, cutoff=r_max) for c in valid_configs],
+        n_node=n_node,
+        n_edge=n_edge,
+        n_graph=n_graph,
         shuffle=False,
-        drop_last=False,
-        overwrapper=lambda x: tools.get_batched_padded_graph_tuples(
-            x, n_mantissa_bits, n_min_nodes, n_min_edges
-        ),
     )
-    test_loader = torch_geometric.dataloader.DataLoader(
-        dataset=[
-            data.AtomicData.from_config(test_config, cutoff=r_max)
-            for test_config in test_configs
-        ],
-        batch_size=valid_batch_size or batch_size,
+    test_loader = data.GraphDataLoader(
+        graphs=[data.graph_from_configuration(c, cutoff=r_max) for c in test_configs],
+        n_node=n_node,
+        n_edge=n_edge,
+        n_graph=n_graph,
         shuffle=False,
-        drop_last=False,
-        overwrapper=lambda x: tools.get_batched_padded_graph_tuples(
-            x, n_mantissa_bits, n_min_nodes, n_min_edges
-        ),
     )
     return dict(
         train_loader=train_loader,

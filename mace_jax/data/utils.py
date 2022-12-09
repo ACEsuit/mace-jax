@@ -1,13 +1,17 @@
 import logging
-from collections import defaultdict
+from collections import defaultdict, namedtuple
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from random import shuffle
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import ase.data
 import ase.io
+import jax
+import jraph
 import numpy as np
+from roundmantissa import ceil_mantissa
 
-from mace_jax.tools import AtomicNumberTable
+from mace_jax.data.neighborhood import get_neighborhood
 
 Vector = np.ndarray  # [3,]
 Positions = np.ndarray  # [..., 3]
@@ -158,6 +162,34 @@ def load_from_xyz(
     return atomic_energies_dict, configs
 
 
+class AtomicNumberTable:
+    def __init__(self, zs: Sequence[int]):
+        self.zs = zs
+
+    def __len__(self) -> int:
+        return len(self.zs)
+
+    def __str__(self):
+        return f"AtomicNumberTable: {tuple(s for s in self.zs)}"
+
+    def index_to_z(self, index: int) -> int:
+        return self.zs[index]
+
+    def z_to_index(self, atomic_number: str) -> int:
+        return self.zs.index(atomic_number)
+
+
+def get_atomic_number_table_from_zs(zs: Iterable[int]) -> AtomicNumberTable:
+    return AtomicNumberTable(sorted(set(zs)))
+
+
+def atomic_numbers_to_indices(
+    atomic_numbers: np.ndarray, z_table: AtomicNumberTable
+) -> np.ndarray:
+    to_index_fn = np.vectorize(z_table.z_to_index)
+    return to_index_fn(atomic_numbers)
+
+
 def compute_average_E0s(
     collections_train: Configurations, z_table: AtomicNumberTable
 ) -> Dict[int, float]:
@@ -186,3 +218,112 @@ def compute_average_E0s(
         for i, z in enumerate(z_table.zs):
             atomic_energies_dict[z] = 0.0
     return atomic_energies_dict
+
+
+GraphNodes = namedtuple("Nodes", ["positions", "forces", "species"])
+GraphEdges = namedtuple("Edges", ["shifts"])
+GraphGlobals = namedtuple("Globals", ["cell", "energy", "stress", "weight"])
+
+
+def graph_from_configuration(config: Configuration, cutoff: float) -> jraph.GraphsTuple:
+    senders, receivers, shifts = get_neighborhood(
+        positions=config.positions, cutoff=cutoff, pbc=config.pbc, cell=config.cell
+    )
+    return jraph.GraphsTuple(
+        nodes=GraphNodes(
+            positions=config.positions,
+            forces=config.forces,
+            species=config.atomic_numbers,
+        ),
+        edges=GraphEdges(shifts=shifts),
+        globals=jax.tree_util.tree_map(
+            lambda x: x[None, ...],
+            GraphGlobals(
+                cell=config.cell,
+                energy=config.energy,
+                stress=config.stress,
+                weight=np.asarray(config.weight),
+            ),
+        ),
+        receivers=receivers,
+        senders=senders,
+        n_edge=np.array([senders.shape[0]]),
+        n_node=np.array([config.positions.shape[0]]),
+    )
+
+
+class GraphDataLoader:
+    def __init__(
+        self,
+        graphs: List[jraph.GraphsTuple],
+        n_node: int,
+        n_edge: int,
+        n_graph: int,
+        shuffle: bool = True,
+    ):
+        self.graphs = graphs
+        self.n_node = n_node
+        self.n_edge = n_edge
+        self.n_graph = n_graph
+        self.shuffle = shuffle
+        self._length = None
+
+    def __iter__(self):
+        graphs = self.graphs.copy()  # this is a shallow copy
+        if self.shuffle:
+            shuffle(graphs)
+        return jraph.dynamically_batch(
+            graphs,
+            n_node=self.n_node,
+            n_edge=self.n_edge,
+            n_graph=self.n_graph,
+        )
+
+    def __len__(self):
+        if self.shuffle:
+            raise NotImplementedError("Cannot compute length of shuffled data loader.")
+        return self.approx_length()
+
+    def approx_length(self):
+        if self._length is None:
+            self._length = 0
+            for _ in self:
+                self._length += 1
+        return self._length
+
+
+def pad_graph_to_nearest_ceil_mantissa(
+    graphs_tuple: jraph.GraphsTuple,
+    n_mantissa_bits: int = 2,
+    n_min_nodes: int = 1,
+    n_min_edges: int = 1,
+) -> jraph.GraphsTuple:
+    """Pads a batched `GraphsTuple` to the nearest power of two.
+
+    For example, if a `GraphsTuple` has 7 nodes, 5 edges and 3 graphs, this method
+    would pad the `GraphsTuple` nodes and edges:
+        7batch_sizedes --> 8 nodes (2^3)
+        5 edges --> 8 edges (2^3)
+
+    And since padding is accomplished using `jraph.pad_with_graphs`, an extra
+    graph and node is added:
+        8 nodes --> 9 nodes
+        3 graphs --> 4 graphs
+
+    Args:
+        graphs_tuple: a batched `GraphsTuple` (can be batch size 1).
+
+    Returns:
+        A graphs_tuple batched to the nearest power of two.
+    """
+    # Add 1 since we need at least one padding node for pad_with_graphs.
+    pad_nodes_to = ceil_mantissa(np.sum(graphs_tuple.n_node) + 1, n_mantissa_bits)
+    pad_nodes_to = max(pad_nodes_to, n_min_nodes)
+    pad_edges_to = ceil_mantissa(np.sum(graphs_tuple.n_edge), n_mantissa_bits)
+    pad_edges_to = max(pad_edges_to, n_min_edges)
+    # Add 1 since we need at least one padding graph for pad_with_graphs.
+    # pad_graphs_to = ceil_mantissa(graphs_tuple.n_node.shape[0] + 1, n_mantissa_bits)
+    pad_graphs_to = graphs_tuple.n_node.shape[0] + 1
+    return jraph.pad_with_graphs(
+        graphs_tuple, pad_nodes_to, pad_edges_to, pad_graphs_to
+    )

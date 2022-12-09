@@ -1,4 +1,3 @@
-from .atomic_data import AtomicData
 from .neighborhood import get_neighborhood
 from .utils import (
     Configuration,
@@ -8,16 +7,33 @@ from .utils import (
     load_from_xyz,
     random_train_valid_split,
     test_config_types,
+    graph_from_configuration,
+    GraphNodes,
+    GraphEdges,
+    GraphGlobals,
+    GraphDataLoader,
+    AtomicNumberTable,
+    atomic_numbers_to_indices,
+    get_atomic_number_table_from_zs,
+    pad_graph_to_nearest_ceil_mantissa,
 )
 
 __all__ = [
     "get_neighborhood",
     "Configuration",
     "Configurations",
-    "random_train_valid_split",
-    "load_from_xyz",
-    "test_config_types",
-    "config_from_atoms",
-    "AtomicData",
     "compute_average_E0s",
+    "config_from_atoms",
+    "load_from_xyz",
+    "random_train_valid_split",
+    "test_config_types",
+    "graph_from_configuration",
+    "GraphNodes",
+    "GraphEdges",
+    "GraphGlobals",
+    "GraphDataLoader",
+    "AtomicNumberTable",
+    "atomic_numbers_to_indices",
+    "get_atomic_number_table_from_zs",
+    "pad_graph_to_nearest_ceil_mantissa",
 ]

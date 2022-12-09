@@ -8,28 +8,20 @@ import jraph
 import numpy as np
 import optax
 import tqdm
-from torch.utils.data import DataLoader
 
-from .utils import (
-    MetricsLogger,
-    compute_mae,
-    compute_q95,
-    compute_rel_mae,
-    compute_rel_rmse,
-    compute_rmse,
-)
+from mace_jax import data, tools
 
 
 def train(
     model: Callable,
     params: Dict[str, Any],
     loss_fn: Any,
-    train_loader: DataLoader,
+    train_loader: data.GraphDataLoader,
     gradient_transform: Any,
     optimizer_state: Dict[str, Any],
     start_epoch: int,
     max_num_epochs: int,
-    logger: MetricsLogger,
+    logger: Any,
     ema_decay: Optional[float] = None,
 ):
     num_updates = 0
@@ -65,7 +57,11 @@ def train(
         yield epoch, params, optimizer_state, ema_params
 
         # Train one epoch
-        p_bar = tqdm.tqdm(train_loader, desc="Epoch {}".format(epoch))
+        p_bar = tqdm.tqdm(
+            train_loader,
+            desc="Epoch {}".format(epoch),
+            total=train_loader.approx_length(),
+        )
         for graph in p_bar:
             num_updates += 1
             start_time = time.time()
@@ -82,7 +78,9 @@ def train(
             opt_metrics["mode"] = "opt"
             opt_metrics["epoch"] = epoch
             opt_metrics["num_updates"] = num_updates
-            opt_metrics["epoch_"] = start_epoch + num_updates / len(train_loader)
+            opt_metrics["epoch_"] = (
+                start_epoch + num_updates / train_loader.approx_length()
+            )
             logger.log(opt_metrics)
 
             if last_cache_size != update_fn._cache_size():
@@ -101,7 +99,7 @@ def evaluate(
     model: Callable,
     params: Any,
     loss_fn: Any,
-    data_loader: DataLoader,
+    data_loader: data.GraphDataLoader,
 ) -> Tuple[float, Dict[str, Any]]:
     total_loss = 0.0
     num_graphs = 0
@@ -152,18 +150,18 @@ def evaluate(
     aux = {
         "loss": avg_loss,
         # Mean absolute error
-        "mae_e": compute_mae(delta_es),
-        "mae_e_per_atom": compute_mae(delta_es_per_atom),
-        "mae_f": compute_mae(delta_fs),
-        "rel_mae_f": compute_rel_mae(delta_fs, fs),
+        "mae_e": tools.compute_mae(delta_es),
+        "mae_e_per_atom": tools.compute_mae(delta_es_per_atom),
+        "mae_f": tools.compute_mae(delta_fs),
+        "rel_mae_f": tools.compute_rel_mae(delta_fs, fs),
         # Root-mean-square error
-        "rmse_e": compute_rmse(delta_es),
-        "rmse_e_per_atom": compute_rmse(delta_es_per_atom),
-        "rmse_f": compute_rmse(delta_fs),
-        "rel_rmse_f": compute_rel_rmse(delta_fs, fs),
+        "rmse_e": tools.compute_rmse(delta_es),
+        "rmse_e_per_atom": tools.compute_rmse(delta_es_per_atom),
+        "rmse_f": tools.compute_rmse(delta_fs),
+        "rel_rmse_f": tools.compute_rel_rmse(delta_fs, fs),
         # Q_95
-        "q95_e": compute_q95(delta_es),
-        "q95_f": compute_q95(delta_fs),
+        "q95_e": tools.compute_q95(delta_es),
+        "q95_f": tools.compute_q95(delta_fs),
         # Time
         "time": time.time() - start_time,
     }

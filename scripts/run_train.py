@@ -48,7 +48,9 @@ def main():
 
     params = reload(params)
 
-    gradient_transform, max_num_epochs = optimizer(steps_per_epoch=len(train_loader))
+    gradient_transform, max_num_epochs = optimizer(
+        steps_per_epoch=train_loader.approx_length()
+    )
     optimizer_state = gradient_transform.init(params)
 
     logging.info(f"Number of parameters: {tools.count_parameters(params)}")
