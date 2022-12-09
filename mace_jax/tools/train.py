@@ -109,7 +109,7 @@ def evaluate(
     fs_list = []
 
     start_time = time.time()
-    p_bar = tqdm.tqdm(data_loader, desc="Evaluating")
+    p_bar = tqdm.tqdm(data_loader, desc="Evaluating", total=data_loader.approx_length())
     for ref_graph in p_bar:
         output = model(params, ref_graph)
         pred_graph = ref_graph._replace(
