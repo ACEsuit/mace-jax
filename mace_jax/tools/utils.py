@@ -323,15 +323,7 @@ def sum_nodes_of_the_same_graph(
     graph: jraph.GraphsTuple, node_quantities: jnp.ndarray
 ) -> jnp.ndarray:
     """Sum node quantities and return a graph quantity."""
-    num_graphs = graph.n_node.shape[0]
-    num_nodes = graph.nodes.positions.shape[0]
-    graph_index = jnp.repeat(
-        jnp.arange(num_graphs), graph.n_node, total_repeat_length=num_nodes
-    )  # [n_nodes,]
-    graph_quantities = e3nn.index_add(
-        indices=graph_index, input=node_quantities, out_dim=num_graphs
-    )  # [ n_graphs,]
-    return graph_quantities
+    return e3nn.scatter_sum(node_quantities, nel=graph.n_node)  # [ n_graphs,]
 
 
 def get_edge_vectors(
