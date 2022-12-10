@@ -107,6 +107,8 @@ def evaluate(
     delta_es_per_atom_list = []
     delta_fs_list = []
     fs_list = []
+    delta_stress_list = []
+    stress_list = []
 
     start_time = time.time()
     p_bar = tqdm.tqdm(data_loader, desc="Evaluating", total=data_loader.approx_length())
@@ -114,7 +116,9 @@ def evaluate(
         output = model(params, ref_graph)
         pred_graph = ref_graph._replace(
             nodes=ref_graph.nodes._replace(forces=output["forces"]),
-            globals=ref_graph.globals._replace(energy=output["energy"]),
+            globals=ref_graph.globals._replace(
+                energy=output["energy"], stress=output["stress"]
+            ),
         )
 
         ref_graph = jraph.unpad_with_graphs(ref_graph)
@@ -124,9 +128,9 @@ def evaluate(
             loss_fn(
                 ref_graph,
                 dict(
-                    energy=getattr(pred_graph.globals, "energy"),
-                    forces=getattr(pred_graph.nodes, "forces"),
-                    stress=getattr(pred_graph.globals, "stress"),
+                    energy=pred_graph.globals.energy,
+                    forces=pred_graph.nodes.forces,
+                    stress=pred_graph.globals.stress,
                 ),
             )
         )
@@ -141,12 +145,17 @@ def evaluate(
         delta_fs_list.append(ref_graph.nodes.forces - pred_graph.nodes.forces)
         fs_list.append(ref_graph.nodes.forces)
 
+        delta_stress_list.append(ref_graph.globals.stress - pred_graph.globals.stress)
+        stress_list.append(ref_graph.globals.stress)
+
     avg_loss = total_loss / num_graphs
 
     delta_es = np.concatenate(delta_es_list, axis=0)
     delta_es_per_atom = np.concatenate(delta_es_per_atom_list, axis=0)
     delta_fs = np.concatenate(delta_fs_list, axis=0)
     fs = np.concatenate(fs_list, axis=0)
+    delta_stress_list = np.concatenate(delta_stress_list, axis=0)
+    stress_list = np.concatenate(stress_list, axis=0)
 
     aux = {
         "loss": avg_loss,
@@ -155,11 +164,13 @@ def evaluate(
         "mae_e_per_atom": tools.compute_mae(delta_es_per_atom),
         "mae_f": tools.compute_mae(delta_fs),
         "rel_mae_f": tools.compute_rel_mae(delta_fs, fs),
+        "mae_s": tools.compute_mae(delta_stress_list),
         # Root-mean-square error
         "rmse_e": tools.compute_rmse(delta_es),
         "rmse_e_per_atom": tools.compute_rmse(delta_es_per_atom),
         "rmse_f": tools.compute_rmse(delta_fs),
         "rel_rmse_f": tools.compute_rel_rmse(delta_fs, fs),
+        "rmse_s": tools.compute_rmse(delta_stress_list),
         # Q_95
         "q95_e": tools.compute_q95(delta_es),
         "q95_f": tools.compute_q95(delta_fs),

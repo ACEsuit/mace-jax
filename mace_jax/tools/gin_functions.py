@@ -323,10 +323,16 @@ def model(
         raise ValueError(f"atomic_energies={atomic_energies} is not supported")
 
     # check that num_species is consistent with the dataset
-    for graph in train_loader.graphs:
-        if not np.all(graph.nodes.species < num_species):
+    if z_table is None:
+        for graph in train_loader.graphs:
+            if not np.all(graph.nodes.species < num_species):
+                raise ValueError(
+                    f"max(graph.nodes.species)={np.max(graph.nodes.species)} >= num_species={num_species}"
+                )
+    else:
+        if max(z_table.zs) >= num_species:
             raise ValueError(
-                f"max(graph.nodes.species)={np.max(graph.nodes.species)} >= num_species={num_species}"
+                f"max(z_table.zs)={max(z_table.zs)} >= num_species={num_species}"
             )
 
     if scaling is None:
@@ -550,15 +556,19 @@ def train(
     if log_errors == "PerAtomRMSE":
         error_e = "rmse_e_per_atom"
         error_f = "rmse_f"
+        error_s = "rmse_s"
     elif log_errors == "TotalRMSE":
         error_e = "rmse_e"
         error_f = "rmse_f"
+        error_s = "rmse_s"
     elif log_errors == "PerAtomMAE":
         error_e = "mae_e_per_atom"
         error_f = "mae_f"
+        error_s = "mae_s"
     elif log_errors == "TotalMAE":
         error_e = "mae_e"
         error_f = "mae_f"
+        error_s = "mae_s"
 
     lowest_loss = np.inf
     patience_counter = 0
@@ -610,7 +620,8 @@ def train(
                     f"Epoch {epoch}: Train: "
                     f"loss={loss_:.4f}, "
                     f"{error_e}={1e3 * metrics_[error_e]:.1f} meV, "
-                    f"{error_f}={1e3 * metrics_[error_f]:.1f} meV/A"
+                    f"{error_f}={1e3 * metrics_[error_f]:.1f} meV/A, "
+                    f"{error_s}={1e3 * metrics_[error_s]:.1f} meV/A^3"
                 )
 
             if (
