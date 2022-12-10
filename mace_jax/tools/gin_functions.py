@@ -142,21 +142,27 @@ def datasets(
     )
 
     train_loader = data.GraphDataLoader(
-        graphs=[data.graph_from_configuration(c, cutoff=r_max) for c in train_configs],
+        graphs=[
+            data.graph_from_configuration(c, cutoff=r_max) for c in tqdm(train_configs)
+        ],
         n_node=n_node,
         n_edge=n_edge,
         n_graph=n_graph,
         shuffle=True,
     )
     valid_loader = data.GraphDataLoader(
-        graphs=[data.graph_from_configuration(c, cutoff=r_max) for c in valid_configs],
+        graphs=[
+            data.graph_from_configuration(c, cutoff=r_max) for c in tqdm(valid_configs)
+        ],
         n_node=n_node,
         n_edge=n_edge,
         n_graph=n_graph,
         shuffle=False,
     )
     test_loader = data.GraphDataLoader(
-        graphs=[data.graph_from_configuration(c, cutoff=r_max) for c in test_configs],
+        graphs=[
+            data.graph_from_configuration(c, cutoff=r_max) for c in tqdm(test_configs)
+        ],
         n_node=n_node,
         n_edge=n_edge,
         n_graph=n_graph,
@@ -643,7 +649,8 @@ def train(
                     f"Epoch {epoch}: Test: "
                     f"loss={loss_:.4f}, "
                     f"{error_e}={1e3 * metrics_[error_e]:.1f} meV, "
-                    f"{error_f}={1e3 * metrics_[error_f]:.1f} meV/A"
+                    f"{error_f}={1e3 * metrics_[error_f]:.1f} meV/A, "
+                    f"{error_s}={1e3 * metrics_[error_s]:.1f} meV/A^3"
                 )
 
             loss_, metrics_ = tools.evaluate(
@@ -660,7 +667,8 @@ def train(
                 f"Epoch {epoch}: Validation: "
                 f"loss={loss_:.4f}, "
                 f"{error_e}={1e3 * metrics_[error_e]:.1f} meV, "
-                f"{error_f}={1e3 * metrics_[error_f]:.1f} meV/A"
+                f"{error_f}={1e3 * metrics_[error_f]:.1f} meV/A, "
+                f"{error_s}={1e3 * metrics_[error_s]:.1f} meV/A^3"
             )
 
             if loss_ >= lowest_loss:
