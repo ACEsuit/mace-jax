@@ -124,8 +124,9 @@ def evaluate(
             loss_fn(
                 ref_graph,
                 dict(
-                    energy=pred_graph.globals.energy,
-                    forces=pred_graph.nodes.forces,
+                    energy=getattr(pred_graph.globals, "energy"),
+                    forces=getattr(pred_graph.nodes, "forces"),
+                    stress=getattr(pred_graph.globals, "stress"),
                 ),
             )
         )

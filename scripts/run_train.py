@@ -83,6 +83,8 @@ def main():
         )  # [ n_graphs,]
 
         det = jnp.linalg.det(graph.globals.cell)[:, None, None]  # [n_graphs, 1, 1]
+        det = jnp.where(det > 0.0, det, 1.0)  # dummy graphs have det = 0
+
         stress_cell = (
             jnp.transpose(pseudo_stress, (0, 2, 1)) @ graph.globals.cell
         )  # [n_graphs, 3, 3]

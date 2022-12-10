@@ -135,7 +135,10 @@ def load_from_xyz(
         atoms_without_iso_atoms = []
 
         for idx, atoms in enumerate(atoms_list):
-            if len(atoms) == 1 and atoms.info["config_type"] == "IsolatedAtom":
+            if (
+                len(atoms) == 1
+                and getattr(atoms, "config_type", None) == "IsolatedAtom"
+            ):
                 if energy_key in atoms.info.keys():
                     atomic_energies_dict[atoms.get_atomic_numbers()[0]] = atoms.info[
                         energy_key
@@ -267,6 +270,18 @@ class GraphDataLoader:
         self.n_graph = n_graph
         self.shuffle = shuffle
         self._length = None
+
+        keep_graphs = [
+            graph
+            for graph in self.graphs
+            if graph.n_node.sum() <= self.n_node - 1
+            and graph.n_edge.sum() <= self.n_edge
+        ]
+        if len(keep_graphs) != len(self.graphs):
+            logging.warning(
+                f"Discarded {len(self.graphs) - len(keep_graphs)} graphs due to size constraints."
+            )
+        self.graphs = keep_graphs
 
     def __iter__(self):
         graphs = self.graphs.copy()  # this is a shallow copy
