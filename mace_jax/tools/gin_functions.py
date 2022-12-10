@@ -246,7 +246,7 @@ def model(
     seed: int,
     r_max: float,
     atomic_energies_dict: Dict[int, float] = None,
-    train_loader=None,
+    train_loader: data.GraphDataLoader = None,
     train_configs=None,
     z_table=None,
     initialize: bool = True,
@@ -321,6 +321,13 @@ def model(
         )
     else:
         raise ValueError(f"atomic_energies={atomic_energies} is not supported")
+
+    # check that num_species is consistent with the dataset
+    for graph in train_loader.graphs:
+        if not np.all(graph.nodes.species < num_species):
+            raise ValueError(
+                f"max(graph.nodes.species)={np.max(graph.nodes.species)} >= num_species={num_species}"
+            )
 
     if scaling is None:
         mean, std = 0.0, 1.0
