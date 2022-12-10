@@ -11,12 +11,12 @@ import jraph
 import mace_jax
 from mace_jax import tools
 from mace_jax.tools.gin_functions import (
+    checks,
     datasets,
     flags,
     logs,
     model,
     optimizer,
-    checks,
     parse_argv,
     reload,
     train,
@@ -46,6 +46,8 @@ def main():
         dd["train_configs"],
         dd["z_table"],
     )
+
+    params = reload(params)
 
     @jax.jit
     def predictor(w, graph: jraph.GraphsTuple) -> Dict[str, jnp.ndarray]:
@@ -91,8 +93,6 @@ def main():
 
     if checks(predictor, params, train_loader):
         return
-
-    params = reload(params)
 
     gradient_transform, max_num_epochs = optimizer(
         steps_per_epoch=train_loader.approx_length()
