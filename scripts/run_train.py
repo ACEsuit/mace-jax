@@ -16,6 +16,7 @@ from mace_jax.tools.gin_functions import (
     logs,
     model,
     optimizer,
+    checks,
     parse_argv,
     reload,
     train,
@@ -44,18 +45,6 @@ def main():
         dd["train_loader"],
         dd["train_configs"],
         dd["z_table"],
-    )
-
-    params = reload(params)
-
-    gradient_transform, max_num_epochs = optimizer(
-        steps_per_epoch=train_loader.approx_length()
-    )
-    optimizer_state = gradient_transform.init(params)
-
-    logging.info(f"Number of parameters: {tools.count_parameters(params)}")
-    logging.info(
-        f"Number of parameters in optimizer: {tools.count_parameters(optimizer_state)}"
     )
 
     @jax.jit
@@ -99,6 +88,21 @@ def main():
             "forces": -minus_forces,  # [n_nodes, 3] forces on each atom [eV / A]
             "stress": stress,  # [n_graphs, 3, 3] stress tensor [eV / A^3]
         }
+
+    if checks(predictor, params, train_loader):
+        return
+
+    params = reload(params)
+
+    gradient_transform, max_num_epochs = optimizer(
+        steps_per_epoch=train_loader.approx_length()
+    )
+    optimizer_state = gradient_transform.init(params)
+
+    logging.info(f"Number of parameters: {tools.count_parameters(params)}")
+    logging.info(
+        f"Number of parameters in optimizer: {tools.count_parameters(optimizer_state)}"
+    )
 
     epoch, params = train(
         predictor,
