@@ -77,6 +77,7 @@ def datasets(
     n_node: int = 1,
     n_edge: int = 1,
     n_graph: int = 1,
+    n_mantissa_bits: int = 2,
 ):
     """Load training and test dataset from xyz file"""
 
@@ -148,6 +149,7 @@ def datasets(
         n_node=n_node,
         n_edge=n_edge,
         n_graph=n_graph,
+        n_mantissa_bits=n_mantissa_bits,
         shuffle=True,
     )
     valid_loader = data.GraphDataLoader(
@@ -157,6 +159,7 @@ def datasets(
         n_node=n_node,
         n_edge=n_edge,
         n_graph=n_graph,
+        n_mantissa_bits=n_mantissa_bits,
         shuffle=False,
     )
     test_loader = data.GraphDataLoader(
@@ -166,6 +169,7 @@ def datasets(
         n_node=n_node,
         n_edge=n_edge,
         n_graph=n_graph,
+        n_mantissa_bits=n_mantissa_bits,
         shuffle=False,
     )
     return dict(
@@ -663,12 +667,15 @@ def train(
             metrics_["epoch"] = epoch
             logger.log(metrics_)
 
+            def _(x):
+                return "NA" if x is None else f"{1e3 * x:.1f}"
+
             logging.info(
                 f"Epoch {epoch}: Validation: "
                 f"loss={loss_:.4f}, "
-                f"{error_e}={1e3 * metrics_[error_e]:.1f} meV, "
-                f"{error_f}={1e3 * metrics_[error_f]:.1f} meV/A, "
-                f"{error_s}={1e3 * metrics_[error_s]:.1f} meV/A^3"
+                f"{error_e}={_(metrics_[error_e])} meV, "
+                f"{error_f}={_(metrics_[error_f])} meV/A, "
+                f"{error_s}={_(metrics_[error_s])} meV/A^3"
             )
 
             if loss_ >= lowest_loss:

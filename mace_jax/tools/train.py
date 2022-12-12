@@ -138,44 +138,89 @@ def evaluate(
         num_graphs += len(ref_graph.n_edge)
         p_bar.set_postfix({"n": num_graphs})
 
-        delta_es_list.append(ref_graph.globals.energy - pred_graph.globals.energy)
-        delta_es_per_atom_list.append(
-            (ref_graph.globals.energy - pred_graph.globals.energy) / ref_graph.n_node
-        )
-        delta_fs_list.append(ref_graph.nodes.forces - pred_graph.nodes.forces)
-        fs_list.append(ref_graph.nodes.forces)
+        if ref_graph.globals.energy is not None:
+            delta_es_list.append(ref_graph.globals.energy - pred_graph.globals.energy)
+            delta_es_per_atom_list.append(
+                (ref_graph.globals.energy - pred_graph.globals.energy)
+                / ref_graph.n_node
+            )
 
-        delta_stress_list.append(ref_graph.globals.stress - pred_graph.globals.stress)
-        stress_list.append(ref_graph.globals.stress)
+        if ref_graph.nodes.forces is not None:
+            delta_fs_list.append(ref_graph.nodes.forces - pred_graph.nodes.forces)
+            fs_list.append(ref_graph.nodes.forces)
+
+        if ref_graph.globals.stress is not None:
+            delta_stress_list.append(
+                ref_graph.globals.stress - pred_graph.globals.stress
+            )
+            stress_list.append(ref_graph.globals.stress)
 
     avg_loss = total_loss / num_graphs
 
-    delta_es = np.concatenate(delta_es_list, axis=0)
-    delta_es_per_atom = np.concatenate(delta_es_per_atom_list, axis=0)
-    delta_fs = np.concatenate(delta_fs_list, axis=0)
-    fs = np.concatenate(fs_list, axis=0)
-    delta_stress_list = np.concatenate(delta_stress_list, axis=0)
-    stress_list = np.concatenate(stress_list, axis=0)
-
     aux = {
         "loss": avg_loss,
-        # Mean absolute error
-        "mae_e": tools.compute_mae(delta_es),
-        "mae_e_per_atom": tools.compute_mae(delta_es_per_atom),
-        "mae_f": tools.compute_mae(delta_fs),
-        "rel_mae_f": tools.compute_rel_mae(delta_fs, fs),
-        "mae_s": tools.compute_mae(delta_stress_list),
-        # Root-mean-square error
-        "rmse_e": tools.compute_rmse(delta_es),
-        "rmse_e_per_atom": tools.compute_rmse(delta_es_per_atom),
-        "rmse_f": tools.compute_rmse(delta_fs),
-        "rel_rmse_f": tools.compute_rel_rmse(delta_fs, fs),
-        "rmse_s": tools.compute_rmse(delta_stress_list),
-        # Q_95
-        "q95_e": tools.compute_q95(delta_es),
-        "q95_f": tools.compute_q95(delta_fs),
-        # Time
         "time": time.time() - start_time,
+        "mae_e": None,
+        "mae_e_per_atom": None,
+        "rmse_e": None,
+        "rmse_e_per_atom": None,
+        "q95_e": None,
+        "mae_f": None,
+        "rel_mae_f": None,
+        "rmse_f": None,
+        "rel_rmse_f": None,
+        "q95_f": None,
+        "mae_s": None,
+        "rel_mae_s": None,
+        "rmse_s": None,
+        "rel_rmse_s": None,
+        "q95_s": None,
     }
+
+    if len(delta_es_list) > 0:
+        delta_es = np.concatenate(delta_es_list, axis=0)
+        delta_es_per_atom = np.concatenate(delta_es_per_atom_list, axis=0)
+        aux.update(
+            {
+                # Mean absolute error
+                "mae_e": tools.compute_mae(delta_es),
+                "mae_e_per_atom": tools.compute_mae(delta_es_per_atom),
+                # Root-mean-square error
+                "rmse_e": tools.compute_rmse(delta_es),
+                "rmse_e_per_atom": tools.compute_rmse(delta_es_per_atom),
+                # Q_95
+                "q95_e": tools.compute_q95(delta_es),
+            }
+        )
+    if len(delta_fs_list) > 0:
+        delta_fs = np.concatenate(delta_fs_list, axis=0)
+        fs = np.concatenate(fs_list, axis=0)
+        aux.update(
+            {
+                # Mean absolute error
+                "mae_f": tools.compute_mae(delta_fs),
+                "rel_mae_f": tools.compute_rel_mae(delta_fs, fs),
+                # Root-mean-square error
+                "rmse_f": tools.compute_rmse(delta_fs),
+                "rel_rmse_f": tools.compute_rel_rmse(delta_fs, fs),
+                # Q_95
+                "q95_f": tools.compute_q95(delta_fs),
+            }
+        )
+    if len(delta_stress_list) > 0:
+        delta_stress = np.concatenate(delta_stress_list, axis=0)
+        stress = np.concatenate(stress_list, axis=0)
+        aux.update(
+            {
+                # Mean absolute error
+                "mae_s": tools.compute_mae(delta_stress),
+                "rel_mae_s": tools.compute_rel_mae(delta_stress, stress),
+                # Root-mean-square error
+                "rmse_s": tools.compute_rmse(delta_stress),
+                "rel_rmse_s": tools.compute_rel_rmse(delta_stress, stress),
+                # Q_95
+                "q95_s": tools.compute_q95(delta_stress),
+            }
+        )
 
     return avg_loss, aux

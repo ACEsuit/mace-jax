@@ -13,6 +13,8 @@ from roundmantissa import ceil_mantissa
 
 from mace_jax.data.neighborhood import get_neighborhood
 
+from .dynamically_batch import dynamically_batch
+
 Vector = np.ndarray  # [3,]
 Positions = np.ndarray  # [..., 3]
 Forces = np.ndarray  # [..., 3]
@@ -263,12 +265,14 @@ class GraphDataLoader:
         n_edge: int,
         n_graph: int,
         shuffle: bool = True,
+        n_mantissa_bits: Optional[int] = None,
     ):
         self.graphs = graphs
         self.n_node = n_node
         self.n_edge = n_edge
         self.n_graph = n_graph
         self.shuffle = shuffle
+        self.n_mantissa_bits = n_mantissa_bits
         self._length = None
 
         keep_graphs = [
@@ -287,12 +291,25 @@ class GraphDataLoader:
         graphs = self.graphs.copy()  # this is a shallow copy
         if self.shuffle:
             shuffle(graphs)
-        return jraph.dynamically_batch(
+
+        for batched_graph in dynamically_batch(
             graphs,
             n_node=self.n_node,
             n_edge=self.n_edge,
             n_graph=self.n_graph,
-        )
+        ):
+            if self.n_mantissa_bits is None:
+                yield jraph.pad_with_graphs(
+                    batched_graph, self.n_node, self.n_edge, self.n_graph
+                )
+            else:
+                yield pad_graph_to_nearest_ceil_mantissa(
+                    batched_graph,
+                    n_mantissa_bits=self.n_mantissa_bits,
+                    n_max_nodes=self.n_node,
+                    n_max_edges=self.n_edge,
+                    n_max_graphs=self.n_graph,
+                )
 
     def __len__(self):
         if self.shuffle:
@@ -309,9 +326,14 @@ class GraphDataLoader:
 
 def pad_graph_to_nearest_ceil_mantissa(
     graphs_tuple: jraph.GraphsTuple,
+    *,
     n_mantissa_bits: int = 2,
     n_min_nodes: int = 1,
     n_min_edges: int = 1,
+    n_min_graphs: int = 1,
+    n_max_nodes: int = np.iinfo(np.int32).max,
+    n_max_edges: int = np.iinfo(np.int32).max,
+    n_max_graphs: int = np.iinfo(np.int32).max,
 ) -> jraph.GraphsTuple:
     """Pads a batched `GraphsTuple` to the nearest power of two.
 
@@ -331,14 +353,18 @@ def pad_graph_to_nearest_ceil_mantissa(
     Returns:
         A graphs_tuple batched to the nearest power of two.
     """
-    # Add 1 since we need at least one padding node for pad_with_graphs.
-    pad_nodes_to = ceil_mantissa(np.sum(graphs_tuple.n_node) + 1, n_mantissa_bits)
-    pad_nodes_to = max(pad_nodes_to, n_min_nodes)
-    pad_edges_to = ceil_mantissa(np.sum(graphs_tuple.n_edge), n_mantissa_bits)
-    pad_edges_to = max(pad_edges_to, n_min_edges)
-    # Add 1 since we need at least one padding graph for pad_with_graphs.
-    # pad_graphs_to = ceil_mantissa(graphs_tuple.n_node.shape[0] + 1, n_mantissa_bits)
-    pad_graphs_to = graphs_tuple.n_node.shape[0] + 1
+    n_nodes = graphs_tuple.n_node.sum()
+    n_edges = len(graphs_tuple.senders)
+    n_graphs = graphs_tuple.n_node.shape[0]
+
+    pad_nodes_to = ceil_mantissa(n_nodes + 1, n_mantissa_bits)
+    pad_edges_to = ceil_mantissa(n_edges, n_mantissa_bits)
+    pad_graphs_to = ceil_mantissa(n_graphs + 1, n_mantissa_bits)
+
+    pad_nodes_to = np.clip(pad_nodes_to, n_min_nodes, n_max_nodes)
+    pad_edges_to = np.clip(pad_edges_to, n_min_edges, n_max_edges)
+    pad_graphs_to = np.clip(pad_graphs_to, n_min_graphs, n_max_graphs)
+
     return jraph.pad_with_graphs(
         graphs_tuple, pad_nodes_to, pad_edges_to, pad_graphs_to
     )
