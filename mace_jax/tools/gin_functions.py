@@ -105,13 +105,17 @@ def datasets(
             f"Loaded {len(valid_configs)} validation configurations from '{valid_path}'"
         )
         train_configs = all_train_configs
-    else:
+    elif valid_fraction is not None:
         logging.info(
             "Using random %s%% of training set for validation", 100 * valid_fraction
         )
         train_configs, valid_configs = data.random_train_valid_split(
             all_train_configs, valid_fraction, seed
         )
+    else:
+        logging.info("No validation set")
+        train_configs = all_train_configs
+        valid_configs = []
 
     if test_path is not None:
         _, test_configs = data.load_from_xyz(
@@ -657,37 +661,38 @@ def train(
                     f"{error_s}={1e3 * metrics_[error_s]:.1f} meV/A^3"
                 )
 
-            loss_, metrics_ = tools.evaluate(
-                model=model,
-                params=ema_params,
-                loss_fn=loss_fn,
-                data_loader=valid_loader,
-            )
-            metrics_["mode"] = "eval"
-            metrics_["epoch"] = epoch
-            logger.log(metrics_)
+            if valid_loader is not None and len(valid_loader) > 0:
+                loss_, metrics_ = tools.evaluate(
+                    model=model,
+                    params=ema_params,
+                    loss_fn=loss_fn,
+                    data_loader=valid_loader,
+                )
+                metrics_["mode"] = "eval"
+                metrics_["epoch"] = epoch
+                logger.log(metrics_)
 
-            def _(x):
-                return "NA" if x is None else f"{1e3 * x:.1f}"
+                def _(x):
+                    return "NA" if x is None else f"{1e3 * x:.1f}"
 
-            logging.info(
-                f"Epoch {epoch}: Validation: "
-                f"loss={loss_:.4f}, "
-                f"{error_e}={_(metrics_[error_e])} meV, "
-                f"{error_f}={_(metrics_[error_f])} meV/A, "
-                f"{error_s}={_(metrics_[error_s])} meV/A^3"
-            )
+                logging.info(
+                    f"Epoch {epoch}: Validation: "
+                    f"loss={loss_:.4f}, "
+                    f"{error_e}={_(metrics_[error_e])} meV, "
+                    f"{error_f}={_(metrics_[error_f])} meV/A, "
+                    f"{error_s}={_(metrics_[error_s])} meV/A^3"
+                )
 
-            if loss_ >= lowest_loss:
-                patience_counter += 1
-                if patience_counter >= patience:
-                    logging.info(
-                        f"Stopping optimization after {patience_counter} epochs without improvement"
-                    )
-                    break
-            else:
-                lowest_loss = loss_
-                patience_counter = 0
+                if loss_ >= lowest_loss:
+                    patience_counter += 1
+                    if patience_counter >= patience:
+                        logging.info(
+                            f"Stopping optimization after {patience_counter} epochs without improvement"
+                        )
+                        break
+                else:
+                    lowest_loss = loss_
+                    patience_counter = 0
 
             eval_time_per_epoch += [time.perf_counter() - start_time]
             avg_time_per_epoch = np.mean(total_time_per_epoch[-eval_interval:])
