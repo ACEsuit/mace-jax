@@ -57,4 +57,4 @@ If you have any questions, please contact us at ilyes.batatia@ens-paris-saclay.f
 
 ## License
 
-MACE is published and distributed under the [Academic Software License v1.0 ](ASL.md).
+MACE is published and distributed under the [MIT](MIT.md).
