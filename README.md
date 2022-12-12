@@ -1,7 +1,7 @@
 # MACE &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; :rocket: [JAX](https://github.com/google/jax) 
 
 This repository contains a **porting** of MACE in **jax** developed by
-Mario Geiger and Ilyes Batatia.
+**Mario Geiger** and Ilyes Batatia.
 
 :warning: This repository is still in developement. Everything can change anytime.
 
