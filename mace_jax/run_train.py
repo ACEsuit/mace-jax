@@ -83,7 +83,8 @@ def main():
             jnp.einsum("iu,iv->iuv", minus_forces, graph.nodes.positions),
             nel=graph.n_node,
         )  # [n_graphs, 3, 3]
-        stress = 1.0 / det * (stress_cell + stress_forces)
+        viriel = stress_cell + stress_forces  # NOTE: sign suggested by Ilyes Batatia
+        stress = -1.0 / det * viriel  # NOTE: sign suggested by Ilyes Batatia
 
         return {
             "energy": graph_energies,  # [n_graphs,] energy per cell [eV]
