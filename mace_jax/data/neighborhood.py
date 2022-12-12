@@ -30,20 +30,9 @@ def get_neighborhood(
         cell=cell,
         positions=positions,
         cutoff=cutoff,
-        self_interaction=True,  # we want edges from atom to itself in different periodic images
+        self_interaction=true_self_interaction,
         use_scaled_positions=False,  # positions are not scaled positions
     )
-
-    if not true_self_interaction:
-        # Eliminate self-edges that don't cross periodic boundaries
-        true_self_edge = senders == receivers
-        true_self_edge &= np.all(senders_unit_shifts == 0, axis=1)
-        keep_edge = ~true_self_edge
-
-        # Note: after eliminating self-edges, it can be that no edges remain in this system
-        senders = senders[keep_edge]
-        receivers = receivers[keep_edge]
-        senders_unit_shifts = senders_unit_shifts[keep_edge]
 
     # From the docs: With the shift vector S, the distances D between atoms can be computed from
     # D = positions[j]-positions[i]+S.dot(cell)
