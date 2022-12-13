@@ -35,6 +35,7 @@ setup(
         "e3nn_jax",
         "numpy",
         "ase",
+        "matscipy",
         "roundmantissa",
         "jraph",
         "gin-config",

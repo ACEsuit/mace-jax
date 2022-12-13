@@ -247,6 +247,7 @@ def get_edge_vectors(
     # From ASE docs: With the shift vector S, the distances D between atoms can be computed from
     # D = positions[j]-positions[i]+S.dot(cell)
     vectors_senders = positions[senders]  # [n_edges, 3]
+    vectors_receivers = positions[receivers]  # [n_edges, 3]
 
     if cell is not None:
         num_edges = receivers.shape[0]
@@ -262,7 +263,7 @@ def get_edge_vectors(
         )  # [n_edges, 3]
         vectors_senders += shifts
 
-    return vectors_senders, positions[receivers]  # [n_edges, 3]
+    return vectors_senders, vectors_receivers  # [n_edges, 3]
 
 
 def get_edge_relative_vectors(
