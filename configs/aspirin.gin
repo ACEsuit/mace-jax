@@ -1,5 +1,3 @@
-# best run: rude-adiana
-
 flags.dtype = "float32"
 flags.debug = False  # If True, enables flags jax_debug_nans and jax_debug_infs
 flags.seed = 7
@@ -31,20 +29,12 @@ model.off_diagonal = False
 model.max_ell = 3
 model.num_interactions = 2
 model.hidden_irreps = "256x0e + 256x1o"
-# model.interaction_irreps = "o3_full"  # "o3_restricted" seems to be better
-model.epsilon = 0.4
+model.interaction_irreps = "o3_restricted"  # "o3_restricted" seems to be better than "o3_full"
+model.epsilon = 0.4  # set to None to use the default value of MACE, 1/sqrt(avg_num_neighbors)
 model.correlation = 3  # 4 is better but 5x slower
 model.gate = @silu
 model.readout_mlp_irreps = "16x0e"
 model.num_species = 11
-model.path_normalization = "path"  # "element" or "path", it affects the weights when mixing the different paths
-model.gradient_normalization = "path"  # "element" or "path", it affects the relative learning rate of the parameters
-# path_normalization = "element"     =>  out = (path1 + path2) / sqrt(len(path1) + len(path2))
-# path_normalization = "path"        =>  out = (path1 / sqrt(len(path1)) + path2 / sqrt(len(path2))) / sqrt(2)
-# gradient_normalization = "element" =>  out = W @ path  with W initialized with stddev = 1 / sqrt(len(path))
-# gradient_normalization = "path"    =>  out = W @ path / sqrt(len(path))  with W initialized with stddev = 1
-# gradient_normalization="element" corresponds to the more traditional approach (e.g. in torch.nn.Linear or haiku.Linear)
-# In e3nn pytorch, the two options were "path" by default.
 model.atomic_energies = "average"
 model.avg_num_neighbors = "average"
 # model.atomic_energies = {
@@ -60,7 +50,7 @@ loss.forces_weight = 10.0
 loss.stress_weight = 0.0
 
 
-optimizer.algorithm = @amsgrad
+optimizer.algorithm = @amsgrad  # @adam is slightly worse
 optimizer.lr = 0.01
 optimizer.max_num_epochs = 100
 # optimizer.weight_decay = 5e-7

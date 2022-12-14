@@ -1,3 +1,4 @@
+import itertools
 import logging
 import time
 from typing import Any, Callable, Dict, Optional, Tuple
@@ -20,7 +21,6 @@ def train(
     gradient_transform: Any,
     optimizer_state: Dict[str, Any],
     start_epoch: int,
-    max_num_epochs: int,
     logger: Any,
     ema_decay: Optional[float] = None,
 ):
@@ -53,13 +53,13 @@ def train(
 
     last_cache_size = update_fn._cache_size()
 
-    for epoch in range(start_epoch, max_num_epochs):
+    for epoch in itertools.count(start_epoch):
         yield epoch, params, optimizer_state, ema_params
 
         # Train one epoch
         p_bar = tqdm.tqdm(
             train_loader,
-            desc="Epoch {}".format(epoch),
+            desc=f"Epoch {epoch}",
             total=train_loader.approx_length(),
         )
         for graph in p_bar:

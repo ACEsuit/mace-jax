@@ -8,35 +8,36 @@ logs.directory = "results"
 
 datasets.train_path = "data/rmd17_aspirin_train.xyz"  # in units of eV and Å
 datasets.test_path = "data/rmd17_aspirin_test.xyz"
+datasets.num_train = 150
 datasets.r_max = 5.0
-datasets.num_train = 1055  # size of the training set
-datasets.valid_fraction = 0.1
-datasets.batch_size = 5
-datasets.valid_batch_size = 10
+datasets.valid_fraction = 0.208
+datasets.n_node = 512
+datasets.n_edge = 2048
+datasets.n_graph = 6
+datasets.n_mantissa_bits = 3
 
 
 
 model.radial_basis = @bessel_basis
 bessel_basis.number = 8
 
+# model.radial_envelope = @u_envelope  # 10. @ epoch 350
+# u_envelope.p = 5
+model.radial_envelope = @soft_envelope  # 9.5 @ epoch 350
+
+model.symmetric_tensor_product_basis = True  # symmetric is slightly worse but slightly faster
+model.off_diagonal = False
 model.max_ell = 3
 model.num_interactions = 2
-model.hidden_irreps = "32x0e + 16x1o"  # will be converted into num_features=16 and hidden_irreps="2x0e + 1x1o"
-model.epsilon = 0.03  # the coefficient applied right before the EquivariantProductBasisBlock, if not specified, use 1.0 / sqrt(avg_num_neighbors)
-model.correlation = 3
+model.hidden_irreps = "32x0e"
+model.interaction_irreps = "o3_restricted"  # "o3_restricted" seems to be better than "o3_full"
+model.epsilon = 0.4  # set to None to use the default value of MACE, 1/sqrt(avg_num_neighbors)
+model.correlation = 3  # 4 is better but 5x slower
 model.gate = @silu
 model.readout_mlp_irreps = "16x0e"
-model.num_species = 10
-model.scaling = @rms_forces_scaling
-model.path_normalization = "element"  # "element" or "path", it affects the weights when mixing the different paths
-model.gradient_normalization = "element"  # "element" or "path", it affects the relative learning rate of the parameters
-# path_normalization = "element"     =>  out = (path1 + path2) / sqrt(len(path1) + len(path2))
-# path_normalization = "path"        =>  out = (path1 / sqrt(len(path1)) + path2 / sqrt(len(path2))) / sqrt(2)
-# gradient_normalization = "element" =>  out = W @ path  with W initialized with stddev = 1 / sqrt(len(path))
-# gradient_normalization = "path"    =>  out = W @ path / sqrt(len(path))  with W initialized with stddev = 1
-# gradient_normalization="element" corresponds to the more traditional approach (e.g. in torch.nn.Linear or haiku.Linear)
-# In e3nn pytorch, the two options were "path" by default.
-
+model.num_species = 11
+model.atomic_energies = "average"
+model.avg_num_neighbors = "average"
 # model.atomic_energies = {
 #     1: -13.587222780835477,
 #     6: -1029.4889999855063,
@@ -45,19 +46,24 @@ model.gradient_normalization = "element"  # "element" or "path", it affects the 
 # }
 
 
-loss.energy_weight = 1e-3
-loss.forces_weight = 1.0
+loss.energy_weight = 1.0
+loss.forces_weight = 10.0
+loss.stress_weight = 0.0
 
-optimizer.lr = 1e-3
-optimizer.max_num_epochs = 10
-optimizer.weight_decay = 1e-3
-optimizer.scheduler = @piecewise_constant_schedule
-piecewise_constant_schedule.boundaries_and_scales = {
-    100: 0.1,  # divide the learning rate by 10 after 100 epochs
-    1000: 0.1,  # divide the learning rate by 10 after 1000 epochs
-}
 
-train.eval_interval = 2
-train.patience = 1000
+optimizer.algorithm = @sgd
+optimizer.lr = 0.01
+optimizer.max_num_epochs = 2
+# optimizer.weight_decay = 5e-7
+# optimizer.scheduler = @piecewise_constant_schedule
+# piecewise_constant_schedule.boundaries_and_scales = {
+#     100: 0.1,  # divide the learning rate by 10 after 100 epochs
+#     1000: 0.1,  # divide the learning rate by 10 after 1000 epochs
+# }
+
+train.eval_interval = 5
+train.patience = 2048
 train.ema_decay = 0.99
 train.eval_train = False  # if True, evaluates the whole training set at each eval_interval
+train.eval_test = False
+train.log_errors = "PerAtomMAE"

@@ -271,8 +271,8 @@ def model(
     avg_r_min: float = None,
     num_species: int = None,
     num_interactions=3,
-    path_normalization="element",
-    gradient_normalization="element",
+    path_normalization="path",
+    gradient_normalization="path",
     learnable_atomic_energies=False,
     radial_basis: Callable[[jnp.ndarray], jnp.ndarray] = bessel_basis,
     radial_envelope: Callable[[jnp.ndarray], jnp.ndarray] = soft_envelope,
@@ -567,23 +567,6 @@ def train(
     log_errors: str = "PerAtomRMSE",
     **kwargs,
 ):
-    if log_errors == "PerAtomRMSE":
-        error_e = "rmse_e_per_atom"
-        error_f = "rmse_f"
-        error_s = "rmse_s"
-    elif log_errors == "TotalRMSE":
-        error_e = "rmse_e"
-        error_f = "rmse_f"
-        error_s = "rmse_s"
-    elif log_errors == "PerAtomMAE":
-        error_e = "mae_e_per_atom"
-        error_f = "mae_f"
-        error_s = "mae_s"
-    elif log_errors == "TotalMAE":
-        error_e = "mae_e"
-        error_f = "mae_f"
-        error_s = "mae_s"
-
     lowest_loss = np.inf
     patience_counter = 0
     loss_fn = loss()
@@ -599,7 +582,6 @@ def train(
         gradient_transform=gradient_transform,
         optimizer_state=optimizer_state,
         start_epoch=0,
-        max_num_epochs=max_num_epochs,
         logger=logger,
         **kwargs,
     ):
@@ -613,75 +595,64 @@ def train(
         else:
             profile_nn_jax.restart_timer()
 
-        last_epoch = epoch == max_num_epochs - 1
+        last_epoch = epoch == max_num_epochs
         if epoch % eval_interval == 0 or last_epoch:
             with open(f"{directory}/{tag}.pkl", "wb") as f:
                 pickle.dump(gin.operative_config_str(), f)
                 pickle.dump(params, f)
 
-            if eval_train or last_epoch:
+            def eval_and_print(loader, mode: str):
                 loss_, metrics_ = tools.evaluate(
                     model=model,
                     params=ema_params,
                     loss_fn=loss_fn,
-                    data_loader=train_loader,
+                    data_loader=loader,
                 )
-                metrics_["mode"] = "eval_train"
+                metrics_["mode"] = mode
                 metrics_["epoch"] = epoch
                 logger.log(metrics_)
 
+                def _(x):
+                    return "N/A" if x is None else f"{1e3 * x:.1f}"
+
+                if log_errors == "PerAtomRMSE":
+                    error_e = "rmse_e_per_atom"
+                    error_f = "rmse_f"
+                    error_s = "rmse_s"
+                elif log_errors == "TotalRMSE":
+                    error_e = "rmse_e"
+                    error_f = "rmse_f"
+                    error_s = "rmse_s"
+                elif log_errors == "PerAtomMAE":
+                    error_e = "mae_e_per_atom"
+                    error_f = "mae_f"
+                    error_s = "mae_s"
+                elif log_errors == "TotalMAE":
+                    error_e = "mae_e"
+                    error_f = "mae_f"
+                    error_s = "mae_s"
+
                 logging.info(
-                    f"Epoch {epoch}: Train: "
+                    f"Epoch {epoch}: {mode}: "
                     f"loss={loss_:.4f}, "
-                    f"{error_e}={1e3 * metrics_[error_e]:.1f} meV, "
-                    f"{error_f}={1e3 * metrics_[error_f]:.1f} meV/A, "
-                    f"{error_s}={1e3 * metrics_[error_s]:.1f} meV/A^3"
+                    f"{error_e}={_(metrics_[error_e])} meV, "
+                    f"{error_f}={_(metrics_[error_f])} meV/A, "
+                    f"{error_s}={_(metrics_[error_s])} meV/A^3"
                 )
+                return loss_
+
+            if eval_train or last_epoch:
+                eval_and_print(train_loader, "eval_train")
 
             if (
                 (eval_test or last_epoch)
                 and test_loader is not None
                 and len(test_loader) > 0
             ):
-                loss_, metrics_ = tools.evaluate(
-                    model=model,
-                    params=ema_params,
-                    loss_fn=loss_fn,
-                    data_loader=test_loader,
-                )
-                metrics_["mode"] = "eval_test"
-                metrics_["epoch"] = epoch
-                logger.log(metrics_)
-
-                logging.info(
-                    f"Epoch {epoch}: Test: "
-                    f"loss={loss_:.4f}, "
-                    f"{error_e}={1e3 * metrics_[error_e]:.1f} meV, "
-                    f"{error_f}={1e3 * metrics_[error_f]:.1f} meV/A, "
-                    f"{error_s}={1e3 * metrics_[error_s]:.1f} meV/A^3"
-                )
+                eval_and_print(test_loader, "eval_test")
 
             if valid_loader is not None and len(valid_loader) > 0:
-                loss_, metrics_ = tools.evaluate(
-                    model=model,
-                    params=ema_params,
-                    loss_fn=loss_fn,
-                    data_loader=valid_loader,
-                )
-                metrics_["mode"] = "eval"
-                metrics_["epoch"] = epoch
-                logger.log(metrics_)
-
-                def _(x):
-                    return "NA" if x is None else f"{1e3 * x:.1f}"
-
-                logging.info(
-                    f"Epoch {epoch}: Validation: "
-                    f"loss={loss_:.4f}, "
-                    f"{error_e}={_(metrics_[error_e])} meV, "
-                    f"{error_f}={_(metrics_[error_f])} meV/A, "
-                    f"{error_s}={_(metrics_[error_s])} meV/A^3"
-                )
+                loss_ = eval_and_print(valid_loader, "eval_valid")
 
                 if loss_ >= lowest_loss:
                     patience_counter += 1
@@ -704,6 +675,9 @@ def train(
             )
         else:
             eval_time_per_epoch += [time.perf_counter() - start_time]  # basically 0
+
+        if last_epoch:
+            break
 
     logging.info("Training complete")
     return epoch, ema_params

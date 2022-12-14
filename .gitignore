@@ -20,7 +20,8 @@ build/
 # Notebook
 notebooks
 
-
-
 # Tests
 results
+
+# Nox
+.nox
