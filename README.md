@@ -5,6 +5,13 @@ This repository contains a **porting** of MACE in **jax** developed by
 
 :warning: This repository is still in developement. Everything can change anytime.
 
+## Test without installing
+
+```sh
+pip install nox
+nox
+```
+
 ## Installation
 
 ```sh
