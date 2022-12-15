@@ -45,7 +45,7 @@ class MessagePassingConvolution(hk.Module):
         #     messages, e3nn.concatenate([one, edge_attrs.filter(drop="0e")])
         # ).filter(self.target_irreps)
 
-        mix = e3nn.MultiLayerPerceptron(
+        mix = e3nn.haiku.MultiLayerPerceptron(
             3 * [64] + [messages.irreps.num_irreps],
             self.activation,
             output_activation=False,

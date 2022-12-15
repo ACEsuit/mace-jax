@@ -35,7 +35,7 @@ class LinearReadoutBlock(hk.Module):
 
     def __call__(self, x: e3nn.IrrepsArray) -> e3nn.IrrepsArray:
         # x = [n_nodes, irreps]
-        return e3nn.Linear(self.output_irreps)(x)  # [n_nodes, output_irreps]
+        return e3nn.haiku.Linear(self.output_irreps)(x)  # [n_nodes, output_irreps]
 
 
 class NonLinearReadoutBlock(hk.Module):
@@ -59,11 +59,11 @@ class NonLinearReadoutBlock(hk.Module):
             self.hidden_irreps.num_irreps
             - self.hidden_irreps.filter(["0e", "0o"]).num_irreps
         )  # Multiplicity of (l > 0) irreps
-        x = e3nn.Linear(
+        x = e3nn.haiku.Linear(
             (self.hidden_irreps + e3nn.Irreps(f"{num_vectors}x0e")).simplify()
         )(x)
         x = e3nn.gate(x, even_act=self.activation, even_gate_act=self.gate)
-        return e3nn.Linear(self.output_irreps)(x)  # [n_nodes, output_irreps]
+        return e3nn.haiku.Linear(self.output_irreps)(x)  # [n_nodes, output_irreps]
 
 
 class RadialEmbeddingBlock:
@@ -134,7 +134,7 @@ class EquivariantProductBasisBlock(hk.Module):
         node_feats = node_feats.mul_to_axis().remove_nones()
         node_feats = self.symmetric_contractions(node_feats, node_specie)
         node_feats = node_feats.axis_to_mul()
-        return e3nn.Linear(self.target_irreps)(node_feats)
+        return e3nn.haiku.Linear(self.target_irreps)(node_feats)
 
 
 class InteractionBlock(hk.Module):
@@ -159,13 +159,15 @@ class InteractionBlock(hk.Module):
     ) -> Tuple[e3nn.IrrepsArray, e3nn.IrrepsArray]:
         assert node_feats.ndim == 2
 
-        node_feats = e3nn.Linear(node_feats.irreps, name="linear_up")(node_feats)
+        node_feats = e3nn.haiku.Linear(node_feats.irreps, name="linear_up")(node_feats)
 
         node_feats = MessagePassingConvolution(
             self.avg_num_neighbors, self.target_irreps, self.activation
         )(node_feats, edge_attrs, senders, receivers)
 
-        node_feats = e3nn.Linear(self.target_irreps, name="linear_down")(node_feats)
+        node_feats = e3nn.haiku.Linear(self.target_irreps, name="linear_down")(
+            node_feats
+        )
 
         assert node_feats.ndim == 2
         return node_feats  # [n_nodes, target_irreps]

@@ -232,7 +232,7 @@ class MACELayer(hk.Module):
 
         sc = None
         if not self.first:
-            sc = e3nn.Linear(
+            sc = e3nn.haiku.Linear(
                 self.num_features * self.hidden_irreps,
                 num_indexed_weights=self.num_species,
                 name="skip_tp",
@@ -261,7 +261,7 @@ class MACELayer(hk.Module):
 
         if self.first:
             # Selector TensorProduct
-            node_feats = e3nn.Linear(
+            node_feats = e3nn.haiku.Linear(
                 self.num_features * self.interaction_irreps,
                 num_indexed_weights=self.num_species,
                 name="skip_tp_first",
