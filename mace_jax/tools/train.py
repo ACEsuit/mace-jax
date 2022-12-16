@@ -110,6 +110,11 @@ def evaluate(
     delta_stress_list = []
     stress_list = []
 
+    if hasattr(model, "_cache_size"):
+        last_cache_size = model._cache_size()
+    else:
+        last_cache_size = None
+
     start_time = time.time()
     p_bar = tqdm.tqdm(data_loader, desc="Evaluating", total=data_loader.approx_length())
     for ref_graph in p_bar:
@@ -120,6 +125,14 @@ def evaluate(
                 energy=output["energy"], stress=output["stress"]
             ),
         )
+
+        if last_cache_size is not None and last_cache_size != model._cache_size():
+            last_cache_size = model._cache_size()
+
+            logging.info("Compiled function `model` for args:")
+            logging.info(f"- n_node={ref_graph.n_node} total={ref_graph.n_node.sum()}")
+            logging.info(f"- n_edge={ref_graph.n_edge} total={ref_graph.n_edge.sum()}")
+            logging.info(f"cache size: {last_cache_size}")
 
         ref_graph = jraph.unpad_with_graphs(ref_graph)
         pred_graph = jraph.unpad_with_graphs(pred_graph)

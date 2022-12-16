@@ -77,7 +77,9 @@ def datasets(
     n_node: int = 1,
     n_edge: int = 1,
     n_graph: int = 1,
-    n_mantissa_bits: int = 2,
+    n_mantissa_bits: int = 1,
+    prefactor_stress: float = 1.0,
+    remap_stress: np.ndarray = None,
 ):
     """Load training and test dataset from xyz file"""
 
@@ -88,6 +90,8 @@ def datasets(
         forces_key=forces_key,
         extract_atomic_energies=True,
         num_configs=num_train,
+        prefactor_stress=prefactor_stress,
+        remap_stress=remap_stress,
     )
     logging.info(
         f"Loaded {len(all_train_configs)} training configurations from '{train_path}'"
@@ -100,6 +104,8 @@ def datasets(
             energy_key=energy_key,
             forces_key=forces_key,
             extract_atomic_energies=False,
+            prefactor_stress=prefactor_stress,
+            remap_stress=remap_stress,
         )
         logging.info(
             f"Loaded {len(valid_configs)} validation configurations from '{valid_path}'"
@@ -124,6 +130,8 @@ def datasets(
             energy_key=energy_key,
             forces_key=forces_key,
             extract_atomic_energies=False,
+            prefactor_stress=prefactor_stress,
+            remap_stress=remap_stress,
         )
         logging.info(
             f"Loaded {len(test_configs)} test configurations from '{test_path}'"

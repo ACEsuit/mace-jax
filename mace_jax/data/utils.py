@@ -67,6 +67,8 @@ def config_from_atoms(
     forces_key="forces",
     stress_key="stress",
     config_type_weights: Dict[str, float] = None,
+    prefactor_stress: float = 1.0,
+    remap_stress: np.ndarray = None,
 ) -> Configuration:
     """Convert ase.Atoms to Configuration"""
     if config_type_weights is None:
@@ -77,6 +79,17 @@ def config_from_atoms(
 
     if energy is None:
         energy = 0.0
+
+    if stress is not None:
+        stress = prefactor_stress * stress
+
+        if remap_stress is not None:
+            remap_stress = np.asarray(remap_stress)
+            assert remap_stress.shape == (3, 3)
+            assert remap_stress.dtype.kind == "i"
+            stress = stress.flatten()[remap_stress]
+
+        assert stress.shape == (3, 3)
 
     forces = atoms.arrays.get(forces_key, None)  # eV / Ang
     atomic_numbers = np.array(
@@ -117,6 +130,8 @@ def load_from_xyz(
     stress_key: str = "stress",
     extract_atomic_energies: bool = False,
     num_configs: int = None,
+    prefactor_stress: float = 1.0,
+    remap_stress: np.ndarray = None,
 ) -> Tuple[Dict[int, float], Configurations]:
     assert file_path[-4:] == ".xyz", NameError("Specify file with extension .xyz")
 
@@ -160,7 +175,13 @@ def load_from_xyz(
 
     configs = [
         config_from_atoms(
-            atoms, energy_key, forces_key, stress_key, config_type_weights
+            atoms,
+            energy_key,
+            forces_key,
+            stress_key,
+            config_type_weights,
+            prefactor_stress,
+            remap_stress,
         )
         for atoms in atoms_list
     ]
