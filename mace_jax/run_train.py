@@ -10,17 +10,17 @@ import jraph
 
 import mace_jax
 from mace_jax import tools
+from mace_jax.tools.gin_datasets import datasets
 from mace_jax.tools.gin_functions import (
     checks,
-    datasets,
     flags,
     logs,
-    model,
     optimizer,
     parse_argv,
     reload,
     train,
 )
+from mace_jax.tools.gin_model import model
 
 
 def main():
