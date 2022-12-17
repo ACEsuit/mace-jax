@@ -31,7 +31,7 @@ def main():
     train_loader, valid_loader, test_loader, atomic_energies_dict, r_max = datasets()
 
     model_fn, params, num_message_passing = model(
-        seed, r_max, atomic_energies_dict, train_loader.graphs, initialize=True
+        r_max, atomic_energies_dict, train_loader.graphs, initialize_seed=seed
     )
 
     params = reload(params)

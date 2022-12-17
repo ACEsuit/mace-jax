@@ -1,5 +1,5 @@
 import logging
-from typing import Callable, Dict, List, Union
+from typing import Callable, Dict, List, Optional, Union
 
 import ase.data
 import e3nn_jax as e3nn
@@ -80,11 +80,10 @@ class LinearMassEmbedding(hk.Module):
 
 @gin.configurable
 def model(
-    seed: int,
     r_max: float,
     atomic_energies_dict: Dict[int, float] = None,
     train_graphs: List[jraph.GraphsTuple] = None,
-    initialize: bool = True,
+    initialize_seed: Optional[int] = None,
     *,
     scaling: Callable = None,
     atomic_energies: Union[str, np.ndarray, Dict[int, float]] = None,
@@ -186,6 +185,19 @@ def model(
             f"Scaling with {scaling.__qualname__}: mean={mean:.2f}, std={std:.2f}"
         )
 
+    kwargs.update(
+        dict(
+            r_max=r_max,
+            avg_num_neighbors=avg_num_neighbors,
+            num_interactions=num_interactions,
+            avg_r_min=avg_r_min,
+            num_species=num_species,
+            radial_basis=radial_basis,
+            radial_envelope=radial_envelope,
+        )
+    )
+    logging.info(f"Create MACE with parameters {kwargs}")
+
     @hk.without_apply_rng
     @hk.transform
     def model_(
@@ -197,17 +209,7 @@ def model(
         e3nn.config("path_normalization", path_normalization)
         e3nn.config("gradient_normalization", gradient_normalization)
 
-        mace = modules.GeneralMACE(
-            output_irreps="0e",
-            r_max=r_max,
-            avg_num_neighbors=avg_num_neighbors,
-            num_interactions=num_interactions,
-            avg_r_min=avg_r_min,
-            num_species=num_species,
-            radial_basis=radial_basis,
-            radial_envelope=radial_envelope,
-            **kwargs,
-        )
+        mace = modules.GeneralMACE(output_irreps="0e", **kwargs)
 
         if hk.running_init():
             logging.info(
@@ -238,9 +240,9 @@ def model(
 
         return node_energies
 
-    if initialize:
+    if initialize_seed is not None:
         params = jax.jit(model_.init)(
-            jax.random.PRNGKey(seed),
+            jax.random.PRNGKey(initialize_seed),
             jnp.zeros((1, 3)),
             jnp.array([16]),
             jnp.array([0]),
