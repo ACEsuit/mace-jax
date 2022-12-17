@@ -46,10 +46,16 @@ def energy_forces_stress_predictor(model):
         viriel = stress_cell + stress_forces  # NOTE: sign suggested by Ilyes Batatia
         stress = -1.0 / det * viriel  # NOTE: sign suggested by Ilyes Batatia
 
+        # TODO(mario): fix this
+        # make it traceless? because it seems that our formula is not valid for the trace
+        # p = jnp.trace(stress, axis1=1, axis2=2)  # [n_graphs,]
+        # stress = stress - p[:, None, None] / 3.0 * jnp.eye(3)
+
         return {
             "energy": graph_energies,  # [n_graphs,] energy per cell [eV]
             "forces": -minus_forces,  # [n_nodes, 3] forces on each atom [eV / A]
             "stress": stress,  # [n_graphs, 3, 3] stress tensor [eV / A^3]
+            # "pressure": p,  # [n_graphs,] pressure [eV / A^3]
         }
 
     return predictor

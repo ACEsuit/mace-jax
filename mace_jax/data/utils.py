@@ -91,6 +91,13 @@ def config_from_atoms(
 
         assert stress.shape == (3, 3)
 
+        # TODO(mario): fix this
+        # make it traceless? because it seems that our formula is not valid for the trace
+        # pressure = np.trace(stress)
+        # stress -= pressure / 3.0 * np.eye(3)
+    # else:
+    # pressure = None
+
     forces = atoms.arrays.get(forces_key, None)  # eV / Ang
     atomic_numbers = np.array(
         [ase.data.atomic_numbers[symbol] for symbol in atoms.symbols]

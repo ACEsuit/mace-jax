@@ -252,7 +252,7 @@ def train(
                     error_f = "rmse_f"
                     error_s = "rmse_s"
                 elif log_errors == "rel_PerAtomRMSE":
-                    error_e = "rel_rmse_e_per_atom"
+                    error_e = "rmse_e_per_atom"
                     error_f = "rel_rmse_f"
                     error_s = "rel_rmse_s"
                 elif log_errors == "TotalRMSE":
@@ -265,8 +265,8 @@ def train(
                     error_s = "mae_s"
                 elif log_errors == "rel_PerAtomMAE":
                     error_e = "mae_e_per_atom"
-                    error_f = "mae_f"
-                    error_s = "mae_s"
+                    error_f = "rel_mae_f"
+                    error_s = "rel_mae_s"
                 elif log_errors == "TotalMAE":
                     error_e = "mae_e"
                     error_f = "mae_f"
