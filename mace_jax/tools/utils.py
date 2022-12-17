@@ -2,15 +2,13 @@ import json
 import logging
 import os
 import sys
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import e3nn_jax as e3nn
 import jax
 import jax.numpy as jnp
 import jraph
 import numpy as np
-
-from mace_jax import data
 
 
 def count_parameters(parameters) -> int:
@@ -140,7 +138,7 @@ def safe_norm(x: jnp.ndarray, axis: int = None, keepdims=False) -> jnp.ndarray:
 
 
 def compute_mean_std_atomic_inter_energy(
-    data_loader: data.GraphDataLoader,
+    graphs: List[jraph.GraphsTuple],
     atomic_energies: np.ndarray,
 ) -> Tuple[float, float]:
     # atomic_energies = torch.from_numpy(atomic_energies)
@@ -167,7 +165,7 @@ def compute_mean_std_atomic_inter_energy(
 
 
 def compute_mean_rms_energy_forces(
-    data_loader: data.GraphDataLoader,
+    graphs: List[jraph.GraphsTuple],
     atomic_energies: np.ndarray,
 ) -> Tuple[float, float]:
     # mean, _ = compute_mean_std_atomic_inter_energy(data_loader, atomic_energies)
@@ -184,22 +182,20 @@ def compute_mean_rms_energy_forces(
     raise NotImplementedError
 
 
-def compute_avg_num_neighbors(data_loader: data.GraphDataLoader) -> float:
+def compute_avg_num_neighbors(graphs: List[jraph.GraphsTuple]) -> float:
     num_neighbors = []
 
-    for graph in data_loader.graphs:
+    for graph in graphs:
         _, counts = np.unique(graph.receivers, return_counts=True)
         num_neighbors.append(counts)
 
     return np.mean(np.concatenate(num_neighbors)).item()
 
 
-def compute_avg_min_neighbor_distance(
-    data_loader: data.GraphDataLoader,
-) -> float:
+def compute_avg_min_neighbor_distance(graphs: List[jraph.GraphsTuple]) -> float:
     min_neighbor_distances = []
 
-    for graph in data_loader.graphs:
+    for graph in graphs:
         vectors = get_edge_relative_vectors(
             graph.nodes.positions,
             graph.senders,

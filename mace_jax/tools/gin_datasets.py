@@ -1,5 +1,5 @@
 import logging
-from typing import Dict
+from typing import Dict, Tuple
 
 import gin
 import numpy as np
@@ -27,7 +27,7 @@ def datasets(
     n_mantissa_bits: int = 1,
     prefactor_stress: float = 1.0,
     remap_stress: np.ndarray = None,
-):
+) -> Tuple[data.GraphDataLoader, data.GraphDataLoader, data.GraphDataLoader, Dict[int, float], float]:
     """Load training and test dataset from xyz file"""
 
     atomic_energies_dict, all_train_configs = data.load_from_xyz(
@@ -69,6 +69,7 @@ def datasets(
         logging.info("No validation set")
         train_configs = all_train_configs
         valid_configs = []
+    del all_train_configs
 
     if test_path is not None:
         _, test_configs = data.load_from_xyz(
@@ -85,14 +86,6 @@ def datasets(
         )
     else:
         test_configs = []
-
-    z_table = data.get_atomic_number_table_from_zs(
-        z
-        for configs in (train_configs, valid_configs)
-        for config in configs
-        for z in config.atomic_numbers
-    )
-    logging.info(f"z_table= {z_table}")
 
     logging.info(
         f"Total number of configurations: "
@@ -131,14 +124,4 @@ def datasets(
         n_mantissa_bits=n_mantissa_bits,
         shuffle=False,
     )
-    return dict(
-        train_loader=train_loader,
-        valid_loader=valid_loader,
-        test_loader=test_loader,
-        atomic_energies_dict=atomic_energies_dict,
-        r_max=r_max,
-        z_table=z_table,
-        train_configs=train_configs,
-        valid_configs=valid_configs,
-        test_configs=test_configs,
-    )
+    return train_loader, valid_loader, test_loader, atomic_energies_dict, r_max

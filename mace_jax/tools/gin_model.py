@@ -1,5 +1,5 @@
 import logging
-from typing import Callable, Dict, Union
+from typing import Callable, Dict, List, Union
 
 import ase.data
 import e3nn_jax as e3nn
@@ -7,6 +7,7 @@ import gin
 import haiku as hk
 import jax
 import jax.numpy as jnp
+import jraph
 import numpy as np
 
 from mace_jax import data, modules, tools
@@ -23,7 +24,7 @@ gin.register("rms_forces_scaling")(tools.compute_mean_rms_energy_forces)
 
 
 @gin.configurable
-def constant_scaling(train_loader, atomic_energies, *, mean=0.0, std=1.0):
+def constant_scaling(graphs, atomic_energies, *, mean=0.0, std=1.0):
     return mean, std
 
 
@@ -82,9 +83,7 @@ def model(
     seed: int,
     r_max: float,
     atomic_energies_dict: Dict[int, float] = None,
-    train_loader: data.GraphDataLoader = None,
-    train_configs=None,
-    z_table=None,
+    train_graphs: List[jraph.GraphsTuple] = None,
     initialize: bool = True,
     *,
     scaling: Callable = None,
@@ -100,8 +99,16 @@ def model(
     radial_envelope: Callable[[jnp.ndarray], jnp.ndarray] = soft_envelope,
     **kwargs,
 ):
+    if train_graphs is None:
+        z_table = None
+    else:
+        z_table = data.get_atomic_number_table_from_zs(
+            z for graph in train_graphs for z in graph.nodes.species
+        )
+    logging.info(f"z_table= {z_table}")
+
     if avg_num_neighbors == "average":
-        avg_num_neighbors = tools.compute_avg_num_neighbors(train_loader)
+        avg_num_neighbors = tools.compute_avg_num_neighbors(train_graphs)
         logging.info(
             f"Compute the average number of neighbors: {avg_num_neighbors:.3f}"
         )
@@ -109,7 +116,7 @@ def model(
         logging.info(f"Use the average number of neighbors: {avg_num_neighbors:.3f}")
 
     if avg_r_min == "average":
-        avg_r_min = tools.compute_avg_min_neighbor_distance(train_loader)
+        avg_r_min = tools.compute_avg_min_neighbor_distance(train_graphs)
         logging.info(f"Compute the average min neighbor distance: {avg_r_min:.3f}")
     elif avg_r_min is None:
         logging.info(f"Do not normalize the radial basis (avg_r_min=None)")
@@ -123,7 +130,7 @@ def model(
             atomic_energies = "isolated_atom"
 
     if atomic_energies == "average":
-        atomic_energies_dict = data.compute_average_E0s(train_configs, z_table)
+        atomic_energies_dict = data.compute_average_E0s(train_graphs, z_table)
         logging.info(
             f"Computed average Atomic Energies using least squares: {atomic_energies_dict}"
         )
@@ -160,7 +167,7 @@ def model(
 
     # check that num_species is consistent with the dataset
     if z_table is None:
-        for graph in train_loader.graphs:
+        for graph in train_graphs:
             if not np.all(graph.nodes.species < num_species):
                 raise ValueError(
                     f"max(graph.nodes.species)={np.max(graph.nodes.species)} >= num_species={num_species}"
@@ -174,7 +181,7 @@ def model(
     if scaling is None:
         mean, std = 0.0, 1.0
     else:
-        mean, std = scaling(train_loader, atomic_energies)
+        mean, std = scaling(train_graphs, atomic_energies)
         logging.info(
             f"Scaling with {scaling.__qualname__}: mean={mean:.2f}, std={std:.2f}"
         )

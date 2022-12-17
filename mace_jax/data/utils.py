@@ -217,20 +217,20 @@ def atomic_numbers_to_indices(
 
 
 def compute_average_E0s(
-    collections_train: Configurations, z_table: AtomicNumberTable
+    graphs: List[jraph.GraphsTuple], z_table: AtomicNumberTable
 ) -> Dict[int, float]:
     """
     Function to compute the average interaction energy of each chemical element
     returns dictionary of E0s
     """
-    len_train = len(collections_train)
+    len_train = len(graphs)
     len_zs = len(z_table)
     A = np.zeros((len_train, len_zs))
     B = np.zeros(len_train)
     for i in range(len_train):
-        B[i] = collections_train[i].energy
+        B[i] = graphs[i].globals.energy
         for j, z in enumerate(z_table.zs):
-            A[i, j] = np.count_nonzero(collections_train[i].atomic_numbers == z)
+            A[i, j] = np.count_nonzero(graphs[i].nodes.species == z)
     try:
         E0s = np.linalg.lstsq(A, B, rcond=None)[0]
         atomic_energies_dict = {}

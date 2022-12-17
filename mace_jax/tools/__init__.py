@@ -22,6 +22,7 @@ from .utils import (
     unflatten_dict,
     MetricsLogger,
 )
+from .predictors import energy_forces_stress_predictor
 from .train import evaluate, train
 
 __all__ = [
@@ -47,6 +48,7 @@ __all__ = [
     "sum_nodes_of_the_same_graph",
     "unflatten_dict",
     "MetricsLogger",
+    "energy_forces_stress_predictor",
     "evaluate",
     "train",
 ]
