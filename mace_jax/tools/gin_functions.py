@@ -195,7 +195,7 @@ def train(
     directory,
     tag,
     *,
-    patience: int,
+    patience: Optional[int] = None,
     eval_train: bool = False,
     eval_test: bool = False,
     eval_interval: int = 1,
@@ -247,13 +247,14 @@ def train(
                 metrics_["epoch"] = epoch
                 logger.log(metrics_)
 
-                def _(x):
-                    return "N/A" if x is None else f"{1e3 * x:.1f}"
-
                 if log_errors == "PerAtomRMSE":
                     error_e = "rmse_e_per_atom"
                     error_f = "rmse_f"
                     error_s = "rmse_s"
+                elif log_errors == "rel_PerAtomRMSE":
+                    error_e = "rel_rmse_e_per_atom"
+                    error_f = "rel_rmse_f"
+                    error_s = "rel_rmse_s"
                 elif log_errors == "TotalRMSE":
                     error_e = "rmse_e"
                     error_f = "rmse_f"
@@ -262,17 +263,35 @@ def train(
                     error_e = "mae_e_per_atom"
                     error_f = "mae_f"
                     error_s = "mae_s"
+                elif log_errors == "rel_PerAtomMAE":
+                    error_e = "mae_e_per_atom"
+                    error_f = "mae_f"
+                    error_s = "mae_s"
                 elif log_errors == "TotalMAE":
                     error_e = "mae_e"
                     error_f = "mae_f"
                     error_s = "mae_s"
 
+                def _(x: str):
+                    v: float = metrics_[x]
+                    if v is None:
+                        return "N/A"
+                    if x.startswith("rel_"):
+                        return f"{100 * v:.1f}%"
+                    if "_e" in x:
+                        return f"{1e3 * v:.1f} meV"
+                    if "_f" in x:
+                        return f"{1e3 * v:.1f} meV/Å"
+                    if "_s" in x:
+                        return f"{1e3 * v:.1f} meV/Å³"
+                    raise NotImplementedError
+
                 logging.info(
                     f"Epoch {epoch}: {mode}: "
                     f"loss={loss_:.4f}, "
-                    f"{error_e}={_(metrics_[error_e])} meV, "
-                    f"{error_f}={_(metrics_[error_f])} meV/A, "
-                    f"{error_s}={_(metrics_[error_s])} meV/A^3"
+                    f"{error_e}={_(error_e)}, "
+                    f"{error_f}={_(error_f)}, "
+                    f"{error_s}={_(error_s)}"
                 )
                 return loss_
 
@@ -291,7 +310,7 @@ def train(
 
                 if loss_ >= lowest_loss:
                     patience_counter += 1
-                    if patience_counter >= patience:
+                    if patience is not None and patience_counter >= patience:
                         logging.info(
                             f"Stopping optimization after {patience_counter} epochs without improvement"
                         )

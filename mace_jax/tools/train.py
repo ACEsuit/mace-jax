@@ -103,10 +103,16 @@ def evaluate(
 ) -> Tuple[float, Dict[str, Any]]:
     total_loss = 0.0
     num_graphs = 0
+
     delta_es_list = []
+    es_list = []
+
     delta_es_per_atom_list = []
+    es_per_atom_list = []
+
     delta_fs_list = []
     fs_list = []
+
     delta_stress_list = []
     stress_list = []
 
@@ -153,10 +159,13 @@ def evaluate(
 
         if ref_graph.globals.energy is not None:
             delta_es_list.append(ref_graph.globals.energy - pred_graph.globals.energy)
+            es_list.append(ref_graph.globals.energy)
+
             delta_es_per_atom_list.append(
                 (ref_graph.globals.energy - pred_graph.globals.energy)
                 / ref_graph.n_node
             )
+            es_per_atom_list.append(ref_graph.globals.energy / ref_graph.n_node)
 
         if ref_graph.nodes.forces is not None:
             delta_fs_list.append(ref_graph.nodes.forces - pred_graph.nodes.forces)
@@ -174,9 +183,13 @@ def evaluate(
         "loss": avg_loss,
         "time": time.time() - start_time,
         "mae_e": None,
+        "rel_mae_e": None,
         "mae_e_per_atom": None,
+        "rel_mae_e_per_atom": None,
         "rmse_e": None,
+        "rel_rmse_e": None,
         "rmse_e_per_atom": None,
+        "rel_rmse_e_per_atom": None,
         "q95_e": None,
         "mae_f": None,
         "rel_mae_f": None,
@@ -193,14 +206,24 @@ def evaluate(
     if len(delta_es_list) > 0:
         delta_es = np.concatenate(delta_es_list, axis=0)
         delta_es_per_atom = np.concatenate(delta_es_per_atom_list, axis=0)
+        es = np.concatenate(es_list, axis=0)
+        es_per_atom = np.concatenate(es_per_atom_list, axis=0)
         aux.update(
             {
                 # Mean absolute error
                 "mae_e": tools.compute_mae(delta_es),
+                "rel_mae_e": tools.compute_rel_mae(delta_es, es),
                 "mae_e_per_atom": tools.compute_mae(delta_es_per_atom),
+                "rel_mae_e_per_atom": tools.compute_rel_mae(
+                    delta_es_per_atom, es_per_atom
+                ),
                 # Root-mean-square error
                 "rmse_e": tools.compute_rmse(delta_es),
+                "rel_rmse_e": tools.compute_rel_rmse(delta_es, es),
                 "rmse_e_per_atom": tools.compute_rmse(delta_es_per_atom),
+                "rel_rmse_e_per_atom": tools.compute_rel_rmse(
+                    delta_es_per_atom, es_per_atom
+                ),
                 # Q_95
                 "q95_e": tools.compute_q95(delta_es),
             }

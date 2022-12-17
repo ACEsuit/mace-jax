@@ -287,7 +287,7 @@ def compute_mae(delta: np.ndarray) -> float:
 
 def compute_rel_mae(delta: np.ndarray, target_val: np.ndarray) -> float:
     target_norm = np.mean(np.abs(target_val))
-    return np.mean(np.abs(delta)).item() / (target_norm + 1e-9) * 100
+    return np.mean(np.abs(delta)).item() / (target_norm + 1e-30)
 
 
 def compute_rmse(delta: np.ndarray) -> float:
@@ -296,7 +296,7 @@ def compute_rmse(delta: np.ndarray) -> float:
 
 def compute_rel_rmse(delta: np.ndarray, target_val: np.ndarray) -> float:
     target_norm = np.sqrt(np.mean(np.square(target_val))).item()
-    return np.sqrt(np.mean(np.square(delta))).item() / (target_norm + 1e-9) * 100
+    return np.sqrt(np.mean(np.square(delta))).item() / (target_norm + 1e-30)
 
 
 def compute_q95(delta: np.ndarray) -> float:
