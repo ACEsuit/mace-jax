@@ -119,9 +119,9 @@ class GeneralMACE(hk.Module):
         assert vectors.shape[0] == senders.shape[0] == receivers.shape[0]
 
         # Embeddings
-        node_feats = self.node_embedding(node_specie)  # [n_nodes, feature * irreps]
-        # poly_order = 0  # polynomial order in atom positions of the node features
-        # NOTE: we assume hidden_irreps to be scalar only
+        node_feats = self.node_embedding(node_specie).astype(
+            vectors.dtype
+        )  # [n_nodes, feature * irreps]
         node_feats = profile("embedding: node_feats", node_feats)
 
         lengths = safe_norm(vectors, axis=-1)
