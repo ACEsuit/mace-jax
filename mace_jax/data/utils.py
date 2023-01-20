@@ -293,6 +293,9 @@ class GraphDataLoader:
         n_node: int,
         n_edge: int,
         n_graph: int,
+        min_n_node: int = 1,
+        min_n_edge: int = 1,
+        min_n_graph: int = 1,
         shuffle: bool = True,
         n_mantissa_bits: Optional[int] = None,
     ):
@@ -300,6 +303,9 @@ class GraphDataLoader:
         self.n_node = n_node
         self.n_edge = n_edge
         self.n_graph = n_graph
+        self.min_n_node = min_n_node
+        self.min_n_edge = min_n_edge
+        self.min_n_graph = min_n_graph
         self.shuffle = shuffle
         self.n_mantissa_bits = n_mantissa_bits
         self._length = None
@@ -335,6 +341,9 @@ class GraphDataLoader:
                 yield pad_graph_to_nearest_ceil_mantissa(
                     batched_graph,
                     n_mantissa_bits=self.n_mantissa_bits,
+                    n_min_nodes=self.min_n_node,
+                    n_min_edges=self.min_n_edge,
+                    n_min_graphs=self.min_n_graph,
                     n_max_nodes=self.n_node,
                     n_max_edges=self.n_edge,
                     n_max_graphs=self.n_graph,
