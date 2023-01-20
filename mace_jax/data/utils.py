@@ -104,6 +104,7 @@ def config_from_atoms(
     )
     pbc = tuple(atoms.get_pbc())
     cell = np.array(atoms.get_cell())
+    assert np.linalg.det(cell) >= 0.0
     config_type = atoms.info.get("config_type", "Default")
     weight = config_type_weights.get(config_type, 1.0)
     return Configuration(

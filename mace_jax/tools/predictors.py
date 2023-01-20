@@ -55,6 +55,12 @@ def energy_forces_stress_predictor(model):
             "energy": graph_energies,  # [n_graphs,] energy per cell [eV]
             "forces": -minus_forces,  # [n_nodes, 3] forces on each atom [eV / A]
             "stress": stress,  # [n_graphs, 3, 3] stress tensor [eV / A^3]
+            "stress_cell": (
+                -1.0 / det * stress_cell
+            ),  # [n_graphs, 3, 3] stress tensor [eV / A^3]
+            "stress_forces": (
+                -1.0 / det * stress_forces
+            ),  # [n_graphs, 3, 3] stress tensor [eV / A^3]
             # "pressure": p,  # [n_graphs,] pressure [eV / A^3]
         }
 

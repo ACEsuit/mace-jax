@@ -27,7 +27,13 @@ def datasets(
     n_mantissa_bits: int = 1,
     prefactor_stress: float = 1.0,
     remap_stress: np.ndarray = None,
-) -> Tuple[data.GraphDataLoader, data.GraphDataLoader, data.GraphDataLoader, Dict[int, float], float]:
+) -> Tuple[
+    data.GraphDataLoader,
+    data.GraphDataLoader,
+    data.GraphDataLoader,
+    Dict[int, float],
+    float,
+]:
     """Load training and test dataset from xyz file"""
 
     atomic_energies_dict, all_train_configs = data.load_from_xyz(
