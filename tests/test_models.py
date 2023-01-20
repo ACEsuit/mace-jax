@@ -51,7 +51,6 @@ def test_mace():
             atomic_energies=atomic_energies,
             avg_num_neighbors=8,
             correlation=3,
-            max_poly_order=4,
         )(graph)
 
     Node = namedtuple("Node", ["positions", "attrs"])

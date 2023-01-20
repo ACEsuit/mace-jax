@@ -108,8 +108,6 @@ class EquivariantProductBasisBlock(hk.Module):
         target_irreps: e3nn.Irreps,
         correlation: int,
         num_species: int,
-        max_poly_order: Optional[int] = None,
-        input_poly_order: int = 0,
         symmetric_tensor_product_basis: bool = True,
         off_diagonal: bool = False,
     ) -> None:
@@ -118,8 +116,6 @@ class EquivariantProductBasisBlock(hk.Module):
         self.symmetric_contractions = SymmetricContraction(
             keep_irrep_out={ir for _, ir in self.target_irreps},
             correlation=correlation,
-            max_poly_order=max_poly_order,
-            input_poly_order=input_poly_order,
             num_species=num_species,
             gradient_normalization="element",  # NOTE: This is to copy mace-torch
             symmetric_tensor_product_basis=symmetric_tensor_product_basis,

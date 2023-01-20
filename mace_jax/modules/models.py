@@ -48,7 +48,6 @@ class GeneralMACE(hk.Module):
         max_ell: int = 3,  # Max spherical harmonic degree, default 3
         epsilon: Optional[float] = None,
         correlation: int = 3,  # Correlation order at each layer (~ node_features^correlation), default 3
-        max_poly_order: Optional[int] = None,  # TODO (mario): implement it back?
         gate: Callable = jax.nn.silu,  # activation function
         symmetric_tensor_product_basis: bool = True,
         off_diagonal: bool = False,
@@ -57,7 +56,6 @@ class GeneralMACE(hk.Module):
     ):
         super().__init__()
 
-        assert max_poly_order is None, "max_poly_order is not implemented yet"
         output_irreps = e3nn.Irreps(output_irreps)
         hidden_irreps = e3nn.Irreps(hidden_irreps)
         readout_mlp_irreps = e3nn.Irreps(readout_mlp_irreps)
@@ -84,7 +82,6 @@ class GeneralMACE(hk.Module):
 
         self.r_max = r_max
         self.correlation = correlation
-        self.max_poly_order = max_poly_order
         self.avg_num_neighbors = avg_num_neighbors
         self.epsilon = epsilon
         self.readout_mlp_irreps = readout_mlp_irreps
@@ -271,24 +268,15 @@ class MACELayer(hk.Module):
             )
             sc = None
 
-        # if self.max_poly_order is None:
-        #     new_poly_order = self.correlation * (poly_order + self.sh_irreps.lmax)
-        # else:
-        #     new_poly_order = self.correlation * poly_order + self.max_poly_order
-
         node_feats = EquivariantProductBasisBlock(
             target_irreps=self.num_features * self.hidden_irreps,
             correlation=self.correlation,
-            # max_poly_order=new_poly_order,
-            # input_poly_order=poly_order,
             num_species=self.num_species,
             symmetric_tensor_product_basis=self.symmetric_tensor_product_basis,
             off_diagonal=self.off_diagonal,
         )(node_feats=node_feats, node_specie=node_specie)
 
         node_feats = profile(f"{self.name}: node_feats after tensor power", node_feats)
-
-        # poly_order = new_poly_order
 
         if sc is not None:
             node_feats = node_feats + sc  # [n_nodes, feature * hidden_irreps]
@@ -305,8 +293,6 @@ class MACELayer(hk.Module):
             )(
                 node_feats
             )  # [n_nodes, output_irreps]
-
-            # polynomial order of node outputs is infinite in the last layer because of the non-polynomial activation function
 
         node_outputs = profile(f"{self.name}: node_outputs", node_outputs)
         return node_outputs, node_feats

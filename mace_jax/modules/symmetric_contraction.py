@@ -1,4 +1,4 @@
-from typing import Set, Optional, Union
+from typing import Set, Union
 
 import e3nn_jax as e3nn
 import haiku as hk
@@ -14,8 +14,6 @@ class SymmetricContraction(hk.Module):
         correlation: int,
         keep_irrep_out: Set[e3nn.Irrep],
         num_species: int,
-        max_poly_order: Optional[int] = None,
-        input_poly_order: int = 0,
         gradient_normalization: Union[str, float] = None,
         symmetric_tensor_product_basis: bool = True,
         off_diagonal: bool = False,
@@ -37,8 +35,6 @@ class SymmetricContraction(hk.Module):
 
         self.keep_irrep_out = {e3nn.Irrep(ir) for ir in keep_irrep_out}
         self.num_species = num_species
-        self.max_poly_order = max_poly_order
-        self.input_poly_order = input_poly_order
         self.symmetric_tensor_product_basis = symmetric_tensor_product_basis
         self.off_diagonal = off_diagonal
 
@@ -61,20 +57,11 @@ class SymmetricContraction(hk.Module):
 
                 if self.symmetric_tensor_product_basis:
                     U = e3nn.reduced_symmetric_tensor_product_basis(
-                        input.irreps,
-                        order,
-                        keep_ir=self.keep_irrep_out,
-                        max_order=self.max_poly_order - order * self.input_poly_order
-                        if self.max_poly_order is not None
-                        else None,
+                        input.irreps, order, keep_ir=self.keep_irrep_out
                     )
                 else:
                     U = e3nn.reduced_tensor_product_basis(
-                        [input.irreps] * order,
-                        keep_ir=self.keep_irrep_out,
-                        max_order=self.max_poly_order - order * self.input_poly_order
-                        if self.max_poly_order is not None
-                        else None,
+                        [input.irreps] * order, keep_ir=self.keep_irrep_out
                     )
                 # U = U / order  # normalization TODO(mario): put back after testing
                 # NOTE(mario): The normalization constants (/order and /mul**0.5)
