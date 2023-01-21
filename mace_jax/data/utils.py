@@ -361,6 +361,29 @@ class GraphDataLoader:
                 self._length += 1
         return self._length
 
+    def subset(self, i):
+        graphs = self.graphs
+        if isinstance(i, slice):
+            graphs = graphs[i]
+        if isinstance(i, int):
+            graphs = graphs[:i]
+        if isinstance(i, list):
+            graphs = [graphs[j] for j in i]
+        if isinstance(i, float):
+            graphs = graphs[: int(len(graphs) * i)]
+
+        return GraphDataLoader(
+            graphs=graphs,
+            n_node=self.n_node,
+            n_edge=self.n_edge,
+            n_graph=self.n_graph,
+            min_n_node=self.min_n_node,
+            min_n_edge=self.min_n_edge,
+            min_n_graph=self.min_n_graph,
+            shuffle=self.shuffle,
+            n_mantissa_bits=self.n_mantissa_bits,
+        )
+
 
 def pad_graph_to_nearest_ceil_mantissa(
     graphs_tuple: jraph.GraphsTuple,
