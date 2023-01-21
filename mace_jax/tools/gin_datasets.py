@@ -17,6 +17,7 @@ def datasets(
     num_train: int = None,
     valid_path: str = None,
     valid_fraction: float = None,
+    valid_num: int = None,
     test_path: str = None,
     seed: int = 1234,
     energy_key: str = "energy",
@@ -69,10 +70,15 @@ def datasets(
         train_configs = all_train_configs
     elif valid_fraction is not None:
         logging.info(
-            "Using random %s%% of training set for validation", 100 * valid_fraction
+            f"Using random {100 * valid_fraction}% of training set for validation"
         )
         train_configs, valid_configs = data.random_train_valid_split(
-            all_train_configs, valid_fraction, seed
+            all_train_configs, int(len(all_train_configs) * valid_fraction), seed
+        )
+    elif valid_num is not None:
+        logging.info(f"Using random {valid_num} configurations for validation")
+        train_configs, valid_configs = data.random_train_valid_split(
+            all_train_configs, valid_num, seed
         )
     else:
         logging.info("No validation set")

@@ -44,12 +44,10 @@ Configurations = List[Configuration]
 
 
 def random_train_valid_split(
-    items: Sequence, valid_fraction: float, seed: int
+    items: Sequence, valid_num: int, seed: int
 ) -> Tuple[List, List]:
-    assert 0.0 < valid_fraction < 1.0
-
     size = len(items)
-    train_size = size - int(valid_fraction * size)
+    train_size = size - valid_num
 
     indices = list(range(size))
     rng = np.random.default_rng(seed)
