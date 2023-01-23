@@ -298,6 +298,7 @@ class MACELayer(hk.Module):
         return node_outputs, node_feats
 
 
+# TODO REMOVE and use predictor instead
 class MACE(hk.Module):
     def __init__(
         self,
@@ -326,7 +327,7 @@ class MACE(hk.Module):
             )
 
             contributions = self.energy_model(
-                vectors, graph.nodes.specie, graph.senders, graph.receivers
+                vectors, graph.nodes.species, graph.senders, graph.receivers
             )  # [n_nodes, num_interactions, 0e]
 
             contributions = contributions.array[:, :, 0]  # [n_nodes, num_interactions]
@@ -334,7 +335,7 @@ class MACE(hk.Module):
                 jnp.sum(contributions, axis=1)
             )  # [n_nodes, ]
 
-            node_energies += self.atomic_energies[graph.nodes.specie]  # [n_nodes, ]
+            node_energies += self.atomic_energies[graph.nodes.species]  # [n_nodes, ]
             return jnp.sum(node_energies), node_energies
 
         minus_forces, node_energies = jax.grad(energy_fn, has_aux=True)(

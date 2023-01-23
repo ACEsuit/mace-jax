@@ -76,7 +76,7 @@ def config_from_atoms(
     stress = atoms.info.get(stress_key, None)  # eV / Ang^3
 
     if energy is None:
-        energy = 0.0
+        energy = np.array(0.0)
 
     if stress is not None:
         stress = prefactor_stress * stress
