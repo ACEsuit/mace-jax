@@ -69,7 +69,7 @@ def train(
                 params, optimizer_state, ema_params, num_updates, graph
             )
             loss = float(loss)
-            p_bar.set_postfix({"loss": loss})
+            p_bar.set_postfix({"loss": f"{loss:7.3f}"})
             opt_metrics = {
                 "loss": loss,
                 "time": time.time() - start_time,
