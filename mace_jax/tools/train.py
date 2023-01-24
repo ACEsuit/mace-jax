@@ -177,6 +177,10 @@ def evaluate(
             )
             stress_list.append(ref_graph.globals.stress)
 
+    if num_graphs == 0:
+        logging.warning("No graphs in data_loader !")
+        return 0.0, {}
+
     avg_loss = total_loss / num_graphs
 
     aux = {

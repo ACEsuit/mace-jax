@@ -273,7 +273,7 @@ def train(
                     error_s = "mae_s"
 
                 def _(x: str):
-                    v: float = metrics_[x]
+                    v: float = metrics_.get(x, None)
                     if v is None:
                         return "N/A"
                     if x.startswith("rel_"):
