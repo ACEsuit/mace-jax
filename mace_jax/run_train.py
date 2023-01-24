@@ -36,7 +36,9 @@ def main():
 
     params = reload(params)
 
-    predictor = tools.energy_forces_stress_predictor(model_fn)
+    predictor = lambda w, g: tools.predict_energy_forces_stress(
+        lambda *x: model_fn(w, *x), g
+    )
 
     if checks(predictor, params, train_loader):
         return
