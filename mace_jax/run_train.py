@@ -43,7 +43,7 @@ def main():
     if checks(predictor, params, train_loader):
         return
 
-    gradient_transform, max_num_epochs = optimizer(train_loader.approx_length())
+    gradient_transform, steps_per_interval, max_num_intervals = optimizer()
     optimizer_state = gradient_transform.init(params)
 
     logging.info(f"Number of parameters: {tools.count_parameters(params)}")
@@ -59,7 +59,8 @@ def main():
         valid_loader,
         test_loader,
         gradient_transform,
-        max_num_epochs,
+        max_num_intervals,
+        steps_per_interval,
         logger,
         directory,
         tag,

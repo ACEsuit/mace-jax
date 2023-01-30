@@ -67,7 +67,7 @@ class LinearMassEmbedding(hk.Module):
 
     def __call__(self, node_specie: jnp.ndarray) -> e3nn.IrrepsArray:
         w = hk.get_parameter(
-            f"embeddings",
+            "embeddings",
             shape=(self.num_species, self.irreps_out.dim),
             dtype=jnp.float32,
             init=hk.initializers.RandomNormal(),
@@ -118,7 +118,7 @@ def model(
         avg_r_min = tools.compute_avg_min_neighbor_distance(train_graphs)
         logging.info(f"Compute the average min neighbor distance: {avg_r_min:.3f}")
     elif avg_r_min is None:
-        logging.info(f"Do not normalize the radial basis (avg_r_min=None)")
+        logging.info("Do not normalize the radial basis (avg_r_min=None)")
     else:
         logging.info(f"Use the average min neighbor distance: {avg_r_min:.3f}")
 
