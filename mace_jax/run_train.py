@@ -2,6 +2,7 @@ import logging
 import sys
 
 import gin
+import jax
 
 import mace_jax
 from mace_jax import tools
@@ -36,8 +37,8 @@ def main():
 
     params = reload(params)
 
-    predictor = lambda w, g: tools.predict_energy_forces_stress(
-        lambda *x: model_fn(w, *x), g
+    predictor = jax.jit(
+        lambda w, g: tools.predict_energy_forces_stress(lambda *x: model_fn(w, *x), g)
     )
 
     if checks(predictor, params, train_loader):
