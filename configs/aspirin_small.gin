@@ -8,7 +8,7 @@ logs.directory = "results"
 
 datasets.train_path = "data/rmd17_aspirin_train.xyz"  # in units of eV and Å
 datasets.test_path = "data/rmd17_aspirin_test.xyz"
-datasets.num_train = 150
+datasets.train_num = 150
 datasets.r_max = 5.0
 datasets.valid_fraction = 0.208
 datasets.n_node = 512
