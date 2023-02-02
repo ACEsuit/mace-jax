@@ -19,6 +19,7 @@ def datasets(
     valid_fraction: float = None,
     valid_num: int = None,
     test_path: str = None,
+    test_num: int = None,
     seed: int = 1234,
     energy_key: str = "energy",
     forces_key: str = "forces",
@@ -93,6 +94,7 @@ def datasets(
             energy_key=energy_key,
             forces_key=forces_key,
             extract_atomic_energies=False,
+            num_configs=test_num,
             prefactor_stress=prefactor_stress,
             remap_stress=remap_stress,
         )
