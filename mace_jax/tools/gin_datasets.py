@@ -14,7 +14,7 @@ def datasets(
     r_max: float,
     train_path: str,
     config_type_weights: Dict = None,
-    num_train: int = None,
+    train_num: int = None,
     valid_path: str = None,
     valid_fraction: float = None,
     valid_num: int = None,
@@ -46,7 +46,7 @@ def datasets(
         energy_key=energy_key,
         forces_key=forces_key,
         extract_atomic_energies=True,
-        num_configs=num_train,
+        num_configs=train_num,
         prefactor_stress=prefactor_stress,
         remap_stress=remap_stress,
     )
