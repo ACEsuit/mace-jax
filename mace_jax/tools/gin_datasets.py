@@ -57,7 +57,7 @@ def datasets(
 
     if valid_path is not None:
         _, valid_configs = data.load_from_xyz(
-            file_path=valid_path,
+            file_or_path=valid_path,
             config_type_weights=config_type_weights,
             energy_key=energy_key,
             forces_key=forces_key,
@@ -89,7 +89,7 @@ def datasets(
 
     if test_path is not None:
         _, test_configs = data.load_from_xyz(
-            file_path=test_path,
+            file_or_path=test_path,
             config_type_weights=config_type_weights,
             energy_key=energy_key,
             forces_key=forces_key,
