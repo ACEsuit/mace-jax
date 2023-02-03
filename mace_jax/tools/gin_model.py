@@ -80,11 +80,11 @@ class LinearMassEmbedding(hk.Module):
 
 @gin.configurable
 def model(
+    *,
     r_max: float,
     atomic_energies_dict: Dict[int, float] = None,
     train_graphs: List[jraph.GraphsTuple] = None,
     initialize_seed: Optional[int] = None,
-    *,
     scaling: Callable = None,
     atomic_energies: Union[str, np.ndarray, Dict[int, float]] = None,
     avg_num_neighbors: float = "average",
@@ -166,11 +166,12 @@ def model(
 
     # check that num_species is consistent with the dataset
     if z_table is None:
-        for graph in train_graphs:
-            if not np.all(graph.nodes.species < num_species):
-                raise ValueError(
-                    f"max(graph.nodes.species)={np.max(graph.nodes.species)} >= num_species={num_species}"
-                )
+        if train_graphs is not None:
+            for graph in train_graphs:
+                if not np.all(graph.nodes.species < num_species):
+                    raise ValueError(
+                        f"max(graph.nodes.species)={np.max(graph.nodes.species)} >= num_species={num_species}"
+                    )
     else:
         if max(z_table.zs) >= num_species:
             raise ValueError(
