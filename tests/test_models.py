@@ -26,6 +26,7 @@ def test_symmetric_contraction():
     )
 
 
+# TODO fix this test
 def test_mace():
     atomic_energies = np.array([1.0, 3.0], dtype=float)
 

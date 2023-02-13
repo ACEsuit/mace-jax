@@ -1,15 +1,13 @@
 import functools
 import math
-from typing import Callable, Dict, Optional, Union
+from typing import Callable, Optional, Union
 
 import e3nn_jax as e3nn
 import haiku as hk
 import jax
 import jax.numpy as jnp
-import jraph
-import numpy as np
 
-from ..tools import get_edge_relative_vectors, safe_norm, sum_nodes_of_the_same_graph
+from ..tools import safe_norm
 from .blocks import (
     EquivariantProductBasisBlock,
     InteractionBlock,
@@ -17,7 +15,6 @@ from .blocks import (
     LinearReadoutBlock,
     NonLinearReadoutBlock,
     RadialEmbeddingBlock,
-    ScaleShiftBlock,
 )
 
 try:
@@ -28,7 +25,7 @@ except ImportError:
         return x
 
 
-class GeneralMACE(hk.Module):
+class MACE(hk.Module):
     def __init__(
         self,
         *,
@@ -296,57 +293,3 @@ class MACELayer(hk.Module):
 
         node_outputs = profile(f"{self.name}: node_outputs", node_outputs)
         return node_outputs, node_feats
-
-
-# TODO REMOVE and use predictor instead
-class MACE(hk.Module):
-    def __init__(
-        self,
-        *,
-        atomic_inter_scale: float = 1.0,
-        atomic_inter_shift: float = 0.0,
-        atomic_energies: np.ndarray,
-        **kwargs,
-    ):
-        super().__init__()
-        self.scale_shift = ScaleShiftBlock(
-            scale=atomic_inter_scale, shift=atomic_inter_shift
-        )
-        self.energy_model = GeneralMACE(output_irreps="0e", **kwargs)
-        self.atomic_energies = jnp.asarray(atomic_energies)
-
-    def __call__(self, graph: jraph.GraphsTuple) -> Dict[str, jnp.ndarray]:
-        def energy_fn(positions):
-            vectors = get_edge_relative_vectors(
-                positions=positions,
-                senders=graph.senders,
-                receivers=graph.receivers,
-                shifts=graph.edges.shifts,
-                cell=graph.globals.cell,
-                n_edge=graph.n_edge,
-            )
-
-            contributions = self.energy_model(
-                vectors, graph.nodes.species, graph.senders, graph.receivers
-            )  # [n_nodes, num_interactions, 0e]
-
-            contributions = contributions.array[:, :, 0]  # [n_nodes, num_interactions]
-            node_energies = self.scale_shift(
-                jnp.sum(contributions, axis=1)
-            )  # [n_nodes, ]
-
-            node_energies += self.atomic_energies[graph.nodes.species]  # [n_nodes, ]
-            return jnp.sum(node_energies), node_energies
-
-        minus_forces, node_energies = jax.grad(energy_fn, has_aux=True)(
-            graph.nodes.positions
-        )
-
-        graph_energies = sum_nodes_of_the_same_graph(
-            graph, node_energies
-        )  # [ n_graphs,]
-
-        return {
-            "energy": graph_energies,  # [n_graphs,]
-            "forces": -minus_forces,  # [n_nodes, 3]
-        }

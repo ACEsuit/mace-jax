@@ -9,7 +9,7 @@ from .blocks import (
 )
 from .loss import WeightedEnergyFrocesStressLoss
 from .message_passing import MessagePassingConvolution
-from .models import MACE, GeneralMACE
+from .models import MACE
 from .symmetric_contraction import SymmetricContraction
 
 __all__ = [
@@ -23,6 +23,5 @@ __all__ = [
     "WeightedEnergyFrocesStressLoss",
     "MessagePassingConvolution",
     "MACE",
-    "GeneralMACE",
     "SymmetricContraction",
 ]
