@@ -67,7 +67,7 @@ class LinearMassEmbedding(hk.Module):
 
     def __call__(self, node_specie: jnp.ndarray) -> e3nn.IrrepsArray:
         w = hk.get_parameter(
-            f"embeddings",
+            "embeddings",
             shape=(self.num_species, self.irreps_out.dim),
             dtype=jnp.float32,
             init=hk.initializers.RandomNormal(),
@@ -80,11 +80,11 @@ class LinearMassEmbedding(hk.Module):
 
 @gin.configurable
 def model(
+    *,
     r_max: float,
     atomic_energies_dict: Dict[int, float] = None,
     train_graphs: List[jraph.GraphsTuple] = None,
     initialize_seed: Optional[int] = None,
-    *,
     scaling: Callable = None,
     atomic_energies: Union[str, np.ndarray, Dict[int, float]] = None,
     avg_num_neighbors: float = "average",
@@ -118,7 +118,7 @@ def model(
         avg_r_min = tools.compute_avg_min_neighbor_distance(train_graphs)
         logging.info(f"Compute the average min neighbor distance: {avg_r_min:.3f}")
     elif avg_r_min is None:
-        logging.info(f"Do not normalize the radial basis (avg_r_min=None)")
+        logging.info("Do not normalize the radial basis (avg_r_min=None)")
     else:
         logging.info(f"Use the average min neighbor distance: {avg_r_min:.3f}")
 
@@ -166,11 +166,12 @@ def model(
 
     # check that num_species is consistent with the dataset
     if z_table is None:
-        for graph in train_graphs:
-            if not np.all(graph.nodes.species < num_species):
-                raise ValueError(
-                    f"max(graph.nodes.species)={np.max(graph.nodes.species)} >= num_species={num_species}"
-                )
+        if train_graphs is not None:
+            for graph in train_graphs:
+                if not np.all(graph.nodes.species < num_species):
+                    raise ValueError(
+                        f"max(graph.nodes.species)={np.max(graph.nodes.species)} >= num_species={num_species}"
+                    )
     else:
         if max(z_table.zs) >= num_species:
             raise ValueError(

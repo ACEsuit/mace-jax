@@ -20,8 +20,7 @@ def train(
     train_loader: data.GraphDataLoader,
     gradient_transform: Any,
     optimizer_state: Dict[str, Any],
-    start_epoch: int,
-    logger: Any,
+    steps_per_interval: int,
     ema_decay: Optional[float] = None,
 ):
     num_updates = 0
@@ -53,14 +52,23 @@ def train(
 
     last_cache_size = update_fn._cache_size()
 
-    for epoch in itertools.count(start_epoch):
-        yield epoch, params, optimizer_state, ema_params
+    def interval_loader():
+        i = 0
+        while True:
+            for graph in train_loader:
+                yield graph
+                i += 1
+                if i >= steps_per_interval:
+                    return
 
-        # Train one epoch
+    for interval in itertools.count():
+        yield interval, params, optimizer_state, ema_params
+
+        # Train one interval
         p_bar = tqdm.tqdm(
-            train_loader,
-            desc=f"Epoch {epoch}",
-            total=train_loader.approx_length(),
+            interval_loader(),
+            desc=f"Train interval {interval}",
+            total=steps_per_interval,
         )
         for graph in p_bar:
             num_updates += 1
@@ -70,18 +78,6 @@ def train(
             )
             loss = float(loss)
             p_bar.set_postfix({"loss": f"{loss:7.3f}"})
-            opt_metrics = {
-                "loss": loss,
-                "time": time.time() - start_time,
-            }
-
-            opt_metrics["mode"] = "opt"
-            opt_metrics["epoch"] = epoch
-            opt_metrics["num_updates"] = num_updates
-            opt_metrics["epoch_"] = (
-                start_epoch + num_updates / train_loader.approx_length()
-            )
-            logger.log(opt_metrics)
 
             if last_cache_size != update_fn._cache_size():
                 last_cache_size = update_fn._cache_size()
@@ -91,7 +87,7 @@ def train(
                 logging.info(f"- n_edge={graph.n_edge} total={graph.n_edge.sum()}")
                 logging.info(f"Outout: loss= {loss:.3f}")
                 logging.info(
-                    f"Compilation time: {opt_metrics['time']:.3f}s, cache size: {last_cache_size}"
+                    f"Compilation time: {time.time() - start_time:.3f}s, cache size: {last_cache_size}"
                 )
 
 
@@ -100,6 +96,7 @@ def evaluate(
     params: Any,
     loss_fn: Any,
     data_loader: data.GraphDataLoader,
+    name: str = "Evaluation",
 ) -> Tuple[float, Dict[str, Any]]:
     total_loss = 0.0
     num_graphs = 0
@@ -122,7 +119,7 @@ def evaluate(
         last_cache_size = None
 
     start_time = time.time()
-    p_bar = tqdm.tqdm(data_loader, desc="Evaluating", total=data_loader.approx_length())
+    p_bar = tqdm.tqdm(data_loader, desc=name, total=data_loader.approx_length())
     for ref_graph in p_bar:
         output = model(params, ref_graph)
         pred_graph = ref_graph._replace(
@@ -178,7 +175,7 @@ def evaluate(
             stress_list.append(ref_graph.globals.stress)
 
     if num_graphs == 0:
-        logging.warning("No graphs in data_loader !")
+        logging.warning(f"No graphs in data_loader ! Returning 0.0 for {name}")
         return 0.0, {}
 
     avg_loss = total_loss / num_graphs

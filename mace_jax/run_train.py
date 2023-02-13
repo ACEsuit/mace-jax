@@ -2,6 +2,7 @@ import logging
 import sys
 
 import gin
+import jax
 
 import mace_jax
 from mace_jax import tools
@@ -31,19 +32,22 @@ def main():
     train_loader, valid_loader, test_loader, atomic_energies_dict, r_max = datasets()
 
     model_fn, params, num_message_passing = model(
-        r_max, atomic_energies_dict, train_loader.graphs, initialize_seed=seed
+        r_max=r_max,
+        atomic_energies_dict=atomic_energies_dict,
+        train_graphs=train_loader.graphs,
+        initialize_seed=seed,
     )
 
     params = reload(params)
 
-    predictor = lambda w, g: tools.predict_energy_forces_stress(
-        lambda *x: model_fn(w, *x), g
+    predictor = jax.jit(
+        lambda w, g: tools.predict_energy_forces_stress(lambda *x: model_fn(w, *x), g)
     )
 
     if checks(predictor, params, train_loader):
         return
 
-    gradient_transform, max_num_epochs = optimizer(train_loader.approx_length())
+    gradient_transform, steps_per_interval, max_num_intervals = optimizer()
     optimizer_state = gradient_transform.init(params)
 
     logging.info(f"Number of parameters: {tools.count_parameters(params)}")
@@ -59,7 +63,8 @@ def main():
         valid_loader,
         test_loader,
         gradient_transform,
-        max_num_epochs,
+        max_num_intervals,
+        steps_per_interval,
         logger,
         directory,
         tag,
