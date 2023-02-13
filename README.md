@@ -14,6 +14,14 @@ nox
 
 ## Installation
 
+From github:
+
+```sh
+pip install git+https://github.com/ACEsuit/mace-jax
+```
+
+Or locally:
+
 ```sh
 python setup.py develop
 ```
