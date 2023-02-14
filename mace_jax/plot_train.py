@@ -44,17 +44,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--path", help="path to results file or directory", required=True
     )
-    parser.add_argument(
-        "--min_epoch", help="minimum epoch", default=50, type=int, required=False
-    )
     return parser.parse_args()
 
 
-def plot(data: pd.DataFrame, min_epoch: int, output_path: str) -> None:
-    data = data[data["epoch"] > min_epoch]
-
+def plot(data: pd.DataFrame, output_path: str) -> None:
     data = (
-        data.groupby(["path", "name", "mode", "epoch"])
+        data.groupby(["path", "name", "mode", "interval"])
         .agg([np.mean, np.std])
         .reset_index()
     )
@@ -68,14 +63,14 @@ def plot(data: pd.DataFrame, min_epoch: int, output_path: str) -> None:
 
     ax = axes[0]
     ax.plot(
-        valid_data["epoch"],
+        valid_data["interval"],
         valid_data["loss"]["mean"],
         color=colors[0],
         zorder=1,
         label="Validation",
     )
     # ax.fill_between(
-    #     x=valid_data["epoch"],
+    #     x=valid_data["interval"],
     #     y1=valid_data["loss"]["mean"] - valid_data["loss"]["std"],
     #     y2=valid_data["loss"]["mean"] + valid_data["loss"]["std"],
     #     alpha=0.5,
@@ -83,14 +78,14 @@ def plot(data: pd.DataFrame, min_epoch: int, output_path: str) -> None:
     #     color=colors[0],
     # )
     ax.plot(
-        train_data["epoch"],
+        train_data["interval"],
         train_data["loss"]["mean"],
         color=colors[3],
         zorder=1,
         label="Training",
     )
     # ax.fill_between(
-    #     x=train_data["epoch"],
+    #     x=train_data["interval"],
     #     y1=train_data["loss"]["mean"] - train_data["loss"]["std"],
     #     y2=train_data["loss"]["mean"] + train_data["loss"]["std"],
     #     alpha=0.5,
@@ -100,20 +95,20 @@ def plot(data: pd.DataFrame, min_epoch: int, output_path: str) -> None:
 
     ax.set_xscale("log")
     ax.set_yscale("log")
-    ax.set_xlabel("Epoch")
+    ax.set_xlabel("Interval")
     ax.set_ylabel("Loss")
     ax.legend()
 
     ax = axes[1]
     ax.plot(
-        valid_data["epoch"],
+        valid_data["interval"],
         valid_data["mae_e"]["mean"],
         color=colors[1],
         zorder=1,
         label="MAE Energy [eV]",
     )
     # ax.fill_between(
-    #     x=valid_data["epoch"],
+    #     x=valid_data["interval"],
     #     y1=valid_data["mae_e"]["mean"] - valid_data["mae_e"]["std"],
     #     y2=valid_data["mae_e"]["mean"] + valid_data["mae_e"]["std"],
     #     alpha=0.5,
@@ -121,14 +116,14 @@ def plot(data: pd.DataFrame, min_epoch: int, output_path: str) -> None:
     #     color=colors[1],
     # )
     ax.plot(
-        valid_data["epoch"],
+        valid_data["interval"],
         valid_data["mae_f"]["mean"],
         color=colors[2],
         zorder=1,
         label="MAE Forces [eV/Å]",
     )
     # ax.fill_between(
-    #     x=valid_data["epoch"],
+    #     x=valid_data["interval"],
     #     y1=valid_data["mae_f"]["mean"] - valid_data["mae_f"]["std"],
     #     y2=valid_data["mae_f"]["mean"] + valid_data["mae_f"]["std"],
     #     alpha=0.5,
@@ -166,7 +161,7 @@ def main():
     )
 
     for (path, name), group in data.groupby(["path", "name"]):
-        plot(group, min_epoch=args.min_epoch, output_path=f"{path}/{name}.pdf")
+        plot(group, output_path=f"{path}/{name}.pdf")
 
 
 if __name__ == "__main__":
