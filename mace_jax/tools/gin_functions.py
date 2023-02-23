@@ -16,7 +16,7 @@ from unique_names_generator.data import ADJECTIVES, NAMES
 
 from mace_jax import modules, tools
 
-loss = gin.configurable("loss")(modules.WeightedEnergyFrocesStressLoss)
+loss = gin.configurable("loss")(modules.WeightedEnergyForcesStressLoss)
 
 
 @gin.configurable

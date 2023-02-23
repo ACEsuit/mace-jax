@@ -32,7 +32,7 @@ def mean_squared_error_stress(graph, stress_pred) -> jnp.ndarray:
     )  # [n_graphs, ]
 
 
-class WeightedEnergyFrocesStressLoss:
+class WeightedEnergyForcesStressLoss:
     def __init__(self, energy_weight=1.0, forces_weight=1.0, stress_weight=1.0) -> None:
         super().__init__()
         self.energy_weight = energy_weight

@@ -7,7 +7,7 @@ from .blocks import (
     RadialEmbeddingBlock,
     ScaleShiftBlock,
 )
-from .loss import WeightedEnergyFrocesStressLoss
+from .loss import WeightedEnergyForcesStressLoss
 from .message_passing import MessagePassingConvolution
 from .models import MACE
 from .symmetric_contraction import SymmetricContraction
@@ -20,7 +20,7 @@ __all__ = [
     "NonLinearReadoutBlock",
     "RadialEmbeddingBlock",
     "ScaleShiftBlock",
-    "WeightedEnergyFrocesStressLoss",
+    "WeightedEnergyForcesStressLoss",
     "MessagePassingConvolution",
     "MACE",
     "SymmetricContraction",
