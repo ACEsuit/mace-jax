@@ -21,7 +21,7 @@ try:
     from profile_nn_jax import profile
 except ImportError:
 
-    def profile(_, x):
+    def profile(_, x, __=None):
         return x
 
 
@@ -106,17 +106,21 @@ class MACE(hk.Module):
         node_specie: jnp.ndarray,  # [n_nodes] int between 0 and num_species-1
         senders: jnp.ndarray,  # [n_edges]
         receivers: jnp.ndarray,  # [n_edges]
+        node_mask: Optional[jnp.ndarray] = None,  # [n_nodes] only used for profiling
     ) -> e3nn.IrrepsArray:
         assert vectors.ndim == 2 and vectors.shape[1] == 3
         assert node_specie.ndim == 1
         assert senders.ndim == 1 and receivers.ndim == 1
         assert vectors.shape[0] == senders.shape[0] == receivers.shape[0]
 
+        if node_mask is None:
+            node_mask = jnp.ones(node_specie.shape[0], dtype=jnp.bool_)
+
         # Embeddings
         node_feats = self.node_embedding(node_specie).astype(
             vectors.dtype
         )  # [n_nodes, feature * irreps]
-        node_feats = profile("embedding: node_feats", node_feats)
+        node_feats = profile("embedding: node_feats", node_feats, node_mask[:, None])
 
         lengths = safe_norm(vectors, axis=-1)
 
@@ -162,13 +166,7 @@ class MACE(hk.Module):
                 symmetric_tensor_product_basis=self.symmetric_tensor_product_basis,
                 off_diagonal=self.off_diagonal,
                 name=f"layer_{i}",
-            )(
-                node_feats,
-                node_specie,
-                edge_attrs,
-                senders,
-                receivers,
-            )
+            )(node_feats, node_specie, edge_attrs, senders, receivers, node_mask)
             outputs += [node_outputs]  # list of [n_nodes, output_irreps]
 
         return e3nn.stack(outputs, axis=1)  # [n_nodes, num_interactions, output_irreps]
@@ -221,8 +219,12 @@ class MACELayer(hk.Module):
         edge_attrs: e3nn.IrrepsArray,  # [n_edges, irreps]
         senders: jnp.ndarray,  # [n_edges]
         receivers: jnp.ndarray,  # [n_edges]
+        node_mask: Optional[jnp.ndarray] = None,  # [n_nodes] only used for profiling
     ):
-        node_feats = profile(f"{self.name}: node_feats", node_feats)
+        if node_mask is None:
+            node_mask = jnp.ones(node_specie.shape[0], dtype=jnp.bool_)
+
+        node_feats = profile(f"{self.name}: input", node_feats, node_mask[:, None])
 
         sc = None
         if not self.first:
@@ -233,7 +235,7 @@ class MACELayer(hk.Module):
             )(
                 node_specie, node_feats
             )  # [n_nodes, feature * hidden_irreps]
-            sc = profile(f"{self.name}: self-connexion", sc)
+            sc = profile(f"{self.name}: self-connexion", sc, node_mask[:, None])
 
         node_feats = InteractionBlock(
             target_irreps=self.num_features * self.interaction_irreps,
@@ -251,7 +253,9 @@ class MACELayer(hk.Module):
         else:
             node_feats /= jnp.sqrt(self.avg_num_neighbors)
 
-        node_feats = profile(f"{self.name}: node_feats after interaction", node_feats)
+        node_feats = profile(
+            f"{self.name}: interaction", node_feats, node_mask[:, None]
+        )
 
         if self.first:
             # Selector TensorProduct
@@ -261,7 +265,7 @@ class MACELayer(hk.Module):
                 name="skip_tp_first",
             )(node_specie, node_feats)
             node_feats = profile(
-                f"{self.name}: node_feats after skip_tp_first", node_feats
+                f"{self.name}: skip_tp_first", node_feats, node_mask[:, None]
             )
             sc = None
 
@@ -273,7 +277,9 @@ class MACELayer(hk.Module):
             off_diagonal=self.off_diagonal,
         )(node_feats=node_feats, node_specie=node_specie)
 
-        node_feats = profile(f"{self.name}: node_feats after tensor power", node_feats)
+        node_feats = profile(
+            f"{self.name}: tensor power", node_feats, node_mask[:, None]
+        )
 
         if sc is not None:
             node_feats = node_feats + sc  # [n_nodes, feature * hidden_irreps]
@@ -291,5 +297,5 @@ class MACELayer(hk.Module):
                 node_feats
             )  # [n_nodes, output_irreps]
 
-        node_outputs = profile(f"{self.name}: node_outputs", node_outputs)
+        node_outputs = profile(f"{self.name}: output", node_outputs, node_mask[:, None])
         return node_outputs, node_feats
