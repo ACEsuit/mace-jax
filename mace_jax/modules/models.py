@@ -129,8 +129,8 @@ class MACE(hk.Module):
                 self.radial_embedding(lengths),
                 e3nn.spherical_harmonics(
                     self.sh_irreps,
-                    vectors / lengths[..., None],
-                    normalize=False,
+                    vectors,
+                    normalize=True,
                     normalization="component",
                 ),
             ]

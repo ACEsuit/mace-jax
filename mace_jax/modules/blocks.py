@@ -98,7 +98,9 @@ class RadialEmbeddingBlock:
                 )
                 factor = jnp.mean(func(samples) ** 2).item() ** -0.5
 
-        embedding = factor * func(edge_lengths)  # [n_edges, num_basis]
+        embedding = factor * jnp.where(
+            edge_lengths == 0.0, 0.0, func(edge_lengths)
+        )  # [n_edges, num_basis]
         return e3nn.IrrepsArray(f"{embedding.shape[-1]}x0e", embedding)
 
 
