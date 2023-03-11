@@ -33,7 +33,7 @@ def flags(
     if profile:
         import profile_nn_jax
 
-        profile_nn_jax.enable(timing=True, statistics=True)
+        profile_nn_jax.enable()
     return seed
 
 
