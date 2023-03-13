@@ -66,9 +66,8 @@ class NonLinearReadoutBlock(hk.Module):
         if not self.torch_style:
             x = e3nn.gate(x, even_act=self.activation, even_gate_act=self.gate)
         else:
-            x = (
-                e3nn.gate(x, even_act=self.activation, even_gate_act=self.gate)
-                / 0.9984383888506675
+            x = 1.00070554545458 * e3nn.gate(
+                x, even_act=self.activation, even_gate_act=self.gate
             )
         return e3nn.haiku.Linear(self.output_irreps)(x)  # [n_nodes, output_irreps]
 
