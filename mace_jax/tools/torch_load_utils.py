@@ -99,12 +99,10 @@ def load_torch_model(model: torch.nn.Module,):
         jnp.array([0]),
     )
     params_from_torch = create_jax_params(model, config_torch)
-    print(params_from_torch)
-    print(params)
-    # assert jax.tree_util.tree_structure(params) == jax.tree_util.tree_structure(
-    #     params_from_torch
-    # )
-    return jax_model.apply, params_from_torch, params
+    assert jax.tree_util.tree_structure(params) == jax.tree_util.tree_structure(
+        params_from_torch
+    )
+    return jax_model.apply, params_from_torch
 
 
 def linear_torch_to_jax(linear):
