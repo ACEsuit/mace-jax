@@ -216,6 +216,7 @@ class MACELayer(hk.Module):
         self.readout_mlp_irreps = readout_mlp_irreps
         self.symmetric_tensor_product_basis = symmetric_tensor_product_basis
         self.off_diagonal = off_diagonal
+        self.torch_style = torch_style
 
     def __call__(
         self,
@@ -246,6 +247,7 @@ class MACELayer(hk.Module):
             target_irreps=self.num_features * self.interaction_irreps,
             avg_num_neighbors=self.avg_num_neighbors,
             activation=self.activation,
+            torch_style=self.torch_style,
         )(
             node_feats=node_feats,
             edge_attrs=edge_attrs,
@@ -295,7 +297,10 @@ class MACELayer(hk.Module):
             )  # [n_nodes, output_irreps]
         else:  # Non linear readout for last layer
             node_outputs = NonLinearReadoutBlock(
-                self.readout_mlp_irreps, self.output_irreps, activation=self.activation,
+                self.readout_mlp_irreps,
+                self.output_irreps,
+                activation=self.activation,
+                torch_style=self.torch_style,
             )(
                 node_feats
             )  # [n_nodes, output_irreps]

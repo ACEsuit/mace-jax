@@ -45,12 +45,14 @@ class NonLinearReadoutBlock(hk.Module):
         *,
         activation: Optional[Callable] = None,
         gate: Optional[Callable] = None,
+        torch_style: bool = False,
     ):
         super().__init__()
         self.hidden_irreps = hidden_irreps
         self.output_irreps = output_irreps
         self.activation = activation
         self.gate = gate
+        self.torch_style = torch_style
 
     def __call__(self, x: e3nn.IrrepsArray) -> e3nn.IrrepsArray:
         # x = [n_nodes, irreps]
@@ -61,10 +63,13 @@ class NonLinearReadoutBlock(hk.Module):
         x = e3nn.haiku.Linear(
             (self.hidden_irreps + e3nn.Irreps(f"{num_vectors}x0e")).simplify()
         )(x)
-        x = (
-            e3nn.gate(x, even_act=self.activation, even_gate_act=self.gate)
-            / 0.9984383888506675
-        )
+        if not self.torch_style:
+            x = e3nn.gate(x, even_act=self.activation, even_gate_act=self.gate)
+        else:
+            x = (
+                e3nn.gate(x, even_act=self.activation, even_gate_act=self.gate)
+                / 0.9984383888506675
+            )
         return e3nn.haiku.Linear(self.output_irreps)(x)  # [n_nodes, output_irreps]
 
 
