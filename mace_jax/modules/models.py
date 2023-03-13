@@ -46,6 +46,7 @@ class MACE(hk.Module):
         epsilon: Optional[float] = None,
         correlation: int = 3,  # Correlation order at each layer (~ node_features^correlation), default 3
         gate: Callable = jax.nn.silu,  # activation function
+        torch_style: bool = False,
         symmetric_tensor_product_basis: bool = True,
         off_diagonal: bool = False,
         interaction_irreps: Union[str, e3nn.Irreps] = "o3_restricted",  # or o3_full
@@ -88,6 +89,7 @@ class MACE(hk.Module):
         self.num_species = num_species
         self.symmetric_tensor_product_basis = symmetric_tensor_product_basis
         self.off_diagonal = off_diagonal
+        self.torch_style = torch_style
 
         # Embeddings
         self.node_embedding = node_embedding(
@@ -128,10 +130,7 @@ class MACE(hk.Module):
             [
                 self.radial_embedding(lengths),
                 e3nn.spherical_harmonics(
-                    self.sh_irreps,
-                    vectors,
-                    normalize=True,
-                    normalization="component",
+                    self.sh_irreps, vectors, normalize=True, normalization="component",
                 ),
             ]
         )  # [n_edges, irreps]
@@ -163,6 +162,7 @@ class MACE(hk.Module):
                 correlation=self.correlation,
                 output_irreps=self.output_irreps,
                 readout_mlp_irreps=self.readout_mlp_irreps,
+                torch_style=self.torch_style,
                 symmetric_tensor_product_basis=self.symmetric_tensor_product_basis,
                 off_diagonal=self.off_diagonal,
                 name=f"layer_{i}",
@@ -194,6 +194,7 @@ class MACELayer(hk.Module):
         # ReadoutBlock:
         output_irreps: e3nn.Irreps,
         readout_mlp_irreps: e3nn.Irreps,
+        torch_style: bool = False,
     ) -> None:
         super().__init__(name=name)
 
@@ -290,9 +291,7 @@ class MACELayer(hk.Module):
             )  # [n_nodes, output_irreps]
         else:  # Non linear readout for last layer
             node_outputs = NonLinearReadoutBlock(
-                self.readout_mlp_irreps,
-                self.output_irreps,
-                activation=self.activation,
+                self.readout_mlp_irreps, self.output_irreps, activation=self.activation,
             )(
                 node_feats
             )  # [n_nodes, output_irreps]

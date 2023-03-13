@@ -27,8 +27,7 @@ class LinearNodeEmbeddingBlock(hk.Module):
 
 class LinearReadoutBlock(hk.Module):
     def __init__(
-        self,
-        output_irreps: e3nn.Irreps,
+        self, output_irreps: e3nn.Irreps,
     ):
         super().__init__()
         self.output_irreps = output_irreps
@@ -81,8 +80,7 @@ class RadialEmbeddingBlock:
         self.envelope_function = envelope_function
 
     def __call__(
-        self,
-        edge_lengths: jnp.ndarray,  # [n_edges]
+        self, edge_lengths: jnp.ndarray,  # [n_edges]
     ) -> e3nn.IrrepsArray:  # [n_edges, num_basis]
         def func(lengths):
             basis = self.basis_functions(lengths, self.r_max)  # [n_edges, num_basis]
@@ -142,11 +140,13 @@ class InteractionBlock(hk.Module):
         target_irreps: e3nn.Irreps,
         avg_num_neighbors: float,
         activation: Callable,
+        torch_style: bool = False,
     ) -> None:
         super().__init__()
         self.target_irreps = target_irreps
         self.avg_num_neighbors = avg_num_neighbors
         self.activation = activation
+        self.torch_style = torch_style
 
     def __call__(
         self,
@@ -160,7 +160,10 @@ class InteractionBlock(hk.Module):
         node_feats = e3nn.haiku.Linear(node_feats.irreps, name="linear_up")(node_feats)
 
         node_feats = MessagePassingConvolution(
-            self.avg_num_neighbors, self.target_irreps, self.activation
+            self.avg_num_neighbors,
+            self.target_irreps,
+            self.activation,
+            self.torch_style,
         )(node_feats, edge_attrs, senders, receivers)
 
         node_feats = e3nn.haiku.Linear(self.target_irreps, name="linear_down")(
