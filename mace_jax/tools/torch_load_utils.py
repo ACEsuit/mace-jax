@@ -132,13 +132,13 @@ def create_jax_params(model: torch.nn.Module, config_torch: dict):
     num_interactions = config_torch["num_interactions"]
     correlation = config_torch["correlation"]
     residual_first = config_torch["residual_first"]
-    if residual_first:
-        params["mace/layer_0/skip_tp_first"] = (
-            skip_tp_torch_to_jax(model.interactions[0].skip_tp),
+    if not residual_first:
+        params["mace/layer_0/skip_tp_first"] = skip_tp_torch_to_jax(
+            model.interactions[0].skip_tp
         )
 
     for i in range(num_interactions):
-        if i != 0 and not residual_first:
+        if i != 0 or residual_first:
             params[f"mace/layer_{i}/skip_tp"] = skip_tp_torch_to_jax(
                 model.interactions[i].skip_tp
             )
@@ -151,65 +151,51 @@ def create_jax_params(model: torch.nn.Module, config_torch: dict):
 
         params[
             f"mace/layer_{i}/interaction_block/message_passing_convolution/multi_layer_perceptron/linear_0"
-        ] = (
-            {
-                "w": (
-                    model.interactions[i].conv_tp_weights.layer0.weight.detach().numpy()
-                )
-            },
-        )
+        ] = {
+            "w": (model.interactions[i].conv_tp_weights.layer0.weight.detach().numpy())
+        }
+
         params[
             f"mace/layer_{i}/interaction_block/message_passing_convolution/multi_layer_perceptron/linear_1"
-        ] = (
-            {
-                "w": (
-                    model.interactions[i].conv_tp_weights.layer1.weight.detach().numpy()
-                )
-            },
-        )
+        ] = {
+            "w": (model.interactions[i].conv_tp_weights.layer1.weight.detach().numpy())
+        }
+
         params[
             f"mace/layer_{i}/interaction_block/message_passing_convolution/multi_layer_perceptron/linear_2"
-        ] = (
-            {
-                "w": (
-                    model.interactions[i].conv_tp_weights.layer2.weight.detach().numpy()
-                )
-            },
-        )
+        ] = {
+            "w": (model.interactions[i].conv_tp_weights.layer2.weight.detach().numpy())
+        }
+
         params[
             f"mace/layer_{i}/interaction_block/message_passing_convolution/multi_layer_perceptron/linear_3"
-        ] = (
-            {
-                "w": (
-                    model.interactions[i].conv_tp_weights.layer3.weight.detach().numpy()
-                )
-            },
-        )
-        product_params = ()
+        ] = {
+            "w": (model.interactions[i].conv_tp_weights.layer3.weight.detach().numpy())
+        }
+
+        product_params = {}
         irreps_out = model.products[i].linear.irreps_in
         for corr in range(correlation - 1, -1, -1):
             for j, (mul, ir) in enumerate(irreps_out):
                 if corr == correlation - 1:
-                    product_params += (
-                        {
-                            f"w[{corr}_{ir}]": model.products[i]
-                            .symmetric_contractions.contractions[j]
-                            .weights_max.detach()
-                            .numpy()
-                        },
+                    product_params[f"w{corr + 1}_{ir}"] = (
+                        model.products[i]
+                        .symmetric_contractions.contractions[j]
+                        .weights_max.detach()
+                        .numpy()
                     )
+
                 else:
-                    product_params += (
-                        {
-                            f"w[{corr}_{ir}]": model.products[i]
-                            .symmetric_contractions.contractions[j]
-                            .weights[corr]
-                            .detach()
-                            .numpy()
-                        },
+                    product_params[f"w{corr + 1}_{ir}"] = (
+                        model.products[i]
+                        .symmetric_contractions.contractions[j]
+                        .weights[corr]
+                        .detach()
+                        .numpy()
                     )
+
         params[
-            f"mace/layer_ {i}/equivariant_product_basis_block/~/symmetric_contraction"
+            f"mace/layer_{i}/equivariant_product_basis_block/~/symmetric_contraction"
         ] = product_params
         params[
             f"mace/layer_{i}/equivariant_product_basis_block/linear"
@@ -217,7 +203,7 @@ def create_jax_params(model: torch.nn.Module, config_torch: dict):
 
         if i != num_interactions - 1:
             params[f"mace/layer_{i}/linear_readout_block/linear"] = linear_torch_to_jax(
-                model.interactions[i].linear
+                model.readouts[i].linear
             )
         else:
             params[
