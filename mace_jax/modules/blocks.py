@@ -61,7 +61,10 @@ class NonLinearReadoutBlock(hk.Module):
         x = e3nn.haiku.Linear(
             (self.hidden_irreps + e3nn.Irreps(f"{num_vectors}x0e")).simplify()
         )(x)
-        x = e3nn.gate(x, even_act=self.activation, even_gate_act=self.gate)
+        x = (
+            e3nn.gate(x, even_act=self.activation, even_gate_act=self.gate)
+            / 0.9984383888506675
+        )
         return e3nn.haiku.Linear(self.output_irreps)(x)  # [n_nodes, output_irreps]
 
 

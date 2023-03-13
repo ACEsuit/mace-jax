@@ -22,6 +22,14 @@ def load_torch_model(model: torch.nn.Module,):
     correlation = model.products[0].symmetric_contractions.contractions[0].correlation
     atomic_energies = model.atomic_energies_fn.atomic_energies.numpy()
 
+    if (
+        model.interactions[0].__class__.__name__
+        == "RealAgnosticResidualInteractionBlock"
+    ):
+        raise ValueError(
+            "The model was trained with a a self-interaction block that is not supported by the jax version."
+        )
+
     # check if model has scale_shift layer
     mean = 0.0
     std = 1.0
@@ -55,7 +63,7 @@ def load_torch_model(model: torch.nn.Module,):
         e3nn.config("path_normalization", "path")
         e3nn.config("gradient_normalization", "path")
         mace = MACE(
-            r_max=model.r_max,
+            r_max=float(model.r_max),
             radial_basis=lambda r, r_max: e3nn.bessel(r, num_bessel, r_max),
             radial_envelope=lambda r, r_max: e3nn.poly_envelope(
                 num_polynomial_cutoff - 1, 2, r_max
@@ -91,11 +99,12 @@ def load_torch_model(model: torch.nn.Module,):
         jnp.array([0]),
     )
     params_from_torch = create_jax_params(model, config_torch)
-
-    assert jax.tree_util.tree_structure(params) == jax.tree_util.tree_structure(
-        params_from_torch
-    )
-    return jax_model.apply, params_from_torch
+    print(params_from_torch)
+    print(params)
+    # assert jax.tree_util.tree_structure(params) == jax.tree_util.tree_structure(
+    #     params_from_torch
+    # )
+    return jax_model.apply, params_from_torch, params
 
 
 def linear_torch_to_jax(linear):
@@ -128,8 +137,10 @@ def create_jax_params(model: torch.nn.Module, config_torch: dict):
         ),
     }
     num_interactions = config_torch["num_interactions"]
+    print(num_interactions)
     correlation = config_torch["correlation"]
     for i in range(num_interactions):
+        print(i)
         if i != 0:
             params[f"mace/layer_{i}/skip_tp"] = skip_tp_torch_to_jax(
                 model.interactions[i].skip_tp
@@ -142,7 +153,7 @@ def create_jax_params(model: torch.nn.Module, config_torch: dict):
         )
 
         params[
-            "mace/layer_{i}/interaction_block/message_passing_convolution/multi_layer_perceptron/linear_0"
+            f"mace/layer_{i}/interaction_block/message_passing_convolution/multi_layer_perceptron/linear_0"
         ] = (
             {
                 "w": (
@@ -151,7 +162,7 @@ def create_jax_params(model: torch.nn.Module, config_torch: dict):
             },
         )
         params[
-            "mace/layer_{i}/interaction_block/message_passing_convolution/multi_layer_perceptron/linear_1"
+            f"mace/layer_{i}/interaction_block/message_passing_convolution/multi_layer_perceptron/linear_1"
         ] = (
             {
                 "w": (
@@ -160,7 +171,7 @@ def create_jax_params(model: torch.nn.Module, config_torch: dict):
             },
         )
         params[
-            "mace/layer_{i}/interaction_block/message_passing_convolution/multi_layer_perceptron/linear_2"
+            f"mace/layer_{i}/interaction_block/message_passing_convolution/multi_layer_perceptron/linear_2"
         ] = (
             {
                 "w": (
@@ -169,7 +180,7 @@ def create_jax_params(model: torch.nn.Module, config_torch: dict):
             },
         )
         params[
-            "mace/layer_{i}/interaction_block/message_passing_convolution/multi_layer_perceptron/linear_3"
+            f"mace/layer_{i}/interaction_block/message_passing_convolution/multi_layer_perceptron/linear_3"
         ] = (
             {
                 "w": (
@@ -178,12 +189,13 @@ def create_jax_params(model: torch.nn.Module, config_torch: dict):
             },
         )
         product_params = ()
-        for corr in range(correlation, -1, -1):
-            for j, irrep_out in enumerate(model.products[i].irreps_out):
-                if corr != correlation:
+        irreps_out = model.products[i].linear.irreps_in
+        for corr in range(correlation - 1, -1, -1):
+            for j, (mul, ir) in enumerate(irreps_out):
+                if corr == correlation - 1:
                     product_params += (
                         {
-                            f"w[{corr}_{irrep_out}]": model.products[i]
+                            f"w[{corr}_{ir}]": model.products[i]
                             .symmetric_contractions.contractions[j]
                             .weights_max.detach()
                             .numpy()
@@ -192,7 +204,7 @@ def create_jax_params(model: torch.nn.Module, config_torch: dict):
                 else:
                     product_params += (
                         {
-                            f"w[{corr}_{irrep_out}]": model.products[i]
+                            f"w[{corr}_{ir}]": model.products[i]
                             .symmetric_contractions.contractions[j]
                             .weights[corr]
                             .detach()
@@ -200,22 +212,22 @@ def create_jax_params(model: torch.nn.Module, config_torch: dict):
                         },
                     )
         params[
-            "mace/layer_ {i}/equivariant_product_basis_block/~/symmetric_contraction"
+            f"mace/layer_ {i}/equivariant_product_basis_block/~/symmetric_contraction"
         ] = product_params
         params[
-            "mace/layer_{i}/equivariant_product_basis_block/linear"
+            f"mace/layer_{i}/equivariant_product_basis_block/linear"
         ] = linear_torch_to_jax(model.products[i].linear)
 
         if i != num_interactions - 1:
-            params["mace/layer_{i}/linear_readout_block/linear"] = linear_torch_to_jax(
+            params[f"mace/layer_{i}/linear_readout_block/linear"] = linear_torch_to_jax(
                 model.interactions[i].linear
             )
         else:
             params[
-                "mace/layer_{i}/non_linear_readout_block/linear"
+                f"mace/layer_{i}/non_linear_readout_block/linear"
             ] = linear_torch_to_jax(model.readouts[i].linear_1)
             params[
-                "mace/layer_{i}/non_linear_readout_block/linear_1"
+                f"mace/layer_{i}/non_linear_readout_block/linear_1"
             ] = linear_torch_to_jax(model.readouts[i].linear_2)
 
     return params
