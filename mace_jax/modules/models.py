@@ -47,6 +47,7 @@ class MACE(hk.Module):
         correlation: int = 3,  # Correlation order at each layer (~ node_features^correlation), default 3
         gate: Callable = jax.nn.silu,  # activation function
         torch_style: bool = False,
+        residual_first: bool = False,
         symmetric_tensor_product_basis: bool = True,
         off_diagonal: bool = False,
         interaction_irreps: Union[str, e3nn.Irreps] = "o3_restricted",  # or o3_full
@@ -90,6 +91,7 @@ class MACE(hk.Module):
         self.symmetric_tensor_product_basis = symmetric_tensor_product_basis
         self.off_diagonal = off_diagonal
         self.torch_style = torch_style
+        self.residual_first = residual_first
 
         # Embeddings
         self.node_embedding = node_embedding(
@@ -141,6 +143,8 @@ class MACE(hk.Module):
         outputs = []
         for i in range(self.num_interactions):
             first = i == 0
+            if self.residual_first:
+                first = False
             last = i == self.num_interactions - 1
 
             hidden_irreps = (

@@ -21,14 +21,10 @@ def load_torch_model(model: torch.nn.Module,):
     avg_num_neighbors = model.interactions[0].avg_num_neighbors
     correlation = model.products[0].symmetric_contractions.contractions[0].correlation
     atomic_energies = model.atomic_energies_fn.atomic_energies.numpy()
-
-    if (
+    residual_first = (
         model.interactions[0].__class__.__name__
         == "RealAgnosticResidualInteractionBlock"
-    ):
-        raise ValueError(
-            "The model was trained with a a self-interaction block that is not supported by the jax version."
-        )
+    )
 
     # check if model has scale_shift layer
     mean = 0.0
@@ -47,6 +43,7 @@ def load_torch_model(model: torch.nn.Module,):
         readout_mlp_irreps=readout_mlp_irreps,
         avg_num_neighbors=avg_num_neighbors,
         correlation=correlation,
+        residual_first=residual_first,
         mean=mean,
         std=std,
         atomic_energies=atomic_energies,
@@ -78,6 +75,7 @@ def load_torch_model(model: torch.nn.Module,):
             output_irreps="0e",
             symmetric_tensor_product_basis=False,
             torch_style=True,
+            residual_first=residual_first,
         )
         contributions = mace(
             vectors, node_specie, senders, receivers
@@ -130,16 +128,17 @@ def create_jax_params(model: torch.nn.Module, config_torch: dict):
                 model.node_embedding.linear.weight.detach().numpy().reshape((1, -1))
             )
         },
-        "mace/layer_0/skip_tp_first": skip_tp_torch_to_jax(
-            model.interactions[0].skip_tp
-        ),
     }
     num_interactions = config_torch["num_interactions"]
-    print(num_interactions)
     correlation = config_torch["correlation"]
+    residual_first = config_torch["residual_first"]
+    if residual_first:
+        params["mace/layer_0/skip_tp_first"] = (
+            skip_tp_torch_to_jax(model.interactions[0].skip_tp),
+        )
+
     for i in range(num_interactions):
-        print(i)
-        if i != 0:
+        if i != 0 and not residual_first:
             params[f"mace/layer_{i}/skip_tp"] = skip_tp_torch_to_jax(
                 model.interactions[i].skip_tp
             )

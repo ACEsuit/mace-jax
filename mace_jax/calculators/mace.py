@@ -18,6 +18,7 @@ class MACEJAXCalculator(Calculator):
         self,
         model: Callable,
         params: dict,
+        r_max: float,
         energy_units_to_eV: float = 1.0,
         length_units_to_A: float = 1.0,
         default_dtype="float64",
@@ -33,7 +34,7 @@ class MACEJAXCalculator(Calculator):
             )
         )
 
-        self.r_max = float(self.model.r_max)
+        self.r_max = r_max
         self.energy_units_to_eV = energy_units_to_eV
         self.length_units_to_A = length_units_to_A
         if default_dtype == "float64":
