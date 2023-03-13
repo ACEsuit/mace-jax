@@ -10,22 +10,24 @@ class MessagePassingConvolution(hk.Module):
         self,
         avg_num_neighbors: float,
         target_irreps: e3nn.Irreps,
+        max_ell: int,
         activation: Callable,
     ):
         super().__init__()
         self.avg_num_neighbors = avg_num_neighbors
         self.target_irreps = e3nn.Irreps(target_irreps)
+        self.max_ell = max_ell
         self.activation = activation
 
     def __call__(
         self,
+        vectors: e3nn.IrrepsArray,  # [n_edges, 3]
         node_feats: e3nn.IrrepsArray,  # [n_nodes, irreps]
-        edge_attrs: e3nn.IrrepsArray,  # [n_edges, irreps]
+        radial_embedding: jnp.ndarray,  # [n_edges, radial_embedding_dim]
         senders: jnp.ndarray,  # [n_edges, ]
         receivers: jnp.ndarray,  # [n_edges, ]
     ) -> e3nn.IrrepsArray:
         assert node_feats.ndim == 2
-        assert edge_attrs.ndim == 2
 
         messages = node_feats[senders]
 
@@ -34,9 +36,10 @@ class MessagePassingConvolution(hk.Module):
                 messages.filter(self.target_irreps),
                 e3nn.tensor_product(
                     messages,
-                    edge_attrs.filter(drop="0e"),
+                    e3nn.spherical_harmonics(range(1, self.max_ell + 1), vectors, True),
                     filter_ir_out=self.target_irreps,
                 ),
+                # e3nn.tensor_product_with_spherical_harmonics(messages, vectors, self.max_ell).filter(self.target_irreps)
             ]
         ).regroup()  # [n_edges, irreps]
 
@@ -50,7 +53,7 @@ class MessagePassingConvolution(hk.Module):
             self.activation,
             output_activation=False,
         )(
-            edge_attrs.filter(keep="0e")
+            radial_embedding
         )  # [n_edges, num_irreps]
 
         messages = messages * mix  # [n_edges, irreps]

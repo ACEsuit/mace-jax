@@ -35,7 +35,9 @@ def train(
         # graph is assumed to be padded by jraph.pad_with_graphs
         mask = jraph.get_graph_padding_mask(graph)  # [n_graphs,]
         loss, grad = jax.value_and_grad(
-            lambda params: jnp.mean(jnp.where(mask, loss_fn(graph, model(params, graph)), 0.0))
+            lambda params: jnp.mean(
+                jnp.where(mask, loss_fn(graph, model(params, graph)), 0.0)
+            )
         )(params)
         updates, optimizer_state = gradient_transform.update(
             grad, optimizer_state, params

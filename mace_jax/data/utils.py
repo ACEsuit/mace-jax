@@ -144,7 +144,9 @@ def load_from_xyz(
     else:
         atoms_list = ase.io.read(file_or_path, format="extxyz", index=f":{num_configs}")
         if len(atoms_list) < num_configs:
-            logging.warning(f"Only {len(atoms_list)} configurations found. Expected at least {num_configs}.")
+            logging.warning(
+                f"Only {len(atoms_list)} configurations found. Expected at least {num_configs}."
+            )
 
     if not isinstance(atoms_list, list):
         atoms_list = [atoms_list]

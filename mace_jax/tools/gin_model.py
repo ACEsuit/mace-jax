@@ -217,7 +217,6 @@ def model(
                 "model: "
                 f"num_features={mace.num_features} "
                 f"hidden_irreps={mace.hidden_irreps} "
-                f"sh_irreps={mace.sh_irreps} "
                 f"interaction_irreps={mace.interaction_irreps} ",
             )
 

@@ -141,27 +141,32 @@ class InteractionBlock(hk.Module):
         *,
         target_irreps: e3nn.Irreps,
         avg_num_neighbors: float,
+        max_ell: int,
         activation: Callable,
     ) -> None:
         super().__init__()
         self.target_irreps = target_irreps
         self.avg_num_neighbors = avg_num_neighbors
+        self.max_ell = max_ell
         self.activation = activation
 
     def __call__(
         self,
+        vectors: e3nn.IrrepsArray,  # [n_edges, 3]
         node_feats: e3nn.IrrepsArray,  # [n_nodes, irreps]
-        edge_attrs: e3nn.IrrepsArray,  # [n_edges, irreps]
+        radial_embedding: jnp.ndarray,  # [n_edges, radial_embedding_dim]
         senders: jnp.ndarray,  # [n_edges, ]
         receivers: jnp.ndarray,  # [n_edges, ]
     ) -> Tuple[e3nn.IrrepsArray, e3nn.IrrepsArray]:
         assert node_feats.ndim == 2
+        assert vectors.ndim == 2
+        assert radial_embedding.ndim == 2
 
         node_feats = e3nn.haiku.Linear(node_feats.irreps, name="linear_up")(node_feats)
 
         node_feats = MessagePassingConvolution(
-            self.avg_num_neighbors, self.target_irreps, self.activation
-        )(node_feats, edge_attrs, senders, receivers)
+            self.avg_num_neighbors, self.target_irreps, self.max_ell, self.activation
+        )(vectors, node_feats, radial_embedding, senders, receivers)
 
         node_feats = e3nn.haiku.Linear(self.target_irreps, name="linear_down")(
             node_feats

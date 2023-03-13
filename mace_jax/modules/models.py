@@ -68,8 +68,6 @@ class MACE(hk.Module):
             self.num_features = num_features
             self.hidden_irreps = hidden_irreps
 
-        self.sh_irreps = e3nn.Irreps.spherical_harmonics(max_ell)[1:]  # discard 0e
-
         if interaction_irreps == "o3_restricted":
             self.interaction_irreps = e3nn.Irreps.spherical_harmonics(max_ell)
         elif interaction_irreps == "o3_full":
@@ -88,6 +86,7 @@ class MACE(hk.Module):
         self.num_species = num_species
         self.symmetric_tensor_product_basis = symmetric_tensor_product_basis
         self.off_diagonal = off_diagonal
+        self.max_ell = max_ell
 
         # Embeddings
         self.node_embedding = node_embedding(
@@ -122,21 +121,8 @@ class MACE(hk.Module):
         )  # [n_nodes, feature * irreps]
         node_feats = profile("embedding: node_feats", node_feats, node_mask[:, None])
 
-        lengths = safe_norm(vectors, axis=-1)
-
-        edge_attrs = e3nn.concatenate(
-            [
-                self.radial_embedding(lengths),
-                e3nn.spherical_harmonics(
-                    self.sh_irreps,
-                    vectors,
-                    normalize=True,
-                    normalization="component",
-                ),
-            ]
-        )  # [n_edges, irreps]
-
-        edge_attrs = profile("embedding: edge_attrs", edge_attrs)
+        radial_embedding = self.radial_embedding(safe_norm(vectors, axis=-1))
+        vectors = e3nn.IrrepsArray("1o", vectors)
 
         # Interactions
         outputs = []
@@ -156,6 +142,7 @@ class MACE(hk.Module):
                 num_features=self.num_features,
                 interaction_irreps=self.interaction_irreps,
                 hidden_irreps=hidden_irreps,
+                max_ell=self.max_ell,
                 avg_num_neighbors=self.avg_num_neighbors,
                 activation=self.activation,
                 num_species=self.num_species,
@@ -166,7 +153,15 @@ class MACE(hk.Module):
                 symmetric_tensor_product_basis=self.symmetric_tensor_product_basis,
                 off_diagonal=self.off_diagonal,
                 name=f"layer_{i}",
-            )(node_feats, node_specie, edge_attrs, senders, receivers, node_mask)
+            )(
+                vectors,
+                node_feats,
+                node_specie,
+                radial_embedding,
+                senders,
+                receivers,
+                node_mask,
+            )
             outputs += [node_outputs]  # list of [n_nodes, output_irreps]
 
         return e3nn.stack(outputs, axis=1)  # [n_nodes, num_interactions, output_irreps]
@@ -186,6 +181,7 @@ class MACELayer(hk.Module):
         epsilon: Optional[float],
         name: Optional[str],
         # InteractionBlock:
+        max_ell: int,
         avg_num_neighbors: float,
         # EquivariantProductBasisBlock:
         correlation: int,
@@ -202,6 +198,7 @@ class MACELayer(hk.Module):
         self.num_features = num_features
         self.interaction_irreps = interaction_irreps
         self.hidden_irreps = hidden_irreps
+        self.max_ell = max_ell
         self.avg_num_neighbors = avg_num_neighbors
         self.activation = activation
         self.num_species = num_species
@@ -214,9 +211,10 @@ class MACELayer(hk.Module):
 
     def __call__(
         self,
+        vectors: e3nn.IrrepsArray,  # [n_edges, 3]
         node_feats: e3nn.IrrepsArray,  # [n_nodes, irreps]
         node_specie: jnp.ndarray,  # [n_nodes] int between 0 and num_species-1
-        edge_attrs: e3nn.IrrepsArray,  # [n_edges, irreps]
+        radial_embedding: jnp.ndarray,  # [n_edges, radial_embedding_dim]
         senders: jnp.ndarray,  # [n_edges]
         receivers: jnp.ndarray,  # [n_edges]
         node_mask: Optional[jnp.ndarray] = None,  # [n_nodes] only used for profiling
@@ -240,10 +238,12 @@ class MACELayer(hk.Module):
         node_feats = InteractionBlock(
             target_irreps=self.num_features * self.interaction_irreps,
             avg_num_neighbors=self.avg_num_neighbors,
+            max_ell=self.max_ell,
             activation=self.activation,
         )(
+            vectors=vectors,
             node_feats=node_feats,
-            edge_attrs=edge_attrs,
+            radial_embedding=radial_embedding,
             receivers=receivers,
             senders=senders,
         )
