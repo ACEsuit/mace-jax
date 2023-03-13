@@ -11,8 +11,8 @@ from mace_jax.modules import MACE
 
 
 def load_torch_model(model: torch.nn.Module,):
-    num_bessel = model.radial_basis.num_bessel
-    num_polynomial_cutoff = model.radial_basis.num_polynomial_cutoff
+    num_bessel = len(model.radial_embedding.bessel_fn.bessel_weights)
+    num_polynomial_cutoff = int(model.radial_embedding.cutoff_fn.p.item())
     max_ell = model.spherical_harmonics._lmax
     num_interactions = model.num_interactions.item()
     num_species = model.node_embedding.linear.irreps_in.count(e3nn_torch.o3.Irrep(0, 1))
@@ -20,7 +20,7 @@ def load_torch_model(model: torch.nn.Module,):
     readout_mlp_irreps = model.readouts[-1].hidden_irreps
     avg_num_neighbors = model.interactions[0].avg_num_neighbors
     correlation = model.products[0].symmetric_contractions.contractions[0].correlation
-    atomic_energies = model.atomic_energies
+    atomic_energies = model.atomic_energies_fn.atomic_energies.numpy()
 
     # check if model has scale_shift layer
     mean = 0.0
