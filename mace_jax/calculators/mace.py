@@ -54,7 +54,7 @@ class MACEJAXCalculator(Calculator):
 
         # prepare data
         config = data.config_from_atoms(atoms)
-        graph = graph_from_configuration(config, r_max=self.r_max)
+        graph = graph_from_configuration(config, cutoff=self.r_max)
 
         # predict + extract data
         out = self.predictor(self.params, graph)

@@ -20,7 +20,7 @@ def load_torch_model(model: torch.nn.Module,):
     readout_mlp_irreps = model.readouts[-1].hidden_irreps
     avg_num_neighbors = model.interactions[0].avg_num_neighbors
     correlation = model.products[0].symmetric_contractions.contractions[0].correlation
-    atomic_energies = model.atomic_energies_fn.atomic_energies.numpy()
+    atomic_energies = model.atomic_energies_fn.atomic_energies.detach().cpu().numpy()
     residual_first = (
         model.interactions[0].__class__.__name__
         == "RealAgnosticResidualInteractionBlock"
@@ -30,8 +30,8 @@ def load_torch_model(model: torch.nn.Module,):
     mean = 0.0
     std = 1.0
     if hasattr(model, "scale_shift"):
-        mean = model.scale_shift.shift
-        std = model.scale_shift.scale
+        mean = model.scale_shift.shift.detach().cpu().numpy()
+        std = model.scale_shift.scale.detach().cpu().numpy()
 
     config_torch = dict(
         num_bessel=num_bessel,
@@ -106,7 +106,7 @@ def load_torch_model(model: torch.nn.Module,):
 def linear_torch_to_jax(linear):
     return {
         f"w[{ins.i_in},{ins.i_out}] {linear.irreps_in[ins.i_in]},{linear.irreps_out[ins.i_out]}": jnp.asarray(
-            w.data
+            w.data.detach().cpu().numpy()
         )
         for i, ins, w in linear.weight_views(yield_instruction=True)
     }
@@ -115,23 +115,27 @@ def linear_torch_to_jax(linear):
 def skip_tp_torch_to_jax(tp):
     return {
         f"w[{ins.i_in1},{ins.i_out}] {tp.irreps_in1[ins.i_in1]},{tp.irreps_out[ins.i_out]}": jnp.moveaxis(
-            jnp.asarray(w.data), 1, 0
+            jnp.asarray(w.data.detach().cpu().numpy()), 1, 0
         )
         for i, ins, w in tp.weight_views(yield_instruction=True)
     }
 
 
 def create_jax_params(model: torch.nn.Module, config_torch: dict):
-    params = {
-        "mace/~/linear_node_embedding_block": {
-            "embeddings": (
-                model.node_embedding.linear.weight.detach().numpy().reshape((1, -1))
-            )
-        },
-    }
     num_interactions = config_torch["num_interactions"]
     correlation = config_torch["correlation"]
     residual_first = config_torch["residual_first"]
+    num_species = config_torch["num_species"]
+    params = {
+        "mace/~/linear_node_embedding_block": {
+            "embeddings": (
+                model.node_embedding.linear.weight.detach()
+                .cpu()
+                .numpy()
+                .reshape((num_species, -1))
+            )
+        },
+    }
     if not residual_first:
         params["mace/layer_0/skip_tp_first"] = skip_tp_torch_to_jax(
             model.interactions[0].skip_tp
@@ -152,25 +156,45 @@ def create_jax_params(model: torch.nn.Module, config_torch: dict):
         params[
             f"mace/layer_{i}/interaction_block/message_passing_convolution/multi_layer_perceptron/linear_0"
         ] = {
-            "w": (model.interactions[i].conv_tp_weights.layer0.weight.detach().numpy())
+            "w": (
+                model.interactions[i]
+                .conv_tp_weights.layer0.weight.detach()
+                .cpu()
+                .numpy()
+            )
         }
 
         params[
             f"mace/layer_{i}/interaction_block/message_passing_convolution/multi_layer_perceptron/linear_1"
         ] = {
-            "w": (model.interactions[i].conv_tp_weights.layer1.weight.detach().numpy())
+            "w": (
+                model.interactions[i]
+                .conv_tp_weights.layer1.weight.detach()
+                .cpu()
+                .numpy()
+            )
         }
 
         params[
             f"mace/layer_{i}/interaction_block/message_passing_convolution/multi_layer_perceptron/linear_2"
         ] = {
-            "w": (model.interactions[i].conv_tp_weights.layer2.weight.detach().numpy())
+            "w": (
+                model.interactions[i]
+                .conv_tp_weights.layer2.weight.detach()
+                .cpu()
+                .numpy()
+            )
         }
 
         params[
             f"mace/layer_{i}/interaction_block/message_passing_convolution/multi_layer_perceptron/linear_3"
         ] = {
-            "w": (model.interactions[i].conv_tp_weights.layer3.weight.detach().numpy())
+            "w": (
+                model.interactions[i]
+                .conv_tp_weights.layer3.weight.detach()
+                .cpu()
+                .numpy()
+            )
         }
 
         product_params = {}
@@ -182,6 +206,7 @@ def create_jax_params(model: torch.nn.Module, config_torch: dict):
                         model.products[i]
                         .symmetric_contractions.contractions[j]
                         .weights_max.detach()
+                        .cpu()
                         .numpy()
                     )
 
@@ -189,8 +214,9 @@ def create_jax_params(model: torch.nn.Module, config_torch: dict):
                     product_params[f"w{corr + 1}_{ir}"] = (
                         model.products[i]
                         .symmetric_contractions.contractions[j]
-                        .weights[corr]
+                        .weights[correlation - corr - 2]
                         .detach()
+                        .cpu()
                         .numpy()
                     )
 
