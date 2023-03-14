@@ -20,11 +20,6 @@ from functools import partial
 
 
 K_B = 8.617e-5
-dt = 1e-3
-P_start = 0.0
-P_end = 0.05
-kT = K_B * 300
-Si_mass = 2.81086e-3
 
 
 class MACEJAXmd:
@@ -65,7 +60,7 @@ class MACEJAXmd:
             config.update("jax_enable_x64", True)
 
     def setup_NPT(
-        self, position_initial, species, inner_steps=1000, P_start=1.0, kT=1.0, dt=0.001
+        self, position_initial, species, inner_steps=1000, P_start=1.0, kT=1.0, dt=0.001, mass=1.0
     ):
         neighbor = self.neighbor_fn.allocate(position_initial)
 
@@ -103,10 +98,10 @@ class MACEJAXmd:
         @jit
         def compute_diagnostics(state, nbrs):
             temperature = (
-                quantity.temperature(momentum=state.momentum, mass=Si_mass) / K_B
+                quantity.temperature(momentum=state.momentum, mass=mass) / K_B
             )
             kinetic_energy = quantity.kinetic_energy(
-                momentum=state.momentum, mass=Si_mass
+                momentum=state.momentum, mass=mass
             )
             pressure = quantity.pressure(
                 energy_fn, state.position, state.box, kinetic_energy, neighbor=nbrs
