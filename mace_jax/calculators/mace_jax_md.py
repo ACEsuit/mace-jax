@@ -52,41 +52,41 @@ class MACEJAXmd:
             config.update("jax_enable_x64", True)
 
     def setup_NPT(
-        self,
-        position_initial,
-        species,
-        cell,
-        inner_steps=1000,
-        P_start=1.0,
-        kT=1.0,
-        dt=0.001,
-        mass=1.0,
+        self, atoms, inner_steps=1000, P_start=1.0, kT=1.0, dt=0.001, mass=1.0,
     ):
-        neighbor = self.neighbor_fn.allocate(position_initial)
-        species = self.z_table(species)
-        displacement, shift = space.periodic_general(cell)
+        config = data.config_from_atoms(atoms)
+        cell = config.cell
+        position_initial = atoms.get_scaled_positions(False)
+        species = config.atomic_numbers
+        displacement, shift = space.periodic_general(cell, fractional_coordinates=True)
+        self.neighbor_fn = partition.neighbor_list(
+            displacement,
+            cell,
+            self.r_max,
+            format=partition.Sparse,
+            fractional_coordinates=True,
+        )
         self.shift = shift
         self.displacement = displacement
-        self.neighbor_fn = partition.neighbor_list(
-            displacement, cell, self.r_max, format=partition.Sparse
-        )
+        neighbor = self.neighbor_fn.allocate(position_initial)
+        species = self.z_table(species)
 
         @jit
         def energy_fn(position, neighbor, **kwargs):
             senders, receivers = neighbor.update(position).idx
 
             d = vmap(partial(self.displacement))
-            vectors = d(position[senders], position[receivers.idx[1, :]])
+            vectors = d(position[senders], position[receivers])
 
             mask = partition.neighbor_list_mask(neighbor)
             vectors = jnp.where(mask[:, None], vectors, 0)
             node_energies = self.predictor(
-                vectors, species, senders, receivers
+                self.params, vectors, species, senders, receivers
             )  # [n_nodes, ]
             assert node_energies.shape == (
                 len(position),
             ), "model output needs to be an array of shape (n_nodes, )"
-            return node_energies
+            return jnp.sum(node_energies)
 
         init_fn, step_fn = simulate.npt_nose_hoover(
             energy_fn, self.shift, dt, P_start, kT
