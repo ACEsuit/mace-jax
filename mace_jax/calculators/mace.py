@@ -1,4 +1,4 @@
-from typing import Callable
+from typing import Callable, List, Optional
 import jax
 from ase.calculators.calculator import Calculator, all_changes
 from ase.stress import full_3x3_to_voigt_6_stress
@@ -6,7 +6,11 @@ from jax.config import config
 import numpy as np
 
 from mace_jax import data, tools
-from mace_jax.data.utils import graph_from_configuration
+from mace_jax.data.utils import (
+    AtomicNumberTable,
+    atomic_numbers_to_indices,
+    graph_from_configuration,
+)
 
 
 class MACEJAXCalculator(Calculator):
@@ -22,6 +26,7 @@ class MACEJAXCalculator(Calculator):
         energy_units_to_eV: float = 1.0,
         length_units_to_A: float = 1.0,
         default_dtype="float64",
+        atomic_numbers: Optional[List[int]] = None,
         **kwargs
     ):
         Calculator.__init__(self, **kwargs)
@@ -37,6 +42,12 @@ class MACEJAXCalculator(Calculator):
         self.r_max = r_max
         self.energy_units_to_eV = energy_units_to_eV
         self.length_units_to_A = length_units_to_A
+        self.z_table = None
+
+        if atomic_numbers is not None:
+            self.z_table = lambda x: atomic_numbers_to_indices(
+                x, AtomicNumberTable([int(z) for z in atomic_numbers])
+            )
         if default_dtype == "float64":
             config.update("jax_enable_x64", True)
 
@@ -54,6 +65,8 @@ class MACEJAXCalculator(Calculator):
 
         # prepare data
         config = data.config_from_atoms(atoms)
+        if self.z_table is not None:
+            config.atomic_numbers = self.z_table(config.atomic_numbers)
         graph = graph_from_configuration(config, cutoff=self.r_max)
 
         # predict + extract data

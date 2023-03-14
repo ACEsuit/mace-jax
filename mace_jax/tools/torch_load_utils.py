@@ -25,6 +25,7 @@ def load_torch_model(model: torch.nn.Module,):
         model.interactions[0].__class__.__name__
         == "RealAgnosticResidualInteractionBlock"
     )
+    atomic_numbers = model.atomic_numbers.detach().cpu().numpy()
 
     # check if model has scale_shift layer
     mean = 0.0
@@ -100,7 +101,7 @@ def load_torch_model(model: torch.nn.Module,):
     assert jax.tree_util.tree_structure(params) == jax.tree_util.tree_structure(
         params_from_torch
     )
-    return jax_model.apply, params_from_torch
+    return jax_model.apply, params_from_torch, atomic_numbers
 
 
 def linear_torch_to_jax(linear):
@@ -112,10 +113,10 @@ def linear_torch_to_jax(linear):
     }
 
 
-def skip_tp_torch_to_jax(tp):
+def skip_tp_torch_to_jax(tp, num_species):
     return {
         f"w[{ins.i_in1},{ins.i_out}] {tp.irreps_in1[ins.i_in1]},{tp.irreps_out[ins.i_out]}": jnp.moveaxis(
-            jnp.asarray(w.data.detach().cpu().numpy()), 1, 0
+            jnp.asarray(w.data.detach().cpu().numpy()) / (num_species ** 0.5), 1, 0
         )
         for i, ins, w in tp.weight_views(yield_instruction=True)
     }
@@ -133,18 +134,19 @@ def create_jax_params(model: torch.nn.Module, config_torch: dict):
                 .cpu()
                 .numpy()
                 .reshape((num_species, -1))
+                / (num_species ** 0.5)
             )
         },
     }
     if not residual_first:
         params["mace/layer_0/skip_tp_first"] = skip_tp_torch_to_jax(
-            model.interactions[0].skip_tp
+            model.interactions[0].skip_tp, num_species
         )
 
     for i in range(num_interactions):
         if i != 0 or residual_first:
             params[f"mace/layer_{i}/skip_tp"] = skip_tp_torch_to_jax(
-                model.interactions[i].skip_tp
+                model.interactions[i].skip_tp, num_species
             )
         params[f"mace/layer_{i}/interaction_block/linear_up"] = linear_torch_to_jax(
             model.interactions[i].linear_up
