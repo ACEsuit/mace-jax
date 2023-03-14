@@ -4,6 +4,7 @@ from ase.calculators.calculator import Calculator, all_changes
 from ase.stress import full_3x3_to_voigt_6_stress
 from jax.config import config
 import numpy as np
+import jraph
 
 from mace_jax import data, tools
 from mace_jax.data.utils import (
@@ -43,6 +44,7 @@ class MACEJAXCalculator(Calculator):
         self.energy_units_to_eV = energy_units_to_eV
         self.length_units_to_A = length_units_to_A
         self.z_table = None
+        self.min_n_edge = 0
 
         if atomic_numbers is not None:
             self.z_table = lambda x: atomic_numbers_to_indices(
@@ -67,12 +69,23 @@ class MACEJAXCalculator(Calculator):
         config = data.config_from_atoms(atoms)
         if self.z_table is not None:
             config.atomic_numbers = self.z_table(config.atomic_numbers)
-        graph = graph_from_configuration(config, cutoff=self.r_max)
 
+        graph_config = graph_from_configuration(config, cutoff=self.r_max)
+        if self.min_n_edge == 0 or self.min_n_edge <= graph_config.n_edge:
+            self.min_n_edge = graph_config.n_edge + max(
+                int(graph_config.n_edge // 10), 10
+            )
+        # pad graph with dummy atoms
+        graph = jraph.pad_with_graphs(
+            graph_config,
+            n_node=graph_config.n_node + 1,
+            n_edge=self.min_n_edge,
+            n_graph=2,
+        )
         # predict + extract data
         out = self.predictor(self.params, graph)
-        energy = np.array(out["energy"])
-        forces = np.array(out["forces"])
+        energy = np.array(jax.lax.stop_gradient(out["energy"]))[0]
+        forces = np.array(jax.lax.stop_gradient(out["forces"]))[:-1, :]
 
         # store results
         E = energy * self.energy_units_to_eV
@@ -86,7 +99,7 @@ class MACEJAXCalculator(Calculator):
         # even though compute_stress is True, stress can be none if pbc is False
         # not sure if correct ASE thing is to have no dict key, or dict key with value None
         if out["stress"] is not None:
-            stress = np.array(out["stress"])
+            stress = np.array(jax.lax.stop_gradient(out["stress"]))[:3, :3]
             # stress has units eng / len^3:
             self.results["stress"] = (
                 stress * (self.energy_units_to_eV / self.length_units_to_A ** 3)
