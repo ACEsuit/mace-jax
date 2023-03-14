@@ -28,7 +28,6 @@ class MACEJAXmd:
         model: Callable,
         params: dict,
         r_max: float,
-        cell: float,
         energy_units_to_eV: float = 1.0,
         length_units_to_A: float = 1.0,
         default_dtype="float64",
@@ -44,13 +43,6 @@ class MACEJAXmd:
         self.energy_units_to_eV = energy_units_to_eV
         self.length_units_to_A = length_units_to_A
         self.z_table = None
-        self.min_n_edge = 0
-        displacement, shift = space.periodic_general(cell)
-        self.shift = shift
-        self.displacement = displacement
-        self.neighbor_fn = partition.neighbor_list(
-            displacement, cell, self.r_max, format=partition.Sparse
-        )
 
         if atomic_numbers is not None:
             self.z_table = lambda x: atomic_numbers_to_indices(
@@ -60,9 +52,24 @@ class MACEJAXmd:
             config.update("jax_enable_x64", True)
 
     def setup_NPT(
-        self, position_initial, species, inner_steps=1000, P_start=1.0, kT=1.0, dt=0.001, mass=1.0
+        self,
+        position_initial,
+        species,
+        cell,
+        inner_steps=1000,
+        P_start=1.0,
+        kT=1.0,
+        dt=0.001,
+        mass=1.0,
     ):
         neighbor = self.neighbor_fn.allocate(position_initial)
+        species = self.z_table(species)
+        displacement, shift = space.periodic_general(cell)
+        self.shift = shift
+        self.displacement = displacement
+        self.neighbor_fn = partition.neighbor_list(
+            displacement, cell, self.r_max, format=partition.Sparse
+        )
 
         @jit
         def energy_fn(position, neighbor, **kwargs):
@@ -97,12 +104,8 @@ class MACEJAXmd:
 
         @jit
         def compute_diagnostics(state, nbrs):
-            temperature = (
-                quantity.temperature(momentum=state.momentum, mass=mass) / K_B
-            )
-            kinetic_energy = quantity.kinetic_energy(
-                momentum=state.momentum, mass=mass
-            )
+            temperature = quantity.temperature(momentum=state.momentum, mass=mass) / K_B
+            kinetic_energy = quantity.kinetic_energy(momentum=state.momentum, mass=mass)
             pressure = quantity.pressure(
                 energy_fn, state.position, state.box, kinetic_energy, neighbor=nbrs
             )
