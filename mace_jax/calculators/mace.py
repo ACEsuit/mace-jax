@@ -5,6 +5,7 @@ from ase.stress import full_3x3_to_voigt_6_stress
 from jax.config import config
 import numpy as np
 import jraph
+from flax import traverse_util
 
 from mace_jax import data, tools
 from mace_jax.data.utils import (
@@ -12,6 +13,12 @@ from mace_jax.data.utils import (
     atomic_numbers_to_indices,
     graph_from_configuration,
 )
+
+
+def stop_grad(variables):
+    flat_vars = traverse_util.flatten_dict(variables)
+    new_vars = {k: jax.lax.stop_gradient(v) for k, v in flat_vars.items()}
+    return traverse_util.unflatten_dict(new_vars)
 
 
 class MACEJAXCalculator(Calculator):
@@ -33,7 +40,7 @@ class MACEJAXCalculator(Calculator):
         Calculator.__init__(self, **kwargs)
         self.results = {}
         self.model = model
-        self.params = params
+        self.params = stop_grad(params)
         self.predictor = jax.jit(
             lambda w, g: tools.predict_energy_forces_stress(
                 lambda *x: self.model(w, *x), g
