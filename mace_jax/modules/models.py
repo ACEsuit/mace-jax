@@ -101,7 +101,7 @@ class MACE(hk.Module):
 
     def __call__(
         self,
-        vectors: jnp.ndarray,  # [n_edges, 3]
+        vectors: e3nn.IrrepsArray,  # [n_edges, 3]
         node_specie: jnp.ndarray,  # [n_nodes] int between 0 and num_species-1
         senders: jnp.ndarray,  # [n_edges]
         receivers: jnp.ndarray,  # [n_edges]
@@ -121,8 +121,10 @@ class MACE(hk.Module):
         )  # [n_nodes, feature * irreps]
         node_feats = profile("embedding: node_feats", node_feats, node_mask[:, None])
 
-        radial_embedding = self.radial_embedding(safe_norm(vectors, axis=-1))
-        vectors = e3nn.IrrepsArray("1o", vectors)
+        if not (hasattr(vectors, "irreps") and hasattr(vectors, "array")):
+            vectors = e3nn.IrrepsArray("1o", vectors)
+
+        radial_embedding = self.radial_embedding(safe_norm(vectors.array, axis=-1))
 
         # Interactions
         outputs = []
