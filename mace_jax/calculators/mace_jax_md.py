@@ -52,7 +52,7 @@ class MACEJAXmd:
             config.update("jax_enable_x64", True)
 
     def setup_NPT(
-        self, atoms, inner_steps=1000, P_start=1.0, kT=1.0, dt=0.001, mass=1.0,
+        self, atoms, inner_steps=100, P_start=1.0, kT=1.0, dt=0.001, mass=1.0,
     ):
         config = data.config_from_atoms(atoms)
         cell = config.cell
