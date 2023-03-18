@@ -39,7 +39,9 @@ class MessagePassingConvolution(hk.Module):
                     e3nn.spherical_harmonics(range(1, self.max_ell + 1), vectors, True),
                     filter_ir_out=self.target_irreps,
                 ),
-                # e3nn.tensor_product_with_spherical_harmonics(messages, vectors, self.max_ell).filter(self.target_irreps)
+                # e3nn.tensor_product_with_spherical_harmonics(
+                #     messages, vectors, self.max_ell
+                # ).filter(self.target_irreps),
             ]
         ).regroup()  # [n_edges, irreps]
 
