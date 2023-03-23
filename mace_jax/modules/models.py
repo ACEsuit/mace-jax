@@ -50,6 +50,7 @@ class MACE(hk.Module):
         off_diagonal: bool = False,
         interaction_irreps: Union[str, e3nn.Irreps] = "o3_restricted",  # or o3_full
         node_embedding: hk.Module = LinearNodeEmbeddingBlock,
+        skip_connection_first_layer: bool = False,
     ):
         super().__init__()
 
@@ -87,6 +88,7 @@ class MACE(hk.Module):
         self.symmetric_tensor_product_basis = symmetric_tensor_product_basis
         self.off_diagonal = off_diagonal
         self.max_ell = max_ell
+        self.skip_connection_first_layer = skip_connection_first_layer
 
         # Embeddings
         self.node_embedding = node_embedding(
@@ -154,6 +156,7 @@ class MACE(hk.Module):
                 readout_mlp_irreps=self.readout_mlp_irreps,
                 symmetric_tensor_product_basis=self.symmetric_tensor_product_basis,
                 off_diagonal=self.off_diagonal,
+                skip_connection_first_layer=self.skip_connection_first_layer,
                 name=f"layer_{i}",
             )(
                 vectors,
@@ -192,6 +195,7 @@ class MACELayer(hk.Module):
         # ReadoutBlock:
         output_irreps: e3nn.Irreps,
         readout_mlp_irreps: e3nn.Irreps,
+        skip_connection_first_layer: bool = False,
     ) -> None:
         super().__init__(name=name)
 
@@ -210,6 +214,7 @@ class MACELayer(hk.Module):
         self.readout_mlp_irreps = readout_mlp_irreps
         self.symmetric_tensor_product_basis = symmetric_tensor_product_basis
         self.off_diagonal = off_diagonal
+        self.skip_connection_first_layer = skip_connection_first_layer
 
     def __call__(
         self,
@@ -227,7 +232,7 @@ class MACELayer(hk.Module):
         node_feats = profile(f"{self.name}: input", node_feats, node_mask[:, None])
 
         sc = None
-        if not self.first:
+        if not self.first or self.skip_connection_first_layer:
             sc = e3nn.haiku.Linear(
                 self.num_features * self.hidden_irreps,
                 num_indexed_weights=self.num_species,
@@ -269,7 +274,6 @@ class MACELayer(hk.Module):
             node_feats = profile(
                 f"{self.name}: skip_tp_first", node_feats, node_mask[:, None]
             )
-            sc = None
 
         node_feats = EquivariantProductBasisBlock(
             target_irreps=self.num_features * self.hidden_irreps,
