@@ -42,6 +42,7 @@ model.avg_num_neighbors = "average"
 #     7: -1484.9814568572233,
 #     8: -2041.9816003861047
 # }
+model.soft_normalization = 1000.0
 
 
 loss.energy_weight = 1.0

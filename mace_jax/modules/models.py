@@ -46,6 +46,7 @@ class MACE(hk.Module):
         epsilon: Optional[float] = None,
         correlation: int = 3,  # Correlation order at each layer (~ node_features^correlation), default 3
         gate: Callable = jax.nn.silu,  # activation function
+        soft_normalization: Optional[float] = None,
         symmetric_tensor_product_basis: bool = True,
         off_diagonal: bool = False,
         interaction_irreps: Union[str, e3nn.Irreps] = "o3_restricted",  # or o3_full
@@ -87,6 +88,7 @@ class MACE(hk.Module):
         self.symmetric_tensor_product_basis = symmetric_tensor_product_basis
         self.off_diagonal = off_diagonal
         self.max_ell = max_ell
+        self.soft_normalization = soft_normalization
 
         # Embeddings
         self.node_embedding = node_embedding(
@@ -154,6 +156,7 @@ class MACE(hk.Module):
                 readout_mlp_irreps=self.readout_mlp_irreps,
                 symmetric_tensor_product_basis=self.symmetric_tensor_product_basis,
                 off_diagonal=self.off_diagonal,
+                soft_normalization=self.soft_normalization,
                 name=f"layer_{i}",
             )(
                 vectors,
@@ -189,6 +192,7 @@ class MACELayer(hk.Module):
         correlation: int,
         symmetric_tensor_product_basis: bool,
         off_diagonal: bool,
+        soft_normalization: Optional[float],
         # ReadoutBlock:
         output_irreps: e3nn.Irreps,
         readout_mlp_irreps: e3nn.Irreps,
@@ -210,6 +214,7 @@ class MACELayer(hk.Module):
         self.readout_mlp_irreps = readout_mlp_irreps
         self.symmetric_tensor_product_basis = symmetric_tensor_product_basis
         self.off_diagonal = off_diagonal
+        self.soft_normalization = soft_normalization
 
     def __call__(
         self,
@@ -282,6 +287,20 @@ class MACELayer(hk.Module):
         node_feats = profile(
             f"{self.name}: tensor power", node_feats, node_mask[:, None]
         )
+
+        if self.soft_normalization is not None:
+
+            def phi(n):
+                n = n / self.soft_normalization
+                return 1.0 / (1.0 + n * e3nn.sus(n))
+
+            node_feats = e3nn.norm_activation(
+                node_feats, [phi] * len(node_feats.irreps)
+            )
+
+            node_feats = profile(
+                f"{self.name}: soft normalization", node_feats, node_mask[:, None]
+            )
 
         if sc is not None:
             node_feats = node_feats + sc  # [n_nodes, feature * hidden_irreps]
