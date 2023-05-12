@@ -100,6 +100,14 @@ def evaluate(
     data_loader: data.GraphDataLoader,
     name: str = "Evaluation",
 ) -> Tuple[float, Dict[str, Any]]:
+    r"""Evaluate the model on the given data loader.
+
+    Args:
+        model: function of signature `model(params, graph) -> {energy: [num_graphs], forces: [num_nodes, 3], stress: [num_graphs, 3, 3]}`
+        params: parameters of the model
+        loss_fn: function of signature `loss_fn(graph, output) -> loss` where `output` is the output of `model`
+        data_loader: data loader
+    """
     total_loss = 0.0
     num_graphs = 0
 
