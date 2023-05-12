@@ -255,15 +255,22 @@ GraphEdges = namedtuple("Edges", ["shifts"])
 GraphGlobals = namedtuple("Globals", ["cell", "energy", "stress", "weight"])
 
 
-def graph_from_configuration(config: Configuration, cutoff: float) -> jraph.GraphsTuple:
+def graph_from_configuration(
+    config: Configuration, cutoff: float, z_map=None
+) -> jraph.GraphsTuple:
     senders, receivers, shifts = get_neighborhood(
         positions=config.positions, cutoff=cutoff, pbc=config.pbc, cell=config.cell
     )
+    if z_map is None:
+        species = config.atomic_numbers
+    else:
+        species = z_map[config.atomic_numbers]
+
     return jraph.GraphsTuple(
         nodes=GraphNodes(
             positions=config.positions,
             forces=config.forces,
-            species=config.atomic_numbers,
+            species=species,
         ),
         edges=GraphEdges(shifts=shifts),
         globals=jax.tree_util.tree_map(
