@@ -14,15 +14,18 @@ from mace_jax import data, tools
 
 
 def train(
-    model: Callable,
-    params: Dict[str, Any],
-    loss_fn: Any,
+    params: Any,
+    total_loss_fn: Callable,  # loss_fn(params, graph) -> [num_graphs]
     train_loader: data.GraphDataLoader,
     gradient_transform: Any,
     optimizer_state: Dict[str, Any],
     steps_per_interval: int,
     ema_decay: Optional[float] = None,
 ):
+    """
+    for interval, params, optimizer_state, ema_params in train(...):
+        # do something
+    """
     num_updates = 0
     ema_params = params
 
@@ -35,9 +38,7 @@ def train(
         # graph is assumed to be padded by jraph.pad_with_graphs
         mask = jraph.get_graph_padding_mask(graph)  # [n_graphs,]
         loss, grad = jax.value_and_grad(
-            lambda params: jnp.mean(
-                jnp.where(mask, loss_fn(graph, model(params, graph)), 0.0)
-            )
+            lambda params: jnp.mean(jnp.where(mask, total_loss_fn(params, graph), 0.0))
         )(params)
         updates, optimizer_state = gradient_transform.update(
             grad, optimizer_state, params
@@ -94,18 +95,18 @@ def train(
 
 
 def evaluate(
-    model: Callable,
+    predictor: Callable,
     params: Any,
     loss_fn: Any,
     data_loader: data.GraphDataLoader,
     name: str = "Evaluation",
 ) -> Tuple[float, Dict[str, Any]]:
-    r"""Evaluate the model on the given data loader.
+    r"""Evaluate the predictor on the given data loader.
 
     Args:
-        model: function of signature `model(params, graph) -> {energy: [num_graphs], forces: [num_nodes, 3], stress: [num_graphs, 3, 3]}`
-        params: parameters of the model
-        loss_fn: function of signature `loss_fn(graph, output) -> loss` where `output` is the output of `model`
+        predictor: function of signature `predictor(params, graph) -> {energy: [num_graphs], forces: [num_nodes, 3], stress: [num_graphs, 3, 3]}`
+        params: parameters of the predictor
+        loss_fn: function of signature `loss_fn(graph, output) -> loss` where `output` is the output of `predictor`
         data_loader: data loader
     """
     total_loss = 0.0
@@ -123,15 +124,15 @@ def evaluate(
     delta_stress_list = []
     stress_list = []
 
-    if hasattr(model, "_cache_size"):
-        last_cache_size = model._cache_size()
+    if hasattr(predictor, "_cache_size"):
+        last_cache_size = predictor._cache_size()
     else:
         last_cache_size = None
 
     start_time = time.time()
     p_bar = tqdm.tqdm(data_loader, desc=name, total=data_loader.approx_length())
     for ref_graph in p_bar:
-        output = model(params, ref_graph)
+        output = predictor(params, ref_graph)
         pred_graph = ref_graph._replace(
             nodes=ref_graph.nodes._replace(forces=output["forces"]),
             globals=ref_graph.globals._replace(
@@ -139,10 +140,10 @@ def evaluate(
             ),
         )
 
-        if last_cache_size is not None and last_cache_size != model._cache_size():
-            last_cache_size = model._cache_size()
+        if last_cache_size is not None and last_cache_size != predictor._cache_size():
+            last_cache_size = predictor._cache_size()
 
-            logging.info("Compiled function `model` for args:")
+            logging.info("Compiled function `predictor` for args:")
             logging.info(f"- n_node={ref_graph.n_node} total={ref_graph.n_node.sum()}")
             logging.info(f"- n_edge={ref_graph.n_edge} total={ref_graph.n_edge.sum()}")
             logging.info(f"cache size: {last_cache_size}")

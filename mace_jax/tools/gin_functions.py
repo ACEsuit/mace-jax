@@ -211,9 +211,8 @@ def train(
     eval_time_per_interval = []
 
     for interval, params, optimizer_state, ema_params in tools.train(
-        model=model,
         params=params,
-        loss_fn=loss_fn,
+        loss_fn=lambda params, graph: loss_fn(graph, model(params, graph)),
         train_loader=train_loader,
         gradient_transform=gradient_transform,
         optimizer_state=optimizer_state,

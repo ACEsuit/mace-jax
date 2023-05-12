@@ -9,7 +9,8 @@ from mace_jax import tools
 
 
 def predict_energy_forces_stress(
-    model, graph: jraph.GraphsTuple
+    model,  # model(relative_vectors, species, senders, receivers) -> [num_nodes]
+    graph: jraph.GraphsTuple,
 ) -> Dict[str, jnp.ndarray]:
     """Predict energy, forces and stress tensor for a batch of graphs.
 
