@@ -32,27 +32,27 @@ def train(
 
     logging.info("Started training")
 
-    @partial(jax.pmap, in_axes=(None, 0), out_axes=0)
+    @jax.jit
+    def pre_grad_fn(graph: jraph.GraphsTuple):
+        if graph.n_node.ndim == 1:
+            graph = jax.tree_map(lambda x: x[None, ...], graph)
+        return graph
+
+    @partial(jax.pmap, in_axes=(None, 0), out_axes=None, axis_name="i")
     def grad_fn(params, graph: jraph.GraphsTuple):
         # graph is assumed to be padded by jraph.pad_with_graphs
         mask = jraph.get_graph_padding_mask(graph)  # [n_graphs,]
         loss, grad = jax.value_and_grad(
             lambda params: jnp.sum(jnp.where(mask, total_loss_fn(params, graph), 0.0))
         )(params)
-        return jnp.sum(mask), loss, grad
+        n = jax.lax.psum(jnp.sum(mask), axis_name="i")
+        loss = jax.lax.psum(loss, axis_name="i") / n
+        grad = jax.lax.psum(grad, axis_name="i")
+        grad = jax.tree_map(lambda x: x / n, grad)
+        return loss, grad
 
-    # jit-of-pmap is not recommended but so far it seems faster
     @jax.jit
-    def update_fn(
-        params, optimizer_state, ema_params, num_updates: int, graph: jraph.GraphsTuple
-    ) -> Tuple[float, Any, Any]:
-        if graph.n_node.ndim == 1:
-            graph = jax.tree_map(lambda x: x[None, ...], graph)
-
-        n, loss, grad = grad_fn(params, graph)
-        loss = jnp.sum(loss) / jnp.sum(n)
-        grad = jax.tree_map(lambda x: jnp.sum(x, axis=0) / jnp.sum(n), grad)
-
+    def post_grad_fn(grad, params, optimizer_state, ema_params, num_updates):
         updates, optimizer_state = gradient_transform.update(
             grad, optimizer_state, params
         )
@@ -64,9 +64,19 @@ def train(
             )
         else:
             ema_params = params
+        return params, optimizer_state, ema_params
+
+    def update_fn(
+        params, optimizer_state, ema_params, num_updates: int, graph: jraph.GraphsTuple
+    ) -> Tuple[float, Any, Any]:
+        graph = pre_grad_fn(graph)
+        loss, grad = grad_fn(params, graph)
+        params, optimizer_state, ema_params = post_grad_fn(
+            grad, params, optimizer_state, ema_params, num_updates
+        )
         return loss, params, optimizer_state, ema_params
 
-    last_cache_size = update_fn._cache_size()
+    # last_cache_size = update_fn._cache_size()
 
     def interval_loader():
         i = 0
@@ -88,23 +98,23 @@ def train(
         )
         for graph in p_bar:
             num_updates += 1
-            start_time = time.time()
+            # start_time = time.time()
             loss, params, optimizer_state, ema_params = update_fn(
                 params, optimizer_state, ema_params, num_updates, graph
             )
             loss = float(loss)
             p_bar.set_postfix({"loss": f"{loss:7.3f}"})
 
-            if last_cache_size != update_fn._cache_size():
-                last_cache_size = update_fn._cache_size()
+            # if last_cache_size != update_fn._cache_size():
+            #     last_cache_size = update_fn._cache_size()
 
-                logging.info("Compiled function `update_fn` for args:")
-                logging.info(f"- n_node={graph.n_node} total={graph.n_node.sum()}")
-                logging.info(f"- n_edge={graph.n_edge} total={graph.n_edge.sum()}")
-                logging.info(f"Outout: loss= {loss:.3f}")
-                logging.info(
-                    f"Compilation time: {time.time() - start_time:.3f}s, cache size: {last_cache_size}"
-                )
+            #     logging.info("Compiled function `update_fn` for args:")
+            #     logging.info(f"- n_node={graph.n_node} total={graph.n_node.sum()}")
+            #     logging.info(f"- n_edge={graph.n_edge} total={graph.n_edge.sum()}")
+            #     logging.info(f"Outout: loss= {loss:.3f}")
+            #     logging.info(
+            #         f"Compilation time: {time.time() - start_time:.3f}s, cache size: {last_cache_size}"
+            #     )
 
 
 def evaluate(
