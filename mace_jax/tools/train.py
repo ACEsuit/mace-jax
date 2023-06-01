@@ -16,7 +16,7 @@ from mace_jax import data, tools
 def train(
     params: Any,
     total_loss_fn: Callable,  # loss_fn(params, graph) -> [num_graphs]
-    train_loader: data.GraphDataLoader,
+    train_loader: data.GraphDataLoader,  # device parallel done on the (optional) extra dimension
     gradient_transform: Any,
     optimizer_state: Dict[str, Any],
     steps_per_interval: int,
@@ -35,11 +35,23 @@ def train(
     def update_fn(
         params, optimizer_state, ema_params, num_updates: int, graph: jraph.GraphsTuple
     ) -> Tuple[float, Any, Any]:
-        # graph is assumed to be padded by jraph.pad_with_graphs
-        mask = jraph.get_graph_padding_mask(graph)  # [n_graphs,]
-        loss, grad = jax.value_and_grad(
-            lambda params: jnp.mean(jnp.where(mask, total_loss_fn(params, graph), 0.0))
-        )(params)
+        if graph.n_node.ndim == 1:
+            graph = jax.tree_map(lambda x: x[None, ...], graph)
+
+        def grad_fn(graph):
+            # graph is assumed to be padded by jraph.pad_with_graphs
+            mask = jraph.get_graph_padding_mask(graph)  # [n_graphs,]
+            loss, grad = jax.value_and_grad(
+                lambda params: jnp.sum(
+                    jnp.where(mask, total_loss_fn(params, graph), 0.0)
+                )
+            )(params)
+            return jnp.sum(mask), loss, grad
+
+        n, loss, grad = jax.pmap(grad_fn, axis_name="batch")(graph)
+        loss = jnp.sum(loss) / jnp.sum(n)
+        grad = jax.tree_map(lambda x: jnp.sum(x, axis=0) / jnp.sum(n), grad)
+
         updates, optimizer_state = gradient_transform.update(
             grad, optimizer_state, params
         )
