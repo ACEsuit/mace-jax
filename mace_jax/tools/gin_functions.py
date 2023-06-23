@@ -184,7 +184,7 @@ def optimizer(
 
 @gin.configurable
 def train(
-    model,
+    predictor,
     params,
     optimizer_state,
     train_loader,
@@ -212,7 +212,7 @@ def train(
 
     for interval, params, optimizer_state, ema_params in tools.train(
         params=params,
-        loss_fn=lambda params, graph: loss_fn(graph, model(params, graph)),
+        total_loss_fn=lambda params, graph: loss_fn(graph, predictor(params, graph)),
         train_loader=train_loader,
         gradient_transform=gradient_transform,
         optimizer_state=optimizer_state,
@@ -237,7 +237,7 @@ def train(
 
         def eval_and_print(loader, mode: str):
             loss_, metrics_ = tools.evaluate(
-                model=model,
+                predictor=predictor,
                 params=ema_params,
                 loss_fn=loss_fn,
                 data_loader=loader,

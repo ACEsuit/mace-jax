@@ -13,7 +13,7 @@ datasets.valid_fraction = 0.208
 datasets.n_node = 512
 datasets.n_edge = 2048
 datasets.n_graph = 6
-datasets.n_mantissa_bits = 3
+datasets.n_mantissa_bits = 2
 
 
 
