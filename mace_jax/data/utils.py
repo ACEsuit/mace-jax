@@ -194,6 +194,14 @@ def load_from_xyz(
 
 class AtomicNumberTable:
     def __init__(self, zs: Sequence[int]):
+        zs = list(zs)
+        # integers
+        assert all(isinstance(z, int) for z in zs)
+        # unique
+        assert len(zs) == len(set(zs))
+        # sorted
+        assert zs == sorted(zs)
+
         self.zs = zs
 
     def __len__(self) -> int:
@@ -205,8 +213,14 @@ class AtomicNumberTable:
     def index_to_z(self, index: int) -> int:
         return self.zs[index]
 
-    def z_to_index(self, atomic_number: str) -> int:
+    def z_to_index(self, atomic_number: int) -> int:
         return self.zs.index(atomic_number)
+
+    def z_to_index_map(self, max_atomic_number: int) -> np.ndarray:
+        x = np.zeros(max_atomic_number + 1, dtype=np.int32)
+        for i, z in enumerate(self.zs):
+            x[z] = i
+        return x
 
 
 def get_atomic_number_table_from_zs(zs: Iterable[int]) -> AtomicNumberTable:
@@ -250,20 +264,45 @@ def compute_average_E0s(
     return atomic_energies_dict
 
 
+def compute_average_E0s_from_species(
+    graphs: List[jraph.GraphsTuple], num_species: int
+) -> Dict[int, float]:
+    """
+    Function to compute the average interaction energy of each chemical element
+    returns dictionary of E0s
+    """
+    len_train = len(graphs)
+    A = np.zeros((len_train, num_species))
+    B = np.zeros(len_train)
+    for i in range(len_train):
+        B[i] = graphs[i].globals.energy
+        for j in range(num_species):
+            A[i, j] = np.count_nonzero(graphs[i].nodes.species == j)
+    try:
+        E0s = np.linalg.lstsq(A, B, rcond=None)[0]
+    except np.linalg.LinAlgError:
+        logging.warning(
+            "Failed to compute E0s using least squares regression, using the same for all atoms"
+        )
+        E0s = np.zeros(num_species)
+    return E0s
+
+
 GraphNodes = namedtuple("Nodes", ["positions", "forces", "species"])
 GraphEdges = namedtuple("Edges", ["shifts"])
 GraphGlobals = namedtuple("Globals", ["cell", "energy", "stress", "weight"])
 
 
 def graph_from_configuration(
-    config: Configuration, cutoff: float, z_map=None
+    config: Configuration, cutoff: float, z_table: AtomicNumberTable = None
 ) -> jraph.GraphsTuple:
     senders, receivers, shifts = get_neighborhood(
         positions=config.positions, cutoff=cutoff, pbc=config.pbc, cell=config.cell
     )
-    if z_map is None:
+    if z_table is None:
         species = config.atomic_numbers
     else:
+        z_map = z_table.z_to_index_map(max_atomic_number=200)
         species = z_map[config.atomic_numbers]
 
     return jraph.GraphsTuple(

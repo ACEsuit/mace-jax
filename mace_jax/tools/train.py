@@ -113,6 +113,7 @@ def evaluate(
     loss_fn: Any,
     data_loader: data.GraphDataLoader,
     name: str = "Evaluation",
+    progress_bar: bool = True,
 ) -> Tuple[float, Dict[str, Any]]:
     r"""Evaluate the predictor on the given data loader.
 
@@ -143,7 +144,14 @@ def evaluate(
         last_cache_size = None
 
     start_time = time.time()
-    p_bar = tqdm.tqdm(data_loader, desc=name, total=data_loader.approx_length())
+
+    p_bar = tqdm.tqdm(
+        data_loader,
+        desc=name,
+        total=data_loader.approx_length(),
+        disable=not progress_bar,
+    )
+
     for ref_graph in p_bar:
         output = predictor(params, ref_graph)
         pred_graph = ref_graph._replace(
