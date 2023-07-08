@@ -194,9 +194,7 @@ def load_from_xyz(
 
 class AtomicNumberTable:
     def __init__(self, zs: Sequence[int]):
-        zs = list(zs)
-        # integers
-        assert all(isinstance(z, int) for z in zs)
+        zs = [int(z) for z in zs]
         # unique
         assert len(zs) == len(set(zs))
         # sorted

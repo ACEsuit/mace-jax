@@ -22,6 +22,7 @@ def train(
     optimizer_state: Dict[str, Any],
     steps_per_interval: int,
     ema_decay: Optional[float] = None,
+    progress_bar: bool = True,
 ):
     """
     for interval, params, optimizer_state, ema_params in train(...):
@@ -33,6 +34,7 @@ def train(
     logging.info("Started training")
 
     @partial(jax.pmap, in_axes=(None, 0), out_axes=0)
+    # @partial(jax.vmap, in_axes=(None, 0), out_axes=0)
     def grad_fn(params, graph: jraph.GraphsTuple):
         # graph is assumed to be padded by jraph.pad_with_graphs
         mask = jraph.get_graph_padding_mask(graph)  # [n_graphs,]
@@ -85,6 +87,7 @@ def train(
             interval_loader(),
             desc=f"Train interval {interval}",
             total=steps_per_interval,
+            disable=not progress_bar,
         )
         for graph in p_bar:
             num_updates += 1

@@ -62,3 +62,10 @@ class WeightedEnergyForcesStressLoss:
             f"forces_weight={self.forces_weight:.3f}, "
             f"stress_weight={self.stress_weight:.3f})"
         )
+
+
+def uber_loss(x, t=1.0):
+    x_center = jnp.where(jnp.abs(x) <= 1.01 * t, x, 0.0)
+    center = x_center**2 / (2 * t)
+    sides = jnp.abs(x) - t / 2
+    return jnp.where(jnp.abs(x) <= t, center, sides)
