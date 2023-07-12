@@ -424,6 +424,35 @@ class GraphDataLoader:
             n_mantissa_bits=self.n_mantissa_bits,
         )
 
+    def replace_graphs(self, graphs: List[jraph.GraphsTuple]):
+        return GraphDataLoader(
+            graphs=graphs,
+            n_node=self.n_node,
+            n_edge=self.n_edge,
+            n_graph=self.n_graph,
+            min_n_node=self.min_n_node,
+            min_n_edge=self.min_n_edge,
+            min_n_graph=self.min_n_graph,
+            shuffle=self.shuffle,
+            n_mantissa_bits=self.n_mantissa_bits,
+        )
+
+
+class ParallelLoader:
+    def __init__(self, loader, n: int):
+        self.loader = loader
+        self.n = n
+
+    def __iter__(self):
+        it = iter(self.loader)
+        while True:
+            try:
+                yield jax.tree_map(
+                    lambda *x: jnp.stack(x), *[next(it) for _ in range(self.n)]
+                )
+            except StopIteration:
+                return
+
 
 def pad_graph_to_nearest_ceil_mantissa(
     graphs_tuple: jraph.GraphsTuple,
