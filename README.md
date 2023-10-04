@@ -3,8 +3,6 @@
 This repository contains a **porting** of MACE in **jax** developed by
 **Mario Geiger** and Ilyes Batatia.
 
-:warning: This repository is still in developement. Everything can change anytime.
-
 ## Test without installing
 
 ```sh
