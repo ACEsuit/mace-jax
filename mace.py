@@ -15,6 +15,13 @@
 # NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
 # DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+"""
+Install dependencies with
+
+$ pip install -U "jax[cuda12]"
+$ pip install -U flax optax
+$ pip install cuequivariance-jax cuequivariance-ops-jax-cu12 --force-reinstall
+"""
 
 from typing import Callable
 
