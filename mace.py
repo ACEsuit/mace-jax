@@ -20,7 +20,7 @@ Install dependencies with
 
 $ pip install -U "jax[cuda12]"
 $ pip install -U flax optax
-$ pip install cuequivariance-jax cuequivariance-ops-jax-cu12 --force-reinstall
+$ pip install cuequivariance-jax==0.3.0 cuequivariance-ops-jax-cu12==0.3.0 --force-reinstall
 """
 
 from typing import Callable
