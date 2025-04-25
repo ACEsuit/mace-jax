@@ -20,21 +20,20 @@ Install dependencies with
 
 $ pip install -U "jax[cuda12]"
 $ pip install -U flax optax
-$ pip install cuequivariance-jax==0.3.0 cuequivariance-ops-jax-cu12==0.3.0 --force-reinstall
+$ pip install cuequivariance-jax==0.4.0 cuequivariance-ops-jax-cu12==0.4.0 --force-reinstall
 """
 
 from typing import Callable
 
+import cuequivariance as cue
+import cuequivariance_jax as cuex
 import flax
 import flax.linen
 import jax
 import jax.numpy as jnp
 import numpy as np
-
-import cuequivariance as cue
-import cuequivariance_jax as cuex
-from cuequivariance.experimental.e3nn import O3_e3nn
-from cuequivariance.experimental.mace import symmetric_contraction
+from cuequivariance.group_theory.experimental.e3nn import O3_e3nn
+from cuequivariance.group_theory.experimental.mace import symmetric_contraction
 from cuequivariance_jax.experimental.utils import MultiLayerPerceptron
 
 
@@ -74,8 +73,8 @@ class MACELayer(flax.linen.Module):
         def lin(irreps: cue.Irreps, input: cuex.RepArray, name: str):
             e = cue.descriptors.linear(input.irreps, irreps)
             w = self.param(name, jax.random.normal, (e.inputs[0].irreps.dim,), dtype)
-            return cuex.equivariant_tensor_product(
-                e, w, input, name=f"{self.name}_{name}"
+            return cuex.equivariant_polynomial(
+                e, [w, input], name=f"{self.name}_{name}"
             )
 
         def linZ(irreps: cue.Irreps, input: cuex.RepArray, name: str):
@@ -88,10 +87,9 @@ class MACELayer(flax.linen.Module):
                 (self.num_species, e.inputs[0].irreps.dim),
                 dtype,
             )
-            return cuex.equivariant_tensor_product(
+            return cuex.equivariant_polynomial(
                 e,
-                w,
-                input,
+                [w, input],
                 indices=[node_species, None, None],
                 name=f"{self.name}_{name}",
             )
@@ -116,12 +114,12 @@ class MACELayer(flax.linen.Module):
                 with_bias=False,
             )(radial_embeddings)
 
-            node_features = cuex.equivariant_tensor_product(
+            node_features = cuex.equivariant_polynomial(
                 descriptor,
-                w,
-                node_features,
-                sph,
-                output_batch_shape=node_features.shape[:1],
+                [w, node_features, sph],
+                outputs_shape_dtype=jax.ShapeDtypeStruct(
+                    (node_features.shape[0], -1), dtype
+                ),
                 indices=[None, senders, None, receivers],
                 name=f"{self.name}_TP",
             )
@@ -145,10 +143,9 @@ class MACELayer(flax.linen.Module):
                 w = jnp.einsum("zau,ab->zbu", w, projection)
             w = jnp.reshape(w, (self.num_species, -1))
 
-            return cuex.equivariant_tensor_product(
+            return cuex.equivariant_polynomial(
                 e,
-                w,
-                node_feats,
+                [w, node_feats],
                 indices=[node_species, None, None],
                 name=f"{self.name}_SC",
             )
