@@ -62,8 +62,8 @@ def predict_energy_forces_stress(
         jnp.einsum("iu,iv->iuv", minus_forces, graph.nodes.positions),
         nel=graph.n_node,
     )  # [n_graphs, 3, 3]
-    viriel = stress_cell + stress_forces  # NOTE: sign suggested by Ilyes Batatia
-    stress = -1.0 / det * viriel  # NOTE: sign suggested by Ilyes Batatia
+    virial = stress_cell + stress_forces
+    stress = virial / det
 
     # TODO(mario): fix this
     # make it traceless? because it seems that our formula is not valid for the trace
