@@ -24,9 +24,9 @@ def test_mace():
             num_species=2,
             hidden_irreps=e3nn.Irreps("32x0e"),
             readout_mlp_irreps=e3nn.Irreps("16x0e"),
+            output_irreps=e3nn.Irreps("0e"),
             avg_num_neighbors=8.0,
             correlation=3,
-            output_irreps="0e",
             symmetric_tensor_product_basis=False,
         )(vectors, node_specie, senders, receivers)
 
