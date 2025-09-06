@@ -105,9 +105,9 @@ def scatter_std(
     if unbiased:
         count_safe = jnp.maximum(count_safe - 1, 1)
 
-    std = jnp.sqrt(var_sum / count_safe)
+    out = jnp.sqrt(var_sum / count_safe)
 
-    return std
+    return out
 
 
 def scatter_mean(
