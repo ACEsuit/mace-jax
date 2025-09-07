@@ -37,14 +37,20 @@ class TestClebschGordanParity:
 
     @pytest.mark.parametrize(
         "irreps_in, irreps_out, corr",
-        [("1x0e + 1x1o", "1x0e", 1), ("2x0e + 1x1o", "1x1o", 2)],
+        [
+            ("1x0e + 1x1o", "1x0e", 1),
+            ("2x0e + 1x1o", "1x1o", 2),
+            ("2x0e + 1x1o", "1x0e", 2),
+        ],
     )
     def test_U_matrix_real(self, irreps_in, irreps_out, corr):
         out_jax = U_matrix_real_jax(irreps_in, irreps_out, corr)
         out_torch = U_matrix_real_torch(irreps_in, irreps_out, corr)
 
         assert len(out_jax) == len(out_torch)
-        for a, b in zip(out_jax, out_torch):
+        for idx, (a, b) in enumerate(zip(out_jax, out_torch)):
+            assert to_numpy(a).shape == to_numpy(b).shape, f"Mismatch at element {idx}"
+
             if isinstance(a, tuple) and isinstance(b, tuple):
                 # tuple: (irreps, array)
                 ir_a, tensor_a = a
