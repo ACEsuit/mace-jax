@@ -1,3 +1,4 @@
+import numpy as np
 import pytest
 import torch
 import jax.numpy as jnp
@@ -35,17 +36,14 @@ class TestContractionParity:
         num_ell = model_torch.U_tensors(correlation).shape[-2]
 
         # Torch inputs
-        x_t = torch.randn(batch, num_feats, num_ell)  # 3D input
-        y_t = torch.randn(batch, num_elements)  # 2D input
+        x_t = torch.randn(batch, num_feats, num_ell)
+        y_t = torch.randn(batch, num_elements)
 
         # JAX inputs
         x_j = jnp.array(x_t.detach().numpy())
         y_j = jnp.array(y_t.detach().numpy())
 
-        # Torch forward
-        out_t = model_torch(x_t, y_t).detach().numpy()
-
-        # Haiku forward: wrap in hk.transform
+        # --- JAX model ---
         def forward_fn(x, y):
             model = ContractionJax(
                 irreps_in=Irreps(str(irreps_in)),
@@ -58,11 +56,25 @@ class TestContractionParity:
             return model(x, y)
 
         forward = hk.transform(forward_fn)
-
         key = jax.random.PRNGKey(0)
         params = forward.init(key, x_j, y_j)
+
+        # --- Transfer weights from JAX → Torch ---
+        jax_wmax = np.array(params["contraction"]["weights_max"])
+        jax_ws = [
+            np.array(params["contraction"][f"weights_{i + 1}"])
+            for i in range(len(model_torch.weights))
+        ]
+
+        with torch.no_grad():
+            model_torch.weights_max.copy_(torch.tensor(jax_wmax))
+            for tw, jw in zip(model_torch.weights, jax_ws):
+                tw.copy_(torch.tensor(jw))
+
+        # --- Forward passes ---
+        out_t = model_torch(x_t, y_t).detach().numpy()
         out_j = forward.apply(params, None, x_j, y_j)
 
-        # Compare
+        # --- Compare ---
         assert out_t.shape == out_j.shape
         assert jnp.allclose(out_j, out_t, atol=1e-5, rtol=1e-5)
