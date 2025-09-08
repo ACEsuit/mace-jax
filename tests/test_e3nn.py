@@ -19,8 +19,9 @@ class TestTensorProductParity:
         irreps_out = Irreps("1x0e + 1x1o")
 
         instructions = [
-            (0, 0, 0, "uuu", True, 1.0),
-            (1, 1, 1, "uuu", True, 1.0),
+            (0, 0, 0, "uuu", True, 1.0),  # 0e ⊗ 0e -> 0e ✓
+            (0, 1, 1, "uuu", True, 1.0),  # 0e ⊗ 1o -> 1o ✓
+            (1, 0, 1, "uuu", True, 1.0),  # 1o ⊗ 0e -> 1o ✓
         ]
 
         x_np = np.random.randn(batch, irreps_in1.dim).astype(np.float32)
@@ -61,7 +62,7 @@ class TestTensorProductParity:
         # Copy weights from JAX -> PyTorch
         if model_torch.weight_numel > 0:
             model_torch.weight.data = torch.tensor(
-                np.array(params_jax["~"]["weight"]), dtype=torch.float32
+                np.array(params_jax["tensor_product"]["weight"]), dtype=torch.float32
             )
 
         out_t = model_torch(x_t, y_t).detach().numpy()
