@@ -1,0 +1,224 @@
+"""
+Wrapper class for o3.Linear that optionally uses cuet.Linear
+"""
+
+import dataclasses
+import types
+import jax.numpy as jnp
+from typing import Callable, List, Optional, Union
+
+from e3nn_jax import Irreps, IrrepsArray, haiku as e3nn_hk, tensor_product
+
+from mace_jax.modules.symmetric_contraction import SymmetricContraction
+from mace_jax.tools.cg import O3_e3nn
+from mace_jax.tools.scatter import scatter_sum
+
+try:
+    import cuequivariance as cue
+    import cuequivariance_jax as cuej
+
+    CUET_AVAILABLE = True
+except (ImportError, ModuleNotFoundError):
+    CUET_AVAILABLE = False
+
+# OpenEquivariance is primarily PyTorch-focused, no JAX bindings found
+OEQ_AVAILABLE = False
+
+
+@dataclasses.dataclass
+class CuEquivarianceConfig:
+    """Configuration for cuequivariance acceleration"""
+
+    enabled: bool = False
+    layout: str = "mul_ir"  # One of: mul_ir, ir_mul
+    layout_str: str = "mul_ir"
+    group: str = "O3"
+    optimize_all: bool = False  # Set to True to enable all optimizations
+    optimize_linear: bool = False
+    optimize_channelwise: bool = False
+    optimize_symmetric: bool = False
+    optimize_fctp: bool = False
+    conv_fusion: bool = False  # Set to True to enable conv fusion
+
+    def __post_init__(self):
+        if self.enabled and CUET_AVAILABLE:
+            self.layout_str = self.layout
+            self.layout = getattr(cue, self.layout)
+            self.group = (
+                O3_e3nn if self.group == "O3_e3nn" else getattr(cue, self.group)
+            )
+        if not CUET_AVAILABLE:
+            self.enabled = False
+
+
+@dataclasses.dataclass
+class OEQConfig:
+    """Configuration for cuequivariance acceleration"""
+
+    enabled: bool = False
+    optimize_all: bool = False
+    optimize_channelwise: bool = False
+    conv_fusion: Optional[str] = "atomic"
+
+    def __post_init__(self):
+        if not OEQ_AVAILABLE:
+            self.enabled = False
+
+
+class Linear:
+    """Returns either a cuet.Linear or o3.Linear based on config"""
+
+    def __new__(
+        cls,
+        irreps_in: Irreps,
+        irreps_out: Irreps,
+        shared_weights: bool = True,
+        internal_weights: bool = True,
+        cueq_config: Optional[CuEquivarianceConfig] = None,
+    ):
+        if (
+            CUET_AVAILABLE
+            and cueq_config is not None
+            and cueq_config.enabled
+            and (cueq_config.optimize_all or cueq_config.optimize_linear)
+        ):
+            return cuej.Linear(
+                cue.Irreps(cueq_config.group, irreps_in),
+                cue.Irreps(cueq_config.group, irreps_out),
+                layout=cueq_config.layout,
+                shared_weights=shared_weights,
+                use_fallback=True,
+            )
+
+        return Linear(
+            irreps_in,
+            irreps_out,
+            shared_weights=shared_weights,
+            internal_weights=internal_weights,
+        )
+
+
+def with_scatter_sum(conv_fn: Callable) -> Callable:
+    """
+    Wrap a convolution-like function with scatter_sum aggregation.
+
+    Args:
+        conv_fn: a function with signature
+            conv_fn(node_feats[sender], edge_attrs, tp_weights) -> messages
+
+    Returns:
+        A wrapped function with signature:
+            (node_feats, edge_attrs, tp_weights, edge_index) -> aggregated messages
+    """
+
+    def wrapped(
+        node_feats: jnp.ndarray,
+        edge_attrs: jnp.ndarray,
+        tp_weights: jnp.ndarray,
+        edge_index: jnp.ndarray,
+    ) -> jnp.ndarray:
+        sender = edge_index[0]
+        receiver = edge_index[1]
+        num_nodes = node_feats.shape[0]
+
+        mji = conv_fn(node_feats[sender], edge_attrs, tp_weights)
+        message = scatter_sum(src=mji, index=receiver, dim=0, dim_size=num_nodes)
+        return message
+
+    return wrapped
+
+
+def with_cueq_conv_fusion(
+    conv_fn: Callable, num_segments: int, num_operands: int
+) -> Callable:
+    """
+    Wrap a ConvTensorProduct-like function to use conv fusion.
+
+    Args:
+        conv_fn: callable implementing the fused cuEQ conv, typically conv_fn(inputs, senders, nodes, receivers).
+        num_segments: number of segments in buffer (analogous to conv_tp.m.buffer_num_segments[0]).
+        num_operands: operand extent (analogous to conv_tp.m.operand_extent).
+
+    Returns:
+        A wrapped function with signature:
+            (node_feats, edge_attrs, tp_weights, edge_index) -> tensor
+    """
+    weight_numel = num_segments * num_operands
+
+    def wrapped(
+        node_feats: jnp.ndarray,
+        edge_attrs: jnp.ndarray,
+        tp_weights: jnp.ndarray,
+        edge_index: jnp.ndarray,
+    ) -> jnp.ndarray:
+        sender = edge_index[0]
+        receiver = edge_index[1]
+        # conv_fn is expected to return a tuple/list, like original_forward(...)[0]
+        return conv_fn(
+            [tp_weights, node_feats, edge_attrs],
+            {1: sender},
+            {0: node_feats},
+            {0: receiver},
+        )[0]
+
+    wrapped.weight_numel = weight_numel
+    return wrapped
+
+
+class TensorProduct:
+    """Wrapper around o3.TensorProduct / cuequivariance_jax.segmented_polynomial"""
+
+    def __new__(
+        cls,
+        irreps_in1: Irreps,
+        irreps_in2: Irreps,
+        irreps_out: Irreps,
+        instructions=None,
+        shared_weights: bool = False,
+        internal_weights: bool = False,
+        cueq_config=None,
+        oeq_config=None,
+    ):
+        # --- Case 1: CuEquivariance backend ---
+        if cueq_config is not None and cueq_config.enabled:
+            # build polynomial descriptor
+            poly_desc = (
+                cuej.descriptors.channelwise_tensor_product(
+                    cuej.Irreps(cueq_config.group, irreps_in1),
+                    cuej.Irreps(cueq_config.group, irreps_in2),
+                    cuej.Irreps(cueq_config.group, irreps_out),
+                )
+                .flatten_coefficient_modes()
+                .squeeze_modes()
+                .polynomial
+            )
+
+            def forward(tp_weights, node_feats, edge_attrs, sender, receiver):
+                """Mimic fused forward in JAX"""
+                num_nodes = node_feats.shape[0]
+                output_shape = (num_nodes, irreps_out.dim)
+
+                return cuej.segmented_polynomial(
+                    polynomial=poly_desc,
+                    inputs=[tp_weights, node_feats, edge_attrs],
+                    outputs_shape_dtype=(output_shape, jnp.float32),
+                    indices={1: sender},  # like message passing index
+                    math_dtype=jnp.float32,
+                    precision="highest",
+                )
+
+            return forward
+
+        # --- Case 2: OEQ backend (not ported yet) ---
+        if oeq_config is not None and oeq_config.enabled:
+            raise NotImplementedError("OEQ backend not yet ported to JAX")
+
+        # --- Default: fallback to e3nn_jax.TensorProduct ---
+        return o3.TensorProduct(
+            irreps_in1,
+            irreps_in2,
+            irreps_out,
+            instructions=instructions,
+            shared_weights=shared_weights,
+            internal_weights=internal_weights,
+        )
