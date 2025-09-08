@@ -1,13 +1,9 @@
-# mace_jax/tools/contraction.py
-from typing import Dict, Optional, List, Any, Tuple, Set, Union
+from typing import Dict, Optional, List, Any, Union
 
 import haiku as hk
-import jax
 import jax.numpy as jnp
-import numpy as np
 import opt_einsum as oe
-import e3nn_jax as e3nn
-from e3nn_jax import Irreps
+from e3nn_jax import Irreps, Irrep
 
 from mace_jax.tools.cg import U_matrix_real
 
@@ -47,6 +43,7 @@ class Contraction(hk.Module):
         internal_weights: bool = True,
         use_reduced_cg: bool = False,
         num_elements: Optional[int] = None,
+        weights: Optional[jnp.array] = None,
         name: Optional[str] = None,
     ):
         super().__init__(name=name)
@@ -129,17 +126,11 @@ class Contraction(hk.Module):
         assert shapes_main[2][1] == self.num_features, "x bci 'c' != self.num_features"
 
         self._main_expr = oe.contract_expression(main_sub, *shapes_main)
-
-        # create hk parameters for the weights (matching PyTorch)
-        self.weights_max = hk.get_parameter(
-            "weights_max",
-            shape=(self.num_elements, num_params, self.num_features),
-            init=hk.initializers.RandomNormal(stddev=1.0 / num_params),
-        )
+        self._shapes_main = shapes_main
 
         # --- Prepare weighting/feature expressions for i < correlation ---
-        self.weights: List[jnp.ndarray] = []
         self._weight_exprs: List[Any] = []
+        self._shapes_weight: List[Any] = []
         self._feature_exprs: List[Any] = []
 
         # iterate descending (correlation-1 .. 1) as PyTorch
@@ -187,6 +178,7 @@ class Contraction(hk.Module):
                 )
             expr_w = oe.contract_expression(subs_weight, *shapes_weight)
             self._weight_exprs.append(expr_w)
+            self._shapes_weight.append((num_elements, num_params_i, self.num_features))
 
             # For feature expr: first operand is c_tensor shape WITHOUT batch
             # c_tensor shape (after weighting conv) corresponds to expr result "bc..." -> we
@@ -207,16 +199,8 @@ class Contraction(hk.Module):
             expr_f = oe.contract_expression(subs_feat, *shapes_feat)
             self._feature_exprs.append(expr_f)
 
-            # create weight parameter (product-basis) like PyTorch
-            w = hk.get_parameter(
-                f"weights_{i}",
-                shape=(self.num_elements, num_params_i, self.num_features),
-                init=hk.initializers.RandomNormal(stddev=1.0 / num_params_i),
-            )
-            self.weights.append(w)
-
-        # store zero flags to decide zeroing at runtime if required
-        self.zero_flags = list(self.zero_flags)  # keep order for nu=1..correlation
+        if not internal_weights:
+            raise NotImplementedError("Sharing weights is not implemented in JAX.")
 
     def __call__(self, x: jnp.ndarray, y: jnp.ndarray) -> jnp.ndarray:
         # Ensure arrays
@@ -240,12 +224,35 @@ class Contraction(hk.Module):
                 f"Mismatch: y.shape[1] == {y.shape[1]} but self.num_elements == {self.num_elements}."
             )
 
+        weights_max = hk.get_parameter(
+            "weights_max",
+            shape=(
+                self.num_elements,
+                self.U_matrices[self.correlation].shape[-1],
+                self.num_features,
+            ),
+            init=hk.initializers.RandomNormal(
+                stddev=1.0 / self.U_matrices[self.correlation].shape[-1]
+            ),
+        )
+
+        weights = []
+        for i in range(1, self.correlation):
+            w = hk.get_parameter(
+                f"weights_{i}",
+                shape=self._shapes_weight[i - 1],
+                init=hk.initializers.RandomNormal(
+                    stddev=1.0 / self._shapes_weight[i - 1][1]
+                ),
+            )
+            weights.append(w)
+
         # If a given path was flagged zero, use zeros instead of the parameter (like EmptyParam)
         # For weights_max it's the last path flag
         if self.zero_flags and self.zero_flags[-1]:
-            w_main = jnp.zeros_like(self.weights_max)
+            w_main = jnp.zeros_like(weights_max)
         else:
-            w_main = self.weights_max
+            w_main = weights_max
 
         # Call main expr. opt_einsum supports leading batch dims and will broadcast.
         U_main = self.U_matrices[self.correlation]
@@ -254,7 +261,7 @@ class Contraction(hk.Module):
         # subsequent weighting + feature contractions (mirror PyTorch loop order)
         # weights list corresponds to i = correlation-1, correlation-2, ..., 1 in that order
         for idx, (w_param, expr_w, expr_f) in enumerate(
-            zip(self.weights, self._weight_exprs, self._feature_exprs)
+            zip(weights, self._weight_exprs, self._feature_exprs)
         ):
             # nu maps to correlation - (idx+1)
             nu = self.correlation - (idx + 1)
@@ -289,126 +296,56 @@ class Contraction(hk.Module):
 class SymmetricContraction(hk.Module):
     def __init__(
         self,
-        correlation: int,
-        keep_irrep_out: Set[e3nn.Irrep],
-        num_species: int,
-        gradient_normalization: Union[str, float] = None,
-        symmetric_tensor_product_basis: bool = True,
-        off_diagonal: bool = False,
+        irreps_in: Union[str, Irreps],
+        irreps_out: Union[str, Irreps],
+        correlation: Union[int, Dict[Irrep, int]],
+        irrep_normalization: str = "component",
+        path_normalization: str = "element",
+        use_reduced_cg: bool = False,
+        internal_weights: Optional[bool] = None,
+        shared_weights: Optional[bool] = None,
+        num_elements: Optional[int] = None,
+        name: Optional[str] = None,
     ):
-        super().__init__()
-        self.correlation = correlation
+        super().__init__(name=name)
 
-        if gradient_normalization is None:
-            gradient_normalization = e3nn.config("gradient_normalization")
-        if isinstance(gradient_normalization, str):
-            gradient_normalization = {"element": 0.0, "path": 1.0}[
-                gradient_normalization
-            ]
-        self.gradient_normalization = gradient_normalization
+        if irrep_normalization is None:
+            irrep_normalization = "component"
+        if path_normalization is None:
+            path_normalization = "element"
 
-        if isinstance(keep_irrep_out, str):
-            keep_irrep_out = e3nn.Irreps(keep_irrep_out)
-            assert all(mul == 1 for mul, _ in keep_irrep_out)
+        assert irrep_normalization in ["component", "norm", "none"]
+        assert path_normalization in ["element", "path", "none"]
 
-        self.keep_irrep_out = {e3nn.Irrep(ir) for ir in keep_irrep_out}
-        self.num_species = num_species
-        self.symmetric_tensor_product_basis = symmetric_tensor_product_basis
-        self.off_diagonal = off_diagonal
+        self.irreps_in = Irreps(irreps_in)
+        self.irreps_out = Irreps(irreps_out)
+        self.num_elements = int(num_elements or 1)
+        self.use_reduced_cg = bool(use_reduced_cg)
 
-    def __call__(self, input: e3nn.IrrepsArray, index: jnp.ndarray) -> e3nn.IrrepsArray:
-        def fn(input: e3nn.IrrepsArray, index: jnp.ndarray):
-            # - This operation is parallel on the feature dimension (but each feature has its own parameters)
-            # This operation is an efficient implementation of
-            # vmap(lambda w, x: FunctionalLinear(irreps_out)(w, concatenate([x, tensor_product(x, x), tensor_product(x, x, x), ...])))(w, x)
-            # up to x power self.correlation
-            assert input.ndim == 2  # [num_features, irreps_x.dim]
-            assert index.ndim == 0  # int
+        # Normalize correlation into dict[Irrep, int]
+        if not isinstance(correlation, dict):
+            corr_val = correlation
+            self.correlation = {irrep_out: corr_val for irrep_out in self.irreps_out}
 
-            out = dict()
+        assert shared_weights or not internal_weights
 
-            for order in range(self.correlation, 0, -1):  # correlation, ..., 1
-                if self.off_diagonal:
-                    x_ = jnp.roll(input.array, A025582[order - 1])
-                else:
-                    x_ = input.array
+        if internal_weights is None:
+            internal_weights = True
 
-                if self.symmetric_tensor_product_basis:
-                    U = e3nn.reduced_symmetric_tensor_product_basis(
-                        input.irreps, order, keep_ir=self.keep_irrep_out
-                    )
-                else:
-                    U = e3nn.reduced_tensor_product_basis(
-                        [input.irreps] * order, keep_ir=self.keep_irrep_out
-                    )
-                # U = U / order  # normalization TODO(mario): put back after testing
-                # NOTE(mario): The normalization constants (/order and /mul**0.5)
-                # has been numerically checked to be correct.
+        self.internal_weights = internal_weights
+        self.shared_weights = shared_weights
 
-                # TODO(mario) implement norm_p
-
-                # ((w3 x + w2) x + w1) x
-                #  \-----------/
-                #       out
-
-                for (mul, ir_out), u in zip(U.irreps, U.list):
-                    u = u.astype(x_.dtype)
-                    # u: ndarray [(irreps_x.dim)^order, multiplicity, ir_out.dim]
-
-                    w = hk.get_parameter(
-                        f"w{order}_{ir_out}",
-                        (self.num_species, mul, input.shape[0]),
-                        dtype=jnp.float32,
-                        init=hk.initializers.RandomNormal(
-                            stddev=(mul**-0.5) ** (1.0 - self.gradient_normalization)
-                        ),
-                    )[index]  # [multiplicity, num_features]
-                    w = (
-                        w * (mul**-0.5) ** self.gradient_normalization
-                    )  # normalize weights
-
-                    if ir_out not in out:
-                        out[ir_out] = (
-                            "special",
-                            jnp.einsum("...jki,kc,cj->c...i", u, w, x_),
-                        )  # [num_features, (irreps_x.dim)^(oder-1), ir_out.dim]
-                    else:
-                        out[ir_out] += jnp.einsum(
-                            "...ki,kc->c...i", u, w
-                        )  # [num_features, (irreps_x.dim)^order, ir_out.dim]
-
-                # ((w3 x + w2) x + w1) x
-                #  \----------------/
-                #         out (in the normal case)
-
-                for ir_out in out:
-                    if isinstance(out[ir_out], tuple):
-                        out[ir_out] = out[ir_out][1]
-                        continue  # already done (special case optimization above)
-
-                    out[ir_out] = jnp.einsum(
-                        "c...ji,cj->c...i", out[ir_out], x_
-                    )  # [num_features, (irreps_x.dim)^(oder-1), ir_out.dim]
-
-                # ((w3 x + w2) x + w1) x
-                #  \-------------------/
-                #           out
-
-            # out[irrep_out] : [num_features, ir_out.dim]
-            irreps_out = e3nn.Irreps(sorted(out.keys()))
-            return e3nn.IrrepsArray.from_list(
-                irreps_out,
-                [out[ir][:, None, :] for (_, ir) in irreps_out],
-                (input.shape[0],),
+    def __call__(self, x: jnp.ndarray, y: jnp.ndarray) -> jnp.ndarray:
+        outs = []
+        for irrep_out in self.irreps_out:
+            contraction = Contraction(
+                irreps_in=self.irreps_in,
+                irrep_out=Irreps(str(irrep_out.ir)),
+                correlation=self.correlation[irrep_out],
+                internal_weights=self.internal_weights,
+                num_elements=self.num_elements,
+                weights=self.shared_weights,
+                use_reduced_cg=self.use_reduced_cg,
             )
-
-        # Treat batch indices using vmap
-        shape = jnp.broadcast_shapes(input.shape[:-2], index.shape)
-        input = input.broadcast_to(shape + input.shape[-2:])
-        index = jnp.broadcast_to(index, shape)
-
-        fn_mapped = fn
-        for _ in range(input.ndim - 2):
-            fn_mapped = hk.vmap(fn_mapped, split_rng=False)
-
-        return fn_mapped(input, index)
+            outs.append(contraction(x, y))
+        return jnp.concatenate(outs, axis=-1)
