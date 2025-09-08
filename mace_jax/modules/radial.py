@@ -7,6 +7,9 @@
 import jax.numpy as jnp
 import haiku as hk
 import numpy as np
+from typing import Optional
+
+from .special import chebyshev_polynomial_t
 
 
 class BesselBasis(hk.Module):
@@ -55,4 +58,34 @@ class BesselBasis(hk.Module):
         return (
             f"{self.__class__.__name__}(r_max={self.r_max_val}, "
             f"num_basis={self.num_basis}, trainable={self.trainable})"
+        )
+
+
+class ChebychevBasis(hk.Module):
+    """
+    JAX/Haiku version of ChebychevBasis (Equation 7).
+    """
+
+    def __init__(self, r_max: float, num_basis: int = 8, name: Optional[str] = None):
+        super().__init__(name=name)
+        self.num_basis = num_basis
+        self.r_max = r_max
+
+        # Precompute n values [1..num_basis]
+        self.n = jnp.arange(1, num_basis + 1)
+
+    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+        """
+        Args:
+            x: shape [..., 1] or [...], radial distances normalized to [-1, 1].
+
+        Returns:
+            shape [..., num_basis]
+        """
+        x = jnp.broadcast_to(x, x.shape[:-1] + (self.num_basis,))
+        return chebyshev_polynomial_t(x, self.n)
+
+    def __repr__(self):
+        return (
+            f"{self.__class__.__name__}(r_max={self.r_max}, num_basis={self.num_basis})"
         )

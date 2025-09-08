@@ -5,6 +5,7 @@ import numpy as np
 
 from mace_jax.modules.special import chebyshev_polynomial_t
 
+
 class TestChebyshevPolynomialT:
     @pytest.mark.parametrize("n", [0, 1, 2, 3, 5, 10])
     @pytest.mark.parametrize("shape", [(5,), (2, 3), (4, 2, 2)])
