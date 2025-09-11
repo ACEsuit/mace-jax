@@ -123,7 +123,7 @@ def codegen_tensor_product_left_right(
 
         # Wigner 3j lookup
         l1, l2, l3 = mul_ir_in1.ir.l, mul_ir_in2.ir.l, mul_ir_out.ir.l
-        w3j = wigner_3j(l1, l2, l3)
+        w3j = jnp.array(wigner_3j(l1, l2, l3))
 
         # contraction modes
         if ins.connection_mode == "uvw":
@@ -533,7 +533,7 @@ def codegen_tensor_product_right(
         # Name would be "_w3j_l1_l2_lout" in the PyTorch codegen,
         # here we just compute them directly
         l1, l2, lout = mul_ir_in1.ir.l, mul_ir_in2.ir.l, mul_ir_out.ir.l
-        w3j = wigner_3j(l1, l2, lout)  # shape (2*l1+1, 2*l2+1, 2*lout+1)
+        w3j = jnp.array(wigner_3j(l1, l2, lout))  # shape (2*l1+1, 2*l2+1, 2*lout+1)
 
         if ins.connection_mode == "uvw":
             assert ins.has_weight

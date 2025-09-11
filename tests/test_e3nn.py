@@ -1,8 +1,11 @@
+import haiku as hk
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 import torch
 from e3nn.o3 import Irreps
+from e3nn.o3 import TensorProduct as TensorProductTorch
 from e3nn.o3._tensor_product._codegen import (
     _sum_tensors as sum_tensors_torch,
 )
@@ -23,6 +26,9 @@ from mace_jax.e3nn._tensor_product._codegen import (
     codegen_tensor_product_right as codegen_tensor_product_right_jax,
 )
 from mace_jax.e3nn._tensor_product._instruction import Instruction
+from mace_jax.e3nn._tensor_product._tensor_product import (
+    TensorProduct as TensorProductJAX,
+)
 
 
 class TestSumTensors:
@@ -207,3 +213,120 @@ class TestTensorProductRight:
         assert np.allclose(out_torch, out_jax_np, rtol=1e-5, atol=1e-6), (
             "JAX right-product output differs from PyTorch output"
         )
+
+
+def compute_weight_numel(instructions, irreps_in1, irreps_in2, irreps_out):
+    numel = 0
+    for ins in instructions:
+        if ins[4]:  # has_weight
+            i1, i2, i_out = ins[:3]
+            mode = ins[3]
+            path_shape = {
+                "uvw": (irreps_in1[i1].mul, irreps_in2[i2].mul, irreps_out[i_out].mul),
+                "uvu": (irreps_in1[i1].mul, irreps_in2[i2].mul),
+                "uvv": (irreps_in1[i1].mul, irreps_in2[i2].mul),
+                "uuw": (irreps_in1[i1].mul, irreps_out[i_out].mul),
+                "uuu": (irreps_in1[i1].mul,),
+                "uvuv": (irreps_in1[i1].mul, irreps_in2[i2].mul),
+            }[mode]
+            numel += np.prod(path_shape)
+    return numel
+
+
+class TestTensorProductAllExamples:
+    @pytest.mark.parametrize("example_idx", list(range(6)))  # we have 6 examples
+    def test_tensor_product_examples(self, example_idx):
+        # ------------------------
+        # Define examples
+        if example_idx == 0:
+            irreps_in1 = irreps_in2 = Irreps("16x1o")
+            irreps_out = Irreps("16x1e")
+            instructions = [(0, 0, 0, "uuu", False)]
+        elif example_idx == 1:
+            irreps_in1 = Irreps("16x1o")
+            irreps_in2 = Irreps("16x1o")
+            irreps_out = Irreps("16x1e")
+            instructions = [(0, 0, 0, "uvw", True)]
+        elif example_idx == 2:
+            irreps_in1 = Irreps("8x0o + 8x1o")
+            irreps_in2 = Irreps("16x1o")
+            irreps_out = Irreps("16x1e")
+            instructions = [
+                (0, 0, 0, "uvw", True, 3),
+                (1, 0, 0, "uvw", True, 1),
+            ]
+        elif example_idx == 3:
+            irreps = Irreps("3x0e + 4x0o + 1e + 2o + 3o")
+            irreps_in1 = irreps_in2 = irreps_out = irreps
+            instructions = [
+                (i, i, 0, "uuw", False) for i, (mul, ir) in enumerate(irreps)
+            ]
+        elif example_idx == 4:
+            irreps_in1 = Irreps("8x0o + 7x1o + 3x2e")
+            irreps_in2 = Irreps("10x0e + 10x1e + 10x2e")
+            irreps_out = Irreps("8x0o + 7x1o + 3x2e")
+            instructions = [
+                (0, 0, 0, "uvu", True),
+                (1, 0, 1, "uvu", True),
+                (1, 1, 1, "uvu", True),
+                (1, 2, 1, "uvu", True),
+                (2, 0, 2, "uvu", True),
+                (2, 1, 2, "uvu", True),
+                (2, 2, 2, "uvu", True),
+            ]
+        elif example_idx == 5:
+            irreps_in1 = Irreps("5x0e + 10x1o + 1x2e")
+            irreps_in2 = Irreps("5x0e + 10x1o + 1x2e")
+            irreps_out = Irreps("5x0e + 10x1o + 1x2e")
+            instructions = [
+                (i1, i2, i_out, "uvw", True, mul1 * mul2)
+                for i1, (mul1, ir1) in enumerate(irreps_in1)
+                for i2, (mul2, ir2) in enumerate(irreps_in2)
+                for i_out, (mul_out, ir_out) in enumerate(irreps_out)
+                if ir_out in ir1 * ir2
+            ]
+        else:
+            raise ValueError(f"Unexpected example_idx {example_idx}")
+
+        # ------------------------
+        # Random inputs
+        batch_size = 4
+        x1 = torch.randn(batch_size, irreps_in1.dim)
+        x2 = torch.randn(batch_size, irreps_in2.dim)
+
+        total_weight_numel = sum(
+            np.prod((irreps_in1[i1].mul, irreps_in2[i2].mul, irreps_out[i_out].mul))
+            if mode == "uvw"
+            else np.prod((irreps_in1[i1].mul, irreps_in2[i2].mul))
+            if mode in ["uvu", "uvv"]
+            else np.prod((irreps_in1[i1].mul, irreps_out[i_out].mul))
+            if mode == "uuw"
+            else 1
+            for i1, i2, i_out, mode, has_weight, *rest in instructions
+            if has_weight
+        )
+        w = torch.randn(total_weight_numel) if total_weight_numel > 0 else None
+
+        # ------------------------
+        # PyTorch
+        tp_torch = TensorProductTorch(irreps_in1, irreps_in2, irreps_out, instructions)
+        out_torch = tp_torch(x1, x2, w).detach().cpu().numpy()
+
+        # ------------------------
+        # JAX
+        def forward_fn(x1_, x2_, w_):
+            tp_jax = TensorProductJAX(irreps_in1, irreps_in2, irreps_out, instructions)
+            return tp_jax(x1_, x2_, w_)
+
+        forward_transformed = hk.transform(forward_fn)
+        rng = jax.random.PRNGKey(42)
+        x1_j = jnp.array(x1.detach().cpu().numpy())
+        x2_j = jnp.array(x2.detach().cpu().numpy())
+        w_j = jnp.array(w.detach().cpu().numpy()) if w is not None else None
+        params = forward_transformed.init(rng, x1_j, x2_j, w_j)
+        out_jax = forward_transformed.apply(params, None, x1_j, x2_j, w_j)
+        out_jax_np = np.array(out_jax)
+
+        # ------------------------
+        # Compare outputs
+        np.testing.assert_allclose(out_torch, out_jax_np, rtol=1e-5, atol=1e-6)

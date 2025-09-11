@@ -11,8 +11,8 @@ import numpy as np
 from e3nn import get_optimization_defaults
 from e3nn_jax import Irreps
 
-from .codegen import tensor_product_left_right, tensor_product_right
-from .instruction import Instruction
+from ._codegen import codegen_tensor_product_left_right, codegen_tensor_product_right
+from ._instruction import Instruction
 
 
 def prod(iterable):
@@ -24,66 +24,64 @@ def sqrt(x):
 
 
 class TensorProduct(hk.Module):
-    r"""Tensor product with parametrized paths.
+    r"""Tensor product with parametrized paths (JAX/Haiku version).
 
     Parameters
     ----------
-    irreps_in1 : `e3nn.o3.Irreps`
+    irreps_in1 : `Irreps`
         Irreps for the first input.
 
-    irreps_in2 : `e3nn.o3.Irreps`
+    irreps_in2 : `Irreps`
         Irreps for the second input.
 
-    irreps_out : `e3nn.o3.Irreps`
+    irreps_out : `Irreps`
         Irreps for the output.
 
     instructions : list of tuple
         List of instructions ``(i_1, i_2, i_out, mode, train[, path_weight])``.
 
-        Each instruction puts ``in1[i_1]`` :math:`\otimes` ``in2[i_2]`` into ``out[i_out]``.
+        Each instruction specifies that ``in1[i_1]`` :math:`\otimes` ``in2[i_2]`` contributes to ``out[i_out]``.
 
-        * ``mode``: `str`. Determines the way the multiplicities are treated, ``"uvw"`` is fully connected. Other valid
-        options are: ``'uvw'``, ``'uvu'``, ``'uvv'``, ``'uuw'``, ``'uuu'``, and ``'uvuv'``.
+        * ``mode``: `str`. Determines how multiplicities are treated. `"uvw"` is fully connected.
+        Other valid options: ``'uvw'``, ``'uvu'``, ``'uvv'``, ``'uuw'``, ``'uuu'``, ``'uvuv'``.
         * ``train``: `bool`. `True` if this path should have learnable weights, otherwise `False`.
-        * ``path_weight``: `float`. A fixed multiplicative weight to apply to the output of this path. Defaults to 1. Note
-        that setting ``path_weight`` breaks the normalization derived from ``in1_var``/``in2_var``/``out_var``.
+        * ``path_weight``: `float`. Fixed multiplicative weight for the path. Defaults to 1. Overrides normalization from `in1_var`, `in2_var`, `out_var`.
 
-    in1_var : list of float, Tensor, or None
-        Variance for each irrep in ``irreps_in1``. If ``None``, all default to ``1.0``.
+    in1_var : list of float, array, or None
+        Variance for each irrep in ``irreps_in1``. Defaults to 1.0 if `None`.
 
-    in2_var : list of float, Tensor, or None
-        Variance for each irrep in ``irreps_in2``. If ``None``, all default to ``1.0``.
+    in2_var : list of float, array, or None
+        Variance for each irrep in ``irreps_in2``. Defaults to 1.0 if `None`.
 
-    out_var : list of float, Tensor, or None
-        Variance for each irrep in ``irreps_out``. If ``None``, all default to ``1.0``.
+    out_var : list of float, array, or None
+        Variance for each irrep in ``irreps_out``. Defaults to 1.0 if `None`.
 
-    irrep_normalization : {'component', 'norm'}
-        The assumed normalization of the input and output representations. If it is set to "norm":
+    irrep_normalization : {'component', 'norm', 'none'}, default 'component'
+        Normalization of input and output representations:
 
-        .. math::
+        - `"component"`: each component is normalized.
+        - `"norm"`: the tensor product preserves the norm.
+        - `"none"`: no normalization applied.
 
-            \| x \| = \| y \| = 1 \Longrightarrow \| x \otimes y \| = 1
+    path_normalization : {'element', 'path', 'none'}, default 'element'
+        Normalization applied to paths:
 
-    path_normalization : {'element', 'path'}
-        If set to ``element``, each output is normalized by the total number of elements (independently of their paths).
-        If it is set to ``path``, each path is normalized by the total number of elements in the path, then each output is
-        normalized by the number of paths.
+        - `"element"`: each output is normalized by the total number of elements independently of their paths.
+        - `"path"`: each path is normalized by the number of elements in the path, then each output is normalized by the number of paths.
+        - `"none"`: no normalization applied.
 
     internal_weights : bool
-        whether the `e3nn.o3.TensorProduct` contains its learnable weights as a parameter
+        Whether the module contains its learnable weights as internal Haiku parameters.
 
     shared_weights : bool
-        whether the learnable weights are shared among the input's extra dimensions
+        Whether the learnable weights are shared across batch dimensions:
 
-        * `True` :math:`z_i = w x_i \otimes y_i`
-        * `False` :math:`z_i = w_i x_i \otimes y_i`
-
-        where here :math:`i` denotes a *batch-like* index.
-        ``shared_weights`` cannot be `False` if ``internal_weights`` is `True`.
+        - `True`: same weight used for all batch elements.
+        - `False`: each batch element has its own weights (requires `internal_weights=False`).
 
     Examples
     --------
-    Create a module that computes elementwise the cross-product of 16 vectors with 16 vectors :math:`z_u = x_u \wedge y_u`
+    Compute the cross product of vectors:
 
     >>> module = TensorProduct(
     ...     "16x1o", "16x1o", "16x1e",
@@ -92,7 +90,7 @@ class TensorProduct(hk.Module):
     ...     ]
     ... )
 
-    Now mix all 16 vectors with all 16 vectors to makes 16 pseudo-vectors :math:`z_w = \sum_{u,v} w_{uvw} x_u \wedge y_v`
+    Fully connected combination of vectors:
 
     >>> module = TensorProduct(
     ...     [(16, (1, -1))],
@@ -103,7 +101,7 @@ class TensorProduct(hk.Module):
     ...     ]
     ... )
 
-    With custom input variance and custom path weights:
+    With custom path weights and input variances:
 
     >>> module = TensorProduct(
     ...     "8x0o + 8x1o",
@@ -118,7 +116,7 @@ class TensorProduct(hk.Module):
 
     Example of a dot product:
 
-    >>> irreps = o3.Irreps("3x0e + 4x0o + 1e + 2o + 3o")
+    >>> irreps = Irreps("3x0e + 4x0o + 1e + 2o + 3o")
     >>> module = TensorProduct(irreps, irreps, "0e", [
     ...     (i, i, 0, 'uuw', False)
     ...     for i, (mul, ir) in enumerate(irreps)
@@ -131,26 +129,25 @@ class TensorProduct(hk.Module):
     ...     "10x0e + 10x1e + 10x2e",
     ...     "8x0o + 7x1o + 3x2e",
     ...     [
-    ...         # paths for the l=0:
-    ...         (0, 0, 0, "uvu", True),  # 0x0->0
-    ...         # paths for the l=1:
-    ...         (1, 0, 1, "uvu", True),  # 1x0->1
-    ...         (1, 1, 1, "uvu", True),  # 1x1->1
-    ...         (1, 2, 1, "uvu", True),  # 1x2->1
-    ...         # paths for the l=2:
-    ...         (2, 0, 2, "uvu", True),  # 2x0->2
-    ...         (2, 1, 2, "uvu", True),  # 2x1->2
-    ...         (2, 2, 2, "uvu", True),  # 2x2->2
+    ...         # paths for l=0
+    ...         (0, 0, 0, "uvu", True),
+    ...         # paths for l=1
+    ...         (1, 0, 1, "uvu", True),
+    ...         (1, 1, 1, "uvu", True),
+    ...         (1, 2, 1, "uvu", True),
+    ...         # paths for l=2
+    ...         (2, 0, 2, "uvu", True),
+    ...         (2, 1, 2, "uvu", True),
+    ...         (2, 2, 2, "uvu", True),
     ...     ]
     ... )
 
-    Tensor Product using the xavier uniform initialization:
+    Tensor Product using Xavier uniform initialization:
 
-    >>> irreps_1 = o3.Irreps("5x0e + 10x1o + 1x2e")
-    >>> irreps_2 = o3.Irreps("5x0e + 10x1o + 1x2e")
-    >>> irreps_out = o3.Irreps("5x0e + 10x1o + 1x2e")
-    >>> # create a Fully Connected Tensor Product
-    >>> module = o3.TensorProduct(
+    >>> irreps_1 = Irreps("5x0e + 10x1o + 1x2e")
+    >>> irreps_2 = Irreps("5x0e + 10x1o + 1x2e")
+    >>> irreps_out = Irreps("5x0e + 10x1o + 1x2e")
+    >>> module = TensorProduct(
     ...     irreps_1,
     ...     irreps_2,
     ...     irreps_out,
@@ -162,17 +159,13 @@ class TensorProduct(hk.Module):
     ...         if ir_out in ir_1 * ir_2
     ...     ]
     ... )
-    >>> with torch.no_grad():
-    ...     for weight in module.weight_views():
-    ...         mul_1, mul_2, mul_out = weight.shape
-    ...         # formula from torch.nn.init.xavier_uniform_
-    ...         a = (6 / (mul_1 * mul_2 + mul_out))**0.5
-    ...         new_weight = torch.empty_like(weight)
-    ...         new_weight.uniform_(-a, a)
-    ...         weight[:] = new_weight
-    tensor(...)
-    >>> n = 1_000
-    >>> vars = module(irreps_1.randn(n, -1), irreps_2.randn(n, -1)).var(0)
+    >>> # initialize weights
+    >>> for weight in module.weight_views():
+    ...     mul_1, mul_2, mul_out = weight.shape
+    ...     a = jnp.sqrt(6 / (mul_1 * mul_2 + mul_out))
+    ...     weight[:] = jax.random.uniform(jax.random.PRNGKey(0), shape=weight.shape, minval=-a, maxval=a)
+    >>> n = 1000
+    >>> vars = module(Irreps.randn(irreps_1, n, -1), Irreps.randn(irreps_2, n, -1)).var(0)
     >>> assert vars.min() > 1 / 3
     >>> assert vars.max() < 3
     """
@@ -533,18 +526,18 @@ class TensorProduct(hk.Module):
 
         weight = self._get_weights(weight)
 
-        return tensor_product_right(
+        return codegen_tensor_product_right(
+            y,
+            weight,
             self.irreps_in1,
             self.irreps_in2,
             self.irreps_out,
             self.instructions,
-            y,
-            weight,
             self.shared_weights,
             self._specialized_code,
         )
 
-    def forward(self, x, y, weight: Optional[torch.Tensor] = None):
+    def __call__(self, x, y, weight: Optional[jax.Array] = None):
         r"""Evaluate :math:`w x \otimes y`.
 
         Parameters
@@ -572,14 +565,14 @@ class TensorProduct(hk.Module):
 
         weight = self._get_weights(weight)
 
-        return tensor_product_left_right(
+        return codegen_tensor_product_left_right(
+            x,
+            y,
+            weight,
             self.irreps_in1,
             self.irreps_in2,
             self.irreps_out,
             self.instructions,
-            x,
-            y,
-            weight,
             self.shared_weights,
             self._specialized_code,
         )
