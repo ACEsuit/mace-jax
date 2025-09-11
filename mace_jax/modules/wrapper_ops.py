@@ -3,12 +3,12 @@ Wrapper class for o3.Linear that optionally uses cuet.Linear
 """
 
 import dataclasses
-import types
+from typing import Callable, Optional
+
 import jax.numpy as jnp
-from typing import Callable, List, Optional, Union
+from e3nn_jax import Irreps
 
-from e3nn_jax import Irreps, IrrepsArray, haiku as e3nn_hk, tensor_product
-
+from mace_jax.e3nn import _tensor_product as _tp
 from mace_jax.modules.symmetric_contraction import SymmetricContraction
 from mace_jax.tools.cg import O3_e3nn
 from mace_jax.tools.scatter import scatter_sum
@@ -214,7 +214,7 @@ class TensorProduct:
             raise NotImplementedError("OEQ backend not yet ported to JAX")
 
         # --- Default: fallback to e3nn_jax.TensorProduct ---
-        return o3.TensorProduct(
+        return _tp.TensorProduct(
             irreps_in1,
             irreps_in2,
             irreps_out,
@@ -222,3 +222,77 @@ class TensorProduct:
             shared_weights=shared_weights,
             internal_weights=internal_weights,
         )
+
+
+def FullyConnectedTensorProduct(
+    irreps_in1: Irreps,
+    irreps_in2: Irreps,
+    irreps_out: Irreps,
+    shared_weights: bool = True,
+    internal_weights: bool = True,
+    cueq_config: Optional[CuEquivarianceConfig] = None,
+):
+    """
+    Wrapper around o3.FullyConnectedTensorProduct (JAX version).
+    If cuequivariance is available and enabled, would return an accelerated version.
+    Otherwise, defaults to e3nn_jax.o3.FullyConnectedTensorProduct.
+    """
+    if (
+        CUET_AVAILABLE
+        and cueq_config is not None
+        and cueq_config.enabled
+        and (cueq_config.optimize_all or cueq_config.optimize_fctp)
+    ):
+        # No JAX cuet binding available (PyTorch only).
+        raise NotImplementedError(
+            "cuet.FullyConnectedTensorProduct is not available in JAX."
+        )
+
+    # Default: e3nn_jax implementation
+    return _tp.FullyConnectedTensorProduct(
+        irreps_in1,
+        irreps_in2,
+        irreps_out,
+        shared_weights=shared_weights,
+        internal_weights=internal_weights,
+    )
+
+
+def SymmetricContractionWrapper(
+    irreps_in: Irreps,
+    irreps_out: Irreps,
+    correlation: int,
+    num_elements: Optional[int] = None,
+    cueq_config: Optional["CuEquivarianceConfig"] = None,
+    oeq_config: Optional["OEQConfig"] = None,  # unused for JAX
+    use_reduced_cg: bool = True,
+):
+    """
+    JAX implementation of SymmetricContraction.
+
+    Notes:
+    - In PyTorch, cuet.SymmetricContraction can accelerate this.
+    - In JAX, cuequivariance_jax does NOT expose SymmetricContraction, so we
+      always build it ourselves from tensor products.
+    """
+
+    return SymmetricContraction(
+        irreps_in=irreps_in,
+        irreps_out=irreps_out,
+        correlation=correlation,
+        num_elements=num_elements,
+        use_reduced_cg=use_reduced_cg,
+    )
+
+
+class TransposeIrrepsLayoutWrapper:
+    """Wrapper around cuet.TransposeIrrepsLayout"""
+
+    def __new__(
+        cls,
+        irreps: Irreps,
+        source: str,
+        target: str,
+        cueq_config: Optional[CuEquivarianceConfig] = None,
+    ):
+        return None
