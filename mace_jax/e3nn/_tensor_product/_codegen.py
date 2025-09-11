@@ -59,17 +59,20 @@ def codegen_tensor_product_left_right(
         for i, mul_ir in zip(irreps_in2.slices(), irreps_in2)
     ]
 
-    weight_numel = sum(prod(ins.path_shape) for ins in instructions if ins.has_weight)
+    if weights is not None:
+        weight_numel = sum(
+            prod(ins.path_shape) for ins in instructions if ins.has_weight
+        )
 
-    if weight_numel > 0:
-        # Flatten weights into (batch, total_weight) if not shared
-        weights = jnp.reshape(
-            weights, (-1, weight_numel)
-        )  # shape: (batch?, total_weight)
+        if weight_numel > 0:
+            # Flatten weights into (batch, total_weight) if not shared
+            weights = jnp.reshape(
+                weights, (-1, weight_numel)
+            )  # shape: (batch?, total_weight)
 
-    # If weights are shared (no batch dimension), add fake batch dimension
-    if shared_weights and weights.ndim == 1:
-        weights = weights[None, :]  # shape: (1, total_weight)
+        # If weights are shared (no batch dimension), add fake batch dimension
+        if shared_weights and weights.ndim == 1:
+            weights = weights[None, :]  # shape: (1, total_weight)
 
     # Cache of input irrep pairs whose outer products (xx) have already been computed
     xx_dict = dict()
@@ -444,9 +447,12 @@ def codegen_tensor_product_right(
     batch_numel = x2s.shape[0]
 
     # = Determine number of weights and reshape =
-    weight_numel = sum(prod(ins.path_shape) for ins in instructions if ins.has_weight)
-    if weight_numel > 0:
-        weights = jnp.reshape(weights, (-1, weight_numel))
+    if weights is not None:
+        weight_numel = sum(
+            prod(ins.path_shape) for ins in instructions if ins.has_weight
+        )
+        if weight_numel > 0:
+            weights = jnp.reshape(weights, (-1, weight_numel))
 
     # = Extract individual input irreps =
     x2_list = []

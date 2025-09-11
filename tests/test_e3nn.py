@@ -215,24 +215,6 @@ class TestTensorProductRight:
         )
 
 
-def compute_weight_numel(instructions, irreps_in1, irreps_in2, irreps_out):
-    numel = 0
-    for ins in instructions:
-        if ins[4]:  # has_weight
-            i1, i2, i_out = ins[:3]
-            mode = ins[3]
-            path_shape = {
-                "uvw": (irreps_in1[i1].mul, irreps_in2[i2].mul, irreps_out[i_out].mul),
-                "uvu": (irreps_in1[i1].mul, irreps_in2[i2].mul),
-                "uvv": (irreps_in1[i1].mul, irreps_in2[i2].mul),
-                "uuw": (irreps_in1[i1].mul, irreps_out[i_out].mul),
-                "uuu": (irreps_in1[i1].mul,),
-                "uvuv": (irreps_in1[i1].mul, irreps_in2[i2].mul),
-            }[mode]
-            numel += np.prod(path_shape)
-    return numel
-
-
 class TestTensorProductAllExamples:
     @pytest.mark.parametrize("example_idx", list(range(6)))  # we have 6 examples
     def test_tensor_product_examples(self, example_idx):
@@ -257,7 +239,8 @@ class TestTensorProductAllExamples:
             ]
         elif example_idx == 3:
             irreps = Irreps("3x0e + 4x0o + 1e + 2o + 3o")
-            irreps_in1 = irreps_in2 = irreps_out = irreps
+            irreps_in1 = irreps_in2 = irreps
+            irreps_out = Irreps("0e")
             instructions = [
                 (i, i, 0, "uuw", False) for i, (mul, ir) in enumerate(irreps)
             ]
