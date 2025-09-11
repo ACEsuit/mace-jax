@@ -1,13 +1,17 @@
+import math
 import warnings
 from functools import reduce
 from operator import mul
 from typing import Any, List, Optional, Union
 
 import haiku as hk
+import jax
 import jax.numpy as jnp
+import numpy as np
+from e3nn import get_optimization_defaults
 from e3nn_jax import Irreps
 
-from .codegen import tensor_product_left_right
+from .codegen import tensor_product_left_right, tensor_product_right
 from .instruction import Instruction
 
 
@@ -180,7 +184,6 @@ class TensorProduct(hk.Module):
     _did_compile_right: bool
     _specialized_code: bool
     _optimize_einsums: bool
-    _profiling_str: str
     _in1_dim: int
     _in2_dim: int
 
@@ -381,7 +384,7 @@ class TensorProduct(hk.Module):
         self.internal_weights = internal_weights
         self.shared_weights = shared_weights
 
-        opt_defaults = e3nn.get_optimization_defaults()
+        opt_defaults = get_optimization_defaults()
         self._specialized_code = (
             _specialized_code
             if _specialized_code is not None
@@ -398,36 +401,27 @@ class TensorProduct(hk.Module):
         self.weight_numel = sum(
             prod(ins.path_shape) for ins in self.instructions if ins.has_weight
         )
+        self.internal_weights = internal_weights
 
-        if internal_weights and self.weight_numel > 0:
-            assert self.shared_weights, "Having internal weights impose shared weights"
-            self.weight = torch.nn.Parameter(torch.randn(self.weight_numel))
-        else:
-            # For TorchScript, there always has to be some kind of defined .weight
-            self.register_buffer("weight", torch.Tensor())
-
+        # --- Output mask (static, non-trainable) ---
         if self.irreps_out.dim > 0:
-            output_mask = torch.cat(
+            self.output_mask = jnp.concatenate(
                 [
                     (
-                        torch.ones(mul * ir.dim)
+                        jnp.ones(mul * ir.dim)
                         if any(
                             (ins.i_out == i_out)
                             and (ins.path_weight != 0)
                             and (0 not in ins.path_shape)
                             for ins in self.instructions
                         )
-                        else torch.zeros(mul * ir.dim)
+                        else jnp.zeros(mul * ir.dim)
                     )
                     for i_out, (mul, ir) in enumerate(self.irreps_out)
                 ]
             )
         else:
-            output_mask = torch.ones(0)
-        self.register_buffer("output_mask", output_mask)
-
-        # For TorchScript, this needs to be done in advance:
-        self._profiling_str = str(self)
+            self.output_mask = jnp.ones(0)
 
     def __repr__(self) -> str:
         npath = sum(prod(i.path_shape) for i in self.instructions)
@@ -437,55 +431,58 @@ class TensorProduct(hk.Module):
             f"-> {self.irreps_out.simplify()} | {npath} paths | {self.weight_numel} weights)"
         )
 
-    @torch.jit.unused
-    def _prep_weights_python(
-        self, weight: Optional[Union[torch.Tensor, List[torch.Tensor]]]
-    ) -> Optional[torch.Tensor]:
+    def _prep_weights(
+        self, weight: Optional[Union[jnp.ndarray, List[jnp.ndarray]]]
+    ) -> Optional[jnp.ndarray]:
+        """Reshape and concatenate weight list if necessary."""
         if isinstance(weight, list):
             weight_shapes = [
                 ins.path_shape for ins in self.instructions if ins.has_weight
             ]
             if not self.shared_weights:
+                # Each weight must have batch dimension
                 weight = [
-                    w.reshape(-1, prod(shape))
+                    w.reshape((-1, np.prod(shape)))
                     for w, shape in zip(weight, weight_shapes)
                 ]
             else:
                 weight = [
-                    w.reshape(prod(shape)) for w, shape in zip(weight, weight_shapes)
+                    w.reshape(np.prod(shape)) for w, shape in zip(weight, weight_shapes)
                 ]
-            return torch.cat(weight, dim=-1)
+            return jnp.concatenate(weight, axis=-1)
         else:
             return weight
 
-    def _get_weights(self, weight: Optional[torch.Tensor]) -> torch.Tensor:
-        if not torch.jit.is_scripting():
-            # If we're not scripting, then we're in Python and `weight` could be a List[Tensor]
-            # deal with that:
-            weight = self._prep_weights_python(weight)
+    def _get_weights(self, weight: Optional[jnp.ndarray]) -> Optional[jnp.ndarray]:
+        """Retrieve real weight tensor, either from argument or from internal parameters."""
+        weight = self._prep_weights(weight)
+
         if weight is None:
             if self.weight_numel > 0 and not self.internal_weights:
                 raise RuntimeError(
-                    "Weights must be provided when the TensorProduct does not have `internal_weights`"
+                    "Weights must be provided when the TensorProduct does not have internal_weights"
                 )
-            return self.weight
-        else:
-            if self.shared_weights:
-                torch._assert(
-                    weight.shape == (self.weight_numel,), "Invalid weight shape"
+            if self.internal_weights and self.weight_numel > 0:
+                weight = hk.get_parameter(
+                    "weight", [self.weight_numel], init=hk.initializers.RandomNormal()
                 )
             else:
-                torch._assert(
-                    weight.shape[-1] == self.weight_numel, "Invalid weight shape"
+                return None
+        else:
+            if self.shared_weights:
+                assert weight.shape == (self.weight_numel,), (
+                    f"Invalid weight shape {weight.shape}"
                 )
-                torch._assert(
-                    weight.ndim > 1,
-                    "When shared weights is false, weights must have batch dimension",
+            else:
+                assert weight.shape[-1] == self.weight_numel, (
+                    f"Invalid weight shape {weight.shape}"
+                )
+                assert weight.ndim > 1, (
+                    "When shared_weights is False, weights must have batch dimension"
                 )
         return weight
 
-    @torch.jit.export
-    def right(self, y, weight: Optional[torch.Tensor] = None):
+    def right(self, y, weight: Optional[jax.Array] = None):
         r"""Partially evaluate :math:`w x \otimes y`.
 
         It returns an operator in the form of a tensor that can act on an arbitrary :math:`x`.
@@ -529,15 +526,23 @@ class TensorProduct(hk.Module):
         `torch.Tensor`
             tensor of shape ``(..., irreps_in1.dim, irreps_out.dim)``
         """
-        torch._assert(
-            self._did_compile_right,
-            "`right` method is not compiled, set `compile_right` to True when creating the TensorProduct",
+        assert self._did_compile_right, (
+            "`right` method not compiled, set compile_right=True"
         )
-        torch._assert(y.shape[-1] == self._in2_dim, "Incorrect last dimension for y")
+        assert y.shape[-1] == self._in2_dim
 
-        # - PROFILER - with torch.autograd.profiler.record_function(self._profiling_str):
-        real_weight = self._get_weights(weight)
-        return self._compiled_main_right(y, real_weight)
+        weight = self._get_weights(weight)
+
+        return tensor_product_right(
+            self.irreps_in1,
+            self.irreps_in2,
+            self.irreps_out,
+            self.instructions,
+            y,
+            weight,
+            self.shared_weights,
+            self._specialized_code,
+        )
 
     def forward(self, x, y, weight: Optional[torch.Tensor] = None):
         r"""Evaluate :math:`w x \otimes y`.
@@ -565,10 +570,7 @@ class TensorProduct(hk.Module):
         assert x.shape[-1] == self._in1_dim
         assert y.shape[-1] == self._in2_dim
 
-        if weight is None and self.internal_weights and self.weight_numel > 0:
-            weight = hk.get_parameter(
-                "weight", [self.weight_numel], init=hk.initializers.RandomNormal()
-            )
+        weight = self._get_weights(weight)
 
         return tensor_product_left_right(
             self.irreps_in1,
@@ -583,43 +585,39 @@ class TensorProduct(hk.Module):
         )
 
     def weight_view_for_instruction(
-        self, instruction: int, weight: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
-        r"""View of weights corresponding to ``instruction``.
-
-        Parameters
-        ----------
-        instruction : int
-            The index of the instruction to get a view on the weights for. ``self.instructions[instruction].has_weight`` must
-            be ``True``.
-
-        weight : `torch.Tensor`, optional
-            like ``weight`` argument to ``forward()``
-
-        Returns
-        -------
-        `torch.Tensor`
-            A view on ``weight`` or this object's internal weights for the weights corresponding to the ``instruction`` th
-            instruction.
-        """
-        if not self.instructions[instruction].has_weight:
-            raise ValueError(f"Instruction {instruction} has no weights.")
-        offset = sum(prod(ins.path_shape) for ins in self.instructions[:instruction])
+        self, instruction: int, weight: Optional[jnp.ndarray] = None
+    ) -> jnp.ndarray:
+        """Return the weights corresponding to a given instruction."""
         ins = self.instructions[instruction]
+
+        if not ins.has_weight:
+            raise ValueError(f"Instruction {instruction} has no weights.")
+
+        # Get the effective weights (either passed in or internal param)
         weight = self._get_weights(weight)
-        batchshape = weight.shape[:-1]
-        return weight.narrow(-1, offset, prod(ins.path_shape)).view(
-            batchshape + ins.path_shape
+
+        # Compute offset in the flattened weight vector
+        offset = sum(
+            math.prod(prev_ins.path_shape)
+            for prev_ins in self.instructions[:instruction]
         )
+        flatsize = math.prod(ins.path_shape)
+
+        # Slice out the relevant chunk
+        sliced = weight[..., offset : offset + flatsize]
+
+        # Reshape to (..., *ins.path_shape)
+        batchshape = weight.shape[:-1]
+        return jnp.reshape(sliced, batchshape + ins.path_shape)
 
     def weight_views(
-        self, weight: Optional[torch.Tensor] = None, yield_instruction: bool = False
+        self, weight: Optional[jax.Array] = None, yield_instruction: bool = False
     ):
         r"""Iterator over weight views for each weighted instruction.
 
         Parameters
         ----------
-        weight : `torch.Tensor`, optional
+        weight : `jax.Array`, optional
             like ``weight`` argument to ``forward()``
 
         yield_instruction : `bool`, default False
@@ -633,13 +631,16 @@ class TensorProduct(hk.Module):
         weight = self._get_weights(weight)
         batchshape = weight.shape[:-1]
         offset = 0
+
         for ins_i, ins in enumerate(self.instructions):
             if ins.has_weight:
-                flatsize = prod(ins.path_shape)
-                this_weight = weight.narrow(-1, offset, flatsize).view(
-                    batchshape + ins.path_shape
-                )
+                flatsize = math.prod(ins.path_shape)
+                # Slice the relevant portion
+                this_weight = weight[..., offset : offset + flatsize]
+                # Reshape to match instruction path shape
+                this_weight = jnp.reshape(this_weight, batchshape + ins.path_shape)
                 offset += flatsize
+
                 if yield_instruction:
                     yield ins_i, ins, this_weight
                 else:
@@ -647,7 +648,7 @@ class TensorProduct(hk.Module):
 
     def visualize(
         self,
-        weight: Optional[torch.Tensor] = None,
+        weight: Optional[jax.Array] = None,
         plot_weight: bool = True,
         aspect_ratio=1,
         ax=None,
