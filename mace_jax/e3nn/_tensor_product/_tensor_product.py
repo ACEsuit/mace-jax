@@ -1,23 +1,13 @@
-import haiku as hk
-import jax.numpy as jnp
 import warnings
-from typing import Any, List, Optional
 from functools import reduce
 from operator import mul
-
-from e3nn_jax import Irreps, IrrepsArray, tensor_product
-
-from .instruction import Instruction
-
+from typing import Any, List, Optional, Union
 
 import haiku as hk
 import jax.numpy as jnp
-from typing import List, Optional, Union
-from functools import reduce
-from operator import mul
-
 from e3nn_jax import Irreps
 
+from .codegen import tensor_product_left_right
 from .instruction import Instruction
 
 
@@ -86,12 +76,6 @@ class TensorProduct(hk.Module):
 
         where here :math:`i` denotes a *batch-like* index.
         ``shared_weights`` cannot be `False` if ``internal_weights`` is `True`.
-
-    compile_left_right : bool
-        whether to compile the forward function, true by default
-
-    compile_right : bool
-        whether to compile the ``.right`` function, false by default
 
     Examples
     --------
@@ -213,8 +197,6 @@ class TensorProduct(hk.Module):
         path_normalization: str = None,
         internal_weights: Optional[bool] = None,
         shared_weights: Optional[bool] = None,
-        compile_left_right: bool = True,
-        compile_right: bool = False,
         normalization=None,  # for backward compatibility
         _specialized_code: Optional[bool] = None,
         _optimize_einsums: Optional[bool] = None,
@@ -412,70 +394,6 @@ class TensorProduct(hk.Module):
         )
         del opt_defaults
 
-        # Generate the actual tensor product code
-        if compile_left_right:
-            for codegen in _CODEGEN_PROVIDERS_LEFT_RIGHT:
-                graphmod_left_right = codegen(
-                    self.irreps_in1,
-                    self.irreps_in2,
-                    self.irreps_out,
-                    self.instructions,
-                    self.shared_weights,
-                    self._specialized_code,
-                    self._optimize_einsums,
-                )
-                if graphmod_left_right is not None:
-                    break
-            assert graphmod_left_right is not None
-        else:
-            graphmod_left_right = fx.Graph()
-            graphmod_left_right.placeholder("x1", torch.Tensor)
-            graphmod_left_right.placeholder("x2", torch.Tensor)
-            graphmod_left_right.placeholder("w", torch.Tensor)
-            graphmod_left_right.call_function(
-                torch._assert,
-                args=(
-                    False,
-                    "`left_right` method is not compiled, set `compile_left_right` to True when creating the TensorProduct",
-                ),
-            )
-            graphmod_left_right = fx.GraphModule(
-                torch.nn.Module(), graphmod_left_right, class_name="tp_forward"
-            )
-
-        if compile_right:
-            for codegen in _CODEGEN_PROVIDERS_RIGHT:
-                graphmod_right = codegen(
-                    self.irreps_in1,
-                    self.irreps_in2,
-                    self.irreps_out,
-                    self.instructions,
-                    self.shared_weights,
-                    self._specialized_code,
-                    self._optimize_einsums,
-                )
-                if graphmod_right is not None:
-                    break
-            assert graphmod_right is not None
-        else:
-            graphmod_right = fx.Graph()
-            tmp = graphmod_right.placeholder("x2", torch.Tensor)
-            # Make a dummy no-op graph, it can't be empty or causes IndentationError on unpickle
-            graphmod_right.placeholder("w", torch.Tensor)
-            graphmod_right.output(tmp)
-            del tmp
-            graphmod_right = fx.GraphModule(
-                torch.nn.Module(), graphmod_right, class_name="tp_forward"
-            )
-        self._did_compile_right = compile_right
-
-        self._codegen_register(
-            {
-                "_compiled_main_left_right": graphmod_left_right,
-                "_compiled_main_right": graphmod_right,
-            }
-        )
-
         # === Determine weights ===
         self.weight_numel = sum(
             prod(ins.path_shape) for ins in self.instructions if ins.has_weight
@@ -644,13 +562,25 @@ class TensorProduct(hk.Module):
         `torch.Tensor`
             tensor of shape ``(..., irreps_out.dim)``
         """
+        assert x.shape[-1] == self._in1_dim
+        assert y.shape[-1] == self._in2_dim
 
-        torch._assert(x.shape[-1] == self._in1_dim, "Incorrect last dimension for x")
-        torch._assert(y.shape[-1] == self._in2_dim, "Incorrect last dimension for y")
+        if weight is None and self.internal_weights and self.weight_numel > 0:
+            weight = hk.get_parameter(
+                "weight", [self.weight_numel], init=hk.initializers.RandomNormal()
+            )
 
-        # - PROFILER - with torch.autograd.profiler.record_function(self._profiling_str):
-        real_weight = self._get_weights(weight)
-        return self._compiled_main_left_right(x, y, real_weight)
+        return tensor_product_left_right(
+            self.irreps_in1,
+            self.irreps_in2,
+            self.irreps_out,
+            self.instructions,
+            x,
+            y,
+            weight,
+            self.shared_weights,
+            self._specialized_code,
+        )
 
     def weight_view_for_instruction(
         self, instruction: int, weight: Optional[torch.Tensor] = None
