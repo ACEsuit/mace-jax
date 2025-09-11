@@ -4,13 +4,57 @@ import pytest
 import torch
 from e3nn.o3 import Irreps
 from e3nn.o3._tensor_product._codegen import (
+    _sum_tensors as sum_tensors_torch,
+)
+from e3nn.o3._tensor_product._codegen import (
     codegen_tensor_product_left_right as codegen_tensor_product_left_right_torch,
 )
 
 from mace_jax.e3nn._tensor_product._codegen import (
+    _sum_tensors as sum_tensors_jax,
+)
+from mace_jax.e3nn._tensor_product._codegen import (
     codegen_tensor_product_left_right as codegen_tensor_product_left_right_jax,
 )
 from mace_jax.e3nn._tensor_product._instruction import Instruction
+
+
+class TestSumTensors:
+    @pytest.mark.parametrize("shape", [(2, 2), (3, 1), (2, 3, 4)])
+    def test_multiple_tensors(self, shape):
+        # Random tensors
+        torch_tensors = [torch.randn(shape) for _ in range(3)]
+        jax_tensors = [jnp.array(t.numpy()) for t in torch_tensors]
+
+        # Compute results
+        result_torch = sum_tensors_torch(torch_tensors, shape, torch_tensors[0])
+        result_jax = sum_tensors_jax(jax_tensors, shape)
+
+        # Compare
+        np.testing.assert_allclose(
+            result_torch.numpy(), np.array(result_jax), rtol=1e-6, atol=1e-6
+        )
+
+    def test_single_tensor(self):
+        shape = (2, 3)
+        torch_t = torch.randn(shape)
+        jax_t = jnp.array(torch_t.numpy())
+
+        result_torch = sum_tensors_torch([torch_t], shape, torch_t)
+        result_jax = sum_tensors_jax([jax_t], shape)
+
+        np.testing.assert_allclose(
+            result_torch.numpy(), np.array(result_jax), rtol=1e-6, atol=1e-6
+        )
+
+    def test_empty_list(self):
+        shape = (2, 2)
+        like = torch.zeros(shape)
+        result_torch = sum_tensors_torch([], shape, like)
+        result_jax = sum_tensors_jax([], shape)
+        np.testing.assert_allclose(
+            result_torch.numpy(), np.array(result_jax), rtol=1e-6, atol=1e-6
+        )
 
 
 class TestTensorProduct:
@@ -43,9 +87,10 @@ class TestTensorProduct:
         self.batch_size = 4
         self.x1 = torch.randn(self.batch_size, self.irreps_in1.dim)
         self.x2 = torch.randn(self.batch_size, self.irreps_in2.dim)
-        self.w = torch.randn(
+        total_weight_numel = (
             self.irreps_in1[0].dim * self.irreps_in2[0].dim * self.irreps_out[0].dim
         )
+        self.w = torch.randn(self.batch_size, total_weight_numel)
 
     def test_jax_matches_torch(self):
         # ------------------------

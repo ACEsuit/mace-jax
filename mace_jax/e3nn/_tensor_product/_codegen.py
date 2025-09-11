@@ -9,13 +9,15 @@ from e3nn_jax import Irreps
 from ._instruction import Instruction
 
 
-def _sum_tensors(xs: List[jnp.ndarray], shape: tuple, like: jnp.ndarray) -> jnp.ndarray:
+def _sum_tensors(xs: list[jax.Array], shape: tuple[int, ...]) -> jax.Array:
     if len(xs) > 0:
         out = xs[0]
         for x in xs[1:]:
             out = out + x
-        return out
-    return jnp.zeros(shape, dtype=like.dtype)
+        # Ensure output has the full shape
+        return jnp.reshape(out, shape)
+    # Return zeros with the correct 3D shape
+    return jnp.zeros(shape, dtype=jnp.float32)
 
 
 def codegen_tensor_product_left_right(
@@ -56,6 +58,18 @@ def codegen_tensor_product_left_right(
         x2s[:, i].reshape(batch_numel, mul_ir.mul, mul_ir.ir.dim)
         for i, mul_ir in zip(irreps_in2.slices(), irreps_in2)
     ]
+
+    weight_numel = sum(prod(ins.path_shape) for ins in instructions if ins.has_weight)
+
+    if weight_numel > 0:
+        # Flatten weights into (batch, total_weight) if not shared
+        weights = jnp.reshape(
+            weights, (-1, weight_numel)
+        )  # shape: (batch?, total_weight)
+
+    # If weights are shared (no batch dimension), add fake batch dimension
+    if shared_weights and weights.ndim == 1:
+        weights = weights[None, :]  # shape: (1, total_weight)
 
     # Cache of input irrep pairs whose outer products (xx) have already been computed
     xx_dict = dict()
@@ -104,6 +118,9 @@ def codegen_tensor_product_left_right(
                 xx_dict[key] = jnp.einsum("zui,zvj->zuvij", x1, x2)
         xx = xx_dict[key]
 
+        # The einsum string index to prepend to the weights if the weights are not shared and have a batch dimension
+        z = "" if shared_weights else "z"
+
         # Wigner 3j lookup
         l1, l2, l3 = mul_ir_in1.ir.l, mul_ir_in2.ir.l, mul_ir_out.ir.l
         w3j = wigner_3j(l1, l2, l3)
@@ -113,7 +130,7 @@ def codegen_tensor_product_left_right(
             assert ins.has_weight
             if specialized_code and (l1, l2, l3) == (0, 0, 0):
                 result = jnp.einsum(
-                    "uvw,zu,zv->zw",
+                    f"{z}uvw,zu,zv->zw",
                     w,
                     jnp.reshape(x1, (batch_numel, mul_ir_in1.dim)),
                     jnp.reshape(x2, (batch_numel, mul_ir_in2.dim)),
@@ -362,45 +379,24 @@ def codegen_tensor_product_left_right(
         result = ins.path_weight * result
         outputs += [result.reshape(batch_numel, mul_ir_out.dim)]
 
-    # Build per-(i_in1, i_out) sums
-    per_input_outputs = []
-    for i_in1, mul_ir_in1 in enumerate(irreps_in1):
-        if mul_ir_in1.mul <= 0:
-            continue
+    # = Sum outputs per output irrep =
+    outputs_summed = [
+        _sum_tensors(
+            [out for ins, out in zip(instructions, outputs) if ins.i_out == i_out],
+            shape=(batch_numel, mul_ir_out.dim),
+        )
+        for i_out, mul_ir_out in enumerate(irreps_out)
+        if mul_ir_out.mul > 0
+    ]
 
-        outs_for_input = []
-        for i_out, mul_ir_out in enumerate(irreps_out):
-            if mul_ir_out.mul <= 0:
-                continue
-
-            # collect all outputs corresponding to this (i_in1, i_out)
-            matches = [
-                out
-                for ins, out in zip(instructions, outputs)
-                if (ins.i_in1, ins.i_out) == (i_in1, i_out)
-            ]
-
-            block_shape = (batch_numel, mul_ir_in1.dim, mul_ir_out.dim)
-            summed = _sum_tensors(matches, shape=block_shape, like=x2s)
-            outs_for_input.append(summed)
-
-        if len(outs_for_input) == 0:
-            continue
-        elif len(outs_for_input) == 1:
-            per_input = outs_for_input[0]
-        else:
-            per_input = jnp.concatenate(outs_for_input, axis=2)
-
-        per_input_outputs.append(per_input)
-
-    if len(per_input_outputs) == 0:
-        outputs_final = jnp.zeros(output_shape, dtype=x2s.dtype)
+    # Concatenate summed outputs along the output irrep dimension
+    if len(outputs_summed) > 1:
+        outputs_cat = jnp.concatenate(outputs_summed, axis=1)
     else:
-        if len(per_input_outputs) > 1:
-            outputs_cat = jnp.concatenate(per_input_outputs, axis=1)
-        else:
-            outputs_cat = per_input_outputs[0]
+        outputs_cat = outputs_summed[0]
 
-        outputs_final = jnp.reshape(outputs_cat, output_shape)
+    # Final output shape = batch dimensions + total irreps_out dimension
+    final_output_shape = output_shape + (irreps_out.dim,)
+    outputs_final = jnp.reshape(outputs_cat, final_output_shape)
 
     return outputs_final
