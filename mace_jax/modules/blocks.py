@@ -7,6 +7,7 @@ import jax
 import jax.numpy as jnp
 from e3nn_jax import Irreps, IrrepsArray
 
+from mace_jax.e3nn import nn
 from mace_jax.modules.wrapper_ops import (
     CuEquivarianceConfig,
     FullyConnectedTensorProduct,
@@ -292,11 +293,15 @@ class RealAgnosticInteractionBlock(InteractionBlock):
             oeq_config=self.oeq_config,
         )
 
-        # Convolution weights MLP
-        self.conv_tp_weights = hk.nets.MLP(
-            output_sizes=[*self.radial_MLP, self.conv_tp.weight_numel],
-            activation=jax.nn.silu,
-            activate_final=False,
+        # Convolution weights network
+        self.conv_tp_weights = nn.FullyConnectedNet(
+            hs=[self.edge_feats_irreps.num_irreps]
+            + self.radial_MLP
+            + [self.conv_tp.weight_numel],
+            act=jax.nn.silu,
+            variance_in=1.0,
+            variance_out=1.0,
+            out_act=True,  # matches PyTorch, which applies SiLU on the final layer
             name="conv_tp_weights",
         )
 
