@@ -19,7 +19,6 @@ from e3nn.o3._tensor_product._codegen import (
     codegen_tensor_product_right as codegen_tensor_product_right_torch,
 )
 
-from mace_jax.e3nn._linear import Instruction as InstructionLinear
 from mace_jax.e3nn._linear import Linear as LinearJax
 from mace_jax.e3nn._tensor_product._codegen import (
     _sum_tensors as sum_tensors_jax,
@@ -335,34 +334,34 @@ class TestCodegenLinear:
         irreps_in = Irreps("4x0e + 3x1o")
         irreps_out = Irreps("4x0e + 3x1o")
 
-        # Example instructions (block-sparse)
-        instructions = [
-            InstructionLinear(i_in=0, i_out=0, path_shape=(4,), path_weight=1.0),
-            InstructionLinear(i_in=1, i_out=1, path_shape=(3,), path_weight=1.0),
-            InstructionLinear(
-                i_in=-1, i_out=0, path_shape=(4,), path_weight=1.0
-            ),  # bias
-        ]
-
-        weight_numel, bias_numel = self.compute_weight_bias_numel(
-            instructions, irreps_in, irreps_out
+        # ========== PyTorch Linear ==========
+        linear_torch = LinearTorch(
+            irreps_in,
+            irreps_out,
         )
+        weight_numel = linear_torch.weight_numel
+        bias_numel = linear_torch.bias_numel
 
         # Create random inputs (PyTorch)
         x_torch = torch.randn(batch_size, f_in, irreps_in.dim, dtype=torch.float32)
-        ws_torch = torch.randn((1, f_in, f_out, weight_numel), dtype=torch.float32)
-        bs_torch = torch.randn((1, f_out, bias_numel), dtype=torch.float32)
+        ws_torch = torch.randn(weight_numel, dtype=torch.float32)
+        bs_torch = torch.randn(bias_numel, dtype=torch.float32)
 
+        # Use the same weights and biases
+        linear_torch.weight = torch.nn.Parameter(ws_torch)
+        linear_torch.bias = torch.nn.Parameter(bs_torch)
+
+        out_torch = linear_torch(x_torch)
+        out_torch_np = out_torch.detach().numpy()
+
+        # ========== JAX/Haiku Linear ==========
         # Convert to JAX
         x_jax = jnp.array(x_torch.numpy())
         ws_jax = jnp.array(ws_torch.numpy())
         bs_jax = jnp.array(bs_torch.numpy())
 
-        # ========== JAX/Haiku Linear ==========
         def forward_fn(x, w, b):
-            linear = LinearJax(
-                irreps_in, irreps_out, f_in=f_in, f_out=f_out, shared_weights=True
-            )
+            linear = LinearJax(irreps_in, irreps_out, shared_weights=True)
             return linear(x, w, b)
 
         linear_transformed = hk.without_apply_rng(hk.transform(forward_fn))
@@ -372,21 +371,6 @@ class TestCodegenLinear:
 
         # Apply the Linear layer
         out_jax = linear_transformed.apply(params, x_jax, ws_jax, bs_jax)
-
-        # ========== PyTorch Linear ==========
-        linear_torch = LinearTorch(
-            irreps_in, irreps_out, f_in=f_in, f_out=f_out, shared_weights=True
-        )
-        # Use the same weights and biases
-        linear_torch.weight = torch.nn.Parameter(
-            torch.tensor(ws_jax, dtype=torch.float32)
-        )
-        linear_torch.bias = torch.nn.Parameter(
-            torch.tensor(bs_jax, dtype=torch.float32)
-        )
-
-        out_torch = linear_torch(x_torch)
-        out_torch_np = out_torch.detach().numpy()
 
         # Compare outputs
         assert jnp.allclose(out_jax, out_torch_np, atol=1e-5), (

@@ -334,7 +334,6 @@ def _codegen_linear(
         _sum_tensors(
             [out for ins, out in zip(instructions, out_list) if ins.i_out == i_out],
             shape=(batch_out, *(() if f_out is None else (f_out,)), mul_ir_out.dim),
-            like=x,
         )
         for i_out, mul_ir_out in enumerate(irreps_out)
         if mul_ir_out.mul > 0
