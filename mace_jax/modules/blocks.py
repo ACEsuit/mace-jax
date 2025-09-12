@@ -18,7 +18,6 @@ from mace_jax.modules.wrapper_ops import (
 from mace_jax.tools.scatter import scatter_sum
 
 from .irreps_tools import reshape_irreps, tp_out_irreps_with_instructions
-from .message_passing import MessagePassingConvolution
 from .symmetric_contraction import SymmetricContraction
 
 
@@ -145,47 +144,6 @@ class EquivariantProductBasisBlock(hk.Module):
         node_feats = self.symmetric_contractions(node_feats, node_specie)
         node_feats = node_feats.axis_to_mul()
         return e3nn.haiku.Linear(self.target_irreps)(node_feats)
-
-
-class InteractionBlock(hk.Module):
-    def __init__(
-        self,
-        *,
-        target_irreps: Irreps,
-        avg_num_neighbors: float,
-        max_ell: int,
-        activation: Callable,
-    ) -> None:
-        super().__init__()
-        self.target_irreps = target_irreps
-        self.avg_num_neighbors = avg_num_neighbors
-        self.max_ell = max_ell
-        self.activation = activation
-
-    def __call__(
-        self,
-        vectors: IrrepsArray,  # [n_edges, 3]
-        node_feats: IrrepsArray,  # [n_nodes, irreps]
-        radial_embedding: jnp.ndarray,  # [n_edges, radial_embedding_dim]
-        senders: jnp.ndarray,  # [n_edges, ]
-        receivers: jnp.ndarray,  # [n_edges, ]
-    ) -> Tuple[IrrepsArray, IrrepsArray]:
-        assert node_feats.ndim == 2
-        assert vectors.ndim == 2
-        assert radial_embedding.ndim == 2
-
-        node_feats = e3nn.haiku.Linear(node_feats.irreps, name="linear_up")(node_feats)
-
-        node_feats = MessagePassingConvolution(
-            self.avg_num_neighbors, self.target_irreps, self.max_ell, self.activation
-        )(vectors, node_feats, radial_embedding, senders, receivers)
-
-        node_feats = e3nn.haiku.Linear(self.target_irreps, name="linear_down")(
-            node_feats
-        )
-
-        assert node_feats.ndim == 2
-        return node_feats  # [n_nodes, target_irreps]
 
 
 class InteractionBlock(hk.Module, metaclass=abc.ABCMeta):
