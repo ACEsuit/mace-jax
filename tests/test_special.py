@@ -26,6 +26,4 @@ class TestChebyshevPolynomialT:
 
         # compare
         assert out_torch.shape == out_jax.shape
-        print("out_torch:", out_torch)
-        print("out_jax:", out_jax)
         np.testing.assert_allclose(out_jax, out_torch, rtol=1e-5, atol=1e-6)
