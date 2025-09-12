@@ -8,7 +8,7 @@ import pytest
 import torch
 from e3nn.o3 import Irreps
 from e3nn.o3 import TensorProduct as TensorProductTorch
-from e3nn.o3._linear import _codegen_linear as codegen_linear_torch
+from e3nn.o3._linear import Linear as LinearTorch
 from e3nn.o3._tensor_product._codegen import (
     _sum_tensors as sum_tensors_torch,
 )
@@ -20,7 +20,7 @@ from e3nn.o3._tensor_product._codegen import (
 )
 
 from mace_jax.e3nn._linear import Instruction as InstructionLinear
-from mace_jax.e3nn._linear import _codegen_linear as codegen_linear_jax
+from mace_jax.e3nn._linear import Linear as LinearJax
 from mace_jax.e3nn._tensor_product._codegen import (
     _sum_tensors as sum_tensors_jax,
 )
@@ -326,9 +326,7 @@ class TestCodegenLinear:
         weight_numel = sum(
             prod(ins.path_shape) for ins in instructions if ins.i_in != -1
         )
-        bias_numel = sum(
-            irreps_out[ins.i_out].dim for ins in instructions if ins.i_in == -1
-        )
+        bias_numel = sum(prod(ins.path_shape) for ins in instructions if ins.i_in == -1)
         return weight_numel, bias_numel
 
     @pytest.mark.parametrize("batch_size,f_in,f_out", [(2, 3, 4)])
@@ -360,22 +358,35 @@ class TestCodegenLinear:
         ws_jax = jnp.array(ws_torch.numpy())
         bs_jax = jnp.array(bs_torch.numpy())
 
-        # PyTorch: build graph without optimizing einsums
-        graphmod_out, _, _ = codegen_linear_torch(
-            irreps_in,
-            irreps_out,
-            instructions,
-            f_in=f_in,
-            f_out=f_out,
-            optimize_einsums=False,
-        )
-        out_torch = graphmod_out(x_torch, ws_torch, bs_torch)
-        out_torch_np = out_torch.detach().numpy()
+        # ========== JAX/Haiku Linear ==========
+        def forward_fn(x, w, b):
+            linear = LinearJax(
+                irreps_in, irreps_out, f_in=f_in, f_out=f_out, shared_weights=True
+            )
+            return linear(x, w, b)
 
-        # JAX: call directly
-        out_jax = codegen_linear_jax(
-            x_jax, ws_jax, bs_jax, irreps_in, irreps_out, instructions, f_in, f_out
+        linear_transformed = hk.without_apply_rng(hk.transform(forward_fn))
+
+        # Initialize parameters
+        params = linear_transformed.init(jax.random.PRNGKey(42), x_jax, ws_jax, bs_jax)
+
+        # Apply the Linear layer
+        out_jax = linear_transformed.apply(params, x_jax, ws_jax, bs_jax)
+
+        # ========== PyTorch Linear ==========
+        linear_torch = LinearTorch(
+            irreps_in, irreps_out, f_in=f_in, f_out=f_out, shared_weights=True
         )
+        # Use the same weights and biases
+        linear_torch.weight = torch.nn.Parameter(
+            torch.tensor(ws_jax, dtype=torch.float32)
+        )
+        linear_torch.bias = torch.nn.Parameter(
+            torch.tensor(bs_jax, dtype=torch.float32)
+        )
+
+        out_torch = linear_torch(x_torch)
+        out_torch_np = out_torch.detach().numpy()
 
         # Compare outputs
         assert jnp.allclose(out_jax, out_torch_np, atol=1e-5), (
