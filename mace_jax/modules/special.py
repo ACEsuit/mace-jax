@@ -9,7 +9,10 @@ def chebyshev_polynomial_t(x: jnp.ndarray, n: jnp.ndarray) -> jnp.ndarray:
     n: [num_basis] or [batch, num_basis] (integers)
     Returns: [batch, num_basis]
     """
-    n = n.astype(int)
+    if isinstance(n, jnp.ndarray):
+        n = n.astype(int)
+    else:
+        n = jnp.array(n)
 
     # Ensure n has same batch shape as x
     while n.ndim < x.ndim:
