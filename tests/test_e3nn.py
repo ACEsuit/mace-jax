@@ -6,6 +6,7 @@ import pytest
 import torch
 from e3nn.o3 import Irreps
 from e3nn.o3 import TensorProduct as TensorProductTorch
+from e3nn.o3._linear import _codegen_linear as codegen_linear_torch
 from e3nn.o3._tensor_product._codegen import (
     _sum_tensors as sum_tensors_torch,
 )
@@ -16,6 +17,8 @@ from e3nn.o3._tensor_product._codegen import (
     codegen_tensor_product_right as codegen_tensor_product_right_torch,
 )
 
+from mace_jax.e3nn._linear import Instruction as InstructionLinear
+from mace_jax.e3nn._linear import _codegen_linear as codegen_linear_jax
 from mace_jax.e3nn._tensor_product._codegen import (
     _sum_tensors as sum_tensors_jax,
 )
@@ -313,3 +316,81 @@ class TestTensorProductAllExamples:
         # ------------------------
         # Compare outputs
         np.testing.assert_allclose(out_torch, out_jax_np, rtol=1e-5, atol=1e-6)
+
+
+@pytest.fixture
+def setup_random_data():
+    # Parameters
+    batch_size = 2
+    f_in = 3
+    f_out = 4
+    irreps_in = Irreps("3x0e + 2x1o")
+    irreps_out = Irreps("2x0e + 3x1o")
+
+    # Random input, weights, and bias (PyTorch)
+    x_torch = torch.randn(batch_size, f_in, irreps_in.dim, dtype=torch.float32)
+    ws_torch = torch.randn(batch_size, f_in, f_out, irreps_in.dim, dtype=torch.float32)
+    bs_torch = torch.randn(batch_size, f_out, irreps_out.dim, dtype=torch.float32)
+
+    # Convert to JAX
+    x_jax = jnp.array(x_torch.numpy())
+    ws_jax = jnp.array(ws_torch.numpy())
+    bs_jax = jnp.array(bs_torch.numpy())
+
+    # Example instructions
+    instructions = [
+        InstructionLinear(i_in=0, i_out=0, path_shape=(1,), path_weight=1.0),
+        InstructionLinear(i_in=1, i_out=1, path_shape=(1,), path_weight=1.0),
+        InstructionLinear(
+            i_in=-1, i_out=0, path_shape=(1,), path_weight=1.0
+        ),  # bias example
+    ]
+
+    return (
+        x_jax,
+        x_torch,
+        ws_jax,
+        ws_torch,
+        bs_jax,
+        bs_torch,
+        irreps_in,
+        irreps_out,
+        instructions,
+        f_in,
+        f_out,
+    )
+
+
+class TestCodegenLinearRandom:
+    def test_random_equivalence(self, setup_random_data):
+        (
+            x_jax,
+            x_torch,
+            ws_jax,
+            ws_torch,
+            bs_jax,
+            bs_torch,
+            irreps_in,
+            irreps_out,
+            instructions,
+            f_in,
+            f_out,
+        ) = setup_random_data
+
+        graphmod_out, _, _ = codegen_linear_torch(
+            irreps_in, irreps_out, instructions, f_in=f_in, f_out=f_out
+        )
+        out_torch = graphmod_out(x_torch, ws_torch, bs_torch)
+
+        # Convert PyTorch output to NumPy
+        out_torch_np = out_torch.detach().numpy()
+
+        # Run JAX implementation
+        out_jax = codegen_linear_jax(
+            x_jax, ws_jax, bs_jax, irreps_in, irreps_out, instructions, f_in, f_out
+        )
+
+        # Compare outputs
+        assert jnp.allclose(out_jax, out_torch_np, atol=1e-6), (
+            f"Output mismatch: JAX {out_jax} vs PyTorch {out_torch_np}"
+        )
