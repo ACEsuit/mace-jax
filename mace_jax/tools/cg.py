@@ -182,10 +182,11 @@ def U_matrix_real(
             if ir == current_ir:
                 # same ir as before, append to stack
                 stack.append(base_o3.squeeze()[..., None])
+                last_ir = current_ir
             else:
                 # new ir
                 if len(stack) > 0:
-                    out.append((last_ir, jnp.concatenate(stack, axis=-1)))
+                    out.extend([last_ir, jnp.concatenate(stack, axis=-1)])
                 stack = [base_o3.squeeze()[..., None]]  # reset stack
                 current_ir, last_ir = ir, ir
         else:
@@ -193,7 +194,7 @@ def U_matrix_real(
             current_ir = ir
 
     if len(stack) > 0:
-        out.append((last_ir, jnp.concatenate(stack, axis=-1)))
+        out.extend([last_ir, jnp.concatenate(stack, axis=-1)])
     else:
         first_dim = irreps_out.dim
         if first_dim != 1:
