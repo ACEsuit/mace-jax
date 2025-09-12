@@ -4,10 +4,11 @@
 # This program is distributed under the MIT License (see MIT.md)
 ###########################################################################################
 
-import jax.numpy as jnp
-import haiku as hk
-import numpy as np
 from typing import Optional
+
+import haiku as hk
+import jax.numpy as jnp
+import numpy as np
 
 from .special import chebyshev_polynomial_t
 

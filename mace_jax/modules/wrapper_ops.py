@@ -7,6 +7,7 @@ from typing import Callable, Optional
 
 import jax.numpy as jnp
 from e3nn_jax import Irreps
+from e3nn_jax import haiku as e3nn_hk
 
 from mace_jax.e3nn import _tensor_product as _tp
 from mace_jax.modules.symmetric_contraction import SymmetricContraction
@@ -90,7 +91,7 @@ class Linear:
                 use_fallback=True,
             )
 
-        return Linear(
+        return e3nn_hk.Linear(
             irreps_in,
             irreps_out,
             shared_weights=shared_weights,
