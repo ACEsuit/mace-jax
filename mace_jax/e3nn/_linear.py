@@ -25,6 +25,7 @@ class Linear(hk.Module):
         *,
         f_in: Optional[int] = None,
         f_out: Optional[int] = None,
+        internal_weights: Optional[bool] = None,
         shared_weights: Optional[bool] = None,
         instructions: Optional[List[Tuple[int, int]]] = None,
         biases: Union[bool, List[bool]] = False,
@@ -88,8 +89,17 @@ class Linear(hk.Module):
             if bias
         ]
 
+        if shared_weights is False and internal_weights is None:
+            internal_weights = False
+
         if shared_weights is None:
             shared_weights = True
+
+        if internal_weights is None:
+            internal_weights = True
+
+        assert shared_weights or not internal_weights
+        self.internal_weights = internal_weights
         self.shared_weights = shared_weights
 
         self.irreps_in = irreps_in
@@ -130,6 +140,10 @@ class Linear(hk.Module):
         """
         # Initialize weights if needed
         if w is None and self.weight_numel > 0:
+            if not self.internal_weights:
+                raise RuntimeError(
+                    "Weights must be provided when internal_weights = False"
+                )
             w_shape = ()
             if self.f_in is not None:
                 w_shape += (self.f_in,)
@@ -139,6 +153,10 @@ class Linear(hk.Module):
             w = hk.get_parameter("weight", w_shape, init=hk.initializers.RandomNormal())
 
         if b is None and self.bias_numel > 0:
+            if not self.internal_weights:
+                raise RuntimeError(
+                    "Weights must be provided when internal_weights = False"
+                )
             b_shape = ()
             if self.f_out is not None:
                 b_shape += (self.f_out,)
