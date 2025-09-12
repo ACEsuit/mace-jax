@@ -59,7 +59,7 @@ def run_jax_forward(jax_module_cls, inputs, **kwargs):
 class TestInteractionBlockParity:
     @pytest.fixture
     def dummy_data(self):
-        n_nodes, n_edges, feat_dim = 5, 8, 4
+        n_nodes, n_edges, feat_dim = 5, 8, 2
         node_attrs = np.random.randn(n_nodes, feat_dim).astype(np.float32)
         node_feats = np.random.randn(n_nodes, feat_dim).astype(np.float32)
         edge_attrs = np.random.randn(n_edges, feat_dim).astype(np.float32)
@@ -69,6 +69,11 @@ class TestInteractionBlockParity:
 
     def test_torch_vs_jax(self, dummy_data):
         node_attrs, node_feats, edge_attrs, edge_feats, edge_index = dummy_data
+
+        assert node_attrs.shape[1] == o3.Irreps("2x0e").dim
+        assert node_feats.shape[1] == o3.Irreps("2x0e").dim
+        assert edge_attrs.shape[1] == o3.Irreps("2x0e").dim
+        assert edge_feats.shape[1] == o3.Irreps("2x0e").dim
 
         # === Run JAX version ===
         jax_inputs = (
