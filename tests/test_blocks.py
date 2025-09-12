@@ -5,6 +5,10 @@ import jax.numpy as jnp
 import haiku as hk
 import numpy as np
 
+torch.serialization.add_safe_globals([slice])
+
+from e3nn import o3
+from e3nn_jax import Irreps
 from mace.modules.blocks import (
     RealAgnosticInteractionBlock as RealAgnosticInteractionBlockTorch,
 )
@@ -77,23 +81,23 @@ class TestInteractionBlockParity:
         jax_out, jax_params = run_jax_forward(
             RealAgnosticInteractionBlockJAX,
             jax_inputs,
-            node_attrs_irreps="2x0e",
-            node_feats_irreps="2x0e",
-            edge_attrs_irreps="2x0e",
-            edge_feats_irreps="2x0e",
-            target_irreps="2x0e",
-            hidden_irreps="2x0e",
+            node_attrs_irreps=Irreps("2x0e"),
+            node_feats_irreps=Irreps("2x0e"),
+            edge_attrs_irreps=Irreps("2x0e"),
+            edge_feats_irreps=Irreps("2x0e"),
+            target_irreps=Irreps("2x0e"),
+            hidden_irreps=Irreps("2x0e"),
             avg_num_neighbors=3.0,
         )
 
         # === Torch version ===
         torch_module = RealAgnosticInteractionBlockTorch(
-            node_attrs_irreps="2x0e",
-            node_feats_irreps="2x0e",
-            edge_attrs_irreps="2x0e",
-            edge_feats_irreps="2x0e",
-            target_irreps="2x0e",
-            hidden_irreps="2x0e",
+            node_attrs_irreps=o3.Irreps("2x0e"),
+            node_feats_irreps=o3.Irreps("2x0e"),
+            edge_attrs_irreps=o3.Irreps("2x0e"),
+            edge_feats_irreps=o3.Irreps("2x0e"),
+            target_irreps=o3.Irreps("2x0e"),
+            hidden_irreps=o3.Irreps("2x0e"),
             avg_num_neighbors=3.0,
         )
 
