@@ -1,0 +1,125 @@
+from typing import Callable, List, Optional
+
+import haiku as hk
+import jax.numpy as jnp
+
+from mace_jax.e3nn.math import normalize2mom
+
+
+class Layer(hk.Module):
+    """JAX/Haiku version of _Layer.
+
+    Parameters
+    ----------
+    h_in : int
+        Input dimensionality.
+    h_out : int
+        Output dimensionality.
+    act : Callable or None
+        Activation function (e.g. jax.nn.relu). If None, no activation is applied.
+    var_in : float
+        Input variance.
+    var_out : float
+        Output variance.
+    """
+
+    def __init__(
+        self,
+        h_in: int,
+        h_out: int,
+        act: Optional[Callable],
+        var_in: float,
+        var_out: float,
+        name: Optional[str] = None,
+    ):
+        super().__init__(name=name)
+        self.h_in = h_in
+        self.h_out = h_out
+        self.act = act
+        self.var_in = var_in
+        self.var_out = var_out
+
+        # For repr/profiling
+        act_name = act.__name__ if hasattr(act, "__name__") else str(act)
+        self._profiling_str = f"Layer({h_in}->{h_out}, act={act_name})"
+
+    def __repr__(self) -> str:
+        return self._profiling_str
+
+    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+        # Initialize weight
+        w = hk.get_parameter(
+            "weight",
+            shape=(self.h_in, self.h_out),
+            init=hk.initializers.RandomNormal(),
+        )
+
+        if self.act is not None:
+            w = w / jnp.sqrt(self.h_in * self.var_in)
+            x = x @ w
+            x = self.act(x)
+            x = x * jnp.sqrt(self.var_out)
+        else:
+            w = w / jnp.sqrt(self.h_in * self.var_in / self.var_out)
+            x = x @ w
+
+        return x
+
+
+class FullyConnectedNet(hk.Module):
+    """Fully-connected Neural Network (Haiku version).
+
+    Parameters
+    ----------
+    hs : list of int
+        Input, hidden, and output dimensions.
+    act : callable, optional
+        Activation function φ. Will be normalized by normalize2mom.
+    variance_in : float
+        Input variance.
+    variance_out : float
+        Output variance.
+    out_act : bool
+        Whether to apply the activation function on the output layer.
+    """
+
+    hs: List[int]
+
+    def __init__(
+        self,
+        hs: List[int],
+        act: Optional[Callable] = None,
+        variance_in: float = 1.0,
+        variance_out: float = 1.0,
+        out_act: bool = False,
+        name: Optional[str] = None,
+    ):
+        super().__init__(name=name)
+        self.hs = list(hs)
+
+        if act is not None:
+            act = normalize2mom(act)
+
+        var_in = variance_in
+        self.layers = []
+
+        for i, (h1, h2) in enumerate(zip(self.hs, self.hs[1:])):
+            if i == len(self.hs) - 2:  # last layer
+                var_out = variance_out
+                a = act if out_act else None
+            else:
+                var_out = 1.0
+                a = act
+
+            layer = Layer(h1, h2, a, var_in, var_out, name=f"layer{i}")
+            self.layers.append(layer)
+
+            var_in = var_out
+
+    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+        for layer in self.layers:
+            x = layer(x)
+        return x
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}{self.hs}"
