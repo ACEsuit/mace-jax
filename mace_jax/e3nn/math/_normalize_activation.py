@@ -13,7 +13,7 @@ def moment(
     return jnp.mean(jnp.power(f(z), n))
 
 
-class Normalize2Mom(hk.Module):
+class normalize2mom(hk.Module):
     """Normalize activation so that its 2nd moment under N(0,1) is 1."""
 
     def __init__(
