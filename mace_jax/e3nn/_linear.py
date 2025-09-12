@@ -1,6 +1,7 @@
 from math import prod
-from typing import List, NamedTuple, Optional
+from typing import Iterator, List, NamedTuple, Optional, Tuple, Union
 
+import haiku as hk
 import jax.numpy as jnp
 from e3nn_jax import Irreps
 
@@ -12,6 +13,192 @@ class Instruction(NamedTuple):
     i_out: int
     path_shape: tuple
     path_weight: float
+
+
+class Linear(hk.Module):
+    """Linear operation equivariant to O(3), JAX/Haiku version."""
+
+    def __init__(
+        self,
+        irreps_in: Irreps,
+        irreps_out: Irreps,
+        *,
+        f_in: Optional[int] = None,
+        f_out: Optional[int] = None,
+        shared_weights: Optional[bool] = None,
+        instructions: Optional[List[Tuple[int, int]]] = None,
+        biases: Union[bool, List[bool]] = False,
+        path_normalization: str = "element",
+        name: Optional[str] = None,
+    ):
+        super().__init__(name=name)
+
+        irreps_in = Irreps(irreps_in)
+        irreps_out = Irreps(irreps_out)
+
+        # Default instructions: connect matching irreps
+        if instructions is None:
+            instructions = [
+                (i_in, i_out)
+                for i_in, (_, ir_in) in enumerate(irreps_in)
+                for i_out, (_, ir_out) in enumerate(irreps_out)
+                if ir_in == ir_out
+            ]
+
+        # Convert to full Instruction objects
+        instructions = [
+            Instruction(
+                i_in=i_in,
+                i_out=i_out,
+                path_shape=(irreps_in[i_in].mul, irreps_out[i_out].mul),
+                path_weight=1.0,
+            )
+            for i_in, i_out in instructions
+        ]
+
+        # Apply path normalization
+        def alpha(ins):
+            x = sum(
+                irreps_in[i.i_in if path_normalization == "element" else ins.i_in].mul
+                for i in instructions
+                if i.i_out == ins.i_out
+            )
+            if f_in is not None:
+                x *= f_in
+            return 1.0 if x == 0 else x
+
+        instructions = [
+            Instruction(
+                i_in=ins.i_in,
+                i_out=ins.i_out,
+                path_shape=ins.path_shape,
+                path_weight=alpha(ins) ** (-0.5),
+            )
+            for ins in instructions
+        ]
+
+        # Add bias instructions
+        if isinstance(biases, bool):
+            biases = [biases and ir.is_scalar() for _, ir in irreps_out]
+        assert len(biases) == len(irreps_out)
+
+        instructions += [
+            Instruction(i_in=-1, i_out=i_out, path_shape=(mul_ir.dim,), path_weight=1.0)
+            for i_out, (bias, mul_ir) in enumerate(zip(biases, irreps_out))
+            if bias
+        ]
+
+        if shared_weights is None:
+            shared_weights = True
+        self.shared_weights = shared_weights
+
+        self.irreps_in = irreps_in
+        self.irreps_out = irreps_out
+        self.instructions = instructions
+        self.f_in = f_in
+        self.f_out = f_out
+
+        # Compute weight_numel and bias_numel
+        self.weight_numel = sum(
+            prod(ins.path_shape) for ins in instructions if ins.i_in != -1
+        )
+        self.bias_numel = sum(
+            prod(ins.path_shape) for ins in instructions if ins.i_in == -1
+        )
+
+    def __call__(
+        self,
+        x: jnp.ndarray,
+        w: Optional[jnp.ndarray] = None,
+        b: Optional[jnp.ndarray] = None,
+    ):
+        """Evaluate the linear layer.
+
+        Parameters
+        ----------
+        x : jnp.ndarray
+            Input tensor of shape (..., irreps_in.dim)
+        w : jnp.ndarray, optional
+            Weight tensor of shape (f_in?, f_out?, weight_numel)
+        b : jnp.ndarray, optional
+            Bias tensor of shape (f_out?, bias_numel)
+
+        Returns
+        -------
+        jnp.ndarray
+            Output tensor of shape (..., irreps_out.dim)
+        """
+        # Initialize weights if needed
+        if w is None and self.weight_numel > 0:
+            w_shape = ()
+            if self.f_in is not None:
+                w_shape += (self.f_in,)
+            if self.f_out is not None:
+                w_shape += (self.f_out,)
+            w_shape += (self.weight_numel,)
+            w = hk.get_parameter("weight", w_shape, init=hk.initializers.RandomNormal())
+
+        if b is None and self.bias_numel > 0:
+            b_shape = ()
+            if self.f_out is not None:
+                b_shape += (self.f_out,)
+            b_shape += (self.bias_numel,)
+            b = hk.get_parameter("bias", b_shape, init=jnp.zeros)
+
+        return _codegen_linear(
+            x,
+            w,
+            b,
+            self.irreps_in,
+            self.irreps_out,
+            self.instructions,
+            self.f_in,
+            self.f_out,
+            self.shared_weights,
+        )
+
+    def weight_view_for_instruction(
+        self, instruction: int, weight: Optional[jnp.ndarray] = None
+    ) -> jnp.ndarray:
+        """
+        View of weights corresponding to `instruction`.
+        """
+        if weight is None:
+            weight = hk.get_parameter(
+                "weight", (self.weight_numel,), init=hk.initializers.RandomNormal()
+            )
+
+        batchshape = weight.shape[:-1]
+        offset = sum(prod(ins.path_shape) for ins in self.instructions[:instruction])
+        ins = self.instructions[instruction]
+        flatsize = prod(ins.path_shape)
+        return weight[..., offset : offset + flatsize].reshape(
+            batchshape + ins.path_shape
+        )
+
+    def weight_views(
+        self, weight: Optional[jnp.ndarray] = None, yield_instruction: bool = False
+    ) -> Union[Iterator[jnp.ndarray], Iterator[Tuple[int, Instruction, jnp.ndarray]]]:
+        """
+        Iterator over weight views for all instructions.
+        """
+        if weight is None:
+            weight = hk.get_parameter(
+                "weight", (self.weight_numel,), init=hk.initializers.RandomNormal()
+            )
+
+        batchshape = weight.shape[:-1]
+        offset = 0
+        for ins_i, ins in enumerate(self.instructions):
+            flatsize = prod(ins.path_shape)
+            this_weight = weight[..., offset : offset + flatsize].reshape(
+                batchshape + ins.path_shape
+            )
+            offset += flatsize
+            if yield_instruction:
+                yield ins_i, ins, this_weight
+            else:
+                yield this_weight
 
 
 def _codegen_linear(

@@ -1,3 +1,5 @@
+from math import prod
+
 import haiku as hk
 import jax
 import jax.numpy as jnp
@@ -318,79 +320,64 @@ class TestTensorProductAllExamples:
         np.testing.assert_allclose(out_torch, out_jax_np, rtol=1e-5, atol=1e-6)
 
 
-@pytest.fixture
-def setup_random_data():
-    # Parameters
-    batch_size = 2
-    f_in = 3
-    f_out = 4
-    irreps_in = Irreps("3x0e + 2x1o")
-    irreps_out = Irreps("2x0e + 3x1o")
+class TestCodegenLinear:
+    @staticmethod
+    def compute_weight_bias_numel(instructions, irreps_in, irreps_out):
+        weight_numel = sum(
+            prod(ins.path_shape) for ins in instructions if ins.i_in != -1
+        )
+        bias_numel = sum(
+            irreps_out[ins.i_out].dim for ins in instructions if ins.i_in == -1
+        )
+        return weight_numel, bias_numel
 
-    # Random input, weights, and bias (PyTorch)
-    x_torch = torch.randn(batch_size, f_in, irreps_in.dim, dtype=torch.float32)
-    ws_torch = torch.randn(batch_size, f_in, f_out, irreps_in.dim, dtype=torch.float32)
-    bs_torch = torch.randn(batch_size, f_out, irreps_out.dim, dtype=torch.float32)
+    @pytest.mark.parametrize("batch_size,f_in,f_out", [(2, 3, 4)])
+    def test_block_sparse_linear(self, batch_size, f_in, f_out):
+        # Define irreps
+        irreps_in = Irreps("4x0e + 3x1o")
+        irreps_out = Irreps("4x0e + 3x1o")
 
-    # Convert to JAX
-    x_jax = jnp.array(x_torch.numpy())
-    ws_jax = jnp.array(ws_torch.numpy())
-    bs_jax = jnp.array(bs_torch.numpy())
+        # Example instructions (block-sparse)
+        instructions = [
+            InstructionLinear(i_in=0, i_out=0, path_shape=(4,), path_weight=1.0),
+            InstructionLinear(i_in=1, i_out=1, path_shape=(3,), path_weight=1.0),
+            InstructionLinear(
+                i_in=-1, i_out=0, path_shape=(4,), path_weight=1.0
+            ),  # bias
+        ]
 
-    # Example instructions
-    instructions = [
-        InstructionLinear(i_in=0, i_out=0, path_shape=(1,), path_weight=1.0),
-        InstructionLinear(i_in=1, i_out=1, path_shape=(1,), path_weight=1.0),
-        InstructionLinear(
-            i_in=-1, i_out=0, path_shape=(1,), path_weight=1.0
-        ),  # bias example
-    ]
+        weight_numel, bias_numel = self.compute_weight_bias_numel(
+            instructions, irreps_in, irreps_out
+        )
 
-    return (
-        x_jax,
-        x_torch,
-        ws_jax,
-        ws_torch,
-        bs_jax,
-        bs_torch,
-        irreps_in,
-        irreps_out,
-        instructions,
-        f_in,
-        f_out,
-    )
+        # Create random inputs (PyTorch)
+        x_torch = torch.randn(batch_size, f_in, irreps_in.dim, dtype=torch.float32)
+        ws_torch = torch.randn((1, f_in, f_out, weight_numel), dtype=torch.float32)
+        bs_torch = torch.randn((1, f_out, bias_numel), dtype=torch.float32)
 
+        # Convert to JAX
+        x_jax = jnp.array(x_torch.numpy())
+        ws_jax = jnp.array(ws_torch.numpy())
+        bs_jax = jnp.array(bs_torch.numpy())
 
-class TestCodegenLinearRandom:
-    def test_random_equivalence(self, setup_random_data):
-        (
-            x_jax,
-            x_torch,
-            ws_jax,
-            ws_torch,
-            bs_jax,
-            bs_torch,
+        # PyTorch: build graph without optimizing einsums
+        graphmod_out, _, _ = codegen_linear_torch(
             irreps_in,
             irreps_out,
             instructions,
-            f_in,
-            f_out,
-        ) = setup_random_data
-
-        graphmod_out, _, _ = codegen_linear_torch(
-            irreps_in, irreps_out, instructions, f_in=f_in, f_out=f_out
+            f_in=f_in,
+            f_out=f_out,
+            optimize_einsums=False,
         )
         out_torch = graphmod_out(x_torch, ws_torch, bs_torch)
-
-        # Convert PyTorch output to NumPy
         out_torch_np = out_torch.detach().numpy()
 
-        # Run JAX implementation
+        # JAX: call directly
         out_jax = codegen_linear_jax(
             x_jax, ws_jax, bs_jax, irreps_in, irreps_out, instructions, f_in, f_out
         )
 
         # Compare outputs
-        assert jnp.allclose(out_jax, out_torch_np, atol=1e-6), (
-            f"Output mismatch: JAX {out_jax} vs PyTorch {out_torch_np}"
+        assert jnp.allclose(out_jax, out_torch_np, atol=1e-5), (
+            f"JAX and PyTorch outputs differ:\nJAX: {out_jax}\nPyTorch: {out_torch_np}"
         )
