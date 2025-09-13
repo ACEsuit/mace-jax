@@ -1,7 +1,7 @@
 import abc
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple, Union
 
-import e3nn_jax as e3nn
+import numpy as np
 import haiku as hk
 import jax
 import jax.numpy as jnp
@@ -13,12 +13,21 @@ from mace_jax.modules.wrapper_ops import (
     FullyConnectedTensorProduct,
     Linear,
     OEQConfig,
+    SymmetricContractionWrapper,
     TensorProduct,
 )
+from .radial import (
+    AgnesiTransform,
+    BesselBasis,
+    ChebychevBasis,
+    GaussianBasis,
+    PolynomialCutoff,
+    SoftTransform,
+)
+
 from mace_jax.tools.scatter import scatter_sum
 
 from .irreps_tools import mask_head, reshape_irreps, tp_out_irreps_with_instructions
-from .symmetric_contraction import SymmetricContraction
 
 
 class LinearNodeEmbeddingBlock(hk.Module):
@@ -277,73 +286,273 @@ class NonLinearDipoleReadoutBlock(hk.Module):
         return self.linear_2(x)  # [n_nodes, irreps_out]
 
 
-class RadialEmbeddingBlock:
+class LinearDipolePolarReadoutBlock(hk.Module):
+    """Linear readout for dipole and polarizability."""
+
     def __init__(
         self,
-        *,
-        r_max: float,
-        avg_r_min: Optional[float] = None,
-        basis_functions: Callable[[jnp.ndarray], jnp.ndarray],
-        envelope_function: Callable[[jnp.ndarray], jnp.ndarray],
+        irreps_in: Irreps,
+        use_polarizability: bool = True,
+        cueq_config: Optional["CuEquivarianceConfig"] = None,
+        oeq_config: Optional["OEQConfig"] = None,
+        name: Optional[str] = None,
     ):
-        self.r_max = r_max
-        self.avg_r_min = avg_r_min
-        self.basis_functions = basis_functions
-        self.envelope_function = envelope_function
+        super().__init__(name=name)
+        if use_polarizability:
+            print("You will calculate the polarizability and dipole.")
+            self.irreps_out = Irreps("2x0e + 1x1o + 1x2e")
+        else:
+            raise ValueError(
+                "Invalid configuration for LinearDipolePolarReadoutBlock: "
+                "use_polarizability must be True. "
+                "If you want to calculate only the dipole, use AtomicDipolesMACE."
+            )
+
+        self.linear = Linear(
+            irreps_in=irreps_in,
+            irreps_out=self.irreps_out,
+            cueq_config=cueq_config,
+        )
+
+    def __call__(self, x: IrrepsArray) -> IrrepsArray:
+        """Forward pass."""
+        y = self.linear(x)  # [n_nodes, irreps_out]
+        return y
+
+
+class NonLinearDipolePolarReadoutBlock(hk.Module):
+    """Non-linear readout for dipole and polarizability with equivariant gate."""
+
+    def __init__(
+        self,
+        irreps_in: Irreps,
+        MLP_irreps: Irreps,
+        gate: Callable,
+        use_polarizability: bool = True,
+        cueq_config: Optional["CuEquivarianceConfig"] = None,
+        oeq_config: Optional["OEQConfig"] = None,
+        name: Optional[str] = None,
+    ):
+        super().__init__(name=name)
+
+        self.hidden_irreps = MLP_irreps
+
+        if use_polarizability:
+            print("You will calculate the polarizability and dipole.")
+            self.irreps_out = Irreps("2x0e + 1x1o + 1x2e")
+        else:
+            raise ValueError(
+                "Invalid configuration for NonLinearDipolePolarReadoutBlock: "
+                "use_polarizability must be True. "
+                "If you want to calculate only the dipole, use AtomicDipolesMACE."
+            )
+
+        irreps_scalars = Irreps([
+            (mul, ir) for mul, ir in MLP_irreps if ir.l == 0 and ir in self.irreps_out
+        ])
+        irreps_gated = Irreps([
+            (mul, ir) for mul, ir in MLP_irreps if ir.l > 0 and ir in self.irreps_out
+        ])
+        irreps_gates = Irreps([(mul, "0e") for mul, _ in irreps_gated])
+
+        # Equivariant nonlinearity
+        self.equivariant_nonlin = nn.Gate(
+            irreps_scalars=irreps_scalars,
+            act_scalars=[gate for _, _ in irreps_scalars],
+            irreps_gates=irreps_gates,
+            act_gates=[gate] * len(irreps_gates),
+            irreps_gated=irreps_gated,
+        )
+        self.irreps_nonlin = self.equivariant_nonlin.irreps_in.simplify()
+
+        # Linear layers
+        self.linear_1 = Linear(
+            irreps_in=irreps_in,
+            irreps_out=self.irreps_nonlin,
+            cueq_config=cueq_config,
+        )
+        self.linear_2 = Linear(
+            irreps_in=self.hidden_irreps,
+            irreps_out=self.irreps_out,
+            cueq_config=cueq_config,
+        )
+
+    def __call__(self, x: IrrepsArray) -> IrrepsArray:
+        """Forward pass."""
+        x = self.equivariant_nonlin(self.linear_1(x))
+        return self.linear_2(x)
+
+
+class AtomicEnergiesBlock(hk.Module):
+    """Block that returns atomic energies from one-hot element vectors."""
+
+    def __init__(
+        self, atomic_energies: Union[np.ndarray, jnp.ndarray], name: str = None
+    ):
+        super().__init__(name=name)
+        atomic_energies = jnp.array(
+            atomic_energies, dtype=jnp.float32
+        )  # convert to JAX array
+        self.atomic_energies = hk.get_parameter(
+            "atomic_energies",
+            shape=atomic_energies.shape,
+            init=lambda *_: atomic_energies,
+        )  # [n_elements, n_heads]
+
+    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+        """
+        Args:
+            x: one-hot element tensor of shape [..., n_elements]
+
+        Returns:
+            tensor of shape [...] with atomic energies
+        """
+        # Ensure atomic_energies is at least 2D
+        energies = jnp.atleast_2d(self.atomic_energies)
+        return jnp.matmul(x, energies.T)
+
+    def __repr__(self) -> str:
+        energies_np = np.array(self.atomic_energies)
+        formatted_energies = ", ".join(
+            "[" + ", ".join([f"{x:.4f}" for x in group]) + "]"
+            for group in np.atleast_2d(energies_np)
+        )
+        return f"{self.__class__.__name__}(energies=[{formatted_energies}])"
+
+
+class RadialEmbeddingBlock(hk.Module):
+    """Radial basis embedding block for edges."""
+
+    def __init__(
+        self,
+        r_max: float,
+        num_bessel: int,
+        num_polynomial_cutoff: int,
+        radial_type: str = "bessel",
+        distance_transform: str = "None",
+        apply_cutoff: bool = True,
+        name: Optional[str] = None,
+    ):
+        super().__init__(name=name)
+
+        # Select radial basis
+        if radial_type == "bessel":
+            self.bessel_fn = BesselBasis(r_max=r_max, num_basis=num_bessel)
+        elif radial_type == "gaussian":
+            self.bessel_fn = GaussianBasis(r_max=r_max, num_basis=num_bessel)
+        elif radial_type == "chebyshev":
+            self.bessel_fn = ChebychevBasis(r_max=r_max, num_basis=num_bessel)
+        else:
+            raise ValueError(f"Unknown radial_type: {radial_type}")
+
+        # Distance transformation
+        if distance_transform == "Agnesi":
+            self.distance_transform = AgnesiTransform()
+        elif distance_transform == "Soft":
+            self.distance_transform = SoftTransform()
+
+        self.cutoff_fn = PolynomialCutoff(r_max=r_max, p=num_polynomial_cutoff)
+        self.out_dim = num_bessel
+        self.apply_cutoff = apply_cutoff
 
     def __call__(
         self,
-        edge_lengths: jnp.ndarray,  # [n_edges]
-    ) -> IrrepsArray:  # [n_edges, num_basis]
-        def func(lengths):
-            basis = self.basis_functions(lengths, self.r_max)  # [n_edges, num_basis]
-            cutoff = self.envelope_function(lengths, self.r_max)  # [n_edges]
-            return basis * cutoff[:, None]  # [n_edges, num_basis]
+        edge_lengths: jnp.ndarray,  # [n_edges, 1]
+        node_attrs: jnp.ndarray,
+        edge_index: jnp.ndarray,
+        atomic_numbers: jnp.ndarray,
+    ):
+        cutoff = self.cutoff_fn(edge_lengths)  # [n_edges, 1]
 
-        with jax.ensure_compile_time_eval():
-            if self.avg_r_min is None:
-                factor = 1.0
-            else:
-                samples = jnp.linspace(
-                    self.avg_r_min, self.r_max, 1000, dtype=jnp.float64
-                )
-                factor = jnp.mean(func(samples) ** 2).item() ** -0.5
+        if hasattr(self, "distance_transform"):
+            edge_lengths = self.distance_transform(
+                edge_lengths, node_attrs, edge_index, atomic_numbers
+            )
 
-        embedding = factor * jnp.where(
-            (edge_lengths == 0.0)[:, None], 0.0, func(edge_lengths)
-        )  # [n_edges, num_basis]
-        return IrrepsArray(f"{embedding.shape[-1]}x0e", embedding)
+        radial = self.bessel_fn(edge_lengths)  # [n_edges, n_basis]
+
+        if hasattr(self, "apply_cutoff") and self.apply_cutoff:
+            return radial * cutoff, None
+        else:
+            return radial, cutoff
 
 
 class EquivariantProductBasisBlock(hk.Module):
     def __init__(
         self,
-        target_irreps: Irreps,
+        node_feats_irreps,
+        target_irreps,
         correlation: int,
-        num_species: int,
-        symmetric_tensor_product_basis: bool = True,
-        off_diagonal: bool = False,
-    ) -> None:
-        super().__init__()
-        self.target_irreps = Irreps(target_irreps)
-        self.symmetric_contractions = SymmetricContraction(
-            keep_irrep_out={ir for _, ir in self.target_irreps},
+        use_sc: bool = True,
+        num_elements: Optional[int] = None,
+        use_agnostic_product: bool = False,
+        use_reduced_cg: Optional[bool] = None,
+        cueq_config: Optional[object] = None,  # replace with CuEquivarianceConfig type
+        oeq_config: Optional[object] = None,
+        name: Optional[str] = None,
+    ):
+        super().__init__(name=name)
+        self.use_sc = use_sc
+        self.use_agnostic_product = use_agnostic_product
+        if self.use_agnostic_product:
+            num_elements = 1
+
+        # Symmetric contraction
+        self.symmetric_contractions = SymmetricContractionWrapper(
+            irreps_in=node_feats_irreps,
+            irreps_out=target_irreps,
             correlation=correlation,
-            num_species=num_species,
-            gradient_normalization="element",  # NOTE: This is to copy mace-torch
-            symmetric_tensor_product_basis=symmetric_tensor_product_basis,
-            off_diagonal=off_diagonal,
+            num_elements=num_elements,
+            use_reduced_cg=use_reduced_cg,
+            cueq_config=cueq_config,
+            oeq_config=oeq_config,
         )
+
+        # Linear layer
+        self.linear = Linear(
+            irreps_in=target_irreps,
+            irreps_out=target_irreps,
+            internal_weights=True,
+            shared_weights=True,
+            cueq_config=cueq_config,
+        )
+
+        self.cueq_config = cueq_config
 
     def __call__(
         self,
-        node_feats: IrrepsArray,  # [n_nodes, feature * irreps]
-        node_specie: jnp.ndarray,  # [n_nodes, ] int
-    ) -> IrrepsArray:
-        node_feats = node_feats.mul_to_axis().remove_nones()
-        node_feats = self.symmetric_contractions(node_feats, node_specie)
-        node_feats = node_feats.axis_to_mul()
-        return e3nn.haiku.Linear(self.target_irreps)(node_feats)
+        node_feats: jnp.ndarray,
+        sc: Optional[jnp.ndarray],
+        node_attrs: jnp.ndarray,
+    ) -> jnp.ndarray:
+        use_cueq = False
+        use_cueq_mul_ir = False
+
+        if self.use_agnostic_product:
+            node_attrs = jnp.ones((node_feats.shape[0], 1), dtype=node_feats.dtype)
+
+        if self.cueq_config is not None:
+            if self.cueq_config.enabled and (
+                self.cueq_config.optimize_all or self.cueq_config.optimize_symmetric
+            ):
+                use_cueq = True
+            if getattr(self.cueq_config, "layout_str", None) == "mul_ir":
+                use_cueq_mul_ir = True
+
+        if use_cueq:
+            if use_cueq_mul_ir:
+                node_feats = jnp.transpose(node_feats, (0, 2, 1))
+            index_attrs = jnp.nonzero(node_attrs, size=node_attrs.shape[0])[1]
+            node_feats = self.symmetric_contractions(
+                node_feats.reshape(node_feats.shape[0], -1), index_attrs
+            )
+        else:
+            node_feats = self.symmetric_contractions(node_feats, node_attrs)
+
+        if self.use_sc and sc is not None:
+            return self.linear(node_feats) + sc
+
+        return self.linear(node_feats)
 
 
 class InteractionBlock(hk.Module, metaclass=abc.ABCMeta):

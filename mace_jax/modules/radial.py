@@ -339,3 +339,68 @@ class AgnesiTransform(hk.Module):
 
     def __repr__(self):
         return f"{self.__class__.__name__}(a={float(self.a):.4f}, q={float(self.q):.4f}, p={float(self.p):.4f})"
+
+
+class SoftTransform(hk.Module):
+    """
+    Tanh-based smooth transformation:
+        T(x) = p0 + (x - p0)*0.5*[1 + tanh(alpha*(x - m))],
+    which smoothly transitions from ~p0 for x << p0 to ~x for x >> r0.
+    """
+
+    def __init__(
+        self, alpha: float = 4.0, trainable: bool = False, name: Optional[str] = None
+    ):
+        super().__init__(name=name)
+        self.init_alpha = alpha
+        self.trainable = trainable
+        # Covalent radii as JAX array
+        self.covalent_radii = jnp.array(ase.data.covalent_radii)
+
+    def _get_alpha(self):
+        # If trainable, we store alpha as a Haiku parameter
+        if self.trainable:
+            return hk.get_parameter(
+                "alpha", shape=(), init=lambda *_: jnp.array(self.init_alpha)
+            )
+        else:
+            return jnp.array(self.init_alpha)
+
+    def compute_r_0(
+        self,
+        node_attrs: jnp.ndarray,
+        edge_index: jnp.ndarray,
+        atomic_numbers: jnp.ndarray,
+    ) -> jnp.ndarray:
+        """
+        Compute r_0 based on atomic information.
+        """
+        sender = edge_index[0]
+        receiver = edge_index[1]
+
+        # Convert one-hot node_attrs to atomic numbers
+        node_atomic_numbers = atomic_numbers[jnp.argmax(node_attrs, axis=1)].reshape(
+            -1, 1
+        )
+        Z_u = node_atomic_numbers[sender].astype(jnp.int32)
+        Z_v = node_atomic_numbers[receiver].astype(jnp.int32)
+        r_0 = self.covalent_radii[Z_u] + self.covalent_radii[Z_v]
+        return r_0
+
+    def __call__(
+        self,
+        x: jnp.ndarray,
+        node_attrs: jnp.ndarray,
+        edge_index: jnp.ndarray,
+        atomic_numbers: jnp.ndarray,
+    ) -> jnp.ndarray:
+        r_0 = self.compute_r_0(node_attrs, edge_index, atomic_numbers)
+        p_0 = (3.0 / 4.0) * r_0
+        p_1 = (4.0 / 3.0) * r_0
+        m = 0.5 * (p_0 + p_1)
+        alpha = self._get_alpha() / (p_1 - p_0)
+        s_x = 0.5 * (1.0 + jnp.tanh(alpha * (x - m)))
+        return p_0 + (x - p_0) * s_x
+
+    def __repr__(self):
+        return f"{self.__class__.__name__}(alpha={self.init_alpha:.4f}, trainable={self.trainable})"
