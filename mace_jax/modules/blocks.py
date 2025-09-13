@@ -117,6 +117,166 @@ class NonLinearReadoutBlock(hk.Module):
         return self.linear_2(x)
 
 
+class NonLinearBiasReadoutBlock(hk.Module):
+    """
+    Non-linear readout with intermediate bias linear layers and optional multi-head masking.
+    """
+
+    def __init__(
+        self,
+        irreps_in: Irreps,
+        MLP_irreps: Irreps,
+        gate: Optional[Callable],
+        irrep_out: Irreps = Irreps("0e"),
+        num_heads: int = 1,
+        cueq_config: Optional["CuEquivarianceConfig"] = None,
+        oeq_config: Optional["OEQConfig"] = None,
+        name: Optional[str] = None,
+    ):
+        super().__init__(name=name)
+        self.hidden_irreps = MLP_irreps
+        self.num_heads = num_heads
+        self.linear_1 = Linear(
+            irreps_in=irreps_in,
+            irreps_out=self.hidden_irreps,
+            cueq_config=cueq_config,
+            name="linear_1",
+        )
+        self.non_linearity_1 = nn.Activation(
+            irreps_in=self.hidden_irreps,
+            acts=[gate],
+            name="activation_1",
+        )
+        self.linear_mid = Linear(
+            irreps_in=self.hidden_irreps,
+            irreps_out=self.hidden_irreps,
+            biases=True,
+            name="linear_mid",
+        )
+        self.non_linearity_2 = nn.Activation(
+            irreps_in=self.hidden_irreps,
+            acts=[gate],
+            name="activation_2",
+        )
+        self.linear_2 = Linear(
+            irreps_in=self.hidden_irreps,
+            irreps_out=irrep_out,
+            biases=True,
+            name="linear_2",
+        )
+
+    def __call__(
+        self, x: IrrepsArray, heads: Optional[jnp.ndarray] = None
+    ) -> IrrepsArray:
+        # First linear + non-linearity
+        x = self.non_linearity_1(self.linear_1(x))
+        # Mid linear + non-linearity
+        x = self.non_linearity_2(self.linear_mid(x))
+        # Optional multi-head masking
+        if self.num_heads > 1 and heads is not None:
+            x = mask_head(x, heads, self.num_heads)
+        # Final linear projection
+        return self.linear_2(x)
+
+
+class LinearDipoleReadoutBlock(hk.Module):
+    """
+    Linear readout block for dipoles or scalar+dipole.
+    """
+
+    def __init__(
+        self,
+        irreps_in: Irreps,
+        dipole_only: bool = False,
+        cueq_config: Optional["CuEquivarianceConfig"] = None,
+        oeq_config: Optional["OEQConfig"] = None,
+        name: Optional[str] = None,
+    ):
+        super().__init__(name=name)
+
+        # Output irreps
+        if dipole_only:
+            self.irreps_out = Irreps("1x1o")
+        else:
+            self.irreps_out = Irreps("1x0e + 1x1o")
+
+        # Linear mapping
+        self.linear = Linear(
+            irreps_in=irreps_in,
+            irreps_out=self.irreps_out,
+            cueq_config=cueq_config,
+            name="linear",
+        )
+
+    def __call__(self, x: IrrepsArray) -> IrrepsArray:
+        return self.linear(x)  # [n_nodes, 1] or [n_nodes, irreps_out]
+
+
+class NonLinearDipoleReadoutBlock(hk.Module):
+    """
+    Non-linear readout block for dipoles or scalar+dipole, with gated nonlinearity.
+    """
+
+    def __init__(
+        self,
+        irreps_in: Irreps,
+        MLP_irreps: Irreps,
+        gate: Callable,
+        dipole_only: bool = False,
+        cueq_config: Optional["CuEquivarianceConfig"] = None,
+        oeq_config: Optional["OEQConfig"] = None,
+        name: Optional[str] = None,
+    ):
+        super().__init__(name=name)
+
+        self.hidden_irreps = MLP_irreps
+
+        # Output irreps
+        if dipole_only:
+            self.irreps_out = Irreps("1x1o")
+        else:
+            self.irreps_out = Irreps("1x0e + 1x1o")
+
+        # Partition hidden irreps into scalars and gated irreps
+        irreps_scalars = Irreps([
+            (mul, ir) for mul, ir in MLP_irreps if ir.l == 0 and ir in self.irreps_out
+        ])
+        irreps_gated = Irreps([
+            (mul, ir) for mul, ir in MLP_irreps if ir.l > 0 and ir in self.irreps_out
+        ])
+        irreps_gates = Irreps([(mul, Irreps("0e")[0][1]) for mul, _ in irreps_gated])
+
+        # Gated nonlinearity
+        self.equivariant_nonlin = nn.Gate(
+            irreps_scalars=irreps_scalars,
+            act_scalars=[gate for _, ir in irreps_scalars],
+            irreps_gates=irreps_gates,
+            act_gates=[gate] * len(irreps_gates),
+            irreps_gated=irreps_gated,
+        )
+
+        # Input to nonlinearity
+        self.irreps_nonlin = self.equivariant_nonlin.irreps_in.simplify()
+
+        # Linear layers
+        self.linear_1 = Linear(
+            irreps_in=irreps_in,
+            irreps_out=self.irreps_nonlin,
+            cueq_config=cueq_config,
+            name="linear_1",
+        )
+        self.linear_2 = Linear(
+            irreps_in=self.hidden_irreps,
+            irreps_out=self.irreps_out,
+            cueq_config=cueq_config,
+            name="linear_2",
+        )
+
+    def __call__(self, x: IrrepsArray) -> IrrepsArray:
+        x = self.equivariant_nonlin(self.linear_1(x))
+        return self.linear_2(x)  # [n_nodes, irreps_out]
+
+
 class RadialEmbeddingBlock:
     def __init__(
         self,
