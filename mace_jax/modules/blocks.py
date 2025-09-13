@@ -17,13 +17,15 @@ from mace_jax.modules.wrapper_ops import (
 )
 from mace_jax.tools.scatter import scatter_sum
 
-from .irreps_tools import reshape_irreps, tp_out_irreps_with_instructions
+from .irreps_tools import mask_head, reshape_irreps, tp_out_irreps_with_instructions
 from .symmetric_contraction import SymmetricContraction
 
 
 class LinearNodeEmbeddingBlock(hk.Module):
-    def __init__(self, num_species: int, irreps_out: Irreps):
-        super().__init__()
+    def __init__(
+        self, num_species: int, irreps_out: Irreps, name: Optional[str] = None
+    ):
+        super().__init__(name=name)
         self.num_species = num_species
         self.irreps_out = Irreps(irreps_out).filter("0e").regroup()
 
@@ -33,6 +35,7 @@ class LinearNodeEmbeddingBlock(hk.Module):
             shape=(self.num_species, self.irreps_out.dim),
             dtype=jnp.float32,
             init=hk.initializers.RandomNormal(),
+            name="linear",
         )
         return IrrepsArray(self.irreps_out, w[node_specie])
 
@@ -40,41 +43,78 @@ class LinearNodeEmbeddingBlock(hk.Module):
 class LinearReadoutBlock(hk.Module):
     def __init__(
         self,
-        output_irreps: Irreps,
+        irreps_in: Irreps,
+        irrep_out: Irreps = Irreps("0e"),
+        cueq_config: Optional[CuEquivarianceConfig] = None,
+        oeq_config: Optional[OEQConfig] = None,  # pylint: disable=unused-argument
+        name: Optional[str] = None,
     ):
-        super().__init__()
-        self.output_irreps = output_irreps
+        super().__init__(name=name)
+        self.irreps_in = irreps_in
+        self.irrep_out = irrep_out
+        self.cueq_config = cueq_config
 
-    def __call__(self, x: IrrepsArray) -> IrrepsArray:
+    def __call__(
+        self,
+        x: IrrepsArray,
+        heads: Optional[jnp.ndarray] = None,  # pylint: disable=unused-argument
+    ) -> IrrepsArray:
         # x = [n_nodes, irreps]
-        return e3nn.haiku.Linear(self.output_irreps)(x)  # [n_nodes, output_irreps]
+        return Linear(
+            irreps_in=self.irreps_in,
+            irreps_out=self.irrep_out,
+            cueq_config=self.cueq_config,
+            name="linear",
+        )(x)  # [n_nodes, output_irreps]
 
 
 class NonLinearReadoutBlock(hk.Module):
     def __init__(
         self,
-        hidden_irreps: Irreps,
-        output_irreps: Irreps,
-        *,
-        activation: Optional[Callable] = None,
-        gate: Optional[Callable] = None,
+        irreps_in: Irreps,
+        MLP_irreps: Irreps,
+        gate: Optional[Callable],
+        irrep_out: Irreps = Irreps("0e"),
+        num_heads: int = 1,
+        cueq_config: Optional[CuEquivarianceConfig] = None,
+        oeq_config: Optional[OEQConfig] = None,  # unused
+        name: Optional[str] = None,
     ):
-        super().__init__()
-        self.hidden_irreps = hidden_irreps
-        self.output_irreps = output_irreps
-        self.activation = activation
-        self.gate = gate
+        super().__init__(name=name)
+        self.hidden_irreps = MLP_irreps
+        self.num_heads = num_heads
 
-    def __call__(self, x: IrrepsArray) -> IrrepsArray:
-        # x = [n_nodes, irreps]
-        num_vectors = self.hidden_irreps.filter(
-            drop=["0e", "0o"]
-        ).num_irreps  # Multiplicity of (l > 0) irreps
-        x = e3nn.haiku.Linear(
-            (self.hidden_irreps + Irreps(f"{num_vectors}x0e")).simplify()
-        )(x)
-        x = e3nn.gate(x, even_act=self.activation, even_gate_act=self.gate)
-        return e3nn.haiku.Linear(self.output_irreps)(x)  # [n_nodes, output_irreps]
+        self.linear_1 = Linear(
+            irreps_in=irreps_in,
+            irreps_out=self.hidden_irreps,
+            cueq_config=cueq_config,
+            name="linear_1",
+        )
+        self.non_linearity = nn.Activation(
+            irreps_in=self.hidden_irreps,
+            acts=[gate],
+            name="non_linearity",
+        )
+        self.linear_2 = Linear(
+            irreps_in=self.hidden_irreps,
+            irreps_out=irrep_out,
+            cueq_config=cueq_config,
+            name="linear_2",
+        )
+
+    def __call__(
+        self, x: IrrepsArray, heads: Optional[jnp.ndarray] = None
+    ) -> IrrepsArray:
+        # First linear + nonlinearity
+        x = self.non_linearity(self.linear_1(x))
+
+        # Optional multi-head masking
+        if hasattr(self, "num_heads"):
+            if self.num_heads > 1 and heads is not None:
+                x = mask_head(x, heads, self.num_heads)
+
+        # Final linear projection
+        return self.linear_2(x)
 
 
 class RadialEmbeddingBlock:
