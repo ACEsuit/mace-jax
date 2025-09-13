@@ -9,15 +9,15 @@ import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="haiku")
 torch.serialization.add_safe_globals([slice])
 
-import haiku as hk
+import haiku as hk  # noqa: E402
 
-from e3nn import o3
-from e3nn_jax import Irreps
-from jax import config as jax_config
-from mace.modules.blocks import (
+from e3nn import o3  # noqa: E402
+from e3nn_jax import Irreps  # noqa: E402
+from jax import config as jax_config  # noqa: E402
+from mace.modules.blocks import (  # noqa: E402
     RealAgnosticInteractionBlock as RealAgnosticInteractionBlockTorch,
 )
-from mace_jax.modules.blocks import (
+from mace_jax.modules.blocks import (  # noqa: E402
     RealAgnosticInteractionBlock as RealAgnosticInteractionBlockJAX,
 )
 
