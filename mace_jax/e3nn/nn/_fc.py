@@ -55,12 +55,12 @@ class Layer(hk.Module):
         )
 
         if self.act is not None:
-            w = w / jnp.sqrt(self.h_in * self.var_in)
+            w = w / (self.h_in * self.var_in) ** 0.5
             x = x @ w
             x = self.act(x)
-            x = x * jnp.sqrt(self.var_out)
+            x = x * self.var_out**0.5
         else:
-            w = w / jnp.sqrt(self.h_in * self.var_in / self.var_out)
+            w = w / (self.h_in * self.var_in / self.var_out) ** 0.5
             x = x @ w
 
         return x

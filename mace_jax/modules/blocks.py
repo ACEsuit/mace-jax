@@ -258,9 +258,6 @@ class RealAgnosticInteractionBlock(InteractionBlock):
             + self.radial_MLP
             + [self.conv_tp.weight_numel],
             act=jax.nn.silu,
-            variance_in=1.0,
-            variance_out=1.0,
-            out_act=True,  # matches PyTorch, which applies SiLU on the final layer
             name="conv_tp_weights",
         )
 
