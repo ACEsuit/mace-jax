@@ -8,6 +8,7 @@ import logging
 from typing import Optional
 
 import ase
+import jax
 import haiku as hk
 import jax.numpy as jnp
 import numpy as np
@@ -404,3 +405,35 @@ class SoftTransform(hk.Module):
 
     def __repr__(self):
         return f"{self.__class__.__name__}(alpha={self.init_alpha:.4f}, trainable={self.trainable})"
+
+
+class RadialMLP(hk.Module):
+    """
+    Radial MLP stack: Linear → LayerNorm → SiLU,
+    following the ESEN / FairChem style.
+    """
+
+    def __init__(self, channels_list, name: str = None):
+        super().__init__(name=name)
+        self.channels_list = channels_list
+
+    def __call__(self, inputs: jnp.ndarray) -> jnp.ndarray:
+        x = inputs
+        for idx, (in_ch, out_ch) in enumerate(
+            zip(self.channels_list[:-1], self.channels_list[1:])
+        ):
+            # Linear layer
+            linear = hk.Linear(output_size=out_ch, with_bias=True, name=f"linear_{idx}")
+            x = linear(x)
+
+            # Apply LayerNorm + SiLU if not the last layer
+            if idx < len(self.channels_list) - 2:
+                ln = hk.LayerNorm(
+                    axis=-1,
+                    create_scale=True,
+                    create_offset=True,
+                    name=f"layernorm_{idx}",
+                )
+                x = ln(x)
+                x = jax.nn.silu(x)
+        return x

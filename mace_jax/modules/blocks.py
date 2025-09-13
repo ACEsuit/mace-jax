@@ -5,7 +5,7 @@ import numpy as np
 import haiku as hk
 import jax
 import jax.numpy as jnp
-from e3nn_jax import Irreps, IrrepsArray
+from e3nn_jax import Irrep, Irreps, IrrepsArray
 
 from mace_jax.e3nn import nn
 from mace_jax.modules.wrapper_ops import (
@@ -15,6 +15,7 @@ from mace_jax.modules.wrapper_ops import (
     OEQConfig,
     SymmetricContractionWrapper,
     TensorProduct,
+    TransposeIrrepsLayoutWrapper,
 )
 from .radial import (
     AgnesiTransform,
@@ -22,6 +23,7 @@ from .radial import (
     ChebychevBasis,
     GaussianBasis,
     PolynomialCutoff,
+    RadialMLP,
     SoftTransform,
 )
 
@@ -728,6 +730,672 @@ class RealAgnosticInteractionBlock(InteractionBlock):
         message = self.skip_tp(message, node_attrs)
 
         return self.reshape(message), None
+
+
+class RealAgnosticResidualInteractionBlock(InteractionBlock):
+    def _setup(self) -> None:
+        # First linear
+        self.linear_up = Linear(
+            self.node_feats_irreps,
+            self.edge_irreps,
+            internal_weights=True,
+            shared_weights=True,
+            cueq_config=self.cueq_config,
+            name="linear_up",
+        )
+
+        # TensorProduct
+        irreps_mid, instructions = tp_out_irreps_with_instructions(
+            self.edge_irreps,
+            self.edge_attrs_irreps,
+            self.target_irreps,
+        )
+        self.conv_tp = TensorProduct(
+            self.edge_irreps,
+            self.edge_attrs_irreps,
+            irreps_mid,
+            instructions=instructions,
+            shared_weights=False,
+            internal_weights=False,
+            cueq_config=self.cueq_config,
+            oeq_config=self.oeq_config,
+            name="conv_tp",
+        )
+
+        # Convolution weights network
+        self.conv_tp_weights = nn.FullyConnectedNet(
+            hs=[self.edge_feats_irreps.num_irreps]
+            + self.radial_MLP
+            + [self.conv_tp.weight_numel],
+            act=jax.nn.silu,
+            name="conv_tp_weights",
+        )
+
+        # Linear
+        self.irreps_out = self.target_irreps
+        self.linear = Linear(
+            irreps_mid,
+            self.irreps_out,
+            internal_weights=True,
+            shared_weights=True,
+            cueq_config=self.cueq_config,
+            name="linear",
+        )
+
+        # Selector TensorProduct (skip connection)
+        self.skip_tp = FullyConnectedTensorProduct(
+            self.node_feats_irreps,
+            self.node_attrs_irreps,
+            self.hidden_irreps,
+            cueq_config=self.cueq_config,
+            name="skip_tp",
+        )
+        self.reshape = reshape_irreps(self.irreps_out, cueq_config=self.cueq_config)
+
+    def __call__(
+        self,
+        node_attrs: jnp.ndarray,
+        node_feats: jnp.ndarray,
+        edge_attrs: jnp.ndarray,
+        edge_feats: jnp.ndarray,
+        edge_index: jnp.ndarray,
+        cutoff: Optional[jnp.ndarray] = None,
+        n_real: Optional[int] = None,
+    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        # Skip connection
+        sc = self.skip_tp(node_feats, node_attrs)
+
+        # First linear projection
+        node_feats = self.linear_up(node_feats)
+
+        # Radial MLP for convolution weights
+        tp_weights = self.conv_tp_weights(edge_feats)
+        if cutoff is not None:
+            tp_weights = tp_weights * cutoff
+
+        # Message passing
+        if hasattr(self, "conv_fusion"):
+            message = self.conv_tp(node_feats, edge_attrs, tp_weights, edge_index)
+        else:
+            mji = self.conv_tp(node_feats[edge_index[:, 0]], edge_attrs, tp_weights)
+            message = scatter_sum(
+                src=mji,
+                index=edge_index[:, 1],
+                dim=0,
+                dim_size=node_feats.shape[0],
+            )
+
+        # Truncate ghost atoms (noop if n_real is None)
+        if n_real is not None:
+            message = message[:n_real]
+            node_attrs = node_attrs[:n_real]
+            sc = sc[:n_real]
+
+        # Linear + normalization
+        message = self.linear(message) / self.avg_num_neighbors
+
+        return self.reshape(message), sc
+
+
+class RealAgnosticDensityInteractionBlock(InteractionBlock):
+    def _setup(self) -> None:
+        # First linear
+        self.linear_up = Linear(
+            self.node_feats_irreps,
+            self.edge_irreps,
+            internal_weights=True,
+            shared_weights=True,
+            cueq_config=self.cueq_config,
+            name="linear_up",
+        )
+
+        # TensorProduct
+        irreps_mid, instructions = tp_out_irreps_with_instructions(
+            self.edge_irreps,
+            self.edge_attrs_irreps,
+            self.target_irreps,
+        )
+        self.conv_tp = TensorProduct(
+            self.edge_irreps,
+            self.edge_attrs_irreps,
+            irreps_mid,
+            instructions=instructions,
+            shared_weights=False,
+            internal_weights=False,
+            cueq_config=self.cueq_config,
+            oeq_config=self.oeq_config,
+            name="conv_tp",
+        )
+
+        # Convolution weights network
+        self.conv_tp_weights = nn.FullyConnectedNet(
+            hs=[self.edge_feats_irreps.num_irreps]
+            + self.radial_MLP
+            + [self.conv_tp.weight_numel],
+            act=jax.nn.silu,
+            name="conv_tp_weights",
+        )
+
+        # Linear projection
+        self.irreps_out = self.target_irreps
+        self.linear = Linear(
+            irreps_mid,
+            self.irreps_out,
+            internal_weights=True,
+            shared_weights=True,
+            cueq_config=self.cueq_config,
+            name="linear",
+        )
+
+        # Selector TensorProduct (skip connection)
+        self.skip_tp = FullyConnectedTensorProduct(
+            self.irreps_out,
+            self.node_attrs_irreps,
+            self.irreps_out,
+            cueq_config=self.cueq_config,
+            name="skip_tp",
+        )
+
+        # Density normalization network
+        self.density_fn = nn.FullyConnectedNet(
+            hs=[self.edge_feats_irreps.num_irreps, 1],
+            act=jax.nn.silu,
+            name="density_fn",
+        )
+
+        # Reshape output
+        self.reshape = reshape_irreps(self.irreps_out, cueq_config=self.cueq_config)
+
+    def __call__(
+        self,
+        node_attrs: jnp.ndarray,
+        node_feats: jnp.ndarray,
+        edge_attrs: jnp.ndarray,
+        edge_feats: jnp.ndarray,
+        edge_index: jnp.ndarray,
+        cutoff: Optional[jnp.ndarray] = None,
+        n_real: Optional[int] = None,
+    ) -> Tuple[jnp.ndarray, None]:
+        receiver = edge_index[:, 1]
+        num_nodes = node_feats.shape[0]
+
+        # Linear projection
+        node_feats = self.linear_up(node_feats)
+
+        # Convolution weights
+        tp_weights = self.conv_tp_weights(edge_feats)
+
+        # Edge density
+        edge_density = jnp.tanh(self.density_fn(edge_feats) ** 2)
+
+        if cutoff is not None:
+            tp_weights = tp_weights * cutoff
+            edge_density = edge_density * cutoff
+
+        # Aggregate density per node
+        density = scatter_sum(edge_density, receiver, num_nodes)  # [n_nodes, 1]
+
+        # Message passing
+        if hasattr(self, "conv_fusion"):
+            message = self.conv_tp(node_feats, edge_attrs, tp_weights, edge_index)
+        else:
+            mji = self.conv_tp(node_feats[edge_index[:, 0]], edge_attrs, tp_weights)
+            message = scatter_sum(mji, receiver, num_nodes)
+
+        # Truncate ghost atoms (noop if n_real is None)
+        if n_real is not None:
+            message = message[:n_real]
+            node_attrs = node_attrs[:n_real]
+            density = density[:n_real]
+
+        # Normalize messages by density
+        message = self.linear(message) / (density + 1)
+        message = self.skip_tp(message, node_attrs)
+
+        return self.reshape(message), None
+
+
+class RealAgnosticDensityResidualInteractionBlock(InteractionBlock):
+    def _setup(self) -> None:
+        # First linear
+        self.linear_up = Linear(
+            self.node_feats_irreps,
+            self.edge_irreps,
+            internal_weights=True,
+            shared_weights=True,
+            cueq_config=self.cueq_config,
+            name="linear_up",
+        )
+
+        # TensorProduct
+        irreps_mid, instructions = tp_out_irreps_with_instructions(
+            self.edge_irreps,
+            self.edge_attrs_irreps,
+            self.target_irreps,
+        )
+        self.conv_tp = TensorProduct(
+            self.edge_irreps,
+            self.edge_attrs_irreps,
+            irreps_mid,
+            instructions=instructions,
+            shared_weights=False,
+            internal_weights=False,
+            cueq_config=self.cueq_config,
+            oeq_config=self.oeq_config,
+            name="conv_tp",
+        )
+
+        # Convolution weights network
+        self.conv_tp_weights = nn.FullyConnectedNet(
+            hs=[self.edge_feats_irreps.num_irreps]
+            + self.radial_MLP
+            + [self.conv_tp.weight_numel],
+            act=jax.nn.silu,
+            name="conv_tp_weights",
+        )
+
+        # Linear projection
+        self.irreps_out = self.target_irreps
+        self.linear = Linear(
+            irreps_mid,
+            self.irreps_out,
+            internal_weights=True,
+            shared_weights=True,
+            cueq_config=self.cueq_config,
+            name="linear",
+        )
+
+        # Selector TensorProduct (skip connection)
+        self.skip_tp = FullyConnectedTensorProduct(
+            self.node_feats_irreps,
+            self.node_attrs_irreps,
+            self.hidden_irreps,
+            cueq_config=self.cueq_config,
+            name="skip_tp",
+        )
+
+        # Density normalization network
+        self.density_fn = nn.FullyConnectedNet(
+            hs=[self.edge_feats_irreps.num_irreps, 1],
+            act=jax.nn.silu,
+            name="density_fn",
+        )
+
+        # Reshape output
+        self.reshape = reshape_irreps(self.irreps_out, cueq_config=self.cueq_config)
+
+    def __call__(
+        self,
+        node_attrs: jnp.ndarray,
+        node_feats: jnp.ndarray,
+        edge_attrs: jnp.ndarray,
+        edge_feats: jnp.ndarray,
+        edge_index: jnp.ndarray,
+        cutoff: Optional[jnp.ndarray] = None,
+        n_real: Optional[int] = None,
+    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        receiver = edge_index[:, 1]
+        num_nodes = node_feats.shape[0]
+
+        # Skip connection
+        sc = self.skip_tp(node_feats, node_attrs)
+
+        # Linear projection
+        node_feats = self.linear_up(node_feats)
+
+        # Convolution weights
+        tp_weights = self.conv_tp_weights(edge_feats)
+
+        # Edge density
+        edge_density = jnp.tanh(self.density_fn(edge_feats) ** 2)
+
+        if cutoff is not None:
+            tp_weights = tp_weights * cutoff
+            edge_density = edge_density * cutoff
+
+        # Aggregate density per node
+        density = scatter_sum(edge_density, receiver, num_nodes)  # [n_nodes, 1]
+
+        # Message passing
+        if hasattr(self, "conv_fusion"):
+            message = self.conv_tp(node_feats, edge_attrs, tp_weights, edge_index)
+        else:
+            mji = self.conv_tp(node_feats[edge_index[:, 0]], edge_attrs, tp_weights)
+            message = scatter_sum(mji, receiver, num_nodes)
+
+        # Truncate ghost atoms
+        if n_real is not None:
+            message = message[:n_real]
+            node_attrs = node_attrs[:n_real]
+            density = density[:n_real]
+            sc = sc[:n_real]
+
+        # Normalize messages by density
+        message = self.linear(message) / (density + 1)
+
+        return self.reshape(message), sc
+
+
+class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
+    def _setup(self) -> None:
+        # Downsample irreps
+        self.node_feats_down_irreps = Irreps("64x0e")
+
+        # First linear (up)
+        self.linear_up = Linear(
+            self.node_feats_irreps,
+            self.edge_irreps,
+            internal_weights=True,
+            shared_weights=True,
+            cueq_config=self.cueq_config,
+            name="linear_up",
+        )
+
+        # TensorProduct
+        irreps_mid, instructions = tp_out_irreps_with_instructions(
+            self.edge_irreps,
+            self.edge_attrs_irreps,
+            self.target_irreps,
+        )
+        self.conv_tp = TensorProduct(
+            self.edge_irreps,
+            self.edge_attrs_irreps,
+            irreps_mid,
+            instructions=instructions,
+            shared_weights=False,
+            internal_weights=False,
+            cueq_config=self.cueq_config,
+            oeq_config=self.oeq_config,
+            name="conv_tp",
+        )
+
+        # Linear (down)
+        self.linear_down = Linear(
+            self.node_feats_irreps,
+            self.node_feats_down_irreps,
+            internal_weights=True,
+            shared_weights=True,
+            cueq_config=self.cueq_config,
+            name="linear_down",
+        )
+
+        # Convolution weights network
+        input_dim = (
+            self.edge_feats_irreps.num_irreps
+            + 2 * self.node_feats_down_irreps.num_irreps
+        )
+        self.conv_tp_weights = nn.FullyConnectedNet(
+            hs=[input_dim] + [256, 256, 256] + [self.conv_tp.weight_numel],
+            act=jax.nn.silu,
+            name="conv_tp_weights",
+        )
+
+        # Linear output
+        self.irreps_out = self.target_irreps
+        self.linear = Linear(
+            irreps_mid,
+            self.irreps_out,
+            internal_weights=True,
+            shared_weights=True,
+            cueq_config=self.cueq_config,
+            name="linear",
+        )
+
+        # Output reshape
+        self.reshape = reshape_irreps(self.irreps_out, cueq_config=self.cueq_config)
+
+        # Skip connection
+        self.skip_linear = Linear(
+            self.node_feats_irreps,
+            self.hidden_irreps,
+            cueq_config=self.cueq_config,
+            name="skip_linear",
+        )
+
+    def __call__(
+        self,
+        node_attrs: jnp.ndarray,
+        node_feats: jnp.ndarray,
+        edge_attrs: jnp.ndarray,
+        edge_feats: jnp.ndarray,
+        edge_index: jnp.ndarray,
+        cutoff: Optional[jnp.ndarray] = None,
+        n_real: Optional[int] = None,
+    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        sender = edge_index[:, 0]
+        receiver = edge_index[:, 1]
+
+        # Skip connection
+        sc = self.skip_linear(node_feats)
+
+        # Linear projections
+        node_feats_up = self.linear_up(node_feats)
+        node_feats_down = self.linear_down(node_feats)
+
+        # Augmented edge features for convolution
+        augmented_edge_feats = jnp.concatenate(
+            [edge_feats, node_feats_down[sender], node_feats_down[receiver]], axis=-1
+        )
+
+        # TensorProduct weights
+        tp_weights = self.conv_tp_weights(augmented_edge_feats)
+        if cutoff is not None:
+            tp_weights = tp_weights * cutoff
+
+        # Message passing
+        if hasattr(self, "conv_fusion"):
+            message = self.conv_tp(node_feats_up, edge_attrs, tp_weights, edge_index)
+        else:
+            mji = self.conv_tp(node_feats_up[sender], edge_attrs, tp_weights)
+            message = scatter_sum(mji, receiver, node_feats.shape[0])
+
+        # Linear projection and normalization
+        message = self.linear(message) / self.avg_num_neighbors
+
+        return self.reshape(message), sc
+
+
+class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
+    def _setup(self) -> None:
+        # Compute scalar irreps
+        node_scalar_irreps = Irreps([
+            (self.node_feats_irreps.count(Irrep(0, 1)), (0, 1))
+        ])
+
+        # Source/target embeddings
+        self.source_embedding = Linear(
+            self.node_attrs_irreps,
+            node_scalar_irreps,
+            internal_weights=True,
+            shared_weights=True,
+            cueq_config=self.cueq_config,
+            name="source_embedding",
+        )
+        self.target_embedding = Linear(
+            self.node_attrs_irreps,
+            node_scalar_irreps,
+            internal_weights=True,
+            shared_weights=True,
+            cueq_config=self.cueq_config,
+            name="target_embedding",
+        )
+
+        # First linear
+        self.linear_up = Linear(
+            self.node_feats_irreps,
+            self.edge_irreps,
+            internal_weights=True,
+            shared_weights=True,
+            cueq_config=self.cueq_config,
+            name="linear_up",
+        )
+
+        # TensorProduct
+        irreps_mid, instructions = tp_out_irreps_with_instructions(
+            self.edge_irreps,
+            self.edge_attrs_irreps,
+            self.target_irreps,
+        )
+        self.conv_tp = TensorProduct(
+            self.edge_irreps,
+            self.edge_attrs_irreps,
+            irreps_mid,
+            instructions=instructions,
+            shared_weights=False,
+            internal_weights=False,
+            cueq_config=self.cueq_config,
+            name="conv_tp",
+        )
+
+        # Convolution weights (Radial MLP)
+        input_dim = self.edge_feats_irreps.num_irreps
+        self.conv_tp_weights = RadialMLP(
+            [input_dim + 2 * node_scalar_irreps.dim]
+            + self.radial_MLP
+            + [self.conv_tp.weight_numel]
+        )
+
+        # Output irreps
+        self.irreps_out = self.target_irreps
+
+        # Selector skip connection
+        self.skip_tp = Linear(
+            self.node_feats_irreps,
+            self.hidden_irreps,
+            cueq_config=self.cueq_config,
+            name="skip_tp",
+        )
+
+        # Reshape
+        self.reshape = reshape_irreps(self.irreps_out, cueq_config=self.cueq_config)
+
+        # Equivariant non-linearity
+        irreps_scalars = Irreps([(mul, ir) for mul, ir in self.irreps_out if ir.l == 0])
+        irreps_gated = Irreps([(mul, ir) for mul, ir in self.irreps_out if ir.l > 0])
+        irreps_gates = Irreps([(mul, (0, 1)) for mul, _ in irreps_gated])
+        self.equivariant_nonlin = nn.Gate(
+            irreps_scalars=irreps_scalars,
+            act_scalars=[jax.nn.silu] * len(irreps_scalars),
+            irreps_gates=irreps_gates,
+            act_gates=[jax.nn.sigmoid] * len(irreps_gates),
+            irreps_gated=irreps_gated,
+        )
+        self.irreps_nonlin = self.equivariant_nonlin.irreps_in.simplify()
+
+        # Linear residual
+        self.linear_res = Linear(
+            self.edge_irreps,
+            self.irreps_nonlin,
+            internal_weights=True,
+            shared_weights=True,
+            cueq_config=self.cueq_config,
+            name="linear_res",
+        )
+
+        # Linear blocks
+        self.linear_1 = Linear(
+            irreps_mid,
+            self.irreps_nonlin,
+            internal_weights=True,
+            shared_weights=True,
+            cueq_config=self.cueq_config,
+            name="linear_1",
+        )
+        self.linear_2 = Linear(
+            self.irreps_out,
+            self.irreps_out,
+            internal_weights=True,
+            shared_weights=True,
+            cueq_config=self.cueq_config,
+            name="linear_2",
+        )
+
+        # Density normalization
+        self.density_fn = RadialMLP([input_dim + 2 * node_scalar_irreps.dim, 64, 1])
+        self.alpha = hk.get_parameter("alpha", shape=(), init=jnp.ones) * 20.0
+        self.beta = hk.get_parameter("beta", shape=(), init=jnp.zeros)
+
+        # Transpose wrappers
+        self.transpose_mul_ir = TransposeIrrepsLayoutWrapper(
+            irreps=self.irreps_nonlin,
+            source="ir_mul",
+            target="mul_ir",
+            cueq_config=self.cueq_config,
+        )
+        self.transpose_ir_mul = TransposeIrrepsLayoutWrapper(
+            irreps=self.irreps_out,
+            source="mul_ir",
+            target="ir_mul",
+            cueq_config=self.cueq_config,
+        )
+
+    def __call__(
+        self,
+        node_attrs: jnp.ndarray,
+        node_feats: jnp.ndarray,
+        edge_attrs: jnp.ndarray,
+        edge_feats: jnp.ndarray,
+        edge_index: jnp.ndarray,
+        cutoff: Optional[jnp.ndarray] = None,
+        n_real: Optional[int] = None,
+    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        num_nodes = node_feats.shape[0]
+
+        # Skip connection
+        sc = self.skip_tp(node_feats)
+
+        # Linear projections
+        node_feats_up = self.linear_up(node_feats)
+        node_feats_res = self.linear_res(node_feats)
+
+        # Source/target embeddings for edges
+        source_embedding = self.source_embedding(node_attrs)
+        target_embedding = self.target_embedding(node_attrs)
+        augmented_edge_feats = jnp.concatenate(
+            [
+                edge_feats,
+                source_embedding[edge_index[:, 0]],
+                target_embedding[edge_index[:, 1]],
+            ],
+            axis=-1,
+        )
+
+        # Convolution weights
+        tp_weights = self.conv_tp_weights(augmented_edge_feats)
+        edge_density = jnp.tanh(self.density_fn(augmented_edge_feats) ** 2)
+        if cutoff is not None:
+            tp_weights = tp_weights * cutoff
+            edge_density = edge_density * cutoff
+
+        # Density sum per node
+        density = scatter_sum(edge_density, edge_index[:, 1], num_nodes)
+
+        # Message passing
+        mji = self.conv_tp(node_feats_up[edge_index[:, 0]], edge_attrs, tp_weights)
+        message = scatter_sum(mji, edge_index[:, 1], num_nodes)
+
+        # Truncate ghosts
+        if n_real is not None:
+            message = message[:n_real]
+            density = density[:n_real]
+            sc = sc[:n_real]
+            node_feats_res = node_feats_res[:n_real]
+
+        # Linear + normalization
+        message = self.linear_1(message) / (density * self.beta + self.alpha)
+        message = message + node_feats_res
+
+        # Equivariant non-linearity
+        if self.transpose_mul_ir is not None:
+            message = self.transpose_mul_ir(message)
+        message = self.equivariant_nonlin(message)
+        if self.transpose_ir_mul is not None:
+            message = self.transpose_ir_mul(message)
+
+        # Linear output
+        message = self.linear_2(message)
+
+        return self.reshape(message), sc
 
 
 class ScaleShiftBlock(hk.Module):
