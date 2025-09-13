@@ -4,6 +4,7 @@ import jax
 import jax.numpy as jnp
 import haiku as hk
 import numpy as np
+import re
 
 torch.serialization.add_safe_globals([slice])
 
@@ -18,18 +19,41 @@ from mace_jax.modules.blocks import (
 
 
 # === Helpers ===
-def copy_jax_to_torch(torch_module, jax_params, mapping=None):
+def map_keys(jax_params):
+    result = {}
+
+    for k1, v1 in jax_params.items():
+        for k2, _ in v1.items():
+            key = f"{k1.split('~_setup/')[-1]}.{k2}"
+            key = re.sub("/~/", ".", key)
+            key = re.sub("fully_connected_tensor_product.", "", key)
+            result[key] = (k1, k2)
+
+    return result
+
+
+def copy_jax_to_torch(torch_module, jax_params):
     """
     Copy parameters from JAX/Haiku to PyTorch module.
     Assumes names align via mapping dict or identical hierarchy.
     """
     torch_state = torch_module.state_dict()
-    new_state = {}
+
+    key_mapping = map_keys(jax_params)
+
     for k in torch_state.keys():
-        # Haiku stores arrays as numpy arrays
-        jax_arr = jax.tree_util.tree_flatten(jax_params)[0][
-            0
-        ]  # crude, adjust to your tree
+        # Skip output_mask in linear layes, which seems to be dead code
+        if k.endswith(".output_mask"):
+            continue
+
+        # In Torch we have an explicit bias, which is a tensor of size 0
+        if len(torch_state[k]) == 0:
+            assert k not in jax_params.keys()
+            continue
+
+        k1, k2 = key_mapping[k]
+
+        jax_arr = jax_params[k1][k2]
         jax_tensor = torch.from_numpy(np.array(jax_arr))
 
         if torch_state[k].shape != jax_tensor.shape:
@@ -37,8 +61,9 @@ def copy_jax_to_torch(torch_module, jax_params, mapping=None):
                 f"Shape mismatch for {k}: "
                 f"torch {torch_state[k].shape}, jax {jax_tensor.shape}"
             )
-        new_state[k] = jax_tensor
-    torch_module.load_state_dict(new_state)
+        torch_state[k] = jax_tensor
+
+    torch_module.load_state_dict(torch_state)
 
 
 def run_jax_forward(jax_module_cls, inputs, **kwargs):

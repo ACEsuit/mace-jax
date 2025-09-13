@@ -76,6 +76,7 @@ class Linear:
         shared_weights: bool = True,
         internal_weights: bool = True,
         cueq_config: Optional[CuEquivarianceConfig] = None,
+        name: Optional[str] = None,
     ):
         if (
             CUET_AVAILABLE
@@ -96,6 +97,7 @@ class Linear:
             irreps_out,
             shared_weights=shared_weights,
             internal_weights=internal_weights,
+            name=name,
         )
 
 
@@ -179,6 +181,7 @@ class TensorProduct:
         internal_weights: bool = False,
         cueq_config=None,
         oeq_config=None,
+        name: Optional[str] = None,
     ):
         # --- Case 1: CuEquivariance backend ---
         if cueq_config is not None and cueq_config.enabled:
@@ -222,6 +225,7 @@ class TensorProduct:
             instructions=instructions,
             shared_weights=shared_weights,
             internal_weights=internal_weights,
+            name=name,
         )
 
 
@@ -232,6 +236,7 @@ def FullyConnectedTensorProduct(
     shared_weights: bool = True,
     internal_weights: bool = True,
     cueq_config: Optional[CuEquivarianceConfig] = None,
+    name: Optional[str] = None,
 ):
     """
     Wrapper around o3.FullyConnectedTensorProduct (JAX version).
@@ -256,6 +261,7 @@ def FullyConnectedTensorProduct(
         irreps_out,
         shared_weights=shared_weights,
         internal_weights=internal_weights,
+        name=name,
     )
 
 

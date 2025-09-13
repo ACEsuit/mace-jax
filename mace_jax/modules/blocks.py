@@ -190,7 +190,6 @@ class InteractionBlock(hk.Module, metaclass=abc.ABCMeta):
         self.oeq_config = oeq_config
 
         # Handle conv_fusion flag
-        self.conv_fusion = None
         if self.oeq_config and getattr(self.oeq_config, "conv_fusion", None):
             self.conv_fusion = self.oeq_config.conv_fusion
         if self.cueq_config and getattr(self.cueq_config, "conv_fusion", None):
@@ -232,6 +231,7 @@ class RealAgnosticInteractionBlock(InteractionBlock):
             internal_weights=True,
             shared_weights=True,
             cueq_config=self.cueq_config,
+            name="linear_up",
         )
 
         # TensorProduct
@@ -249,6 +249,7 @@ class RealAgnosticInteractionBlock(InteractionBlock):
             internal_weights=False,
             cueq_config=self.cueq_config,
             oeq_config=self.oeq_config,
+            name="conv_tp",
         )
 
         # Convolution weights network
@@ -271,6 +272,7 @@ class RealAgnosticInteractionBlock(InteractionBlock):
             internal_weights=True,
             shared_weights=True,
             cueq_config=self.cueq_config,
+            name="linear",
         )
 
         # Selector TensorProduct
@@ -279,6 +281,7 @@ class RealAgnosticInteractionBlock(InteractionBlock):
             self.node_attrs_irreps,
             self.irreps_out,
             cueq_config=self.cueq_config,
+            name="skip_tp",
         )
         self.reshape = reshape_irreps(self.irreps_out, cueq_config=self.cueq_config)
 

@@ -196,9 +196,10 @@ class TensorProduct(hk.Module):
         normalization=None,  # for backward compatibility
         _specialized_code: Optional[bool] = None,
         _optimize_einsums: Optional[bool] = None,
+        name: Optional[str] = None,
     ) -> None:
         # === Setup ===
-        super().__init__()
+        super().__init__(name=name)
 
         if normalization is not None:
             warnings.warn(
@@ -398,21 +399,19 @@ class TensorProduct(hk.Module):
 
         # --- Output mask (static, non-trainable) ---
         if self.irreps_out.dim > 0:
-            self.output_mask = jnp.concatenate(
-                [
-                    (
-                        jnp.ones(mul * ir.dim)
-                        if any(
-                            (ins.i_out == i_out)
-                            and (ins.path_weight != 0)
-                            and (0 not in ins.path_shape)
-                            for ins in self.instructions
-                        )
-                        else jnp.zeros(mul * ir.dim)
+            self.output_mask = jnp.concatenate([
+                (
+                    jnp.ones(mul * ir.dim)
+                    if any(
+                        (ins.i_out == i_out)
+                        and (ins.path_weight != 0)
+                        and (0 not in ins.path_shape)
+                        for ins in self.instructions
                     )
-                    for i_out, (mul, ir) in enumerate(self.irreps_out)
-                ]
-            )
+                    else jnp.zeros(mul * ir.dim)
+                )
+                for i_out, (mul, ir) in enumerate(self.irreps_out)
+            ])
         else:
             self.output_mask = jnp.ones(0)
 
