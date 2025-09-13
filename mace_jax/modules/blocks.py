@@ -731,15 +731,26 @@ class RealAgnosticInteractionBlock(InteractionBlock):
 
 
 class ScaleShiftBlock(hk.Module):
-    def __init__(self, scale: float, shift: float):
-        super().__init__()
-        self.scale = scale
-        self.shift = shift
+    def __init__(
+        self,
+        scale: Union[float, jnp.ndarray],
+        shift: Union[float, jnp.ndarray],
+        name: str = None,
+    ):
+        super().__init__(name=name)
+        # store scale and shift as constants (non-trainable)
+        self.scale = jnp.array(scale)
+        self.shift = jnp.array(shift)
 
-    def __call__(self, x: IrrepsArray) -> IrrepsArray:
-        return self.scale * x + self.shift
+    def __call__(self, x: jnp.ndarray, head: jnp.ndarray) -> jnp.ndarray:
+        # ensure scale/shift are indexed properly for multiple heads
+        scale_h = jnp.atleast_1d(self.scale)[head]
+        shift_h = jnp.atleast_1d(self.shift)[head]
+        return scale_h * x + shift_h
 
     def __repr__(self):
-        return (
-            f"{self.__class__.__name__}(scale={self.scale:.6f}, shift={self.shift:.6f})"
-        )
+        scale_vals = self.scale if self.scale.ndim > 0 else jnp.array([self.scale])
+        shift_vals = self.shift if self.shift.ndim > 0 else jnp.array([self.shift])
+        formatted_scale = ", ".join([f"{x:.4f}" for x in scale_vals])
+        formatted_shift = ", ".join([f"{x:.4f}" for x in shift_vals])
+        return f"{self.__class__.__name__}(scale={formatted_scale}, shift={formatted_shift})"
