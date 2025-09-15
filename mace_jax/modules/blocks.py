@@ -915,7 +915,7 @@ class RealAgnosticDensityInteractionBlock(InteractionBlock):
         cutoff: Optional[jnp.ndarray] = None,
         n_real: Optional[int] = None,
     ) -> Tuple[jnp.ndarray, None]:
-        receiver = edge_index[:, 1]
+        receiver = edge_index[1]
         num_nodes = node_feats.shape[0]
 
         # Linear projection
@@ -932,14 +932,18 @@ class RealAgnosticDensityInteractionBlock(InteractionBlock):
             edge_density = edge_density * cutoff
 
         # Aggregate density per node
-        density = scatter_sum(edge_density, receiver, num_nodes)  # [n_nodes, 1]
+        density = scatter_sum(
+            edge_density, receiver, dim=0, dim_size=num_nodes
+        )  # [n_nodes, 1]
 
         # Message passing
         if hasattr(self, "conv_fusion"):
             message = self.conv_tp(node_feats, edge_attrs, tp_weights, edge_index)
         else:
             mji = self.conv_tp(node_feats[edge_index[0]], edge_attrs, tp_weights)
-            message = scatter_sum(mji, receiver, num_nodes)
+            message = scatter_sum(
+                src=mji, index=edge_index[1], dim=0, dim_size=node_feats.shape[0]
+            )
 
         # Truncate ghost atoms (noop if n_real is None)
         if n_real is not None:
