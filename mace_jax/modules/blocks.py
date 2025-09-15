@@ -938,7 +938,7 @@ class RealAgnosticDensityInteractionBlock(InteractionBlock):
         if hasattr(self, "conv_fusion"):
             message = self.conv_tp(node_feats, edge_attrs, tp_weights, edge_index)
         else:
-            mji = self.conv_tp(node_feats[edge_index[:, 0]], edge_attrs, tp_weights)
+            mji = self.conv_tp(node_feats[edge_index[0]], edge_attrs, tp_weights)
             message = scatter_sum(mji, receiver, num_nodes)
 
         # Truncate ghost atoms (noop if n_real is None)
