@@ -9,7 +9,7 @@ from e3nn_jax import Irrep, Irreps
 from ._tensor_product import TensorProduct
 
 
-class FullyConnectedTensorProduct(hk.Module):
+class FullyConnectedTensorProduct(TensorProduct):
     r"""Fully-connected weighted tensor product
 
     All the possible paths allowed by :math:`|l_1 - l_2| \leq l_{out} \leq l_1 + l_2` are made.
@@ -52,9 +52,9 @@ class FullyConnectedTensorProduct(hk.Module):
         irreps_out,
         irrep_normalization: str = None,
         path_normalization: str = None,
+        name: Optional[str] = None,
         **kwargs,
     ):
-        super().__init__()
         irreps_in1 = Irreps(irreps_in1)
         irreps_in2 = Irreps(irreps_in2)
         irreps_out = Irreps(irreps_out)
@@ -66,19 +66,16 @@ class FullyConnectedTensorProduct(hk.Module):
             for i_out, (_, ir_out) in enumerate(irreps_out)
             if ir_out in ir_1 * ir_2
         ]
-
-        self.tp = TensorProduct(
+        super().__init__(
             irreps_in1=irreps_in1,
             irreps_in2=irreps_in2,
             irreps_out=irreps_out,
             instructions=instructions,
             irrep_normalization=irrep_normalization,
             path_normalization=path_normalization,
+            name=name,
             **kwargs,
         )
-
-    def __call__(self, x, y, weights=None):
-        return self.tp(x, y, weights)
 
 
 class ElementwiseTensorProduct(hk.Module):

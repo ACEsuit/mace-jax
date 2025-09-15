@@ -1,22 +1,23 @@
-import pytest
-import torch
+import re
+import warnings
+
 import jax
 import jax.numpy as jnp
 import numpy as np
-import re
-import warnings
+import pytest
+import torch
 
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="haiku")
 torch.serialization.add_safe_globals([slice])
 
 import haiku as hk  # noqa: E402
-
 from e3nn import o3  # noqa: E402
 from e3nn_jax import Irreps  # noqa: E402
 from jax import config as jax_config  # noqa: E402
 from mace.modules.blocks import (  # noqa: E402
     RealAgnosticInteractionBlock as RealAgnosticInteractionBlockTorch,
 )
+
 from mace_jax.modules.blocks import (  # noqa: E402
     RealAgnosticInteractionBlock as RealAgnosticInteractionBlockJAX,
 )
@@ -30,7 +31,6 @@ def map_keys(jax_params):
         for k2, _ in v1.items():
             key = f"{k1.split('~_setup/')[-1]}.{k2}"
             key = re.sub("/~/", ".", key)
-            key = re.sub("fully_connected_tensor_product.", "", key)
             result[key] = (k1, k2)
 
     return result
