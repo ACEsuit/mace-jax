@@ -403,7 +403,6 @@ class TensorSquare(TensorProduct):
         name: Optional[str] = None,
         **kwargs,
     ):
-        super().__init__(name=name)
         if irrep_normalization is None:
             irrep_normalization = "component"
         assert irrep_normalization in ["component", "norm", "none"]
@@ -437,6 +436,7 @@ class TensorSquare(TensorProduct):
             irreps_out,
             instr,
             irrep_normalization="none",
+            name=name,
             **kwargs,
         )
 
