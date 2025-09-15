@@ -816,10 +816,10 @@ class RealAgnosticResidualInteractionBlock(InteractionBlock):
         if hasattr(self, "conv_fusion"):
             message = self.conv_tp(node_feats, edge_attrs, tp_weights, edge_index)
         else:
-            mji = self.conv_tp(node_feats[edge_index[:, 0]], edge_attrs, tp_weights)
+            mji = self.conv_tp(node_feats[edge_index[0]], edge_attrs, tp_weights)
             message = scatter_sum(
                 src=mji,
-                index=edge_index[:, 1],
+                index=edge_index[1],
                 dim=0,
                 dim_size=node_feats.shape[0],
             )
