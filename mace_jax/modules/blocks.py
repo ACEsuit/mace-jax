@@ -1,10 +1,10 @@
 import abc
 from typing import Callable, List, Optional, Tuple, Union
 
-import numpy as np
 import haiku as hk
 import jax
 import jax.numpy as jnp
+import numpy as np
 from e3nn_jax import Irrep, Irreps, IrrepsArray
 
 from mace_jax.e3nn import nn
@@ -17,6 +17,9 @@ from mace_jax.modules.wrapper_ops import (
     TensorProduct,
     TransposeIrrepsLayoutWrapper,
 )
+from mace_jax.tools.scatter import scatter_sum
+
+from .irreps_tools import mask_head, reshape_irreps, tp_out_irreps_with_instructions
 from .radial import (
     AgnesiTransform,
     BesselBasis,
@@ -26,10 +29,6 @@ from .radial import (
     RadialMLP,
     SoftTransform,
 )
-
-from mace_jax.tools.scatter import scatter_sum
-
-from .irreps_tools import mask_head, reshape_irreps, tp_out_irreps_with_instructions
 
 
 class LinearNodeEmbeddingBlock(hk.Module):
@@ -249,12 +248,12 @@ class NonLinearDipoleReadoutBlock(hk.Module):
             self.irreps_out = Irreps("1x0e + 1x1o")
 
         # Partition hidden irreps into scalars and gated irreps
-        irreps_scalars = Irreps([
-            (mul, ir) for mul, ir in MLP_irreps if ir.l == 0 and ir in self.irreps_out
-        ])
-        irreps_gated = Irreps([
-            (mul, ir) for mul, ir in MLP_irreps if ir.l > 0 and ir in self.irreps_out
-        ])
+        irreps_scalars = Irreps(
+            [(mul, ir) for mul, ir in MLP_irreps if ir.l == 0 and ir in self.irreps_out]
+        )
+        irreps_gated = Irreps(
+            [(mul, ir) for mul, ir in MLP_irreps if ir.l > 0 and ir in self.irreps_out]
+        )
         irreps_gates = Irreps([(mul, Irreps("0e")[0][1]) for mul, _ in irreps_gated])
 
         # Gated nonlinearity
@@ -349,12 +348,12 @@ class NonLinearDipolePolarReadoutBlock(hk.Module):
                 "If you want to calculate only the dipole, use AtomicDipolesMACE."
             )
 
-        irreps_scalars = Irreps([
-            (mul, ir) for mul, ir in MLP_irreps if ir.l == 0 and ir in self.irreps_out
-        ])
-        irreps_gated = Irreps([
-            (mul, ir) for mul, ir in MLP_irreps if ir.l > 0 and ir in self.irreps_out
-        ])
+        irreps_scalars = Irreps(
+            [(mul, ir) for mul, ir in MLP_irreps if ir.l == 0 and ir in self.irreps_out]
+        )
+        irreps_gated = Irreps(
+            [(mul, ir) for mul, ir in MLP_irreps if ir.l > 0 and ir in self.irreps_out]
+        )
         irreps_gates = Irreps([(mul, "0e") for mul, _ in irreps_gated])
 
         # Equivariant nonlinearity
@@ -1198,9 +1197,9 @@ class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
 class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
     def _setup(self) -> None:
         # Compute scalar irreps
-        node_scalar_irreps = Irreps([
-            (self.node_feats_irreps.count(Irrep(0, 1)), (0, 1))
-        ])
+        node_scalar_irreps = Irreps(
+            [(self.node_feats_irreps.count(Irrep(0, 1)), (0, 1))]
+        )
 
         # Source/target embeddings
         self.source_embedding = Linear(

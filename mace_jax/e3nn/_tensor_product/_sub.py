@@ -2,7 +2,6 @@ import operator
 from functools import reduce
 from typing import Iterator, Optional
 
-import haiku as hk
 import jax.numpy as jnp
 from e3nn_jax import Irrep, Irreps
 
@@ -78,7 +77,7 @@ class FullyConnectedTensorProduct(TensorProduct):
         )
 
 
-class ElementwiseTensorProduct(hk.Module):
+class ElementwiseTensorProduct(TensorProduct):
     r"""Elementwise connected tensor product.
 
     .. math::
@@ -116,9 +115,9 @@ class ElementwiseTensorProduct(hk.Module):
         irreps_in2,
         filter_ir_out=None,
         irrep_normalization: str = None,
+        name: Optional[str] = None,
         **kwargs,
     ):
-        super().__init__()
         irreps_in1 = Irreps(irreps_in1).simplify()
         irreps_in2 = Irreps(irreps_in2).simplify()
 
@@ -161,20 +160,18 @@ class ElementwiseTensorProduct(hk.Module):
                 out.append((mul, ir))
                 instructions.append((i, i, i_out, "uuu", False))
 
-        self.tp = TensorProduct(
+        super().__init__(
             irreps_in1=irreps_in1,
             irreps_in2=irreps_in2,
             irreps_out=out,
             instructions=instructions,
             irrep_normalization=irrep_normalization,
+            name=name,
             **kwargs,
         )
 
-    def __call__(self, x, y, weights=None):
-        return self.tp(x, y, weights)
 
-
-class FullTensorProduct(hk.Module):
+class FullTensorProduct(TensorProduct):
     r"""Full tensor product between two irreps.
 
     .. math::
@@ -205,9 +202,9 @@ class FullTensorProduct(hk.Module):
         irreps_in2: Irreps,
         filter_ir_out: Optional[Iterator[Irrep]] = None,
         irrep_normalization: str = None,
+        name: Optional[str] = None,
         **kwargs,
     ):
-        super().__init__()
         irreps_in1 = Irreps(irreps_in1).simplify()
         irreps_in2 = Irreps(irreps_in2).simplify()
 
@@ -236,17 +233,15 @@ class FullTensorProduct(hk.Module):
             (i_1, i_2, p[i_out], mode, train) for i_1, i_2, i_out, mode, train in instr
         ]
 
-        self.tp = TensorProduct(
+        super().__init__(
             irreps_in1=irreps_in1,
             irreps_in2=irreps_in2,
             irreps_out=out,
             instructions=instr,
             irrep_normalization=irrep_normalization,
+            name=name,
             **kwargs,
         )
-
-    def __call__(self, x, y, weights=None):
-        return self.tp(x, y, weights)
 
 
 def _square_instructions_full(irreps_in, filter_ir_out=None, irrep_normalization=None):
@@ -392,7 +387,7 @@ def prod(shape):
     return reduce(operator.mul, shape, 1)
 
 
-class TensorSquare(hk.Module):
+class TensorSquare(TensorProduct):
     r"""Compute the square tensor product of a tensor and reduce it in irreps.
 
     If `irreps_out` is given, this operation is fully connected.
@@ -412,13 +407,6 @@ class TensorSquare(hk.Module):
         if irrep_normalization is None:
             irrep_normalization = "component"
         assert irrep_normalization in ["component", "norm", "none"]
-
-        self.irreps_in = Irreps(irreps_in).simplify()
-        self.irreps_out = None  # will set later
-        self._instr = None
-        self._tp = None
-        self._irrep_normalization = irrep_normalization
-        self._kwargs = kwargs
 
         if filter_ir_out is not None:
             try:
@@ -442,36 +430,33 @@ class TensorSquare(hk.Module):
                 self.irreps_in, irreps_out, irrep_normalization
             )
 
-        self.irreps_out = irreps_out
-        self._instr = instr
-
         # instantiate the internal TensorProduct (JAX version)
-        self._tp = TensorProduct(
-            self.irreps_in,
-            self.irreps_in,
-            self.irreps_out,
-            self._instr,
+        super().__init__(
+            irreps_in,
+            irreps_in,
+            irreps_out,
+            instr,
             irrep_normalization="none",
             **kwargs,
         )
 
     def __call__(self, x: jnp.ndarray, weight: Optional[jnp.ndarray] = None):
         """Forward pass: compute x ⊗ x, optionally with weights."""
-        return self._tp(x, x, weight)
+        return super().__call__(x, x, weight)
 
     def __repr__(self) -> str:
         try:
             weight_info = (
-                self._tp.total_weight_numel
-                if self._tp is not None
+                self.weight_numel
+                if self.weight_numel is not None
                 else "not initialized"
             )
         except AttributeError:
             weight_info = "not initialized"
 
-        npath = sum(jnp.prod(jnp.array(i.path_shape)) for i in self._instr)
+        npath = sum(jnp.prod(jnp.array(i.path_shape)) for i in self.instructions)
         return (
             f"{self.__class__.__name__}"
-            f"({self.irreps_in} -> {self.irreps_out.simplify()} | "
+            f"({self.irreps_in1} -> {self.irreps_out.simplify()} | "
             f"{npath} paths | {weight_info} weights)"
         )

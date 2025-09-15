@@ -85,7 +85,7 @@ def run_jax_forward(jax_module_cls, inputs, **kwargs):
 
 
 # === PyTest class ===
-class TestInteractionBlockParity:
+class TestRealAgnosticInteractionBlock:
     @pytest.fixture
     def dummy_data(self):
         n_nodes, n_edges, feat_dim = 5, 8, 2
