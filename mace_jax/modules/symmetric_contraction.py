@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Optional, Union
 
 import haiku as hk
 import jax.numpy as jnp
@@ -302,7 +302,7 @@ class SymmetricContraction(hk.Module):
         self,
         irreps_in: Union[str, Irreps],
         irreps_out: Union[str, Irreps],
-        correlation: Union[int, Dict[Irrep, int]],
+        correlation: Union[int, dict[Irrep, int]],
         irrep_normalization: str = 'component',
         path_normalization: str = 'element',
         use_reduced_cg: bool = False,

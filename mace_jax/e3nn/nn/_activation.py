@@ -1,7 +1,9 @@
+from typing import Callable, Optional
+
 import haiku as hk
 import jax.numpy as jnp
-from typing import List, Optional, Callable
 from e3nn_jax import Irreps
+
 from mace_jax.e3nn.math import normalize2mom
 
 
@@ -14,14 +16,14 @@ class Activation(hk.Module):
     ----------
     irreps_in : Irreps
         Representation of the input.
-    acts : list of Callable or None
+    acts : List of Callable or None
         List of activation functions; `None` if non-scalar or identity.
     """
 
     def __init__(
         self,
         irreps_in: Irreps,
-        acts: List[Optional[Callable]],
+        acts: list[Optional[Callable]],
         name: Optional[str] = None,
     ):
         super().__init__(name=name)
@@ -29,7 +31,7 @@ class Activation(hk.Module):
 
         if len(self.irreps_in) != len(acts):
             raise ValueError(
-                f"Irreps in and number of activation functions does not match: {len(acts), (irreps_in, acts)}"
+                f'Irreps in and number of activation functions does not match: {len(acts), (irreps_in, acts)}'
             )
 
         # normalize the second moment
@@ -40,7 +42,7 @@ class Activation(hk.Module):
             if act is not None:
                 if l_in != 0:
                     raise ValueError(
-                        "Activation: cannot apply an activation function to a non-scalar input."
+                        'Activation: cannot apply an activation function to a non-scalar input.'
                     )
 
                 # parity check using a sample vector
@@ -58,7 +60,7 @@ class Activation(hk.Module):
 
                 if p_out == 0:
                     raise ValueError(
-                        "Activation: the parity is violated! The input scalar is odd but the activation is neither even nor odd."
+                        'Activation: the parity is violated! The input scalar is odd but the activation is neither even nor odd.'
                     )
             else:
                 irreps_out.append((mul, (l_in, p_in)))
@@ -70,8 +72,8 @@ class Activation(hk.Module):
         ]
 
     def __repr__(self) -> str:
-        acts_str = "".join(["x" if a is not None else " " for a in self.acts])
-        return f"{self.__class__.__name__} [{acts_str}] ({self.irreps_in} -> {self.irreps_out})"
+        acts_str = ''.join(['x' if a is not None else ' ' for a in self.acts])
+        return f'{self.__class__.__name__} [{acts_str}] ({self.irreps_in} -> {self.irreps_out})'
 
     def __call__(self, features: jnp.ndarray, axis: int = -1) -> jnp.ndarray:
         """Evaluate the activation function.

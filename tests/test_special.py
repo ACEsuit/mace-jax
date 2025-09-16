@@ -1,7 +1,7 @@
-import pytest
-import torch
 import jax.numpy as jnp
 import numpy as np
+import pytest
+import torch
 
 torch.serialization.add_safe_globals([slice])
 
@@ -9,8 +9,8 @@ from mace_jax.modules.special import chebyshev_polynomial_t
 
 
 class TestChebyshevPolynomialT:
-    @pytest.mark.parametrize("n", [0, 1, 2, 3, 5, 10])
-    @pytest.mark.parametrize("shape", [(5,), (2, 3), (4, 2, 2)])
+    @pytest.mark.parametrize('n', [0, 1, 2, 3, 5, 10])
+    @pytest.mark.parametrize('shape', [(5,), (2, 3), (4, 2, 2)])
     def test_parity(self, n, shape):
         # random x in [-2, 2] (to test inside and outside [-1, 1])
         rng = np.random.default_rng(0)

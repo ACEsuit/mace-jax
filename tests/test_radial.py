@@ -1,23 +1,27 @@
-import pytest
-import numpy as np
-import torch
+import haiku as hk
 import jax
 import jax.numpy as jnp
-import haiku as hk
-
+import numpy as np
+import pytest
+import torch
 from mace.modules.radial import (
     BesselBasis as BesselBasisTorch,
+)
+from mace.modules.radial import (
     ChebychevBasis as ChebychevBasisTorch,
 )
+
 from mace_jax.modules.radial import (
     BesselBasis as BesselBasisJAX,
+)
+from mace_jax.modules.radial import (
     ChebychevBasis as ChebychevBasisJAX,
 )
 
 
 class TestBesselBasisParity:
-    @pytest.mark.parametrize("trainable", [False, True])
-    @pytest.mark.parametrize("num_basis", [4, 8])
+    @pytest.mark.parametrize('trainable', [False, True])
+    @pytest.mark.parametrize('num_basis', [4, 8])
     def test_forward(self, trainable, num_basis):
         r_max = 5.0
         batch = 6
@@ -51,7 +55,7 @@ class TestBesselBasisParity:
 
         # Copy weights from JAX -> Torch if trainable
         if trainable:
-            w_jax = params["bessel_basis"]["bessel_weights"]
+            w_jax = params['bessel_basis']['bessel_weights']
             model_torch.bessel_weights.data = torch.tensor(
                 np.array(w_jax), dtype=torch.float32
             )
@@ -75,8 +79,8 @@ class TestBesselBasisParity:
 
 
 class TestChebychevBasisParity:
-    @pytest.mark.parametrize("num_basis", [4, 8])
-    @pytest.mark.parametrize("r_max", [3.0, 5.0])
+    @pytest.mark.parametrize('num_basis', [4, 8])
+    @pytest.mark.parametrize('r_max', [3.0, 5.0])
     def test_forward(self, num_basis, r_max):
         batch = 5
 

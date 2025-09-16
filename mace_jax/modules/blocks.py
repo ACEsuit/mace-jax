@@ -1,5 +1,5 @@
 import abc
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Callable, Optional, Union
 
 import haiku as hk
 import jax
@@ -37,15 +37,15 @@ class LinearNodeEmbeddingBlock(hk.Module):
     ):
         super().__init__(name=name)
         self.num_species = num_species
-        self.irreps_out = Irreps(irreps_out).filter("0e").regroup()
+        self.irreps_out = Irreps(irreps_out).filter('0e').regroup()
 
     def __call__(self, node_specie: jnp.ndarray) -> IrrepsArray:
         w = hk.get_parameter(
-            "embeddings",
+            'embeddings',
             shape=(self.num_species, self.irreps_out.dim),
             dtype=jnp.float32,
             init=hk.initializers.RandomNormal(),
-            name="linear",
+            name='linear',
         )
         return IrrepsArray(self.irreps_out, w[node_specie])
 
@@ -54,7 +54,7 @@ class LinearReadoutBlock(hk.Module):
     def __init__(
         self,
         irreps_in: Irreps,
-        irrep_out: Irreps = Irreps("0e"),
+        irrep_out: Irreps = Irreps('0e'),
         cueq_config: Optional[CuEquivarianceConfig] = None,
         oeq_config: Optional[OEQConfig] = None,  # pylint: disable=unused-argument
         name: Optional[str] = None,
@@ -74,7 +74,7 @@ class LinearReadoutBlock(hk.Module):
             irreps_in=self.irreps_in,
             irreps_out=self.irrep_out,
             cueq_config=self.cueq_config,
-            name="linear",
+            name='linear',
         )(x)  # [n_nodes, output_irreps]
 
 
@@ -84,7 +84,7 @@ class NonLinearReadoutBlock(hk.Module):
         irreps_in: Irreps,
         MLP_irreps: Irreps,
         gate: Optional[Callable],
-        irrep_out: Irreps = Irreps("0e"),
+        irrep_out: Irreps = Irreps('0e'),
         num_heads: int = 1,
         cueq_config: Optional[CuEquivarianceConfig] = None,
         oeq_config: Optional[OEQConfig] = None,  # unused
@@ -98,18 +98,18 @@ class NonLinearReadoutBlock(hk.Module):
             irreps_in=irreps_in,
             irreps_out=self.hidden_irreps,
             cueq_config=cueq_config,
-            name="linear_1",
+            name='linear_1',
         )
         self.non_linearity = nn.Activation(
             irreps_in=self.hidden_irreps,
             acts=[gate],
-            name="non_linearity",
+            name='non_linearity',
         )
         self.linear_2 = Linear(
             irreps_in=self.hidden_irreps,
             irreps_out=irrep_out,
             cueq_config=cueq_config,
-            name="linear_2",
+            name='linear_2',
         )
 
     def __call__(
@@ -119,7 +119,7 @@ class NonLinearReadoutBlock(hk.Module):
         x = self.non_linearity(self.linear_1(x))
 
         # Optional multi-head masking
-        if hasattr(self, "num_heads"):
+        if hasattr(self, 'num_heads'):
             if self.num_heads > 1 and heads is not None:
                 x = mask_head(x, heads, self.num_heads)
 
@@ -137,10 +137,10 @@ class NonLinearBiasReadoutBlock(hk.Module):
         irreps_in: Irreps,
         MLP_irreps: Irreps,
         gate: Optional[Callable],
-        irrep_out: Irreps = Irreps("0e"),
+        irrep_out: Irreps = Irreps('0e'),
         num_heads: int = 1,
-        cueq_config: Optional["CuEquivarianceConfig"] = None,
-        oeq_config: Optional["OEQConfig"] = None,
+        cueq_config: Optional['CuEquivarianceConfig'] = None,
+        oeq_config: Optional['OEQConfig'] = None,
         name: Optional[str] = None,
     ):
         super().__init__(name=name)
@@ -150,29 +150,29 @@ class NonLinearBiasReadoutBlock(hk.Module):
             irreps_in=irreps_in,
             irreps_out=self.hidden_irreps,
             cueq_config=cueq_config,
-            name="linear_1",
+            name='linear_1',
         )
         self.non_linearity_1 = nn.Activation(
             irreps_in=self.hidden_irreps,
             acts=[gate],
-            name="activation_1",
+            name='activation_1',
         )
         self.linear_mid = Linear(
             irreps_in=self.hidden_irreps,
             irreps_out=self.hidden_irreps,
             biases=True,
-            name="linear_mid",
+            name='linear_mid',
         )
         self.non_linearity_2 = nn.Activation(
             irreps_in=self.hidden_irreps,
             acts=[gate],
-            name="activation_2",
+            name='activation_2',
         )
         self.linear_2 = Linear(
             irreps_in=self.hidden_irreps,
             irreps_out=irrep_out,
             biases=True,
-            name="linear_2",
+            name='linear_2',
         )
 
     def __call__(
@@ -198,24 +198,24 @@ class LinearDipoleReadoutBlock(hk.Module):
         self,
         irreps_in: Irreps,
         dipole_only: bool = False,
-        cueq_config: Optional["CuEquivarianceConfig"] = None,
-        oeq_config: Optional["OEQConfig"] = None,
+        cueq_config: Optional['CuEquivarianceConfig'] = None,
+        oeq_config: Optional['OEQConfig'] = None,
         name: Optional[str] = None,
     ):
         super().__init__(name=name)
 
         # Output irreps
         if dipole_only:
-            self.irreps_out = Irreps("1x1o")
+            self.irreps_out = Irreps('1x1o')
         else:
-            self.irreps_out = Irreps("1x0e + 1x1o")
+            self.irreps_out = Irreps('1x0e + 1x1o')
 
         # Linear mapping
         self.linear = Linear(
             irreps_in=irreps_in,
             irreps_out=self.irreps_out,
             cueq_config=cueq_config,
-            name="linear",
+            name='linear',
         )
 
     def __call__(self, x: IrrepsArray) -> IrrepsArray:
@@ -233,8 +233,8 @@ class NonLinearDipoleReadoutBlock(hk.Module):
         MLP_irreps: Irreps,
         gate: Callable,
         dipole_only: bool = False,
-        cueq_config: Optional["CuEquivarianceConfig"] = None,
-        oeq_config: Optional["OEQConfig"] = None,
+        cueq_config: Optional['CuEquivarianceConfig'] = None,
+        oeq_config: Optional['OEQConfig'] = None,
         name: Optional[str] = None,
     ):
         super().__init__(name=name)
@@ -243,9 +243,9 @@ class NonLinearDipoleReadoutBlock(hk.Module):
 
         # Output irreps
         if dipole_only:
-            self.irreps_out = Irreps("1x1o")
+            self.irreps_out = Irreps('1x1o')
         else:
-            self.irreps_out = Irreps("1x0e + 1x1o")
+            self.irreps_out = Irreps('1x0e + 1x1o')
 
         # Partition hidden irreps into scalars and gated irreps
         irreps_scalars = Irreps(
@@ -254,7 +254,7 @@ class NonLinearDipoleReadoutBlock(hk.Module):
         irreps_gated = Irreps(
             [(mul, ir) for mul, ir in MLP_irreps if ir.l > 0 and ir in self.irreps_out]
         )
-        irreps_gates = Irreps([(mul, Irreps("0e")[0][1]) for mul, _ in irreps_gated])
+        irreps_gates = Irreps([(mul, Irreps('0e')[0][1]) for mul, _ in irreps_gated])
 
         # Gated nonlinearity
         self.equivariant_nonlin = nn.Gate(
@@ -273,13 +273,13 @@ class NonLinearDipoleReadoutBlock(hk.Module):
             irreps_in=irreps_in,
             irreps_out=self.irreps_nonlin,
             cueq_config=cueq_config,
-            name="linear_1",
+            name='linear_1',
         )
         self.linear_2 = Linear(
             irreps_in=self.hidden_irreps,
             irreps_out=self.irreps_out,
             cueq_config=cueq_config,
-            name="linear_2",
+            name='linear_2',
         )
 
     def __call__(self, x: IrrepsArray) -> IrrepsArray:
@@ -294,19 +294,19 @@ class LinearDipolePolarReadoutBlock(hk.Module):
         self,
         irreps_in: Irreps,
         use_polarizability: bool = True,
-        cueq_config: Optional["CuEquivarianceConfig"] = None,
-        oeq_config: Optional["OEQConfig"] = None,
+        cueq_config: Optional['CuEquivarianceConfig'] = None,
+        oeq_config: Optional['OEQConfig'] = None,
         name: Optional[str] = None,
     ):
         super().__init__(name=name)
         if use_polarizability:
-            print("You will calculate the polarizability and dipole.")
-            self.irreps_out = Irreps("2x0e + 1x1o + 1x2e")
+            print('You will calculate the polarizability and dipole.')
+            self.irreps_out = Irreps('2x0e + 1x1o + 1x2e')
         else:
             raise ValueError(
-                "Invalid configuration for LinearDipolePolarReadoutBlock: "
-                "use_polarizability must be True. "
-                "If you want to calculate only the dipole, use AtomicDipolesMACE."
+                'Invalid configuration for LinearDipolePolarReadoutBlock: '
+                'use_polarizability must be True. '
+                'If you want to calculate only the dipole, use AtomicDipolesMACE.'
             )
 
         self.linear = Linear(
@@ -330,8 +330,8 @@ class NonLinearDipolePolarReadoutBlock(hk.Module):
         MLP_irreps: Irreps,
         gate: Callable,
         use_polarizability: bool = True,
-        cueq_config: Optional["CuEquivarianceConfig"] = None,
-        oeq_config: Optional["OEQConfig"] = None,
+        cueq_config: Optional['CuEquivarianceConfig'] = None,
+        oeq_config: Optional['OEQConfig'] = None,
         name: Optional[str] = None,
     ):
         super().__init__(name=name)
@@ -339,13 +339,13 @@ class NonLinearDipolePolarReadoutBlock(hk.Module):
         self.hidden_irreps = MLP_irreps
 
         if use_polarizability:
-            print("You will calculate the polarizability and dipole.")
-            self.irreps_out = Irreps("2x0e + 1x1o + 1x2e")
+            print('You will calculate the polarizability and dipole.')
+            self.irreps_out = Irreps('2x0e + 1x1o + 1x2e')
         else:
             raise ValueError(
-                "Invalid configuration for NonLinearDipolePolarReadoutBlock: "
-                "use_polarizability must be True. "
-                "If you want to calculate only the dipole, use AtomicDipolesMACE."
+                'Invalid configuration for NonLinearDipolePolarReadoutBlock: '
+                'use_polarizability must be True. '
+                'If you want to calculate only the dipole, use AtomicDipolesMACE.'
             )
 
         irreps_scalars = Irreps(
@@ -354,7 +354,7 @@ class NonLinearDipolePolarReadoutBlock(hk.Module):
         irreps_gated = Irreps(
             [(mul, ir) for mul, ir in MLP_irreps if ir.l > 0 and ir in self.irreps_out]
         )
-        irreps_gates = Irreps([(mul, "0e") for mul, _ in irreps_gated])
+        irreps_gates = Irreps([(mul, '0e') for mul, _ in irreps_gated])
 
         # Equivariant nonlinearity
         self.equivariant_nonlin = nn.Gate(
@@ -395,7 +395,7 @@ class AtomicEnergiesBlock(hk.Module):
             atomic_energies, dtype=jnp.float32
         )  # convert to JAX array
         self.atomic_energies = hk.get_parameter(
-            "atomic_energies",
+            'atomic_energies',
             shape=atomic_energies.shape,
             init=lambda *_: atomic_energies,
         )  # [n_elements, n_heads]
@@ -414,11 +414,11 @@ class AtomicEnergiesBlock(hk.Module):
 
     def __repr__(self) -> str:
         energies_np = np.array(self.atomic_energies)
-        formatted_energies = ", ".join(
-            "[" + ", ".join([f"{x:.4f}" for x in group]) + "]"
+        formatted_energies = ', '.join(
+            '[' + ', '.join([f'{x:.4f}' for x in group]) + ']'
             for group in np.atleast_2d(energies_np)
         )
-        return f"{self.__class__.__name__}(energies=[{formatted_energies}])"
+        return f'{self.__class__.__name__}(energies=[{formatted_energies}])'
 
 
 class RadialEmbeddingBlock(hk.Module):
@@ -429,27 +429,27 @@ class RadialEmbeddingBlock(hk.Module):
         r_max: float,
         num_bessel: int,
         num_polynomial_cutoff: int,
-        radial_type: str = "bessel",
-        distance_transform: str = "None",
+        radial_type: str = 'bessel',
+        distance_transform: str = 'None',
         apply_cutoff: bool = True,
         name: Optional[str] = None,
     ):
         super().__init__(name=name)
 
         # Select radial basis
-        if radial_type == "bessel":
+        if radial_type == 'bessel':
             self.bessel_fn = BesselBasis(r_max=r_max, num_basis=num_bessel)
-        elif radial_type == "gaussian":
+        elif radial_type == 'gaussian':
             self.bessel_fn = GaussianBasis(r_max=r_max, num_basis=num_bessel)
-        elif radial_type == "chebyshev":
+        elif radial_type == 'chebyshev':
             self.bessel_fn = ChebychevBasis(r_max=r_max, num_basis=num_bessel)
         else:
-            raise ValueError(f"Unknown radial_type: {radial_type}")
+            raise ValueError(f'Unknown radial_type: {radial_type}')
 
         # Distance transformation
-        if distance_transform == "Agnesi":
+        if distance_transform == 'Agnesi':
             self.distance_transform = AgnesiTransform()
-        elif distance_transform == "Soft":
+        elif distance_transform == 'Soft':
             self.distance_transform = SoftTransform()
 
         self.cutoff_fn = PolynomialCutoff(r_max=r_max, p=num_polynomial_cutoff)
@@ -465,14 +465,14 @@ class RadialEmbeddingBlock(hk.Module):
     ):
         cutoff = self.cutoff_fn(edge_lengths)  # [n_edges, 1]
 
-        if hasattr(self, "distance_transform"):
+        if hasattr(self, 'distance_transform'):
             edge_lengths = self.distance_transform(
                 edge_lengths, node_attrs, edge_index, atomic_numbers
             )
 
         radial = self.bessel_fn(edge_lengths)  # [n_edges, n_basis]
 
-        if hasattr(self, "apply_cutoff") and self.apply_cutoff:
+        if hasattr(self, 'apply_cutoff') and self.apply_cutoff:
             return radial * cutoff, None
         else:
             return radial, cutoff
@@ -537,7 +537,7 @@ class EquivariantProductBasisBlock(hk.Module):
                 self.cueq_config.optimize_all or self.cueq_config.optimize_symmetric
             ):
                 use_cueq = True
-            if getattr(self.cueq_config, "layout_str", None) == "mul_ir":
+            if getattr(self.cueq_config, 'layout_str', None) == 'mul_ir':
                 use_cueq_mul_ir = True
 
         if use_cueq:
@@ -575,9 +575,9 @@ class InteractionBlock(hk.Module, metaclass=abc.ABCMeta):
         hidden_irreps: Irreps,
         avg_num_neighbors: float,
         edge_irreps: Optional[Irreps] = None,
-        radial_MLP: Optional[List[int]] = None,
-        cueq_config: Optional["CuEquivarianceConfig"] = None,
-        oeq_config: Optional["OEQConfig"] = None,
+        radial_MLP: Optional[list[int]] = None,
+        cueq_config: Optional['CuEquivarianceConfig'] = None,
+        oeq_config: Optional['OEQConfig'] = None,
         name: Optional[str] = None,
     ):
         super().__init__(name=name)
@@ -600,9 +600,9 @@ class InteractionBlock(hk.Module, metaclass=abc.ABCMeta):
         self.oeq_config = oeq_config
 
         # Handle conv_fusion flag
-        if self.oeq_config and getattr(self.oeq_config, "conv_fusion", None):
+        if self.oeq_config and getattr(self.oeq_config, 'conv_fusion', None):
             self.conv_fusion = self.oeq_config.conv_fusion
-        if self.cueq_config and getattr(self.cueq_config, "conv_fusion", None):
+        if self.cueq_config and getattr(self.cueq_config, 'conv_fusion', None):
             self.conv_fusion = self.cueq_config.conv_fusion
 
         # Call subclass-defined setup
@@ -641,7 +641,7 @@ class RealAgnosticInteractionBlock(InteractionBlock):
             internal_weights=True,
             shared_weights=True,
             cueq_config=self.cueq_config,
-            name="linear_up",
+            name='linear_up',
         )
 
         # TensorProduct
@@ -659,7 +659,7 @@ class RealAgnosticInteractionBlock(InteractionBlock):
             internal_weights=False,
             cueq_config=self.cueq_config,
             oeq_config=self.oeq_config,
-            name="conv_tp",
+            name='conv_tp',
         )
 
         # Convolution weights network
@@ -668,7 +668,7 @@ class RealAgnosticInteractionBlock(InteractionBlock):
             + self.radial_MLP
             + [self.conv_tp.weight_numel],
             act=jax.nn.silu,
-            name="conv_tp_weights",
+            name='conv_tp_weights',
         )
 
         # Linear
@@ -679,7 +679,7 @@ class RealAgnosticInteractionBlock(InteractionBlock):
             internal_weights=True,
             shared_weights=True,
             cueq_config=self.cueq_config,
-            name="linear",
+            name='linear',
         )
 
         # Selector TensorProduct
@@ -688,7 +688,7 @@ class RealAgnosticInteractionBlock(InteractionBlock):
             self.node_attrs_irreps,
             self.irreps_out,
             cueq_config=self.cueq_config,
-            name="skip_tp",
+            name='skip_tp',
         )
         self.reshape = reshape_irreps(self.irreps_out, cueq_config=self.cueq_config)
 
@@ -701,7 +701,7 @@ class RealAgnosticInteractionBlock(InteractionBlock):
         edge_index: jnp.ndarray,
         cutoff: Optional[jnp.ndarray] = None,
         n_real: Optional[int] = None,
-    ) -> Tuple[jnp.ndarray, None]:
+    ) -> tuple[jnp.ndarray, None]:
         # First linear projection
         node_feats = self.linear_up(node_feats)
 
@@ -711,7 +711,7 @@ class RealAgnosticInteractionBlock(InteractionBlock):
             tp_weights = tp_weights * cutoff
 
         # Message passing
-        if hasattr(self, "conv_fusion"):
+        if hasattr(self, 'conv_fusion'):
             message = self.conv_tp(node_feats, edge_attrs, tp_weights, edge_index)
         else:
             mji = self.conv_tp(node_feats[edge_index[0]], edge_attrs, tp_weights)
@@ -740,7 +740,7 @@ class RealAgnosticResidualInteractionBlock(InteractionBlock):
             internal_weights=True,
             shared_weights=True,
             cueq_config=self.cueq_config,
-            name="linear_up",
+            name='linear_up',
         )
 
         # TensorProduct
@@ -758,7 +758,7 @@ class RealAgnosticResidualInteractionBlock(InteractionBlock):
             internal_weights=False,
             cueq_config=self.cueq_config,
             oeq_config=self.oeq_config,
-            name="conv_tp",
+            name='conv_tp',
         )
 
         # Convolution weights network
@@ -767,7 +767,7 @@ class RealAgnosticResidualInteractionBlock(InteractionBlock):
             + self.radial_MLP
             + [self.conv_tp.weight_numel],
             act=jax.nn.silu,
-            name="conv_tp_weights",
+            name='conv_tp_weights',
         )
 
         # Linear
@@ -778,7 +778,7 @@ class RealAgnosticResidualInteractionBlock(InteractionBlock):
             internal_weights=True,
             shared_weights=True,
             cueq_config=self.cueq_config,
-            name="linear",
+            name='linear',
         )
 
         # Selector TensorProduct (skip connection)
@@ -787,7 +787,7 @@ class RealAgnosticResidualInteractionBlock(InteractionBlock):
             self.node_attrs_irreps,
             self.hidden_irreps,
             cueq_config=self.cueq_config,
-            name="skip_tp",
+            name='skip_tp',
         )
         self.reshape = reshape_irreps(self.irreps_out, cueq_config=self.cueq_config)
 
@@ -800,7 +800,7 @@ class RealAgnosticResidualInteractionBlock(InteractionBlock):
         edge_index: jnp.ndarray,
         cutoff: Optional[jnp.ndarray] = None,
         n_real: Optional[int] = None,
-    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
         # Skip connection
         sc = self.skip_tp(node_feats, node_attrs)
 
@@ -813,7 +813,7 @@ class RealAgnosticResidualInteractionBlock(InteractionBlock):
             tp_weights = tp_weights * cutoff
 
         # Message passing
-        if hasattr(self, "conv_fusion"):
+        if hasattr(self, 'conv_fusion'):
             message = self.conv_tp(node_feats, edge_attrs, tp_weights, edge_index)
         else:
             mji = self.conv_tp(node_feats[edge_index[0]], edge_attrs, tp_weights)
@@ -845,7 +845,7 @@ class RealAgnosticDensityInteractionBlock(InteractionBlock):
             internal_weights=True,
             shared_weights=True,
             cueq_config=self.cueq_config,
-            name="linear_up",
+            name='linear_up',
         )
 
         # TensorProduct
@@ -863,7 +863,7 @@ class RealAgnosticDensityInteractionBlock(InteractionBlock):
             internal_weights=False,
             cueq_config=self.cueq_config,
             oeq_config=self.oeq_config,
-            name="conv_tp",
+            name='conv_tp',
         )
 
         # Convolution weights network
@@ -872,7 +872,7 @@ class RealAgnosticDensityInteractionBlock(InteractionBlock):
             + self.radial_MLP
             + [self.conv_tp.weight_numel],
             act=jax.nn.silu,
-            name="conv_tp_weights",
+            name='conv_tp_weights',
         )
 
         # Linear projection
@@ -883,7 +883,7 @@ class RealAgnosticDensityInteractionBlock(InteractionBlock):
             internal_weights=True,
             shared_weights=True,
             cueq_config=self.cueq_config,
-            name="linear",
+            name='linear',
         )
 
         # Selector TensorProduct (skip connection)
@@ -892,14 +892,14 @@ class RealAgnosticDensityInteractionBlock(InteractionBlock):
             self.node_attrs_irreps,
             self.irreps_out,
             cueq_config=self.cueq_config,
-            name="skip_tp",
+            name='skip_tp',
         )
 
         # Density normalization network
         self.density_fn = nn.FullyConnectedNet(
             hs=[self.edge_feats_irreps.num_irreps, 1],
             act=jax.nn.silu,
-            name="density_fn",
+            name='density_fn',
         )
 
         # Reshape output
@@ -914,7 +914,7 @@ class RealAgnosticDensityInteractionBlock(InteractionBlock):
         edge_index: jnp.ndarray,
         cutoff: Optional[jnp.ndarray] = None,
         n_real: Optional[int] = None,
-    ) -> Tuple[jnp.ndarray, None]:
+    ) -> tuple[jnp.ndarray, None]:
         receiver = edge_index[1]
         num_nodes = node_feats.shape[0]
 
@@ -937,7 +937,7 @@ class RealAgnosticDensityInteractionBlock(InteractionBlock):
         )  # [n_nodes, 1]
 
         # Message passing
-        if hasattr(self, "conv_fusion"):
+        if hasattr(self, 'conv_fusion'):
             message = self.conv_tp(node_feats, edge_attrs, tp_weights, edge_index)
         else:
             mji = self.conv_tp(node_feats[edge_index[0]], edge_attrs, tp_weights)
@@ -967,7 +967,7 @@ class RealAgnosticDensityResidualInteractionBlock(InteractionBlock):
             internal_weights=True,
             shared_weights=True,
             cueq_config=self.cueq_config,
-            name="linear_up",
+            name='linear_up',
         )
 
         # TensorProduct
@@ -985,7 +985,7 @@ class RealAgnosticDensityResidualInteractionBlock(InteractionBlock):
             internal_weights=False,
             cueq_config=self.cueq_config,
             oeq_config=self.oeq_config,
-            name="conv_tp",
+            name='conv_tp',
         )
 
         # Convolution weights network
@@ -994,7 +994,7 @@ class RealAgnosticDensityResidualInteractionBlock(InteractionBlock):
             + self.radial_MLP
             + [self.conv_tp.weight_numel],
             act=jax.nn.silu,
-            name="conv_tp_weights",
+            name='conv_tp_weights',
         )
 
         # Linear projection
@@ -1005,7 +1005,7 @@ class RealAgnosticDensityResidualInteractionBlock(InteractionBlock):
             internal_weights=True,
             shared_weights=True,
             cueq_config=self.cueq_config,
-            name="linear",
+            name='linear',
         )
 
         # Selector TensorProduct (skip connection)
@@ -1014,14 +1014,14 @@ class RealAgnosticDensityResidualInteractionBlock(InteractionBlock):
             self.node_attrs_irreps,
             self.hidden_irreps,
             cueq_config=self.cueq_config,
-            name="skip_tp",
+            name='skip_tp',
         )
 
         # Density normalization network
         self.density_fn = nn.FullyConnectedNet(
             hs=[self.edge_feats_irreps.num_irreps, 1],
             act=jax.nn.silu,
-            name="density_fn",
+            name='density_fn',
         )
 
         # Reshape output
@@ -1036,7 +1036,7 @@ class RealAgnosticDensityResidualInteractionBlock(InteractionBlock):
         edge_index: jnp.ndarray,
         cutoff: Optional[jnp.ndarray] = None,
         n_real: Optional[int] = None,
-    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
         receiver = edge_index[:, 1]
         num_nodes = node_feats.shape[0]
 
@@ -1060,7 +1060,7 @@ class RealAgnosticDensityResidualInteractionBlock(InteractionBlock):
         density = scatter_sum(edge_density, receiver, num_nodes)  # [n_nodes, 1]
 
         # Message passing
-        if hasattr(self, "conv_fusion"):
+        if hasattr(self, 'conv_fusion'):
             message = self.conv_tp(node_feats, edge_attrs, tp_weights, edge_index)
         else:
             mji = self.conv_tp(node_feats[edge_index[:, 0]], edge_attrs, tp_weights)
@@ -1082,7 +1082,7 @@ class RealAgnosticDensityResidualInteractionBlock(InteractionBlock):
 class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
     def _setup(self) -> None:
         # Downsample irreps
-        self.node_feats_down_irreps = Irreps("64x0e")
+        self.node_feats_down_irreps = Irreps('64x0e')
 
         # First linear (up)
         self.linear_up = Linear(
@@ -1091,7 +1091,7 @@ class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
             internal_weights=True,
             shared_weights=True,
             cueq_config=self.cueq_config,
-            name="linear_up",
+            name='linear_up',
         )
 
         # TensorProduct
@@ -1109,7 +1109,7 @@ class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
             internal_weights=False,
             cueq_config=self.cueq_config,
             oeq_config=self.oeq_config,
-            name="conv_tp",
+            name='conv_tp',
         )
 
         # Linear (down)
@@ -1119,7 +1119,7 @@ class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
             internal_weights=True,
             shared_weights=True,
             cueq_config=self.cueq_config,
-            name="linear_down",
+            name='linear_down',
         )
 
         # Convolution weights network
@@ -1130,7 +1130,7 @@ class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
         self.conv_tp_weights = nn.FullyConnectedNet(
             hs=[input_dim] + [256, 256, 256] + [self.conv_tp.weight_numel],
             act=jax.nn.silu,
-            name="conv_tp_weights",
+            name='conv_tp_weights',
         )
 
         # Linear output
@@ -1141,7 +1141,7 @@ class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
             internal_weights=True,
             shared_weights=True,
             cueq_config=self.cueq_config,
-            name="linear",
+            name='linear',
         )
 
         # Output reshape
@@ -1152,7 +1152,7 @@ class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
             self.node_feats_irreps,
             self.hidden_irreps,
             cueq_config=self.cueq_config,
-            name="skip_linear",
+            name='skip_linear',
         )
 
     def __call__(
@@ -1164,7 +1164,7 @@ class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
         edge_index: jnp.ndarray,
         cutoff: Optional[jnp.ndarray] = None,
         n_real: Optional[int] = None,
-    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
         sender = edge_index[:, 0]
         receiver = edge_index[:, 1]
 
@@ -1186,7 +1186,7 @@ class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
             tp_weights = tp_weights * cutoff
 
         # Message passing
-        if hasattr(self, "conv_fusion"):
+        if hasattr(self, 'conv_fusion'):
             message = self.conv_tp(node_feats_up, edge_attrs, tp_weights, edge_index)
         else:
             mji = self.conv_tp(node_feats_up[sender], edge_attrs, tp_weights)
@@ -1212,7 +1212,7 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
             internal_weights=True,
             shared_weights=True,
             cueq_config=self.cueq_config,
-            name="source_embedding",
+            name='source_embedding',
         )
         self.target_embedding = Linear(
             self.node_attrs_irreps,
@@ -1220,7 +1220,7 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
             internal_weights=True,
             shared_weights=True,
             cueq_config=self.cueq_config,
-            name="target_embedding",
+            name='target_embedding',
         )
 
         # First linear
@@ -1230,7 +1230,7 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
             internal_weights=True,
             shared_weights=True,
             cueq_config=self.cueq_config,
-            name="linear_up",
+            name='linear_up',
         )
 
         # TensorProduct
@@ -1247,7 +1247,7 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
             shared_weights=False,
             internal_weights=False,
             cueq_config=self.cueq_config,
-            name="conv_tp",
+            name='conv_tp',
         )
 
         # Convolution weights (Radial MLP)
@@ -1266,7 +1266,7 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
             self.node_feats_irreps,
             self.hidden_irreps,
             cueq_config=self.cueq_config,
-            name="skip_tp",
+            name='skip_tp',
         )
 
         # Reshape
@@ -1292,7 +1292,7 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
             internal_weights=True,
             shared_weights=True,
             cueq_config=self.cueq_config,
-            name="linear_res",
+            name='linear_res',
         )
 
         # Linear blocks
@@ -1302,7 +1302,7 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
             internal_weights=True,
             shared_weights=True,
             cueq_config=self.cueq_config,
-            name="linear_1",
+            name='linear_1',
         )
         self.linear_2 = Linear(
             self.irreps_out,
@@ -1310,25 +1310,25 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
             internal_weights=True,
             shared_weights=True,
             cueq_config=self.cueq_config,
-            name="linear_2",
+            name='linear_2',
         )
 
         # Density normalization
         self.density_fn = RadialMLP([input_dim + 2 * node_scalar_irreps.dim, 64, 1])
-        self.alpha = hk.get_parameter("alpha", shape=(), init=jnp.ones) * 20.0
-        self.beta = hk.get_parameter("beta", shape=(), init=jnp.zeros)
+        self.alpha = hk.get_parameter('alpha', shape=(), init=jnp.ones) * 20.0
+        self.beta = hk.get_parameter('beta', shape=(), init=jnp.zeros)
 
         # Transpose wrappers
         self.transpose_mul_ir = TransposeIrrepsLayoutWrapper(
             irreps=self.irreps_nonlin,
-            source="ir_mul",
-            target="mul_ir",
+            source='ir_mul',
+            target='mul_ir',
             cueq_config=self.cueq_config,
         )
         self.transpose_ir_mul = TransposeIrrepsLayoutWrapper(
             irreps=self.irreps_out,
-            source="mul_ir",
-            target="ir_mul",
+            source='mul_ir',
+            target='ir_mul',
             cueq_config=self.cueq_config,
         )
 
@@ -1341,7 +1341,7 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
         edge_index: jnp.ndarray,
         cutoff: Optional[jnp.ndarray] = None,
         n_real: Optional[int] = None,
-    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
         num_nodes = node_feats.shape[0]
 
         # Skip connection
@@ -1422,6 +1422,6 @@ class ScaleShiftBlock(hk.Module):
     def __repr__(self):
         scale_vals = self.scale if self.scale.ndim > 0 else jnp.array([self.scale])
         shift_vals = self.shift if self.shift.ndim > 0 else jnp.array([self.shift])
-        formatted_scale = ", ".join([f"{x:.4f}" for x in scale_vals])
-        formatted_shift = ", ".join([f"{x:.4f}" for x in shift_vals])
-        return f"{self.__class__.__name__}(scale={formatted_scale}, shift={formatted_shift})"
+        formatted_scale = ', '.join([f'{x:.4f}' for x in scale_vals])
+        formatted_shift = ', '.join([f'{x:.4f}' for x in shift_vals])
+        return f'{self.__class__.__name__}(scale={formatted_scale}, shift={formatted_shift})'

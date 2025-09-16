@@ -8,10 +8,10 @@ from ._sub import (
 from ._tensor_product import TensorProduct
 
 __all__ = [
-    "Instruction",
-    "TensorProduct",
-    "FullyConnectedTensorProduct",
-    "ElementwiseTensorProduct",
-    "FullTensorProduct",
-    "TensorSquare",
+    'Instruction',
+    'TensorProduct',
+    'FullyConnectedTensorProduct',
+    'ElementwiseTensorProduct',
+    'FullTensorProduct',
+    'TensorSquare',
 ]

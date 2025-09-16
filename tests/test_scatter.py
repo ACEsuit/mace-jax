@@ -1,21 +1,19 @@
-import pytest
-import numpy as np
 import jax.numpy as jnp
+import pytest
 import torch
-
-
 from mace.tools.scatter import _broadcast as _broadcast_torch
-from mace_jax.tools.scatter import _broadcast as _broadcast_jax
-from mace.tools.scatter import scatter_sum as scatter_sum_torch
-from mace_jax.tools.scatter import scatter_sum as scatter_sum_jax
-from mace.tools.scatter import scatter_std as scatter_std_torch
-from mace_jax.tools.scatter import scatter_std as scatter_std_jax
 from mace.tools.scatter import scatter_mean as scatter_mean_torch
+from mace.tools.scatter import scatter_std as scatter_std_torch
+from mace.tools.scatter import scatter_sum as scatter_sum_torch
+
+from mace_jax.tools.scatter import _broadcast as _broadcast_jax
 from mace_jax.tools.scatter import scatter_mean as scatter_mean_jax
+from mace_jax.tools.scatter import scatter_std as scatter_std_jax
+from mace_jax.tools.scatter import scatter_sum as scatter_sum_jax
 
 
 class TestBroadcastParity:
-    @pytest.mark.parametrize("dim", [0, 1, -1])
+    @pytest.mark.parametrize('dim', [0, 1, -1])
     def test_same_shape(self, dim):
         x_torch = torch.ones((2, 3))
         y_torch = torch.zeros((2, 3))

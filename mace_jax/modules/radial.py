@@ -8,8 +8,8 @@ import logging
 from typing import Optional
 
 import ase
-import jax
 import haiku as hk
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -49,7 +49,7 @@ class BesselBasis(hk.Module):
 
         if self.trainable:
             bessel_weights = hk.get_parameter(
-                "bessel_weights",
+                'bessel_weights',
                 shape=init_bessel.shape,
                 dtype=x.dtype,
                 init=lambda *_: init_bessel,
@@ -62,8 +62,8 @@ class BesselBasis(hk.Module):
 
     def __repr__(self):
         return (
-            f"{self.__class__.__name__}(r_max={self.r_max_val}, "
-            f"num_basis={self.num_basis}, trainable={self.trainable})"
+            f'{self.__class__.__name__}(r_max={self.r_max_val}, '
+            f'num_basis={self.num_basis}, trainable={self.trainable})'
         )
 
 
@@ -93,7 +93,7 @@ class ChebychevBasis(hk.Module):
 
     def __repr__(self):
         return (
-            f"{self.__class__.__name__}(r_max={self.r_max}, num_basis={self.num_basis})"
+            f'{self.__class__.__name__}(r_max={self.r_max}, num_basis={self.num_basis})'
         )
 
 
@@ -134,20 +134,20 @@ class GaussianBasis(hk.Module):
 
         if self.trainable:
             gaussian_weights = hk.get_parameter(
-                "gaussian_weights",
+                'gaussian_weights',
                 shape=init_gaussian_weights.shape,
                 init=lambda *_: init_gaussian_weights,
             )
         else:
             # Non-trainable "buffer" -> constant
             gaussian_weights = hk.get_state(
-                "gaussian_weights",
+                'gaussian_weights',
                 shape=init_gaussian_weights.shape,
                 dtype=jnp.float32,
                 init=lambda *_: init_gaussian_weights,
             )
             # Ensure it stays constant
-            hk.set_state("gaussian_weights", gaussian_weights)
+            hk.set_state('gaussian_weights', gaussian_weights)
 
         # Apply Gaussian basis transform
         x = x[..., None] - gaussian_weights  # expand along basis dimension
@@ -164,21 +164,21 @@ class PolynomialCutoff(hk.Module):
 
         # Store as non-trainable constants (buffers in PyTorch)
         self.r_max = hk.get_state(
-            "r_max",
+            'r_max',
             shape=(),
             dtype=jnp.float32,
             init=lambda *_: jnp.array(r_max, dtype=jnp.float32),
         )
         self.p = hk.get_state(
-            "p",
+            'p',
             shape=(),
             dtype=jnp.int32,
             init=lambda *_: jnp.array(p, dtype=jnp.int32),
         )
 
         # Ensure they stay constant
-        hk.set_state("r_max", self.r_max)
-        hk.set_state("p", self.p)
+        hk.set_state('r_max', self.r_max)
+        hk.set_state('p', self.p)
 
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
         return self.calculate_envelope(x, self.r_max, self.p)
@@ -197,7 +197,7 @@ class PolynomialCutoff(hk.Module):
         return envelope * (x < r_max)
 
     def __repr__(self):
-        return f"{self.__class__.__name__}(p={int(self.p)}, r_max={float(self.r_max)})"
+        return f'{self.__class__.__name__}(p={int(self.p)}, r_max={float(self.r_max)})'
 
 
 class ZBLBasis(hk.Module):
@@ -208,9 +208,9 @@ class ZBLBasis(hk.Module):
     def __init__(self, p: int = 6, trainable: bool = False, name: str = None, **kwargs):
         super().__init__(name=name)
 
-        if "r_max" in kwargs:
+        if 'r_max' in kwargs:
             logging.warning(
-                "r_max is deprecated. r_max is determined from the covalent radii."
+                'r_max is deprecated. r_max is determined from the covalent radii.'
             )
 
         # Constants (non-trainable buffers in PyTorch)
@@ -221,10 +221,10 @@ class ZBLBasis(hk.Module):
         # Parameters (trainable or frozen)
         if trainable:
             self.a_exp = hk.get_parameter(
-                "a_exp", shape=(), init=lambda *_: jnp.array(0.300, dtype=jnp.float32)
+                'a_exp', shape=(), init=lambda *_: jnp.array(0.300, dtype=jnp.float32)
             )
             self.a_prefactor = hk.get_parameter(
-                "a_prefactor",
+                'a_prefactor',
                 shape=(),
                 init=lambda *_: jnp.array(0.4543, dtype=jnp.float32),
             )
@@ -278,7 +278,7 @@ class ZBLBasis(hk.Module):
         return V_ZBL
 
     def __repr__(self):
-        return f"{self.__class__.__name__}(c={self.c})"
+        return f'{self.__class__.__name__}(c={self.c})'
 
 
 class AgnesiTransform(hk.Module):
@@ -301,13 +301,13 @@ class AgnesiTransform(hk.Module):
 
         if trainable:
             self.a = hk.get_parameter(
-                "a", shape=(), init=lambda *_: jnp.array(a, dtype=jnp.float32)
+                'a', shape=(), init=lambda *_: jnp.array(a, dtype=jnp.float32)
             )
             self.q = hk.get_parameter(
-                "q", shape=(), init=lambda *_: jnp.array(q, dtype=jnp.float32)
+                'q', shape=(), init=lambda *_: jnp.array(q, dtype=jnp.float32)
             )
             self.p = hk.get_parameter(
-                "p", shape=(), init=lambda *_: jnp.array(p, dtype=jnp.float32)
+                'p', shape=(), init=lambda *_: jnp.array(p, dtype=jnp.float32)
             )
         else:
             self.a = jnp.array(a, dtype=jnp.float32)
@@ -339,7 +339,7 @@ class AgnesiTransform(hk.Module):
         return 1.0 / (1.0 + numerator / denominator)
 
     def __repr__(self):
-        return f"{self.__class__.__name__}(a={float(self.a):.4f}, q={float(self.q):.4f}, p={float(self.p):.4f})"
+        return f'{self.__class__.__name__}(a={float(self.a):.4f}, q={float(self.q):.4f}, p={float(self.p):.4f})'
 
 
 class SoftTransform(hk.Module):
@@ -362,7 +362,7 @@ class SoftTransform(hk.Module):
         # If trainable, we store alpha as a Haiku parameter
         if self.trainable:
             return hk.get_parameter(
-                "alpha", shape=(), init=lambda *_: jnp.array(self.init_alpha)
+                'alpha', shape=(), init=lambda *_: jnp.array(self.init_alpha)
             )
         else:
             return jnp.array(self.init_alpha)
@@ -404,7 +404,7 @@ class SoftTransform(hk.Module):
         return p_0 + (x - p_0) * s_x
 
     def __repr__(self):
-        return f"{self.__class__.__name__}(alpha={self.init_alpha:.4f}, trainable={self.trainable})"
+        return f'{self.__class__.__name__}(alpha={self.init_alpha:.4f}, trainable={self.trainable})'
 
 
 class RadialMLP(hk.Module):
@@ -423,7 +423,7 @@ class RadialMLP(hk.Module):
             zip(self.channels_list[:-1], self.channels_list[1:])
         ):
             # Linear layer
-            linear = hk.Linear(output_size=out_ch, with_bias=True, name=f"linear_{idx}")
+            linear = hk.Linear(output_size=out_ch, with_bias=True, name=f'linear_{idx}')
             x = linear(x)
 
             # Apply LayerNorm + SiLU if not the last layer
@@ -432,7 +432,7 @@ class RadialMLP(hk.Module):
                     axis=-1,
                     create_scale=True,
                     create_offset=True,
-                    name=f"layernorm_{idx}",
+                    name=f'layernorm_{idx}',
                 )
                 x = ln(x)
                 x = jax.nn.silu(x)

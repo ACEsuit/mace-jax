@@ -8,8 +8,8 @@ from typing import Callable, Optional
 import jax.numpy as jnp
 from e3nn_jax import Irreps
 
-from mace_jax.e3nn import _tensor_product as _tp
 from mace_jax.e3nn import _linear
+from mace_jax.e3nn import _tensor_product as _tp
 from mace_jax.modules.symmetric_contraction import SymmetricContraction
 from mace_jax.tools.cg import O3_e3nn
 from mace_jax.tools.scatter import scatter_sum
@@ -31,9 +31,9 @@ class CuEquivarianceConfig:
     """Configuration for cuequivariance acceleration"""
 
     enabled: bool = False
-    layout: str = "mul_ir"  # One of: mul_ir, ir_mul
-    layout_str: str = "mul_ir"
-    group: str = "O3"
+    layout: str = 'mul_ir'  # One of: mul_ir, ir_mul
+    layout_str: str = 'mul_ir'
+    group: str = 'O3'
     optimize_all: bool = False  # Set to True to enable all optimizations
     optimize_linear: bool = False
     optimize_channelwise: bool = False
@@ -46,7 +46,7 @@ class CuEquivarianceConfig:
             self.layout_str = self.layout
             self.layout = getattr(cue, self.layout)
             self.group = (
-                O3_e3nn if self.group == "O3_e3nn" else getattr(cue, self.group)
+                O3_e3nn if self.group == 'O3_e3nn' else getattr(cue, self.group)
             )
         if not CUET_AVAILABLE:
             self.enabled = False
@@ -59,7 +59,7 @@ class OEQConfig:
     enabled: bool = False
     optimize_all: bool = False
     optimize_channelwise: bool = False
-    conv_fusion: Optional[str] = "atomic"
+    conv_fusion: Optional[str] = 'atomic'
 
     def __post_init__(self):
         if not OEQ_AVAILABLE:
@@ -208,14 +208,14 @@ class TensorProduct:
                     outputs_shape_dtype=(output_shape, jnp.float32),
                     indices={1: sender},  # like message passing index
                     math_dtype=jnp.float32,
-                    precision="highest",
+                    precision='highest',
                 )
 
             return forward
 
         # --- Case 2: OEQ backend (not ported yet) ---
         if oeq_config is not None and oeq_config.enabled:
-            raise NotImplementedError("OEQ backend not yet ported to JAX")
+            raise NotImplementedError('OEQ backend not yet ported to JAX')
 
         # --- Default: fallback to e3nn_jax.TensorProduct ---
         return _tp.TensorProduct(
@@ -251,7 +251,7 @@ def FullyConnectedTensorProduct(
     ):
         # No JAX cuet binding available (PyTorch only).
         raise NotImplementedError(
-            "cuet.FullyConnectedTensorProduct is not available in JAX."
+            'cuet.FullyConnectedTensorProduct is not available in JAX.'
         )
 
     # Default: e3nn_jax implementation
@@ -270,8 +270,8 @@ def SymmetricContractionWrapper(
     irreps_out: Irreps,
     correlation: int,
     num_elements: Optional[int] = None,
-    cueq_config: Optional["CuEquivarianceConfig"] = None,
-    oeq_config: Optional["OEQConfig"] = None,  # unused for JAX
+    cueq_config: Optional['CuEquivarianceConfig'] = None,
+    oeq_config: Optional['OEQConfig'] = None,  # unused for JAX
     use_reduced_cg: bool = True,
 ):
     """

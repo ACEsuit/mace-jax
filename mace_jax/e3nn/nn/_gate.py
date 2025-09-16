@@ -1,10 +1,10 @@
+from typing import Callable, Optional
+
 import haiku as hk
 import jax.numpy as jnp
-from typing import List, Optional, Callable, Tuple
 from e3nn_jax import Irreps, IrrepsArray
 
 from .._tensor_product._sub import ElementwiseTensorProduct
-
 from ._activation import Activation
 from ._extract import Extract
 
@@ -31,7 +31,7 @@ class _Sortcut(hk.Module):
         self.cut = Extract(irreps_in, self.irreps_outs, instructions)
         self.irreps_in = irreps_in.simplify()
 
-    def __call__(self, x: IrrepsArray) -> Tuple[IrrepsArray, ...]:
+    def __call__(self, x: IrrepsArray) -> tuple[IrrepsArray, ...]:
         return self.cut(x)  # returns tuple of extracted IrrepsArrays
 
 
@@ -44,9 +44,9 @@ class Gate(hk.Module):
     def __init__(
         self,
         irreps_scalars: Irreps,
-        act_scalars: List[Optional[Callable]],
+        act_scalars: list[Optional[Callable]],
         irreps_gates: Irreps,
-        act_gates: List[Optional[Callable]],
+        act_gates: list[Optional[Callable]],
         irreps_gated: Irreps,
         name: Optional[str] = None,
     ):
@@ -57,13 +57,13 @@ class Gate(hk.Module):
         irreps_gated = Irreps(irreps_gated)
 
         if len(irreps_gates) > 0 and irreps_gates.lmax > 0:
-            raise ValueError(f"Gate scalars must be scalars, got {irreps_gates}")
+            raise ValueError(f'Gate scalars must be scalars, got {irreps_gates}')
         if len(irreps_scalars) > 0 and irreps_scalars.lmax > 0:
-            raise ValueError(f"Scalars must be scalars, got {irreps_scalars}")
+            raise ValueError(f'Scalars must be scalars, got {irreps_scalars}')
         if irreps_gates.num_irreps != irreps_gated.num_irreps:
             raise ValueError(
-                f"Mismatch: {irreps_gated.num_irreps} irreps in gated, "
-                f"{irreps_gates.num_irreps} in gates"
+                f'Mismatch: {irreps_gated.num_irreps} irreps in gated, '
+                f'{irreps_gates.num_irreps} in gates'
             )
 
         # Extract scalars, gates, and gated irreps

@@ -1,5 +1,6 @@
+from collections.abc import Iterator
 from math import prod
-from typing import Iterator, List, NamedTuple, Optional, Tuple, Union
+from typing import NamedTuple, Optional, Union
 
 import haiku as hk
 import jax.numpy as jnp
@@ -27,9 +28,9 @@ class Linear(hk.Module):
         f_out: Optional[int] = None,
         internal_weights: Optional[bool] = None,
         shared_weights: Optional[bool] = None,
-        instructions: Optional[List[Tuple[int, int]]] = None,
-        biases: Union[bool, List[bool]] = False,
-        path_normalization: str = "element",
+        instructions: Optional[list[tuple[int, int]]] = None,
+        biases: Union[bool, list[bool]] = False,
+        path_normalization: str = 'element',
         name: Optional[str] = None,
     ):
         super().__init__(name=name)
@@ -60,7 +61,7 @@ class Linear(hk.Module):
         # Apply path normalization
         def alpha(ins):
             x = sum(
-                irreps_in[i.i_in if path_normalization == "element" else ins.i_in].mul
+                irreps_in[i.i_in if path_normalization == 'element' else ins.i_in].mul
                 for i in instructions
                 if i.i_out == ins.i_out
             )
@@ -142,7 +143,7 @@ class Linear(hk.Module):
         if w is None and self.weight_numel > 0:
             if not self.internal_weights:
                 raise RuntimeError(
-                    "Weights must be provided when internal_weights = False"
+                    'Weights must be provided when internal_weights = False'
                 )
             w_shape = ()
             if self.f_in is not None:
@@ -150,18 +151,18 @@ class Linear(hk.Module):
             if self.f_out is not None:
                 w_shape += (self.f_out,)
             w_shape += (self.weight_numel,)
-            w = hk.get_parameter("weight", w_shape, init=hk.initializers.RandomNormal())
+            w = hk.get_parameter('weight', w_shape, init=hk.initializers.RandomNormal())
 
         if b is None and self.bias_numel > 0:
             if not self.internal_weights:
                 raise RuntimeError(
-                    "Weights must be provided when internal_weights = False"
+                    'Weights must be provided when internal_weights = False'
                 )
             b_shape = ()
             if self.f_out is not None:
                 b_shape += (self.f_out,)
             b_shape += (self.bias_numel,)
-            b = hk.get_parameter("bias", b_shape, init=jnp.zeros)
+            b = hk.get_parameter('bias', b_shape, init=jnp.zeros)
 
         return _codegen_linear(
             x,
@@ -183,7 +184,7 @@ class Linear(hk.Module):
         """
         if weight is None:
             weight = hk.get_parameter(
-                "weight", (self.weight_numel,), init=hk.initializers.RandomNormal()
+                'weight', (self.weight_numel,), init=hk.initializers.RandomNormal()
             )
 
         batchshape = weight.shape[:-1]
@@ -196,13 +197,13 @@ class Linear(hk.Module):
 
     def weight_views(
         self, weight: Optional[jnp.ndarray] = None, yield_instruction: bool = False
-    ) -> Union[Iterator[jnp.ndarray], Iterator[Tuple[int, Instruction, jnp.ndarray]]]:
+    ) -> Union[Iterator[jnp.ndarray], Iterator[tuple[int, Instruction, jnp.ndarray]]]:
         """
         Iterator over weight views for all instructions.
         """
         if weight is None:
             weight = hk.get_parameter(
-                "weight", (self.weight_numel,), init=hk.initializers.RandomNormal()
+                'weight', (self.weight_numel,), init=hk.initializers.RandomNormal()
             )
 
         batchshape = weight.shape[:-1]
@@ -225,7 +226,7 @@ def _codegen_linear(
     bs: Optional[jnp.ndarray],
     irreps_in: Irreps,
     irreps_out: Irreps,
-    instructions: List["Instruction"],
+    instructions: list['Instruction'],
     f_in: Optional[int] = None,
     f_out: Optional[int] = None,
     shared_weights: bool = False,
@@ -293,7 +294,7 @@ def _codegen_linear(
             for i, mul_ir in zip(irreps_in.slices(), irreps_in)
         ]
 
-    z = "" if shared_weights else "z"
+    z = '' if shared_weights else 'z'
 
     flat_weight_index = 0
     flat_bias_index = 0
@@ -335,9 +336,9 @@ def _codegen_linear(
 
             # einsum
             if f_in is None:
-                ein_out = jnp.einsum(f"{z}uw,zui->zwi", w, x_list[ins.i_in])
+                ein_out = jnp.einsum(f'{z}uw,zui->zwi', w, x_list[ins.i_in])
             else:
-                ein_out = jnp.einsum(f"{z}xyuw,zxui->zywi", w, x_list[ins.i_in])
+                ein_out = jnp.einsum(f'{z}xyuw,zxui->zywi', w, x_list[ins.i_in])
 
             ein_out = ins.path_weight * ein_out
 

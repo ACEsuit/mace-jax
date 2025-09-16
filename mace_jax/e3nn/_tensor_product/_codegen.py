@@ -1,5 +1,4 @@
 from math import prod, sqrt
-from typing import List
 
 import jax
 import jax.numpy as jnp
@@ -27,7 +26,7 @@ def codegen_tensor_product_left_right(
     irreps_in1: Irreps,
     irreps_in2: Irreps,
     irreps_out: Irreps,
-    instructions: List[Instruction],
+    instructions: list[Instruction],
     shared_weights: bool = False,
     specialized_code: bool = True,
 ) -> jax.Array:
@@ -115,214 +114,214 @@ def codegen_tensor_product_left_right(
         # xx cache
         key = (ins.i_in1, ins.i_in2, ins.connection_mode[:2])
         if key not in xx_dict:
-            if ins.connection_mode[:2] == "uu":
-                xx_dict[key] = jnp.einsum("zui,zuj->zuij", x1, x2)
+            if ins.connection_mode[:2] == 'uu':
+                xx_dict[key] = jnp.einsum('zui,zuj->zuij', x1, x2)
             else:
-                xx_dict[key] = jnp.einsum("zui,zvj->zuvij", x1, x2)
+                xx_dict[key] = jnp.einsum('zui,zvj->zuvij', x1, x2)
         xx = xx_dict[key]
 
         # The einsum string index to prepend to the weights if the weights are not shared and have a batch dimension
-        z = "" if shared_weights else "z"
+        z = '' if shared_weights else 'z'
 
         # Wigner 3j lookup
         l1, l2, l3 = mul_ir_in1.ir.l, mul_ir_in2.ir.l, mul_ir_out.ir.l
         w3j = jnp.array(wigner_3j(l1, l2, l3))
 
         # contraction modes
-        if ins.connection_mode == "uvw":
+        if ins.connection_mode == 'uvw':
             assert ins.has_weight
             if specialized_code and (l1, l2, l3) == (0, 0, 0):
                 result = jnp.einsum(
-                    f"{z}uvw,zu,zv->zw",
+                    f'{z}uvw,zu,zv->zw',
                     w,
                     jnp.reshape(x1, (batch_numel, mul_ir_in1.dim)),
                     jnp.reshape(x2, (batch_numel, mul_ir_in2.dim)),
                 )
             elif specialized_code and mul_ir_in1.ir.l == 0:
                 result = jnp.einsum(
-                    f"{z}uvw,zu,zvj->zwj",
+                    f'{z}uvw,zu,zvj->zwj',
                     w,
                     jnp.reshape(x1, (batch_numel, mul_ir_in1.dim)),
                     x2,
                 ) / sqrt(mul_ir_out.ir.dim)
             elif specialized_code and mul_ir_in2.ir.l == 0:
                 result = jnp.einsum(
-                    f"{z}uvw,zui,zv->zwi",
+                    f'{z}uvw,zui,zv->zwi',
                     w,
                     x1,
                     jnp.reshape(x2, (batch_numel, mul_ir_in2.dim)),
                 ) / sqrt(mul_ir_out.ir.dim)
             elif specialized_code and mul_ir_out.ir.l == 0:
-                result = jnp.einsum(f"{z}uvw,zui,zvi->zw", w, x1, x2) / sqrt(
+                result = jnp.einsum(f'{z}uvw,zui,zvi->zw', w, x1, x2) / sqrt(
                     mul_ir_in1.ir.dim
                 )
             else:
-                result = jnp.einsum(f"{z}uvw,ijk,zuvij->zwk", w, w3j, xx)
+                result = jnp.einsum(f'{z}uvw,ijk,zuvij->zwk', w, w3j, xx)
 
-        elif ins.connection_mode == "uvu":
+        elif ins.connection_mode == 'uvu':
             assert mul_ir_in1.mul == mul_ir_out.mul
             if ins.has_weight:
                 if specialized_code and (l1, l2, l3) == (0, 0, 0):
                     result = jnp.einsum(
-                        f"{z}uv,zu,zv->zu",
+                        f'{z}uv,zu,zv->zu',
                         w,
                         jnp.reshape(x1, (batch_numel, mul_ir_in1.dim)),
                         jnp.reshape(x2, (batch_numel, mul_ir_in2.dim)),
                     )
                 elif specialized_code and mul_ir_in1.ir.l == 0:
                     result = jnp.einsum(
-                        f"{z}uv,zu,zvj->zuj",
+                        f'{z}uv,zu,zvj->zuj',
                         w,
                         jnp.reshape(x1, (batch_numel, mul_ir_in1.dim)),
                         x2,
                     ) / jnp.sqrt(mul_ir_out.ir.dim)
                 elif specialized_code and mul_ir_in2.ir.l == 0:
                     result = jnp.einsum(
-                        f"{z}uv,zui,zv->zui",
+                        f'{z}uv,zui,zv->zui',
                         w,
                         x1,
                         jnp.reshape(x2, (batch_numel, mul_ir_in2.dim)),
                     ) / jnp.sqrt(mul_ir_out.ir.dim)
                 elif specialized_code and mul_ir_out.ir.l == 0:
-                    result = jnp.einsum(f"{z}uv,zui,zvi->zu", w, x1, x2) / jnp.sqrt(
+                    result = jnp.einsum(f'{z}uv,zui,zvi->zu', w, x1, x2) / jnp.sqrt(
                         mul_ir_in1.ir.dim
                     )
                 else:
-                    result = jnp.einsum(f"{z}uv,ijk,zuvij->zuk", w, w3j, xx)
+                    result = jnp.einsum(f'{z}uv,ijk,zuvij->zuk', w, w3j, xx)
             else:
                 # not so useful operation because v is summed
-                result = jnp.einsum("ijk,zuvij->zuk", w3j, xx)
+                result = jnp.einsum('ijk,zuvij->zuk', w3j, xx)
 
-        elif ins.connection_mode == "uvv":
+        elif ins.connection_mode == 'uvv':
             assert mul_ir_in2.mul == mul_ir_out.mul
             if ins.has_weight:
                 if specialized_code and (l1, l2, l3) == (0, 0, 0):
                     result = jnp.einsum(
-                        f"{z}uv,zu,zv->zv",
+                        f'{z}uv,zu,zv->zv',
                         w,
                         jnp.reshape(x1, (batch_numel, mul_ir_in1.dim)),
                         jnp.reshape(x2, (batch_numel, mul_ir_in2.dim)),
                     )
                 elif specialized_code and mul_ir_in1.ir.l == 0:
                     result = jnp.einsum(
-                        f"{z}uv,zu,zvj->zvj",
+                        f'{z}uv,zu,zvj->zvj',
                         w,
                         jnp.reshape(x1, (batch_numel, mul_ir_in1.dim)),
                         x2,
                     ) / jnp.sqrt(mul_ir_out.ir.dim)
                 elif specialized_code and mul_ir_in2.ir.l == 0:
                     result = jnp.einsum(
-                        f"{z}uv,zui,zv->zvi",
+                        f'{z}uv,zui,zv->zvi',
                         w,
                         x1,
                         jnp.reshape(x2, (batch_numel, mul_ir_in2.dim)),
                     ) / jnp.sqrt(mul_ir_out.ir.dim)
                 elif specialized_code and mul_ir_out.ir.l == 0:
-                    result = jnp.einsum(f"{z}uv,zui,zvi->zv", w, x1, x2) / jnp.sqrt(
+                    result = jnp.einsum(f'{z}uv,zui,zvi->zv', w, x1, x2) / jnp.sqrt(
                         mul_ir_in1.ir.dim
                     )
                 else:
-                    result = jnp.einsum(f"{z}uv,ijk,zuvij->zvk", w, w3j, xx)
+                    result = jnp.einsum(f'{z}uv,ijk,zuvij->zvk', w, w3j, xx)
             else:
                 # not so useful operation because u is summed
                 if specialized_code and (l1, l2, l3) == (0, 0, 0):
                     result = jnp.einsum(
-                        "zu,zv->zv",
+                        'zu,zv->zv',
                         jnp.reshape(x1, (batch_numel, mul_ir_in1.dim)),
                         jnp.reshape(x2, (batch_numel, mul_ir_in2.dim)),
                     )
                 elif specialized_code and mul_ir_in1.ir.l == 0:
                     result = jnp.einsum(
-                        "zu,zvj->zvj",
+                        'zu,zvj->zvj',
                         jnp.reshape(x1, (batch_numel, mul_ir_in1.dim)),
                         x2,
                     ) / jnp.sqrt(mul_ir_out.ir.dim)
                 elif specialized_code and mul_ir_in2.ir.l == 0:
                     result = jnp.einsum(
-                        "zui,zv->zvi",
+                        'zui,zv->zvi',
                         x1,
                         jnp.reshape(x2, (batch_numel, mul_ir_in2.dim)),
                     ) / jnp.sqrt(mul_ir_out.ir.dim)
                 elif specialized_code and mul_ir_out.ir.l == 0:
-                    result = jnp.einsum("zui,zvi->zv", x1, x2) / jnp.sqrt(
+                    result = jnp.einsum('zui,zvi->zv', x1, x2) / jnp.sqrt(
                         mul_ir_in1.ir.dim
                     )
                 else:
-                    result = jnp.einsum("ijk,zuvij->zvk", w3j, xx)
+                    result = jnp.einsum('ijk,zuvij->zvk', w3j, xx)
 
-        elif ins.connection_mode == "uuw":
+        elif ins.connection_mode == 'uuw':
             assert mul_ir_in1.mul == mul_ir_in2.mul
             if ins.has_weight:
                 if specialized_code and (l1, l2, l3) == (0, 0, 0):
                     result = jnp.einsum(
-                        f"{z}uw,zu,zu->zw",
+                        f'{z}uw,zu,zu->zw',
                         w,
                         jnp.reshape(x1, (batch_numel, mul_ir_in1.dim)),
                         jnp.reshape(x2, (batch_numel, mul_ir_in2.dim)),
                     )
                 elif specialized_code and mul_ir_in1.ir.l == 0:
                     result = jnp.einsum(
-                        f"{z}uw,zu,zuj->zwj",
+                        f'{z}uw,zu,zuj->zwj',
                         w,
                         jnp.reshape(x1, (batch_numel, mul_ir_in1.dim)),
                         x2,
                     ) / jnp.sqrt(mul_ir_out.ir.dim)
                 elif specialized_code and mul_ir_in2.ir.l == 0:
                     result = jnp.einsum(
-                        f"{z}uw,zui,zu->zwi",
+                        f'{z}uw,zui,zu->zwi',
                         w,
                         x1,
                         jnp.reshape(x2, (batch_numel, mul_ir_in2.dim)),
                     ) / jnp.sqrt(mul_ir_out.ir.dim)
                 elif specialized_code and mul_ir_out.ir.l == 0:
-                    result = jnp.einsum(f"{z}uw,zui,zui->zw", w, x1, x2) / jnp.sqrt(
+                    result = jnp.einsum(f'{z}uw,zui,zui->zw', w, x1, x2) / jnp.sqrt(
                         mul_ir_in1.ir.dim
                     )
                 else:
-                    result = jnp.einsum(f"{z}uw,ijk,zuij->zwk", w, w3j, xx)
+                    result = jnp.einsum(f'{z}uw,ijk,zuij->zwk', w, w3j, xx)
             else:
                 # equivalent to tp(x, y, 'uuu').sum('u')
                 assert mul_ir_out.mul == 1
-                result = jnp.einsum("ijk,zuij->zk", w3j, xx)
+                result = jnp.einsum('ijk,zuij->zk', w3j, xx)
 
-        elif ins.connection_mode == "uuu":
+        elif ins.connection_mode == 'uuu':
             assert mul_ir_in1.mul == mul_ir_in2.mul == mul_ir_out.mul
             if ins.has_weight:
                 if specialized_code and (l1, l2, l3) == (0, 0, 0):
                     result = jnp.einsum(
-                        f"{z}u,zu,zu->zu",
+                        f'{z}u,zu,zu->zu',
                         w,
                         jnp.reshape(x1, (batch_numel, mul_ir_in1.dim)),
                         jnp.reshape(x2, (batch_numel, mul_ir_in2.dim)),
                     )
                 elif specialized_code and (l1, l2, l3) == (1, 1, 1):
                     result = jnp.einsum(
-                        f"{z}u,zui->zui", w, jnp.cross(x1, x2, axis=2)
+                        f'{z}u,zui->zui', w, jnp.cross(x1, x2, axis=2)
                     ) / jnp.sqrt(2 * 3)
                 elif specialized_code and mul_ir_in1.ir.l == 0:
                     result = jnp.einsum(
-                        f"{z}u,zu,zuj->zuj",
+                        f'{z}u,zu,zuj->zuj',
                         w,
                         jnp.reshape(x1, (batch_numel, mul_ir_in1.dim)),
                         x2,
                     ) / jnp.sqrt(mul_ir_out.ir.dim)
                 elif specialized_code and mul_ir_in2.ir.l == 0:
                     result = jnp.einsum(
-                        f"{z}u,zui,zu->zui",
+                        f'{z}u,zui,zu->zui',
                         w,
                         x1,
                         jnp.reshape(x2, (batch_numel, mul_ir_in2.dim)),
                     ) / jnp.sqrt(mul_ir_out.ir.dim)
                 elif specialized_code and mul_ir_out.ir.l == 0:
-                    result = jnp.einsum(f"{z}u,zui,zui->zu", w, x1, x2) / jnp.sqrt(
+                    result = jnp.einsum(f'{z}u,zui,zui->zu', w, x1, x2) / jnp.sqrt(
                         mul_ir_in1.ir.dim
                     )
                 else:
-                    result = jnp.einsum(f"{z}u,ijk,zuij->zuk", w, w3j, xx)
+                    result = jnp.einsum(f'{z}u,ijk,zuij->zuk', w, w3j, xx)
             else:
                 if specialized_code and (l1, l2, l3) == (0, 0, 0):
                     result = jnp.einsum(
-                        "zu,zu->zu",
+                        'zu,zu->zu',
                         jnp.reshape(x1, (batch_numel, mul_ir_in1.dim)),
                         jnp.reshape(x2, (batch_numel, mul_ir_in2.dim)),
                     )
@@ -330,33 +329,33 @@ def codegen_tensor_product_left_right(
                     result = jnp.cross(x1, x2, axis=2) * (1.0 / jnp.sqrt(2 * 3))
                 elif specialized_code and mul_ir_in1.ir.l == 0:
                     result = jnp.einsum(
-                        "zu,zuj->zuj",
+                        'zu,zuj->zuj',
                         jnp.reshape(x1, (batch_numel, mul_ir_in1.dim)),
                         x2,
                     ) / jnp.sqrt(mul_ir_out.ir.dim)
                 elif specialized_code and mul_ir_in2.ir.l == 0:
                     result = jnp.einsum(
-                        "zui,zu->zui",
+                        'zui,zu->zui',
                         x1,
                         jnp.reshape(x2, (batch_numel, mul_ir_in2.dim)),
                     ) / jnp.sqrt(mul_ir_out.ir.dim)
                 elif specialized_code and mul_ir_out.ir.l == 0:
-                    result = jnp.einsum("zui,zui->zu", x1, x2) / jnp.sqrt(
+                    result = jnp.einsum('zui,zui->zu', x1, x2) / jnp.sqrt(
                         mul_ir_in1.ir.dim
                     )
                 else:
-                    result = jnp.einsum("ijk,zuij->zuk", w3j, xx)
+                    result = jnp.einsum('ijk,zuij->zuk', w3j, xx)
 
-        elif ins.connection_mode == "uvuv":
+        elif ins.connection_mode == 'uvuv':
             assert mul_ir_in1.mul * mul_ir_in2.mul == mul_ir_out.mul
             if ins.has_weight:
                 # TODO implement specialized code
-                result = jnp.einsum(f"{z}uv,ijk,zuvij->zuvk", w, w3j, xx)
+                result = jnp.einsum(f'{z}uv,ijk,zuvij->zuvk', w, w3j, xx)
             else:
                 # TODO implement specialized code
-                result = jnp.einsum("ijk,zuvij->zuvk", w3j, xx)
+                result = jnp.einsum('ijk,zuvij->zuvk', w3j, xx)
 
-        elif ins.connection_mode == "uvu<v":
+        elif ins.connection_mode == 'uvu<v':
             assert mul_ir_in1.mul == mul_ir_in2.mul
             assert mul_ir_in1.mul * (mul_ir_in1.mul - 1) // 2 == mul_ir_out.mul
             # upper-triangular index selection
@@ -364,19 +363,19 @@ def codegen_tensor_product_left_right(
             xx = xx[:, i[0], i[1]]  # zuvij -> zwij
             if ins.has_weight:
                 # TODO implement specialized code
-                result = jnp.einsum(f"{z}w,ijk,zwij->zwk", w, w3j, xx)
+                result = jnp.einsum(f'{z}w,ijk,zwij->zwk', w, w3j, xx)
             else:
                 # TODO implement specialized code
-                result = jnp.einsum("ijk,zwij->zwk", w3j, xx)
+                result = jnp.einsum('ijk,zwij->zwk', w3j, xx)
 
-        elif ins.connection_mode == "u<vw":
+        elif ins.connection_mode == 'u<vw':
             assert mul_ir_in1.mul == mul_ir_in2.mul
             assert ins.has_weight
             # upper-triangular index selection
             i = jnp.triu_indices(mul_ir_in1.mul, k=1)
             xx = xx[:, i[0], i[1]]  # zuvij -> zqij
             # TODO implement specialized code
-            result = jnp.einsum(f"{z}qw,ijk,zqij->zwk", w, w3j, xx)
+            result = jnp.einsum(f'{z}qw,ijk,zqij->zwk', w, w3j, xx)
 
         # apply path weight and reshape
         result = ins.path_weight * result
@@ -411,7 +410,7 @@ def codegen_tensor_product_right(
     irreps_in1: Irreps,
     irreps_in2: Irreps,
     irreps_out: Irreps,
-    instructions: List[Instruction],
+    instructions: list[Instruction],
     shared_weights: bool = False,
     specialized_code: bool = True,
 ) -> jax.Array:
@@ -465,14 +464,14 @@ def codegen_tensor_product_right(
 
     # allowed connection modes (same as PyTorch)
     _valid_connection_modes = {
-        "uvw",
-        "uvu",
-        "uvv",
-        "uuw",
-        "uuu",
-        "uvuv",
-        "uvu<v",
-        "u<vw",
+        'uvw',
+        'uvu',
+        'uvv',
+        'uuw',
+        'uuu',
+        'uvuv',
+        'uvu<v',
+        'u<vw',
     }
 
     # Precompute identity matrices for all multiplicities and ir dims used in irreps_in1/2
@@ -491,7 +490,7 @@ def codegen_tensor_product_right(
         return _eye_ir_dim_cache[d]
 
     # = Setup book-keeping =
-    z = "" if shared_weights else "z"
+    z = '' if shared_weights else 'z'
     flat_weight_index = 0
     outputs = []
 
@@ -541,7 +540,7 @@ def codegen_tensor_product_right(
         l1, l2, lout = mul_ir_in1.ir.l, mul_ir_in2.ir.l, mul_ir_out.ir.l
         w3j = jnp.array(wigner_3j(l1, l2, lout))  # shape (2*l1+1, 2*l2+1, 2*lout+1)
 
-        if ins.connection_mode == "uvw":
+        if ins.connection_mode == 'uvw':
             assert ins.has_weight
             if specialized_code and (
                 mul_ir_in1.ir.l,
@@ -549,27 +548,27 @@ def codegen_tensor_product_right(
                 mul_ir_out.ir.l,
             ) == (0, 0, 0):
                 result = jnp.einsum(
-                    f"{z}uvw,zv->zuw", w, x2.reshape(batch_numel, mul_ir_in2.dim)
+                    f'{z}uvw,zv->zuw', w, x2.reshape(batch_numel, mul_ir_in2.dim)
                 )
             elif specialized_code and mul_ir_in1.ir.l == 0:
-                result = jnp.einsum(f"{z}uvw,zvi->zuwi", w, x2) / jnp.sqrt(
+                result = jnp.einsum(f'{z}uvw,zvi->zuwi', w, x2) / jnp.sqrt(
                     mul_ir_out.ir.dim
                 )
             elif specialized_code and mul_ir_in2.ir.l == 0:
                 result = jnp.einsum(
-                    f"{z}uvw,ij,zv->zuiwj",
+                    f'{z}uvw,ij,zv->zuiwj',
                     w,
                     i1,
                     x2.reshape(batch_numel, mul_ir_in2.dim),
                 ) / jnp.sqrt(mul_ir_out.ir.dim)
             elif specialized_code and mul_ir_out.ir.l == 0:
-                result = jnp.einsum(f"{z}uvw,zvi->zuiw", w, x2) / jnp.sqrt(
+                result = jnp.einsum(f'{z}uvw,zvi->zuiw', w, x2) / jnp.sqrt(
                     mul_ir_in1.ir.dim
                 )
             else:
-                result = jnp.einsum(f"{z}uvw,ijk,zvj->zuiwk", w, w3j, x2)
+                result = jnp.einsum(f'{z}uvw,ijk,zvj->zuiwk', w, w3j, x2)
 
-        elif ins.connection_mode == "uvu":
+        elif ins.connection_mode == 'uvu':
             assert mul_ir_in1.mul == mul_ir_out.mul
             if ins.has_weight:
                 if specialized_code and (
@@ -578,31 +577,31 @@ def codegen_tensor_product_right(
                     mul_ir_out.ir.l,
                 ) == (0, 0, 0):
                     result = jnp.einsum(
-                        f"{z}uv,uw,zv->zuw",
+                        f'{z}uv,uw,zv->zuw',
                         w,
                         e1,
                         x2.reshape(batch_numel, mul_ir_in2.dim),
                     )
                 elif specialized_code and mul_ir_in1.ir.l == 0:
-                    result = jnp.einsum(f"{z}uv,uw,zvi->zuwi", w, e1, x2) / jnp.sqrt(
+                    result = jnp.einsum(f'{z}uv,uw,zvi->zuwi', w, e1, x2) / jnp.sqrt(
                         mul_ir_out.ir.dim
                     )
                 elif specialized_code and mul_ir_in2.ir.l == 0:
                     result = jnp.einsum(
-                        f"{z}uv,ij,uw,zv->zuiwj",
+                        f'{z}uv,ij,uw,zv->zuiwj',
                         w,
                         i1,
                         e1,
                         x2.reshape(batch_numel, mul_ir_in2.dim),
                     ) / jnp.sqrt(mul_ir_out.ir.dim)
                 elif specialized_code and mul_ir_out.ir.l == 0:
-                    result = jnp.einsum(f"{z}uv,uw,zvi->zuiw", w, e1, x2) / jnp.sqrt(
+                    result = jnp.einsum(f'{z}uv,uw,zvi->zuiw', w, e1, x2) / jnp.sqrt(
                         mul_ir_in1.ir.dim
                     )
                 else:
-                    result = jnp.einsum(f"{z}uv,ijk,uw,zvj->zuiwk", w, w3j, e1, x2)
+                    result = jnp.einsum(f'{z}uv,ijk,uw,zvj->zuiwk', w, w3j, e1, x2)
 
-        elif ins.connection_mode == "uvv":
+        elif ins.connection_mode == 'uvv':
             assert mul_ir_in2.mul == mul_ir_out.mul
             if ins.has_weight:
                 if specialized_code and (
@@ -611,46 +610,46 @@ def codegen_tensor_product_right(
                     mul_ir_out.ir.l,
                 ) == (0, 0, 0):
                     result = jnp.einsum(
-                        f"{z}uv,vw,zv->zuw",
+                        f'{z}uv,vw,zv->zuw',
                         w,
                         e2,
                         x2.reshape(batch_numel, mul_ir_in2.dim),
                     )
                 elif specialized_code and mul_ir_in1.ir.l == 0:
-                    result = jnp.einsum(f"{z}uv,vw,zvi->zuwi", w, e2, x2) / jnp.sqrt(
+                    result = jnp.einsum(f'{z}uv,vw,zvi->zuwi', w, e2, x2) / jnp.sqrt(
                         mul_ir_out.ir.dim
                     )
                 elif specialized_code and mul_ir_in2.ir.l == 0:
                     result = jnp.einsum(
-                        f"{z}uv,ij,vw,zv->zuiwj",
+                        f'{z}uv,ij,vw,zv->zuiwj',
                         w,
                         i1,
                         e2,
                         x2.reshape(batch_numel, mul_ir_in2.dim),
                     ) / jnp.sqrt(mul_ir_out.ir.dim)
                 elif specialized_code and mul_ir_out.ir.l == 0:
-                    result = jnp.einsum(f"{z}uv,vw,zvi->zuiw", w, e2, x2) / jnp.sqrt(
+                    result = jnp.einsum(f'{z}uv,vw,zvi->zuiw', w, e2, x2) / jnp.sqrt(
                         mul_ir_in1.ir.dim
                     )
                 else:
-                    result = jnp.einsum(f"{z}uv,ijk,zvj->zuivk", w, w3j, x2)
+                    result = jnp.einsum(f'{z}uv,ijk,zvj->zuivk', w, w3j, x2)
             else:
                 # not so useful operation because u is summed
                 # only specialize out for this path
                 s2ones = jnp.ones((mul_ir_in1.mul,), dtype=x2.dtype)
-                result = jnp.einsum("u,ijk,zvj->zuivk", s2ones, w3j, x2)
+                result = jnp.einsum('u,ijk,zvj->zuivk', s2ones, w3j, x2)
 
-        elif ins.connection_mode == "uuw":
+        elif ins.connection_mode == 'uuw':
             assert mul_ir_in1.mul == mul_ir_in2.mul
             if ins.has_weight:
                 # TODO: specialize right()
-                result = jnp.einsum(f"{z}uw,ijk,zuj->zuiwk", w, w3j, x2)
+                result = jnp.einsum(f'{z}uw,ijk,zuj->zuiwk', w, w3j, x2)
             else:
                 # equivalent to tp(x, y, 'uuu').sum('u')
                 assert mul_ir_out.mul == 1
-                result = jnp.einsum("ijk,zuj->zuik", w3j, x2)
+                result = jnp.einsum('ijk,zuj->zuik', w3j, x2)
 
-        elif ins.connection_mode == "uuu":
+        elif ins.connection_mode == 'uuu':
             assert mul_ir_in1.mul == mul_ir_in2.mul == mul_ir_out.mul
             if ins.has_weight:
                 if specialized_code and (
@@ -659,7 +658,7 @@ def codegen_tensor_product_right(
                     mul_ir_out.ir.l,
                 ) == (0, 0, 0):
                     result = jnp.einsum(
-                        f"{z}u,uw,zu->zuw",
+                        f'{z}u,uw,zu->zuw',
                         w,
                         e2,
                         x2.reshape(batch_numel, mul_ir_in2.dim),
@@ -670,25 +669,25 @@ def codegen_tensor_product_right(
                     mul_ir_out.ir.l,
                 ) == (1, 1, 1):
                     # For cross product, use the general case right()
-                    result = jnp.einsum(f"{z}u,ijk,uw,zuj->zuiwk", w, w3j, e1, x2)
+                    result = jnp.einsum(f'{z}u,ijk,uw,zuj->zuiwk', w, w3j, e1, x2)
                 elif specialized_code and mul_ir_in1.ir.l == 0:
-                    result = jnp.einsum(f"{z}u,uw,zui->zuwi", w, e2, x2) / jnp.sqrt(
+                    result = jnp.einsum(f'{z}u,uw,zui->zuwi', w, e2, x2) / jnp.sqrt(
                         mul_ir_out.ir.dim
                     )
                 elif specialized_code and mul_ir_in2.ir.l == 0:
                     result = jnp.einsum(
-                        f"{z}u,ij,uw,zu->zuiwj",
+                        f'{z}u,ij,uw,zu->zuiwj',
                         w,
                         i1,
                         e2,
                         x2.reshape(batch_numel, mul_ir_in2.dim),
                     ) / jnp.sqrt(mul_ir_out.ir.dim)
                 elif specialized_code and mul_ir_out.ir.l == 0:
-                    result = jnp.einsum(f"{z}u,uw,zui->zuiw", w, e2, x2) / jnp.sqrt(
+                    result = jnp.einsum(f'{z}u,uw,zui->zuiw', w, e2, x2) / jnp.sqrt(
                         mul_ir_in1.ir.dim
                     )
                 else:
-                    result = jnp.einsum(f"{z}u,ijk,uw,zuj->zuiwk", w, w3j, e1, x2)
+                    result = jnp.einsum(f'{z}u,ijk,uw,zuj->zuiwk', w, w3j, e1, x2)
             else:
                 if specialized_code and (
                     mul_ir_in1.ir.l,
@@ -696,7 +695,7 @@ def codegen_tensor_product_right(
                     mul_ir_out.ir.l,
                 ) == (0, 0, 0):
                     result = jnp.einsum(
-                        "uw,zu->zuw", e2, x2.reshape(batch_numel, mul_ir_in2.dim)
+                        'uw,zu->zuw', e2, x2.reshape(batch_numel, mul_ir_in2.dim)
                     )
                 elif specialized_code and (
                     mul_ir_in1.ir.l,
@@ -704,40 +703,40 @@ def codegen_tensor_product_right(
                     mul_ir_out.ir.l,
                 ) == (1, 1, 1):
                     # For cross product, use the general case right()
-                    result = jnp.einsum("ijk,uw,zuj->zuiwk", w3j, e1, x2)
+                    result = jnp.einsum('ijk,uw,zuj->zuiwk', w3j, e1, x2)
                 elif specialized_code and mul_ir_in1.ir.l == 0:
-                    result = jnp.einsum("uw,zui->zuwi", e2, x2) / jnp.sqrt(
+                    result = jnp.einsum('uw,zui->zuwi', e2, x2) / jnp.sqrt(
                         mul_ir_out.ir.dim
                     )
                 elif specialized_code and mul_ir_in2.ir.l == 0:
                     result = jnp.einsum(
-                        "ij,uw,zu->zuiwj",
+                        'ij,uw,zu->zuiwj',
                         i1,
                         e2,
                         x2.reshape(batch_numel, mul_ir_in2.dim),
                     ) / jnp.sqrt(mul_ir_out.ir.dim)
                 elif specialized_code and mul_ir_out.ir.l == 0:
-                    result = jnp.einsum("uw,zui->zuiw", e2, x2) / jnp.sqrt(
+                    result = jnp.einsum('uw,zui->zuiw', e2, x2) / jnp.sqrt(
                         mul_ir_in1.ir.dim
                     )
                 else:
-                    result = jnp.einsum("ijk,uw,zuj->zuiwk", w3j, e1, x2)
+                    result = jnp.einsum('ijk,uw,zuj->zuiwk', w3j, e1, x2)
 
-        elif ins.connection_mode == "uvuv":
+        elif ins.connection_mode == 'uvuv':
             assert mul_ir_in1.mul * mul_ir_in2.mul == mul_ir_out.mul
             if ins.has_weight:
                 # TODO implement specialized code
-                result = jnp.einsum(f"{z}uv,ijk,uw,zvj->zuiwvk", w, w3j, e1, x2)
+                result = jnp.einsum(f'{z}uv,ijk,uw,zvj->zuiwvk', w, w3j, e1, x2)
             else:
                 # TODO implement specialized code
-                result = jnp.einsum("ijk,uw,zvj->zuiwvk", w3j, e1, x2)
+                result = jnp.einsum('ijk,uw,zvj->zuiwvk', w3j, e1, x2)
 
-        elif ins.connection_mode == "uvu<v":
+        elif ins.connection_mode == 'uvu<v':
             raise NotImplementedError(
                 "Connection mode 'uvu<v' is not implemented in JAX version."
             )
 
-        elif ins.connection_mode == "u<vw":
+        elif ins.connection_mode == 'u<vw':
             raise NotImplementedError(
                 "Connection mode 'u<vw' is not implemented in JAX version."
             )

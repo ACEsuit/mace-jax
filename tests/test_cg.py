@@ -1,13 +1,12 @@
-import pytest
-import torch
 import jax.numpy as jnp
 import numpy as np
-
-from mace.tools.cg import _wigner_nj as wigner_nj_torch
+import pytest
+import torch
 from mace.tools.cg import U_matrix_real as U_matrix_real_torch
+from mace.tools.cg import _wigner_nj as wigner_nj_torch
 
-from mace_jax.tools.cg import _wigner_nj as wigner_nj_jax
 from mace_jax.tools.cg import U_matrix_real as U_matrix_real_jax
+from mace_jax.tools.cg import _wigner_nj as wigner_nj_jax
 
 
 def to_numpy(x):
@@ -20,7 +19,7 @@ def to_numpy(x):
 
 
 class TestClebschGordanParity:
-    @pytest.mark.parametrize("irreps_list", [["1x0e", "1x1o"], ["2x0e + 1x1o", "1x0e"]])
+    @pytest.mark.parametrize('irreps_list', [['1x0e', '1x1o'], ['2x0e + 1x1o', '1x0e']])
     def test_wigner_nj(self, irreps_list):
         out_jax = wigner_nj_jax(irreps_list)
         out_torch = wigner_nj_torch(irreps_list)
@@ -36,11 +35,11 @@ class TestClebschGordanParity:
             )
 
     @pytest.mark.parametrize(
-        "irreps_in, irreps_out, corr",
+        'irreps_in, irreps_out, corr',
         [
-            ("1x0e + 1x1o", "1x0e", 1),
-            ("2x0e + 1x1o", "1x1o", 2),
-            ("2x0e + 1x1o", "1x0e", 2),
+            ('1x0e + 1x1o', '1x0e', 1),
+            ('2x0e + 1x1o', '1x1o', 2),
+            ('2x0e + 1x1o', '1x0e', 2),
         ],
     )
     def test_U_matrix_real(self, irreps_in, irreps_out, corr):
@@ -49,7 +48,7 @@ class TestClebschGordanParity:
 
         assert len(out_jax) == len(out_torch)
         for idx, (a, b) in enumerate(zip(out_jax, out_torch)):
-            assert to_numpy(a).shape == to_numpy(b).shape, f"Mismatch at element {idx}"
+            assert to_numpy(a).shape == to_numpy(b).shape, f'Mismatch at element {idx}'
 
             if isinstance(a, tuple) and isinstance(b, tuple):
                 # tuple: (irreps, array)

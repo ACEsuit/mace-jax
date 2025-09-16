@@ -4,7 +4,7 @@
 # This program is distributed under the MIT License (see MIT.md)
 ###########################################################################################
 
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 
 import haiku as hk
 import jax.numpy as jnp
@@ -16,11 +16,11 @@ from mace_jax.modules.wrapper_ops import CuEquivarianceConfig
 # Based on mir-group/nequip
 def tp_out_irreps_with_instructions(
     irreps1: Irreps, irreps2: Irreps, target_irreps: Irreps
-) -> Tuple[Irreps, List]:
+) -> Tuple[Irreps, list]:
     trainable = True
 
     # Collect possible irreps and their instructions
-    irreps_out_list: List[Tuple[int, Irreps]] = []
+    irreps_out_list: list[Tuple[int, Irreps]] = []
     instructions = []
     for i, (mul, ir_in) in enumerate(irreps1):
         for j, (_, ir_edge) in enumerate(irreps2):
@@ -28,7 +28,7 @@ def tp_out_irreps_with_instructions(
                 if ir_out in target_irreps:
                     k = len(irreps_out_list)  # instruction index
                     irreps_out_list.append((mul, ir_out))
-                    instructions.append((i, j, k, "uvu", trainable))
+                    instructions.append((i, j, k, 'uvu', trainable))
 
     # We sort the output irreps of the tensor product so that we can simplify them
     # when they are provided to the second o3.Linear
@@ -59,7 +59,7 @@ def linear_out_irreps(irreps: Irreps, target_irreps: Irreps) -> Irreps:
                 break
 
         if not found:
-            raise RuntimeError(f"{ir_in} not in {target_irreps}")
+            raise RuntimeError(f'{ir_in} not in {target_irreps}')
 
     return Irreps(irreps_mid)
 
@@ -72,7 +72,7 @@ class reshape_irreps(hk.Module):
     def __init__(
         self,
         irreps: Irreps,
-        cueq_config: Optional["CuEquivarianceConfig"] = None,
+        cueq_config: Optional['CuEquivarianceConfig'] = None,
         name: Optional[str] = None,
     ):
         super().__init__(name=name)
@@ -95,7 +95,7 @@ class reshape_irreps(hk.Module):
             ix += mul * d
 
             if self.cueq_config is not None:
-                if self.cueq_config.layout_str == "mul_ir":
+                if self.cueq_config.layout_str == 'mul_ir':
                     field = jnp.reshape(field, (batch, mul, d))
                 else:  # "ir_mul"
                     field = jnp.reshape(field, (batch, d, mul))
@@ -105,7 +105,7 @@ class reshape_irreps(hk.Module):
             out.append(field)
 
         if self.cueq_config is not None:
-            if self.cueq_config.layout_str == "mul_ir":
+            if self.cueq_config.layout_str == 'mul_ir':
                 return jnp.concatenate(out, axis=-1)
             else:  # "ir_mul"
                 return jnp.concatenate(out, axis=-2)

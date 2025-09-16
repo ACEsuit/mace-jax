@@ -2,7 +2,7 @@ import math
 import warnings
 from functools import reduce
 from operator import mul
-from typing import Any, List, Optional, Union
+from typing import Any, Optional, Union
 
 import haiku as hk
 import jax
@@ -37,7 +37,7 @@ class TensorProduct(hk.Module):
     irreps_out : `Irreps`
         Irreps for the output.
 
-    instructions : list of tuple
+    instructions : List of tuple
         List of instructions ``(i_1, i_2, i_out, mode, train[, path_weight])``.
 
         Each instruction specifies that ``in1[i_1]`` :math:`\otimes` ``in2[i_2]`` contributes to ``out[i_out]``.
@@ -170,7 +170,7 @@ class TensorProduct(hk.Module):
     >>> assert vars.max() < 3
     """
 
-    instructions: List[Any]
+    instructions: list[Any]
     shared_weights: bool
     internal_weights: bool
     weight_numel: int
@@ -185,10 +185,10 @@ class TensorProduct(hk.Module):
         irreps_in1: Irreps,
         irreps_in2: Irreps,
         irreps_out: Irreps,
-        instructions: List[tuple],
-        in1_var: Optional[Union[List[float], jnp.ndarray]] = None,
-        in2_var: Optional[Union[List[float], jnp.ndarray]] = None,
-        out_var: Optional[Union[List[float], jnp.ndarray]] = None,
+        instructions: list[tuple],
+        in1_var: Optional[Union[list[float], jnp.ndarray]] = None,
+        in2_var: Optional[Union[list[float], jnp.ndarray]] = None,
+        out_var: Optional[Union[list[float], jnp.ndarray]] = None,
         irrep_normalization: str = None,
         path_normalization: str = None,
         internal_weights: Optional[bool] = None,
@@ -203,19 +203,19 @@ class TensorProduct(hk.Module):
 
         if normalization is not None:
             warnings.warn(
-                "`normalization` is deprecated. Use `irrep_normalization` instead.",
+                '`normalization` is deprecated. Use `irrep_normalization` instead.',
                 DeprecationWarning,
             )
             irrep_normalization = normalization
 
         if irrep_normalization is None:
-            irrep_normalization = "component"
+            irrep_normalization = 'component'
 
         if path_normalization is None:
-            path_normalization = "element"
+            path_normalization = 'element'
 
-        assert irrep_normalization in ["component", "norm", "none"]
-        assert path_normalization in ["element", "path", "none"]
+        assert irrep_normalization in ['component', 'norm', 'none']
+        assert path_normalization in ['element', 'path', 'none']
 
         self.irreps_in1 = Irreps(irreps_in1)
         self.irreps_in2 = Irreps(irreps_in2)
@@ -232,22 +232,22 @@ class TensorProduct(hk.Module):
                 has_weight=has_weight,
                 path_weight=path_weight,
                 path_shape={
-                    "uvw": (
+                    'uvw': (
                         self.irreps_in1[i_in1].mul,
                         self.irreps_in2[i_in2].mul,
                         self.irreps_out[i_out].mul,
                     ),
-                    "uvu": (self.irreps_in1[i_in1].mul, self.irreps_in2[i_in2].mul),
-                    "uvv": (self.irreps_in1[i_in1].mul, self.irreps_in2[i_in2].mul),
-                    "uuw": (self.irreps_in1[i_in1].mul, self.irreps_out[i_out].mul),
-                    "uuu": (self.irreps_in1[i_in1].mul,),
-                    "uvuv": (self.irreps_in1[i_in1].mul, self.irreps_in2[i_in2].mul),
-                    "uvu<v": (
+                    'uvu': (self.irreps_in1[i_in1].mul, self.irreps_in2[i_in2].mul),
+                    'uvv': (self.irreps_in1[i_in1].mul, self.irreps_in2[i_in2].mul),
+                    'uuw': (self.irreps_in1[i_in1].mul, self.irreps_out[i_out].mul),
+                    'uuu': (self.irreps_in1[i_in1].mul,),
+                    'uvuv': (self.irreps_in1[i_in1].mul, self.irreps_in2[i_in2].mul),
+                    'uvu<v': (
                         self.irreps_in1[i_in1].mul
                         * (self.irreps_in2[i_in2].mul - 1)
                         // 2,
                     ),
-                    "u<vw": (
+                    'u<vw': (
                         self.irreps_in1[i_in1].mul
                         * (self.irreps_in2[i_in2].mul - 1)
                         // 2,
@@ -263,7 +263,7 @@ class TensorProduct(hk.Module):
         else:
             in1_var = [float(var) for var in in1_var]
             assert len(in1_var) == len(self.irreps_in1), (
-                "Len of ir1_var must be equal to len(irreps_in1)"
+                'Len of ir1_var must be equal to len(irreps_in1)'
             )
 
         if in2_var is None:
@@ -271,7 +271,7 @@ class TensorProduct(hk.Module):
         else:
             in2_var = [float(var) for var in in2_var]
             assert len(in2_var) == len(self.irreps_in2), (
-                "Len of ir2_var must be equal to len(irreps_in2)"
+                'Len of ir2_var must be equal to len(irreps_in2)'
             )
 
         if out_var is None:
@@ -279,21 +279,21 @@ class TensorProduct(hk.Module):
         else:
             out_var = [float(var) for var in out_var]
             assert len(out_var) == len(self.irreps_out), (
-                "Len of out_var must be equal to len(irreps_out)"
+                'Len of out_var must be equal to len(irreps_out)'
             )
 
         def num_elements(ins):
             return {
-                "uvw": (
+                'uvw': (
                     self.irreps_in1[ins.i_in1].mul * self.irreps_in2[ins.i_in2].mul
                 ),
-                "uvu": self.irreps_in2[ins.i_in2].mul,
-                "uvv": self.irreps_in1[ins.i_in1].mul,
-                "uuw": self.irreps_in1[ins.i_in1].mul,
-                "uuu": 1,
-                "uvuv": 1,
-                "uvu<v": 1,
-                "u<vw": self.irreps_in1[ins.i_in1].mul
+                'uvu': self.irreps_in2[ins.i_in2].mul,
+                'uvv': self.irreps_in1[ins.i_in1].mul,
+                'uuw': self.irreps_in1[ins.i_in1].mul,
+                'uuu': 1,
+                'uvuv': 1,
+                'uvu<v': 1,
+                'u<vw': self.irreps_in1[ins.i_in1].mul
                 * (self.irreps_in2[ins.i_in2].mul - 1)
                 // 2,
             }[ins.connection_mode]
@@ -310,33 +310,33 @@ class TensorProduct(hk.Module):
                 <= mul_ir_in1.ir.l + mul_ir_in2.ir.l
             )
             assert ins.connection_mode in [
-                "uvw",
-                "uvu",
-                "uvv",
-                "uuw",
-                "uuu",
-                "uvuv",
-                "uvu<v",
-                "u<vw",
+                'uvw',
+                'uvu',
+                'uvv',
+                'uuw',
+                'uuu',
+                'uvuv',
+                'uvu<v',
+                'u<vw',
             ]
 
-            if irrep_normalization == "component":
+            if irrep_normalization == 'component':
                 alpha = mul_ir_out.ir.dim
-            if irrep_normalization == "norm":
+            if irrep_normalization == 'norm':
                 alpha = mul_ir_in1.ir.dim * mul_ir_in2.ir.dim
-            if irrep_normalization == "none":
+            if irrep_normalization == 'none':
                 alpha = 1
 
-            if path_normalization == "element":
+            if path_normalization == 'element':
                 x = sum(
                     in1_var[i.i_in1] * in2_var[i.i_in2] * num_elements(i)
                     for i in instructions
                     if i.i_out == ins.i_out
                 )
-            if path_normalization == "path":
+            if path_normalization == 'path':
                 x = in1_var[ins.i_in1] * in2_var[ins.i_in2] * num_elements(ins)
                 x *= len([i for i in instructions if i.i_out == ins.i_out])
-            if path_normalization == "none":
+            if path_normalization == 'none':
                 x = 1
 
             if x > 0.0:
@@ -382,12 +382,12 @@ class TensorProduct(hk.Module):
         self._specialized_code = (
             _specialized_code
             if _specialized_code is not None
-            else opt_defaults["specialized_code"]
+            else opt_defaults['specialized_code']
         )
         self._optimize_einsums = (
             _optimize_einsums
             if _optimize_einsums is not None
-            else opt_defaults["optimize_einsums"]
+            else opt_defaults['optimize_einsums']
         )
         del opt_defaults
 
@@ -399,32 +399,34 @@ class TensorProduct(hk.Module):
 
         # --- Output mask (static, non-trainable) ---
         if self.irreps_out.dim > 0:
-            self.output_mask = jnp.concatenate([
-                (
-                    jnp.ones(mul * ir.dim)
-                    if any(
-                        (ins.i_out == i_out)
-                        and (ins.path_weight != 0)
-                        and (0 not in ins.path_shape)
-                        for ins in self.instructions
+            self.output_mask = jnp.concatenate(
+                [
+                    (
+                        jnp.ones(mul * ir.dim)
+                        if any(
+                            (ins.i_out == i_out)
+                            and (ins.path_weight != 0)
+                            and (0 not in ins.path_shape)
+                            for ins in self.instructions
+                        )
+                        else jnp.zeros(mul * ir.dim)
                     )
-                    else jnp.zeros(mul * ir.dim)
-                )
-                for i_out, (mul, ir) in enumerate(self.irreps_out)
-            ])
+                    for i_out, (mul, ir) in enumerate(self.irreps_out)
+                ]
+            )
         else:
             self.output_mask = jnp.ones(0)
 
     def __repr__(self) -> str:
         npath = sum(prod(i.path_shape) for i in self.instructions)
         return (
-            f"{self.__class__.__name__}"
-            f"({self.irreps_in1.simplify()} x {self.irreps_in2.simplify()} "
-            f"-> {self.irreps_out.simplify()} | {npath} paths | {self.weight_numel} weights)"
+            f'{self.__class__.__name__}'
+            f'({self.irreps_in1.simplify()} x {self.irreps_in2.simplify()} '
+            f'-> {self.irreps_out.simplify()} | {npath} paths | {self.weight_numel} weights)'
         )
 
     def _prep_weights(
-        self, weight: Optional[Union[jnp.ndarray, List[jnp.ndarray]]]
+        self, weight: Optional[Union[jnp.ndarray, list[jnp.ndarray]]]
     ) -> Optional[jnp.ndarray]:
         """Reshape and concatenate weight list if necessary."""
         if isinstance(weight, list):
@@ -452,25 +454,25 @@ class TensorProduct(hk.Module):
         if weight is None:
             if self.weight_numel > 0 and not self.internal_weights:
                 raise RuntimeError(
-                    "Weights must be provided when the TensorProduct does not have internal_weights"
+                    'Weights must be provided when the TensorProduct does not have internal_weights'
                 )
             if self.internal_weights and self.weight_numel > 0:
                 weight = hk.get_parameter(
-                    "weight", [self.weight_numel], init=hk.initializers.RandomNormal()
+                    'weight', [self.weight_numel], init=hk.initializers.RandomNormal()
                 )
             else:
                 return None
         else:
             if self.shared_weights:
                 assert weight.shape == (self.weight_numel,), (
-                    f"Invalid weight shape {weight.shape}"
+                    f'Invalid weight shape {weight.shape}'
                 )
             else:
                 assert weight.shape[-1] == self.weight_numel, (
-                    f"Invalid weight shape {weight.shape}"
+                    f'Invalid weight shape {weight.shape}'
                 )
                 assert weight.ndim > 1, (
-                    "When shared_weights is False, weights must have batch dimension"
+                    'When shared_weights is False, weights must have batch dimension'
                 )
         return weight
 
@@ -519,7 +521,7 @@ class TensorProduct(hk.Module):
             tensor of shape ``(..., irreps_in1.dim, irreps_out.dim)``
         """
         assert self._did_compile_right, (
-            "`right` method not compiled, set compile_right=True"
+            '`right` method not compiled, set compile_right=True'
         )
         assert y.shape[-1] == self._in2_dim
 
@@ -583,7 +585,7 @@ class TensorProduct(hk.Module):
         ins = self.instructions[instruction]
 
         if not ins.has_weight:
-            raise ValueError(f"Instruction {instruction} has no weights.")
+            raise ValueError(f'Instruction {instruction} has no weights.')
 
         # Get the effective weights (either passed in or internal param)
         weight = self._get_weights(weight)
@@ -691,12 +693,12 @@ class TensorProduct(hk.Module):
         verts = np.asarray(verts)
 
         # scale it
-        if not (aspect_ratio in ["auto"] or isinstance(aspect_ratio, (float, int))):
+        if not (aspect_ratio in ['auto'] or isinstance(aspect_ratio, (float, int))):
             raise ValueError(
                 f"aspect_ratio must be 'auto' or a float or int, got {aspect_ratio}"
             )
 
-        if aspect_ratio == "auto":
+        if aspect_ratio == 'auto':
             factor = 0.2 / 2
             min_aspect = 1 / 2
             h_factor = max(len(self.irreps_in2), len(self.irreps_in1))
@@ -723,7 +725,7 @@ class TensorProduct(hk.Module):
         ]
 
         path = Path(verts, codes)
-        patch = patches.PathPatch(path, facecolor="none", lw=1, zorder=2)
+        patch = patches.PathPatch(path, facecolor='none', lw=1, zorder=2)
         ax.add_patch(patch)
 
         n = len(self.irreps_in1)
@@ -756,7 +758,7 @@ class TensorProduct(hk.Module):
                     path_weight.append(0)
             path_weight = np.asarray(path_weight)
             path_weight /= np.abs(path_weight).max()
-        cmap = matplotlib.colormaps["Blues"]
+        cmap = matplotlib.colormaps['Blues']
 
         for ins_index, ins in enumerate(self.instructions):
             y = _intersection(s_in1[ins.i_in1], c_in1, s_in2[ins.i_in2], c_in2)
@@ -774,18 +776,18 @@ class TensorProduct(hk.Module):
                 color = (
                     cmap(0.5 + 0.5 * path_weight[ins_index])
                     if ins.has_weight
-                    else "black"
+                    else 'black'
                 )
             else:
-                color = "green" if ins.has_weight else "black"
+                color = 'green' if ins.has_weight else 'black'
 
             ax.add_patch(
                 patches.PathPatch(
                     Path(verts, codes),
-                    facecolor="none",
+                    facecolor='none',
                     edgecolor=color,
                     alpha=0.5,
-                    ls="-",
+                    ls='-',
                     lw=1.5,
                 )
             )
@@ -796,15 +798,15 @@ class TensorProduct(hk.Module):
 
         def format_ir(mul_ir) -> str:
             if mul_ir.mul == 1:
-                return f"${mul_ir.ir}$"
-            return f"${mul_ir.mul} \\times {mul_ir.ir}$"
+                return f'${mul_ir.ir}$'
+            return f'${mul_ir.mul} \\times {mul_ir.ir}$'
 
         for i, mul_ir in enumerate(self.irreps_in1):
             ax.annotate(
                 format_ir(mul_ir),
                 s_in1[i],
-                horizontalalignment="right",
-                textcoords="offset points",
+                horizontalalignment='right',
+                textcoords='offset points',
                 xytext=(-padding, 0),
                 fontsize=fontsize,
             )
@@ -813,8 +815,8 @@ class TensorProduct(hk.Module):
             ax.annotate(
                 format_ir(mul_ir),
                 s_in2[i],
-                horizontalalignment="left",
-                textcoords="offset points",
+                horizontalalignment='left',
+                textcoords='offset points',
                 xytext=(padding, 0),
                 fontsize=fontsize,
             )
@@ -823,17 +825,17 @@ class TensorProduct(hk.Module):
             ax.annotate(
                 format_ir(mul_ir),
                 s_out[i],
-                horizontalalignment="center",
-                verticalalignment="top",
+                horizontalalignment='center',
+                verticalalignment='top',
                 rotation=90,
-                textcoords="offset points",
+                textcoords='offset points',
                 xytext=(0, -padding),
                 fontsize=fontsize,
             )
 
         ax.set_xlim(-2, 2)
         ax.set_ylim(-2, 2)
-        ax.axis("equal")
-        ax.axis("off")
+        ax.axis('equal')
+        ax.axis('off')
 
         return fig, ax

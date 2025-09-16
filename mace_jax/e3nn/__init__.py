@@ -8,12 +8,12 @@ from ._tensor_product import (
 )
 
 __all__ = [
-    "moment",
-    "normalize2mom",
-    "Instruction",
-    "ElementwiseTensorProduct",
-    "FullyConnectedTensorProduct",
-    "FullTensorProduct",
-    "TensorProduct",
-    "TensorSquare",
+    'moment',
+    'normalize2mom',
+    'Instruction',
+    'ElementwiseTensorProduct',
+    'FullyConnectedTensorProduct',
+    'FullTensorProduct',
+    'TensorProduct',
+    'TensorSquare',
 ]

@@ -36,7 +36,7 @@ from mace_jax.e3nn._tensor_product._tensor_product import (
 
 
 class TestSumTensors:
-    @pytest.mark.parametrize("shape", [(2, 2), (3, 1), (2, 3, 4)])
+    @pytest.mark.parametrize('shape', [(2, 2), (3, 1), (2, 3, 4)])
     def test_multiple_tensors(self, shape):
         # Random tensors
         torch_tensors = [torch.randn(shape) for _ in range(3)]
@@ -77,9 +77,9 @@ class TestTensorProduct:
     @pytest.fixture(autouse=True)
     def setup_irreps_instructions(self):
         # Setup real irreps
-        self.irreps_in1 = Irreps("1x0e + 1x1o")
-        self.irreps_in2 = Irreps("1x0e + 1x1o")
-        self.irreps_out = Irreps("1x0e + 1x1o")
+        self.irreps_in1 = Irreps('1x0e + 1x1o')
+        self.irreps_in2 = Irreps('1x0e + 1x1o')
+        self.irreps_out = Irreps('1x0e + 1x1o')
 
         # Setup example instructions
         # For simplicity, one instruction connecting first irrep of each input to first output
@@ -90,7 +90,7 @@ class TestTensorProduct:
                 i_out=0,
                 has_weight=True,
                 path_weight=1.0,
-                connection_mode="uvw",
+                connection_mode='uvw',
                 path_shape=(
                     self.irreps_in1[0].dim,
                     self.irreps_in2[0].dim,
@@ -144,7 +144,7 @@ class TestTensorProduct:
         # ------------------------
         # Compare outputs
         assert np.allclose(out_torch, out_jax_np, rtol=1e-5, atol=1e-6), (
-            "JAX output differs from PyTorch output"
+            'JAX output differs from PyTorch output'
         )
 
 
@@ -152,9 +152,9 @@ class TestTensorProductRight:
     @pytest.fixture(autouse=True)
     def setup_irreps_instructions(self):
         # Setup irreps
-        self.irreps_in1 = Irreps("1x0e + 1x1o")
-        self.irreps_in2 = Irreps("1x0e + 1x1o")
-        self.irreps_out = Irreps("1x0e + 1x1o")
+        self.irreps_in1 = Irreps('1x0e + 1x1o')
+        self.irreps_in2 = Irreps('1x0e + 1x1o')
+        self.irreps_out = Irreps('1x0e + 1x1o')
 
         # One simple instruction: first input irrep, first second irrep, first output irrep
         self.instructions = [
@@ -164,7 +164,7 @@ class TestTensorProductRight:
                 i_out=0,
                 has_weight=True,
                 path_weight=1.0,
-                connection_mode="uvw",
+                connection_mode='uvw',
                 path_shape=(
                     self.irreps_in1[0].dim,
                     self.irreps_in2[0].dim,
@@ -215,65 +215,65 @@ class TestTensorProductRight:
         # ------------------------
         # Compare outputs
         assert np.allclose(out_torch, out_jax_np, rtol=1e-5, atol=1e-6), (
-            "JAX right-product output differs from PyTorch output"
+            'JAX right-product output differs from PyTorch output'
         )
 
 
 class TestTensorProductAllExamples:
-    @pytest.mark.parametrize("example_idx", list(range(6)))  # we have 6 examples
+    @pytest.mark.parametrize('example_idx', list(range(6)))  # we have 6 examples
     def test_tensor_product_examples(self, example_idx):
         # ------------------------
         # Define examples
         if example_idx == 0:
-            irreps_in1 = irreps_in2 = Irreps("16x1o")
-            irreps_out = Irreps("16x1e")
-            instructions = [(0, 0, 0, "uuu", False)]
+            irreps_in1 = irreps_in2 = Irreps('16x1o')
+            irreps_out = Irreps('16x1e')
+            instructions = [(0, 0, 0, 'uuu', False)]
         elif example_idx == 1:
-            irreps_in1 = Irreps("16x1o")
-            irreps_in2 = Irreps("16x1o")
-            irreps_out = Irreps("16x1e")
-            instructions = [(0, 0, 0, "uvw", True)]
+            irreps_in1 = Irreps('16x1o')
+            irreps_in2 = Irreps('16x1o')
+            irreps_out = Irreps('16x1e')
+            instructions = [(0, 0, 0, 'uvw', True)]
         elif example_idx == 2:
-            irreps_in1 = Irreps("8x0o + 8x1o")
-            irreps_in2 = Irreps("16x1o")
-            irreps_out = Irreps("16x1e")
+            irreps_in1 = Irreps('8x0o + 8x1o')
+            irreps_in2 = Irreps('16x1o')
+            irreps_out = Irreps('16x1e')
             instructions = [
-                (0, 0, 0, "uvw", True, 3),
-                (1, 0, 0, "uvw", True, 1),
+                (0, 0, 0, 'uvw', True, 3),
+                (1, 0, 0, 'uvw', True, 1),
             ]
         elif example_idx == 3:
-            irreps = Irreps("3x0e + 4x0o + 1e + 2o + 3o")
+            irreps = Irreps('3x0e + 4x0o + 1e + 2o + 3o')
             irreps_in1 = irreps_in2 = irreps
-            irreps_out = Irreps("0e")
+            irreps_out = Irreps('0e')
             instructions = [
-                (i, i, 0, "uuw", False) for i, (mul, ir) in enumerate(irreps)
+                (i, i, 0, 'uuw', False) for i, (mul, ir) in enumerate(irreps)
             ]
         elif example_idx == 4:
-            irreps_in1 = Irreps("8x0o + 7x1o + 3x2e")
-            irreps_in2 = Irreps("10x0e + 10x1e + 10x2e")
-            irreps_out = Irreps("8x0o + 7x1o + 3x2e")
+            irreps_in1 = Irreps('8x0o + 7x1o + 3x2e')
+            irreps_in2 = Irreps('10x0e + 10x1e + 10x2e')
+            irreps_out = Irreps('8x0o + 7x1o + 3x2e')
             instructions = [
-                (0, 0, 0, "uvu", True),
-                (1, 0, 1, "uvu", True),
-                (1, 1, 1, "uvu", True),
-                (1, 2, 1, "uvu", True),
-                (2, 0, 2, "uvu", True),
-                (2, 1, 2, "uvu", True),
-                (2, 2, 2, "uvu", True),
+                (0, 0, 0, 'uvu', True),
+                (1, 0, 1, 'uvu', True),
+                (1, 1, 1, 'uvu', True),
+                (1, 2, 1, 'uvu', True),
+                (2, 0, 2, 'uvu', True),
+                (2, 1, 2, 'uvu', True),
+                (2, 2, 2, 'uvu', True),
             ]
         elif example_idx == 5:
-            irreps_in1 = Irreps("5x0e + 10x1o + 1x2e")
-            irreps_in2 = Irreps("5x0e + 10x1o + 1x2e")
-            irreps_out = Irreps("5x0e + 10x1o + 1x2e")
+            irreps_in1 = Irreps('5x0e + 10x1o + 1x2e')
+            irreps_in2 = Irreps('5x0e + 10x1o + 1x2e')
+            irreps_out = Irreps('5x0e + 10x1o + 1x2e')
             instructions = [
-                (i1, i2, i_out, "uvw", True, mul1 * mul2)
+                (i1, i2, i_out, 'uvw', True, mul1 * mul2)
                 for i1, (mul1, ir1) in enumerate(irreps_in1)
                 for i2, (mul2, ir2) in enumerate(irreps_in2)
                 for i_out, (mul_out, ir_out) in enumerate(irreps_out)
                 if ir_out in ir1 * ir2
             ]
         else:
-            raise ValueError(f"Unexpected example_idx {example_idx}")
+            raise ValueError(f'Unexpected example_idx {example_idx}')
 
         # ------------------------
         # Random inputs
@@ -283,11 +283,11 @@ class TestTensorProductAllExamples:
 
         total_weight_numel = sum(
             np.prod((irreps_in1[i1].mul, irreps_in2[i2].mul, irreps_out[i_out].mul))
-            if mode == "uvw"
+            if mode == 'uvw'
             else np.prod((irreps_in1[i1].mul, irreps_in2[i2].mul))
-            if mode in ["uvu", "uvv"]
+            if mode in ['uvu', 'uvv']
             else np.prod((irreps_in1[i1].mul, irreps_out[i_out].mul))
-            if mode == "uuw"
+            if mode == 'uuw'
             else 1
             for i1, i2, i_out, mode, has_weight, *rest in instructions
             if has_weight
@@ -328,11 +328,11 @@ class TestCodegenLinear:
         bias_numel = sum(prod(ins.path_shape) for ins in instructions if ins.i_in == -1)
         return weight_numel, bias_numel
 
-    @pytest.mark.parametrize("batch_size,f_in,f_out", [(2, 3, 4)])
+    @pytest.mark.parametrize('batch_size,f_in,f_out', [(2, 3, 4)])
     def test_block_sparse_linear(self, batch_size, f_in, f_out):
         # Define irreps
-        irreps_in = Irreps("4x0e + 3x1o")
-        irreps_out = Irreps("4x0e + 3x1o")
+        irreps_in = Irreps('4x0e + 3x1o')
+        irreps_out = Irreps('4x0e + 3x1o')
 
         # ========== PyTorch Linear ==========
         linear_torch = LinearTorch(
@@ -374,5 +374,5 @@ class TestCodegenLinear:
 
         # Compare outputs
         assert jnp.allclose(out_jax, out_torch_np, atol=1e-5), (
-            f"JAX and PyTorch outputs differ:\nJAX: {out_jax}\nPyTorch: {out_torch_np}"
+            f'JAX and PyTorch outputs differ:\nJAX: {out_jax}\nPyTorch: {out_torch_np}'
         )

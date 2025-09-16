@@ -1,4 +1,5 @@
-from typing import Tuple, List, Optional
+from typing import Optional
+
 import haiku as hk
 import jax.numpy as jnp
 from e3nn_jax import Irreps, IrrepsArray
@@ -10,8 +11,8 @@ class Extract(hk.Module):
     def __init__(
         self,
         irreps_in: Irreps,
-        irreps_outs: List[Irreps],
-        instructions: List[Tuple[int, ...]],
+        irreps_outs: list[Irreps],
+        instructions: list[tuple[int, ...]],
         squeeze_out: bool = False,
         name: Optional[str] = None,
     ):
@@ -35,7 +36,7 @@ class Extract(hk.Module):
                 slices.append(slice(start, end))
             self._slices_out.append(slices)
 
-    def __call__(self, x: IrrepsArray) -> Tuple[IrrepsArray, ...]:
+    def __call__(self, x: IrrepsArray) -> tuple[IrrepsArray, ...]:
         outputs = []
         for ir_out, slices in zip(self.irreps_outs, self._slices_out):
             # concatenate the slices along the last axis

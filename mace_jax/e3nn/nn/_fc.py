@@ -1,4 +1,4 @@
-from typing import Callable, List, Optional
+from typing import Callable, Optional
 
 import haiku as hk
 import jax.numpy as jnp
@@ -40,8 +40,8 @@ class Layer(hk.Module):
         self.var_out = var_out
 
         # For repr/profiling
-        act_name = act.__name__ if hasattr(act, "__name__") else str(act)
-        self._profiling_str = f"Layer({h_in}->{h_out}, act={act_name})"
+        act_name = act.__name__ if hasattr(act, '__name__') else str(act)
+        self._profiling_str = f'Layer({h_in}->{h_out}, act={act_name})'
 
     def __repr__(self) -> str:
         return self._profiling_str
@@ -49,7 +49,7 @@ class Layer(hk.Module):
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
         # Initialize weight
         w = hk.get_parameter(
-            "weight",
+            'weight',
             shape=(self.h_in, self.h_out),
             init=hk.initializers.RandomNormal(),
         )
@@ -83,11 +83,11 @@ class FullyConnectedNet(hk.Module):
         Whether to apply the activation function on the output layer.
     """
 
-    hs: List[int]
+    hs: list[int]
 
     def __init__(
         self,
-        hs: List[int],
+        hs: list[int],
         act: Optional[Callable] = None,
         variance_in: float = 1.0,
         variance_out: float = 1.0,
@@ -111,7 +111,7 @@ class FullyConnectedNet(hk.Module):
                 var_out = 1.0
                 a = act
 
-            layer = Layer(h1, h2, a, var_in, var_out, name=f"layer{i}")
+            layer = Layer(h1, h2, a, var_in, var_out, name=f'layer{i}')
             self.layers.append(layer)
 
             var_in = var_out
@@ -122,4 +122,4 @@ class FullyConnectedNet(hk.Module):
         return x
 
     def __repr__(self) -> str:
-        return f"{self.__class__.__name__}{self.hs}"
+        return f'{self.__class__.__name__}{self.hs}'
