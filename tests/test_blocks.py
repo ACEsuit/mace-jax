@@ -6,29 +6,44 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import torch
-
-# allow e3nn constants.pt to unpickle safely with PyTorch 2.6+
-torch.serialization.add_safe_globals([slice])
-
 from e3nn import o3
 from e3nn_jax import Irreps
-
+from mace.modules.blocks import (
+    RealAgnosticAttResidualInteractionBlock as RealAgnosticAttResidualInteractionBlockTorch,
+)
+from mace.modules.blocks import (
+    RealAgnosticDensityInteractionBlock as RealAgnosticDensityInteractionBlockTorch,
+)
+from mace.modules.blocks import (
+    RealAgnosticDensityResidualInteractionBlock as RealAgnosticDensityResidualInteractionBlockTorch,
+)
 from mace.modules.blocks import (
     RealAgnosticInteractionBlock as RealAgnosticInteractionBlockTorch,
+)
+from mace.modules.blocks import (
     RealAgnosticResidualInteractionBlock as RealAgnosticResidualInteractionBlockTorch,
-    RealAgnosticDensityInteractionBlock as RealAgnosticDensityInteractionBlockTorch,
+)
+from mace.modules.blocks import (
     RealAgnosticResidualNonLinearInteractionBlock as RealAgnosticResidualNonLinearInteractionBlockTorch,
-    RealAgnosticAttResidualInteractionBlock as RealAgnosticAttResidualInteractionBlockTorch,
-    RealAgnosticDensityResidualInteractionBlock as RealAgnosticDensityResidualInteractionBlockTorch,
 )
 
 from mace_jax.modules.blocks import (
-    RealAgnosticInteractionBlock as RealAgnosticInteractionBlockJAX,
-    RealAgnosticResidualInteractionBlock as RealAgnosticResidualInteractionBlockJAX,
-    RealAgnosticDensityInteractionBlock as RealAgnosticDensityInteractionBlockJAX,
-    RealAgnosticResidualNonLinearInteractionBlock as RealAgnosticResidualNonLinearInteractionBlockJAX,
     RealAgnosticAttResidualInteractionBlock as RealAgnosticAttResidualInteractionBlockJAX,
+)
+from mace_jax.modules.blocks import (
+    RealAgnosticDensityInteractionBlock as RealAgnosticDensityInteractionBlockJAX,
+)
+from mace_jax.modules.blocks import (
     RealAgnosticDensityResidualInteractionBlock as RealAgnosticDensityResidualInteractionBlockJAX,
+)
+from mace_jax.modules.blocks import (
+    RealAgnosticInteractionBlock as RealAgnosticInteractionBlockJAX,
+)
+from mace_jax.modules.blocks import (
+    RealAgnosticResidualInteractionBlock as RealAgnosticResidualInteractionBlockJAX,
+)
+from mace_jax.modules.blocks import (
+    RealAgnosticResidualNonLinearInteractionBlock as RealAgnosticResidualNonLinearInteractionBlockJAX,
 )
 
 
@@ -49,7 +64,7 @@ def copy_jax_to_torch(torch_module, jax_params):
     key_mapping = map_keys(jax_params)
 
     for k in torch_state.keys():
-        if k.endswith(".output_mask"):
+        if k.endswith('.output_mask'):
             continue
         if len(torch_state[k]) == 0:  # empty bias tensor in Torch
             continue
@@ -60,7 +75,7 @@ def copy_jax_to_torch(torch_module, jax_params):
 
         if torch_state[k].shape != jax_tensor.shape:
             raise ValueError(
-                f"Shape mismatch for {k}: torch {torch_state[k].shape}, jax {jax_tensor.shape}"
+                f'Shape mismatch for {k}: torch {torch_state[k].shape}, jax {jax_tensor.shape}'
             )
         torch_state[k] = jax_tensor
 
@@ -69,6 +84,7 @@ def copy_jax_to_torch(torch_module, jax_params):
 
 def run_jax_forward(jax_module_cls, inputs, **kwargs):
     """Initialize and run Haiku module once."""
+
     def forward_fn(*args):
         mod = jax_module_cls(**kwargs)
         return mod(*args)
@@ -94,19 +110,39 @@ def dummy_data():
 
 # === Parametrized Tests for All Blocks ===
 @pytest.mark.parametrize(
-    "jax_cls, torch_cls, multi_output",
+    'jax_cls, torch_cls, multi_output',
     [
         (RealAgnosticInteractionBlockJAX, RealAgnosticInteractionBlockTorch, 1),
-        (RealAgnosticResidualInteractionBlockJAX, RealAgnosticResidualInteractionBlockTorch, 2),
-        (RealAgnosticDensityInteractionBlockJAX, RealAgnosticDensityInteractionBlockTorch, 1),
-        (RealAgnosticResidualNonLinearInteractionBlockJAX, RealAgnosticResidualNonLinearInteractionBlockTorch, 2),
-        (RealAgnosticAttResidualInteractionBlockJAX, RealAgnosticAttResidualInteractionBlockTorch, 2),
-        (RealAgnosticDensityResidualInteractionBlockJAX, RealAgnosticDensityResidualInteractionBlockTorch, 2),
+        (
+            RealAgnosticResidualInteractionBlockJAX,
+            RealAgnosticResidualInteractionBlockTorch,
+            2,
+        ),
+        (
+            RealAgnosticDensityInteractionBlockJAX,
+            RealAgnosticDensityInteractionBlockTorch,
+            1,
+        ),
+        (
+            RealAgnosticResidualNonLinearInteractionBlockJAX,
+            RealAgnosticResidualNonLinearInteractionBlockTorch,
+            2,
+        ),
+        (
+            RealAgnosticAttResidualInteractionBlockJAX,
+            RealAgnosticAttResidualInteractionBlockTorch,
+            2,
+        ),
+        (
+            RealAgnosticDensityResidualInteractionBlockJAX,
+            RealAgnosticDensityResidualInteractionBlockTorch,
+            2,
+        ),
     ],
 )
 def test_torch_vs_jax(dummy_data, jax_cls, torch_cls, multi_output):
     node_attrs, node_feats, edge_attrs, edge_feats, edge_index = dummy_data
-    irreps = Irreps("2x0e")
+    irreps = Irreps('2x0e')
 
     # === Run JAX ===
     jax_inputs = (
@@ -130,12 +166,12 @@ def test_torch_vs_jax(dummy_data, jax_cls, torch_cls, multi_output):
 
     # === Run Torch ===
     torch_module = torch_cls(
-        node_attrs_irreps=o3.Irreps("2x0e"),
-        node_feats_irreps=o3.Irreps("2x0e"),
-        edge_attrs_irreps=o3.Irreps("2x0e"),
-        edge_feats_irreps=o3.Irreps("2x0e"),
-        target_irreps=o3.Irreps("2x0e"),
-        hidden_irreps=o3.Irreps("2x0e"),
+        node_attrs_irreps=o3.Irreps('2x0e'),
+        node_feats_irreps=o3.Irreps('2x0e'),
+        edge_attrs_irreps=o3.Irreps('2x0e'),
+        edge_feats_irreps=o3.Irreps('2x0e'),
+        target_irreps=o3.Irreps('2x0e'),
+        hidden_irreps=o3.Irreps('2x0e'),
         avg_num_neighbors=3.0,
     )
     copy_jax_to_torch(torch_module, jax_params)
@@ -159,4 +195,3 @@ def test_torch_vs_jax(dummy_data, jax_cls, torch_cls, multi_output):
             torch_arr = torch_out[i].detach().cpu().numpy()
             jax_arr = np.array(jax_out[i])
             np.testing.assert_allclose(torch_arr, jax_arr, rtol=0.01, atol=0.001)
-
