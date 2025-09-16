@@ -249,12 +249,12 @@ class NonLinearDipoleReadoutBlock(hk.Module):
             self.irreps_out = Irreps('1x0e + 1x1o')
 
         # Partition hidden irreps into scalars and gated irreps
-        irreps_scalars = Irreps(
-            [(mul, ir) for mul, ir in MLP_irreps if ir.l == 0 and ir in self.irreps_out]
-        )
-        irreps_gated = Irreps(
-            [(mul, ir) for mul, ir in MLP_irreps if ir.l > 0 and ir in self.irreps_out]
-        )
+        irreps_scalars = Irreps([
+            (mul, ir) for mul, ir in MLP_irreps if ir.l == 0 and ir in self.irreps_out
+        ])
+        irreps_gated = Irreps([
+            (mul, ir) for mul, ir in MLP_irreps if ir.l > 0 and ir in self.irreps_out
+        ])
         irreps_gates = Irreps([(mul, Irreps('0e')[0][1]) for mul, _ in irreps_gated])
 
         # Gated nonlinearity
@@ -349,12 +349,12 @@ class NonLinearDipolePolarReadoutBlock(hk.Module):
                 'If you want to calculate only the dipole, use AtomicDipolesMACE.'
             )
 
-        irreps_scalars = Irreps(
-            [(mul, ir) for mul, ir in MLP_irreps if ir.l == 0 and ir in self.irreps_out]
-        )
-        irreps_gated = Irreps(
-            [(mul, ir) for mul, ir in MLP_irreps if ir.l > 0 and ir in self.irreps_out]
-        )
+        irreps_scalars = Irreps([
+            (mul, ir) for mul, ir in MLP_irreps if ir.l == 0 and ir in self.irreps_out
+        ])
+        irreps_gated = Irreps([
+            (mul, ir) for mul, ir in MLP_irreps if ir.l > 0 and ir in self.irreps_out
+        ])
         irreps_gates = Irreps([(mul, '0e') for mul, _ in irreps_gated])
 
         # Equivariant nonlinearity
@@ -1039,7 +1039,7 @@ class RealAgnosticDensityResidualInteractionBlock(InteractionBlock):
         cutoff: Optional[jnp.ndarray] = None,
         n_real: Optional[int] = None,
     ) -> tuple[jnp.ndarray, jnp.ndarray]:
-        receiver = edge_index[:, 1]
+        receiver = edge_index[1]
         num_nodes = node_feats.shape[0]
 
         # Skip connection
@@ -1059,21 +1059,25 @@ class RealAgnosticDensityResidualInteractionBlock(InteractionBlock):
             edge_density = edge_density * cutoff
 
         # Aggregate density per node
-        density = scatter_sum(edge_density, receiver, num_nodes)  # [n_nodes, 1]
+        density = scatter_sum(
+            src=edge_density, index=receiver, dim=0, dim_size=num_nodes
+        )  # [n_nodes, 1]
 
         # Message passing
         if hasattr(self, 'conv_fusion'):
             message = self.conv_tp(node_feats, edge_attrs, tp_weights, edge_index)
         else:
-            mji = self.conv_tp(node_feats[edge_index[:, 0]], edge_attrs, tp_weights)
-            message = scatter_sum(mji, receiver, num_nodes)
+            mji = self.conv_tp(
+                node_feats[edge_index[0]], edge_attrs, tp_weights
+            )  # [n_nodes, irreps]
+            message = scatter_sum(
+                src=mji, index=edge_index[1], dim=0, dim_size=node_feats.shape[0]
+            )
 
-        # Truncate ghost atoms
-        if n_real is not None:
-            message = message[:n_real]
-            node_attrs = node_attrs[:n_real]
-            density = density[:n_real]
-            sc = sc[:n_real]
+        message = self.truncate_ghosts(message, n_real)
+        node_attrs = self.truncate_ghosts(node_attrs, n_real)
+        density = self.truncate_ghosts(density, n_real)
+        sc = self.truncate_ghosts(sc, n_real)
 
         # Normalize messages by density
         message = self.linear(message) / (density + 1)
@@ -1167,8 +1171,8 @@ class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
         cutoff: Optional[jnp.ndarray] = None,
         n_real: Optional[int] = None,
     ) -> tuple[jnp.ndarray, jnp.ndarray]:
-        sender = edge_index[:, 0]
-        receiver = edge_index[:, 1]
+        sender = edge_index[0]
+        receiver = edge_index[1]
 
         # Skip connection
         sc = self.skip_linear(node_feats)
@@ -1191,8 +1195,12 @@ class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
         if hasattr(self, 'conv_fusion'):
             message = self.conv_tp(node_feats_up, edge_attrs, tp_weights, edge_index)
         else:
-            mji = self.conv_tp(node_feats_up[sender], edge_attrs, tp_weights)
-            message = scatter_sum(mji, receiver, node_feats.shape[0])
+            mji = self.conv_tp(
+                node_feats_up[edge_index[0]], edge_attrs, tp_weights
+            )  # [n_nodes, irreps]
+            message = scatter_sum(
+                src=mji, index=edge_index[1], dim=0, dim_size=node_feats.shape[0]
+            )
 
         # Linear projection and normalization
         message = self.linear(message) / self.avg_num_neighbors
@@ -1203,9 +1211,9 @@ class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
 class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
     def _setup(self) -> None:
         # Compute scalar irreps
-        node_scalar_irreps = Irreps(
-            [(self.node_feats_irreps.count(Irrep(0, 1)), (0, 1))]
-        )
+        node_scalar_irreps = Irreps([
+            (self.node_feats_irreps.count(Irrep(0, 1)), (0, 1))
+        ])
 
         # Source/target embeddings
         self.source_embedding = Linear(
@@ -1355,7 +1363,7 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
         sc = self.skip_tp(node_feats)
 
         # Linear projections
-        node_feats_up = self.linear_up(node_feats)
+        node_feats = self.linear_up(node_feats)
         node_feats_res = self.linear_res(node_feats)
 
         # Source/target embeddings for edges
@@ -1364,8 +1372,8 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
         augmented_edge_feats = jnp.concatenate(
             [
                 edge_feats,
-                source_embedding[edge_index[:, 0]],
-                target_embedding[edge_index[:, 1]],
+                source_embedding[edge_index[0]],
+                target_embedding[edge_index[1]],
             ],
             axis=-1,
         )
@@ -1378,18 +1386,26 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
             edge_density = edge_density * cutoff
 
         # Density sum per node
-        density = scatter_sum(edge_density, edge_index[:, 1], num_nodes)
+        density = scatter_sum(
+            src=edge_density, index=edge_index[1], dim=0, dim_size=num_nodes
+        )
 
         # Message passing
-        mji = self.conv_tp(node_feats_up[edge_index[:, 0]], edge_attrs, tp_weights)
-        message = scatter_sum(mji, edge_index[:, 1], num_nodes)
+        if hasattr(self, 'conv_fusion'):
+            message = self.conv_tp(node_feats, edge_attrs, tp_weights, edge_index)
+        else:
+            mji = self.conv_tp(
+                node_feats[edge_index[0]], edge_attrs, tp_weights
+            )  # [n_edges, irreps]
+            message = scatter_sum(
+                src=mji, index=edge_index[1], dim=0, dim_size=num_nodes
+            )  # [n_nodes, irreps]
 
         # Truncate ghosts
-        if n_real is not None:
-            message = message[:n_real]
-            density = density[:n_real]
-            sc = sc[:n_real]
-            node_feats_res = node_feats_res[:n_real]
+        message = self.truncate_ghosts(message, n_real)
+        density = self.truncate_ghosts(density, n_real)
+        sc = self.truncate_ghosts(sc, n_real)
+        node_feats_res = self.truncate_ghosts(node_feats_res, n_real)
 
         # Linear + normalization
         message = self.linear_1(message) / (density * self.beta + self.alpha)
