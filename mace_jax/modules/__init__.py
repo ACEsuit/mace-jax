@@ -8,7 +8,6 @@ from .blocks import (
     ScaleShiftBlock,
 )
 from .loss import WeightedEnergyForcesStressLoss, uber_loss
-from .message_passing import MessagePassingConvolution
 from .models import MACE
 from .symmetric_contraction import SymmetricContraction
 
@@ -22,7 +21,6 @@ __all__ = [
     "ScaleShiftBlock",
     "WeightedEnergyForcesStressLoss",
     "uber_loss",
-    "MessagePassingConvolution",
     "MACE",
     "SymmetricContraction",
 ]
