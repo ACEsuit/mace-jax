@@ -13,6 +13,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from mace_jax.tools.dtype import default_dtype
 from mace_jax.tools.scatter import scatter_sum
 
 from .special import chebyshev_polynomial_t
@@ -51,7 +52,7 @@ class BesselBasis(hk.Module):
             bessel_weights = hk.get_parameter(
                 'bessel_weights',
                 shape=init_bessel.shape,
-                dtype=x.dtype,
+                dtype=default_dtype(),
                 init=lambda *_: init_bessel,
             )
         else:
@@ -136,6 +137,7 @@ class GaussianBasis(hk.Module):
             gaussian_weights = hk.get_parameter(
                 'gaussian_weights',
                 shape=init_gaussian_weights.shape,
+                dtype=default_dtype(),
                 init=lambda *_: init_gaussian_weights,
             )
         else:
@@ -143,7 +145,7 @@ class GaussianBasis(hk.Module):
             gaussian_weights = hk.get_state(
                 'gaussian_weights',
                 shape=init_gaussian_weights.shape,
-                dtype=jnp.float32,
+                dtype=default_dtype(),
                 init=lambda *_: init_gaussian_weights,
             )
             # Ensure it stays constant
@@ -166,13 +168,13 @@ class PolynomialCutoff(hk.Module):
         self.r_max = hk.get_state(
             'r_max',
             shape=(),
-            dtype=jnp.float32,
+            dtype=default_dtype(),
             init=lambda *_: jnp.array(r_max, dtype=jnp.float32),
         )
         self.p = hk.get_state(
             'p',
             shape=(),
-            dtype=jnp.int32,
+            dtype=default_dtype(),
             init=lambda *_: jnp.array(p, dtype=jnp.int32),
         )
 
@@ -221,16 +223,30 @@ class ZBLBasis(hk.Module):
         # Parameters (trainable or frozen)
         if trainable:
             self.a_exp = hk.get_parameter(
-                'a_exp', shape=(), init=lambda *_: jnp.array(0.300, dtype=jnp.float32)
+                'a_exp',
+                shape=(),
+                init=lambda *_: jnp.array(
+                    0.300,
+                    dtype=default_dtype(),
+                ),
             )
             self.a_prefactor = hk.get_parameter(
                 'a_prefactor',
                 shape=(),
-                init=lambda *_: jnp.array(0.4543, dtype=jnp.float32),
+                init=lambda *_: jnp.array(
+                    0.4543,
+                    dtype=default_dtype(),
+                ),
             )
         else:
-            self.a_exp = jnp.array(0.300, dtype=jnp.float32)
-            self.a_prefactor = jnp.array(0.4543, dtype=jnp.float32)
+            self.a_exp = jnp.array(
+                0.300,
+                dtype=default_dtype(),
+            )
+            self.a_prefactor = jnp.array(
+                0.4543,
+                dtype=default_dtype(),
+            )
 
     def __call__(
         self,
@@ -297,17 +313,35 @@ class AgnesiTransform(hk.Module):
         super().__init__(name=name)
 
         # Store constants (as JAX arrays)
-        self.covalent_radii = jnp.array(ase.data.covalent_radii, dtype=jnp.float32)
+        self.covalent_radii = jnp.array(
+            ase.data.covalent_radii,
+            dtype=default_dtype(),
+        )
 
         if trainable:
             self.a = hk.get_parameter(
-                'a', shape=(), init=lambda *_: jnp.array(a, dtype=jnp.float32)
+                'a',
+                shape=(),
+                init=lambda *_: jnp.array(
+                    a,
+                    dtype=default_dtype(),
+                ),
             )
             self.q = hk.get_parameter(
-                'q', shape=(), init=lambda *_: jnp.array(q, dtype=jnp.float32)
+                'q',
+                shape=(),
+                init=lambda *_: jnp.array(
+                    q,
+                    dtype=default_dtype(),
+                ),
             )
             self.p = hk.get_parameter(
-                'p', shape=(), init=lambda *_: jnp.array(p, dtype=jnp.float32)
+                'p',
+                shape=(),
+                init=lambda *_: jnp.array(
+                    p,
+                    dtype=default_dtype(),
+                ),
             )
         else:
             self.a = jnp.array(a, dtype=jnp.float32)
@@ -362,7 +396,10 @@ class SoftTransform(hk.Module):
         # If trainable, we store alpha as a Haiku parameter
         if self.trainable:
             return hk.get_parameter(
-                'alpha', shape=(), init=lambda *_: jnp.array(self.init_alpha)
+                'alpha',
+                shape=(),
+                dtype=default_dtype(),
+                nit=lambda *_: jnp.array(self.init_alpha),
             )
         else:
             return jnp.array(self.init_alpha)

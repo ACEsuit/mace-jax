@@ -6,6 +6,7 @@ import opt_einsum as oe
 from e3nn_jax import Irrep, Irreps
 
 from mace_jax.tools.cg import U_matrix_real
+from mace_jax.tools.dtype import default_dtype
 
 BATCH_EXAMPLE = 10
 ALPHABET = ['w', 'x', 'v', 'n', 'z', 'r', 't', 'y', 'u', 'o', 'p', 's']
@@ -237,7 +238,7 @@ class Contraction(hk.Module):
             init=hk.initializers.RandomNormal(
                 stddev=1.0 / self.U_matrices[self.correlation].shape[-1]
             ),
-            dtype=x.dtype,
+            dtype=default_dtype(),
         )
 
         weights = []
@@ -248,7 +249,7 @@ class Contraction(hk.Module):
                 init=hk.initializers.RandomNormal(
                     stddev=1.0 / self._shapes_weight[i - 1][1]
                 ),
-                dtype=x.dtype,
+                dtype=default_dtype(),
             )
             weights.append(w)
 

@@ -17,6 +17,7 @@ from mace_jax.modules.wrapper_ops import (
     TensorProduct,
     TransposeIrrepsLayoutWrapper,
 )
+from mace_jax.tools.dtype import default_dtype
 from mace_jax.tools.scatter import scatter_sum
 
 from .irreps_tools import mask_head, reshape_irreps, tp_out_irreps_with_instructions
@@ -43,7 +44,7 @@ class LinearNodeEmbeddingBlock(hk.Module):
         w = hk.get_parameter(
             'embeddings',
             shape=(self.num_species, self.irreps_out.dim),
-            dtype=jnp.float32,
+            dtype=default_dtype(),
             init=hk.initializers.RandomNormal(),
             name='linear',
         )
@@ -397,6 +398,7 @@ class AtomicEnergiesBlock(hk.Module):
         self.atomic_energies = hk.get_parameter(
             'atomic_energies',
             shape=atomic_energies.shape,
+            dtype=default_dtype(),
             init=lambda *_: atomic_energies,
         )  # [n_elements, n_heads]
 
@@ -1315,8 +1317,13 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
 
         # Density normalization
         self.density_fn = RadialMLP([input_dim + 2 * node_scalar_irreps.dim, 64, 1])
-        self.alpha = hk.get_parameter('alpha', shape=(), init=jnp.ones) * 20.0
-        self.beta = hk.get_parameter('beta', shape=(), init=jnp.zeros)
+        self.alpha = (
+            hk.get_parameter('alpha', shape=(), dtype=default_dtype(), init=jnp.ones)
+            * 20.0
+        )
+        self.beta = hk.get_parameter(
+            'beta', shape=(), dtype=default_dtype(), init=jnp.zeros
+        )
 
         # Transpose wrappers
         self.transpose_mul_ir = TransposeIrrepsLayoutWrapper(
