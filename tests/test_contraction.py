@@ -1,29 +1,33 @@
+import haiku as hk
+import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 import torch
-import jax.numpy as jnp
-import jax
-import haiku as hk
-
 from e3nn import o3
 from e3nn_jax import Irreps
-
 from mace.modules.symmetric_contraction import (
     Contraction as ContractionTorch,
+)
+from mace.modules.symmetric_contraction import (
     SymmetricContraction as SymmetricContractionTorch,
 )
+
 from mace_jax.modules.symmetric_contraction import (
     Contraction as ContractionJax,
+)
+from mace_jax.modules.symmetric_contraction import (
     SymmetricContraction as SymmetricContractionJax,
 )
 
 
 class TestContractionParity:
-    @pytest.mark.parametrize("correlation", [1, 2])
-    @pytest.mark.parametrize("lmax", [0, 1])
+    @pytest.mark.parametrize('correlation', [1, 2])
+    @pytest.mark.parametrize('lmax', [0, 1])
     def test_forward(self, correlation, lmax):
-        irreps_in = o3.Irreps("2x0e + 1x1o")
-        irrep_out = o3.Irreps(f"{lmax}e")
+        # === Set inputs ===
+        irreps_in = o3.Irreps('2x0e + 1x1o')
+        irrep_out = o3.Irreps(f'{lmax}e')
 
         # Torch version
         model_torch = ContractionTorch(
@@ -66,9 +70,9 @@ class TestContractionParity:
         params = forward.init(key, x_j, y_j)
 
         # --- Transfer weights from JAX → Torch ---
-        jax_wmax = np.array(params["contraction"]["weights_max"])
+        jax_wmax = np.array(params['contraction']['weights_max'])
         jax_ws = [
-            np.array(params["contraction"][f"weights_{i + 1}"])
+            np.array(params['contraction'][f'weights_{i + 1}'])
             for i in range(len(model_torch.weights))
         ]
 
@@ -87,11 +91,12 @@ class TestContractionParity:
 
 
 class TestSymmetricContractionParity:
-    @pytest.mark.parametrize("correlation", [1, 2])
-    @pytest.mark.parametrize("lmax", [0, 1, 2])
+    @pytest.mark.parametrize('correlation', [1, 2])
+    @pytest.mark.parametrize('lmax', [0, 1, 2])
     def test_forward(self, correlation, lmax):
-        irreps_in = o3.Irreps("2x0e + 1x1o")
-        irreps_out = o3.Irreps(f"{lmax}e + 1x1o")  # multi-output test
+        # === Set inputs ===
+        irreps_in = o3.Irreps('2x0e + 1x1o')
+        irreps_out = o3.Irreps(f'{lmax}e + 1x1o')  # multi-output test
 
         batch = 4
         num_elements = 3
@@ -129,28 +134,26 @@ class TestSymmetricContractionParity:
 
         # --- Copy JAX params -> PyTorch ---
         for idx, contraction_torch in enumerate(model_torch.contractions):
-            contraction_name = f"contraction_{idx}" if idx > 0 else "contraction"
-            contraction_jax = params[f"symmetric_contraction/{contraction_name}"]
+            contraction_name = f'contraction_{idx}' if idx > 0 else 'contraction'
+            contraction_jax = params[f'symmetric_contraction/{contraction_name}']
 
             # Copy weights_max
-            w_max = contraction_jax["weights_max"]
-            contraction_torch.weights_max.data = torch.tensor(
-                np.array(w_max), dtype=torch.float32
-            )
+            w_max = contraction_jax['weights_max']
+            contraction_torch.weights_max.data = torch.tensor(np.array(w_max))
 
             # Copy lower-correlation weights
             for key_name, w_jax in contraction_jax.items():
-                if key_name == "weights_max":
+                if key_name == 'weights_max':
                     continue
-                if key_name.startswith("weights_"):
-                    i = int(key_name.split("_")[1])
+                if key_name.startswith('weights_'):
+                    i = int(key_name.split('_')[1])
                     contraction_torch.weights[i - 1].data = torch.tensor(
-                        np.array(w_jax), dtype=torch.float32
+                        np.array(w_jax)
                     )
 
         # Torch inputs
-        x_t = torch.tensor(np.array(x_j), dtype=torch.float32)
-        y_t = torch.tensor(np.array(y_j), dtype=torch.float32)
+        x_t = torch.tensor(np.array(x_j))
+        y_t = torch.tensor(np.array(y_j))
 
         # Forward pass
         out_t = model_torch(x_t, y_t).detach().numpy()

@@ -1,14 +1,14 @@
-from typing import Dict, Optional, List, Any, Union
+from typing import Any, Dict, List, Optional, Union
 
 import haiku as hk
 import jax.numpy as jnp
 import opt_einsum as oe
-from e3nn_jax import Irreps, Irrep
+from e3nn_jax import Irrep, Irreps
 
 from mace_jax.tools.cg import U_matrix_real
 
 BATCH_EXAMPLE = 10
-ALPHABET = ["w", "x", "v", "n", "z", "r", "t", "y", "u", "o", "p", "s"]
+ALPHABET = ['w', 'x', 'v', 'n', 'z', 'r', 't', 'y', 'u', 'o', 'p', 's']
 
 
 def _ensure_array_from_U(u_obj: Any) -> jnp.ndarray:
@@ -60,8 +60,10 @@ class Contraction(hk.Module):
         self.lmax = max((ir.ir.l for ir in self.irrep_out), default=0)
 
         # --- Precompute U matrices (numeric arrays) and path weights ---
-        self.U_matrices: Dict[int, jnp.ndarray] = {}
-        self.zero_flags: List[bool] = []  # corresponds to path_weight (negated)
+        self.U_matrices: dict[int, jnp.ndarray] = {}
+        self.zero_flags: list[bool] = []  # corresponds to path_weight (negated)
+
+        dtype = jnp.array(0.0).dtype
 
         for nu in range(1, self.correlation + 1):
             # Compute U_matrix_real like PyTorch
@@ -70,7 +72,7 @@ class Contraction(hk.Module):
                 irreps_out=self.irrep_out,
                 correlation=nu,
                 use_cueq_cg=use_reduced_cg,
-                dtype=jnp.float32,
+                dtype=dtype,
             )
             # Take the last array (PyTorch uses [-1])
             last = raw[-1]
@@ -86,7 +88,7 @@ class Contraction(hk.Module):
             # U = U[..., :num_ell, :num_params]
 
             # Store cleaned U_matrix
-            self.U_matrices[nu] = jnp.asarray(U, dtype=jnp.float32)
+            self.U_matrices[nu] = jnp.asarray(U)
 
             # Compute zero flag for this path
             is_nonzero = jnp.any(self.U_matrices[nu] != 0.0)
@@ -102,7 +104,7 @@ class Contraction(hk.Module):
 
         # prefix letters like PyTorch
         prefix = [ALPHABET[j] for j in range(self.correlation + min(self.lmax, 1) - 1)]
-        main_sub = "".join(prefix) + "ik,ekc,bci,be->bc" + "".join(prefix)
+        main_sub = ''.join(prefix) + 'ik,ekc,bci,be->bc' + ''.join(prefix)
 
         # When calling contract_expression, pass shapes WITHOUT batch dims.
         # For U_main we pass exactly U_main.shape
@@ -129,9 +131,9 @@ class Contraction(hk.Module):
         self._shapes_main = shapes_main
 
         # --- Prepare weighting/feature expressions for i < correlation ---
-        self._weight_exprs: List[Any] = []
-        self._shapes_weight: List[Any] = []
-        self._feature_exprs: List[Any] = []
+        self._weight_exprs: list[Any] = []
+        self._shapes_weight: list[Any] = []
+        self._feature_exprs: list[Any] = []
 
         # iterate descending (correlation-1 .. 1) as PyTorch
         for i in range(self.correlation - 1, 0, -1):
@@ -140,13 +142,13 @@ class Contraction(hk.Module):
             num_ell_i = int(U_i.shape[-2])
 
             prefix_i = [ALPHABET[j] for j in range(max(0, i + min(self.lmax, 1)))]
-            subs_weight = "".join(prefix_i) + "k,ekc,be->bc" + "".join(prefix_i)
+            subs_weight = ''.join(prefix_i) + 'k,ekc,be->bc' + ''.join(prefix_i)
             # feature subs: match PyTorch construction
             subs_feat = (
-                "bc"
-                + "".join(prefix_i[: i - 1 + min(self.lmax, 1)])
-                + "i,bci->bc"
-                + "".join(prefix_i[: i - 1 + min(self.lmax, 1)])
+                'bc'
+                + ''.join(prefix_i[: i - 1 + min(self.lmax, 1)])
+                + 'i,bci->bc'
+                + ''.join(prefix_i[: i - 1 + min(self.lmax, 1)])
             )
 
             # contract_expression shapes
@@ -200,7 +202,8 @@ class Contraction(hk.Module):
             self._feature_exprs.append(expr_f)
 
         if not internal_weights:
-            raise NotImplementedError("Sharing weights is not implemented in JAX.")
+            self.weights = weights[:-1]
+            self.weights_max = weights[-1]
 
     def __call__(self, x: jnp.ndarray, y: jnp.ndarray) -> jnp.ndarray:
         # Ensure arrays
@@ -210,22 +213,22 @@ class Contraction(hk.Module):
         # expected shape: (batch, c, i) for x
         if x.ndim < 2:
             raise ValueError(
-                f"x must have at least 2 dims (batch,c,...) but got shape {x.shape}"
+                f'x must have at least 2 dims (batch,c,...) but got shape {x.shape}'
             )
         if x.shape[1] != self.num_features:
             raise ValueError(
-                f"Mismatch: x.shape[1] == {x.shape[1]} but self.num_features == {self.num_features}. "
-                "Check the Irreps you passed to this Contraction and the input ordering."
+                f'Mismatch: x.shape[1] == {x.shape[1]} but self.num_features == {self.num_features}. '
+                'Check the Irreps you passed to this Contraction and the input ordering.'
             )
         if y.ndim < 2:
-            raise ValueError(f"y must have shape (batch, elements), got {y.shape}")
+            raise ValueError(f'y must have shape (batch, elements), got {y.shape}')
         if y.shape[1] != self.num_elements:
             raise ValueError(
-                f"Mismatch: y.shape[1] == {y.shape[1]} but self.num_elements == {self.num_elements}."
+                f'Mismatch: y.shape[1] == {y.shape[1]} but self.num_elements == {self.num_elements}.'
             )
 
         weights_max = hk.get_parameter(
-            "weights_max",
+            'weights_max',
             shape=(
                 self.num_elements,
                 self.U_matrices[self.correlation].shape[-1],
@@ -234,16 +237,18 @@ class Contraction(hk.Module):
             init=hk.initializers.RandomNormal(
                 stddev=1.0 / self.U_matrices[self.correlation].shape[-1]
             ),
+            dtype=x.dtype,
         )
 
         weights = []
         for i in range(1, self.correlation):
             w = hk.get_parameter(
-                f"weights_{i}",
+                f'weights_{i}',
                 shape=self._shapes_weight[i - 1],
                 init=hk.initializers.RandomNormal(
                     stddev=1.0 / self._shapes_weight[i - 1][1]
                 ),
+                dtype=x.dtype,
             )
             weights.append(w)
 
@@ -265,8 +270,7 @@ class Contraction(hk.Module):
         ):
             # nu maps to correlation - (idx+1)
             nu = self.correlation - (idx + 1)
-            if nu < 1:
-                nu = 1
+            nu = max(nu, 1)
             U_nu = self.U_matrices[nu]
 
             # zero-flag handling for this stage (indexing zero_flags[nu-1])
@@ -299,8 +303,8 @@ class SymmetricContraction(hk.Module):
         irreps_in: Union[str, Irreps],
         irreps_out: Union[str, Irreps],
         correlation: Union[int, Dict[Irrep, int]],
-        irrep_normalization: str = "component",
-        path_normalization: str = "element",
+        irrep_normalization: str = 'component',
+        path_normalization: str = 'element',
         use_reduced_cg: bool = False,
         internal_weights: Optional[bool] = None,
         shared_weights: Optional[bool] = None,
@@ -310,12 +314,12 @@ class SymmetricContraction(hk.Module):
         super().__init__(name=name)
 
         if irrep_normalization is None:
-            irrep_normalization = "component"
+            irrep_normalization = 'component'
         if path_normalization is None:
-            path_normalization = "element"
+            path_normalization = 'element'
 
-        assert irrep_normalization in ["component", "norm", "none"]
-        assert path_normalization in ["element", "path", "none"]
+        assert irrep_normalization in ['component', 'norm', 'none']
+        assert path_normalization in ['element', 'path', 'none']
 
         self.irreps_in = Irreps(irreps_in)
         self.irreps_out = Irreps(irreps_out)
@@ -344,6 +348,8 @@ class SymmetricContraction(hk.Module):
                 correlation=self.correlation[irrep_out],
                 internal_weights=self.internal_weights,
                 num_elements=self.num_elements,
+                # TODO: Bug in MACE implementation, array expected but passing
+                # a boolean
                 weights=self.shared_weights,
                 use_reduced_cg=self.use_reduced_cg,
             )

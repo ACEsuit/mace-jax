@@ -1,36 +1,30 @@
 import re
-import warnings
 
+import haiku as hk
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 import torch
-
-warnings.filterwarnings("ignore", category=DeprecationWarning, module="haiku")
-torch.serialization.add_safe_globals([slice])
-
-import haiku as hk  # noqa: E402
-from e3nn import o3  # noqa: E402
-from e3nn_jax import Irreps  # noqa: E402
-from jax import config as jax_config  # noqa: E402
+from e3nn import o3
+from e3nn_jax import Irreps
 from mace.modules.blocks import (
     RealAgnosticDensityInteractionBlock as RealAgnosticDensityInteractionBlockTorch,
 )
-from mace.modules.blocks import (  # noqa: E402
+from mace.modules.blocks import (
     RealAgnosticInteractionBlock as RealAgnosticInteractionBlockTorch,
 )
-from mace.modules.blocks import (  # noqa: E402
+from mace.modules.blocks import (
     RealAgnosticResidualInteractionBlock as RealAgnosticResidualInteractionBlockTorch,
 )
 
 from mace_jax.modules.blocks import (
     RealAgnosticDensityInteractionBlock as RealAgnosticDensityInteractionBlockJAX,
 )
-from mace_jax.modules.blocks import (  # noqa: E402
+from mace_jax.modules.blocks import (
     RealAgnosticInteractionBlock as RealAgnosticInteractionBlockJAX,
 )
-from mace_jax.modules.blocks import (  # noqa: E402
+from mace_jax.modules.blocks import (
     RealAgnosticResidualInteractionBlock as RealAgnosticResidualInteractionBlockJAX,
 )
 
@@ -41,8 +35,8 @@ def map_keys(jax_params):
 
     for k1, v1 in jax_params.items():
         for k2, _ in v1.items():
-            key = f"{k1.split('~_setup/')[-1]}.{k2}"
-            key = re.sub("/~/", ".", key)
+            key = f'{k1.split("~_setup/")[-1]}.{k2}'
+            key = re.sub('/~/', '.', key)
             result[key] = (k1, k2)
 
     return result
@@ -59,7 +53,7 @@ def copy_jax_to_torch(torch_module, jax_params):
 
     for k in torch_state.keys():
         # Skip output_mask in linear layes, which seems to be dead code
-        if k.endswith(".output_mask"):
+        if k.endswith('.output_mask'):
             continue
 
         # In Torch we have an explicit bias, which is a tensor of size 0
@@ -74,8 +68,8 @@ def copy_jax_to_torch(torch_module, jax_params):
 
         if torch_state[k].shape != jax_tensor.shape:
             raise ValueError(
-                f"Shape mismatch for {k}: "
-                f"torch {torch_state[k].shape}, jax {jax_tensor.shape}"
+                f'Shape mismatch for {k}: '
+                f'torch {torch_state[k].shape}, jax {jax_tensor.shape}'
             )
         torch_state[k] = jax_tensor
 
@@ -111,14 +105,10 @@ class TestRealAgnosticInteractionBlock:
     def test_torch_vs_jax(self, dummy_data):
         node_attrs, node_feats, edge_attrs, edge_feats, edge_index = dummy_data
 
-        assert node_attrs.shape[1] == o3.Irreps("2x0e").dim
-        assert node_feats.shape[1] == o3.Irreps("2x0e").dim
-        assert edge_attrs.shape[1] == o3.Irreps("2x0e").dim
-        assert edge_feats.shape[1] == o3.Irreps("2x0e").dim
-
-        # === Set dtype ===
-        torch.set_default_dtype(torch.float64)
-        jax_config.update("jax_enable_x64", True)
+        assert node_attrs.shape[1] == o3.Irreps('2x0e').dim
+        assert node_feats.shape[1] == o3.Irreps('2x0e').dim
+        assert edge_attrs.shape[1] == o3.Irreps('2x0e').dim
+        assert edge_feats.shape[1] == o3.Irreps('2x0e').dim
 
         # === Run JAX version ===
         jax_inputs = (
@@ -131,23 +121,23 @@ class TestRealAgnosticInteractionBlock:
         jax_out, jax_params = run_jax_forward(
             RealAgnosticInteractionBlockJAX,
             jax_inputs,
-            node_attrs_irreps=Irreps("2x0e"),
-            node_feats_irreps=Irreps("2x0e"),
-            edge_attrs_irreps=Irreps("2x0e"),
-            edge_feats_irreps=Irreps("2x0e"),
-            target_irreps=Irreps("2x0e"),
-            hidden_irreps=Irreps("2x0e"),
+            node_attrs_irreps=Irreps('2x0e'),
+            node_feats_irreps=Irreps('2x0e'),
+            edge_attrs_irreps=Irreps('2x0e'),
+            edge_feats_irreps=Irreps('2x0e'),
+            target_irreps=Irreps('2x0e'),
+            hidden_irreps=Irreps('2x0e'),
             avg_num_neighbors=3.0,
         )
 
         # === Torch version ===
         torch_module = RealAgnosticInteractionBlockTorch(
-            node_attrs_irreps=o3.Irreps("2x0e"),
-            node_feats_irreps=o3.Irreps("2x0e"),
-            edge_attrs_irreps=o3.Irreps("2x0e"),
-            edge_feats_irreps=o3.Irreps("2x0e"),
-            target_irreps=o3.Irreps("2x0e"),
-            hidden_irreps=o3.Irreps("2x0e"),
+            node_attrs_irreps=o3.Irreps('2x0e'),
+            node_feats_irreps=o3.Irreps('2x0e'),
+            edge_attrs_irreps=o3.Irreps('2x0e'),
+            edge_feats_irreps=o3.Irreps('2x0e'),
+            target_irreps=o3.Irreps('2x0e'),
+            hidden_irreps=o3.Irreps('2x0e'),
             avg_num_neighbors=3.0,
         )
 
@@ -173,7 +163,7 @@ class TestRealAgnosticInteractionBlock:
             jax_arr,
             rtol=0.01,
             atol=0.001,
-            err_msg="Torch and JAX RealAgnosticInteractionBlock outputs differ!",
+            err_msg='Torch and JAX RealAgnosticInteractionBlock outputs differ!',
         )
 
 
@@ -191,14 +181,10 @@ class TestRealAgnosticResidualInteractionBlock:
     def test_torch_vs_jax(self, dummy_data):
         node_attrs, node_feats, edge_attrs, edge_feats, edge_index = dummy_data
 
-        assert node_attrs.shape[1] == o3.Irreps("2x0e").dim
-        assert node_feats.shape[1] == o3.Irreps("2x0e").dim
-        assert edge_attrs.shape[1] == o3.Irreps("2x0e").dim
-        assert edge_feats.shape[1] == o3.Irreps("2x0e").dim
-
-        # === Set dtype ===
-        torch.set_default_dtype(torch.float64)
-        jax_config.update("jax_enable_x64", True)
+        assert node_attrs.shape[1] == o3.Irreps('2x0e').dim
+        assert node_feats.shape[1] == o3.Irreps('2x0e').dim
+        assert edge_attrs.shape[1] == o3.Irreps('2x0e').dim
+        assert edge_feats.shape[1] == o3.Irreps('2x0e').dim
 
         # === Run JAX version ===
         jax_inputs = (
@@ -211,23 +197,23 @@ class TestRealAgnosticResidualInteractionBlock:
         jax_out, jax_params = run_jax_forward(
             RealAgnosticResidualInteractionBlockJAX,
             jax_inputs,
-            node_attrs_irreps=Irreps("2x0e"),
-            node_feats_irreps=Irreps("2x0e"),
-            edge_attrs_irreps=Irreps("2x0e"),
-            edge_feats_irreps=Irreps("2x0e"),
-            target_irreps=Irreps("2x0e"),
-            hidden_irreps=Irreps("2x0e"),
+            node_attrs_irreps=Irreps('2x0e'),
+            node_feats_irreps=Irreps('2x0e'),
+            edge_attrs_irreps=Irreps('2x0e'),
+            edge_feats_irreps=Irreps('2x0e'),
+            target_irreps=Irreps('2x0e'),
+            hidden_irreps=Irreps('2x0e'),
             avg_num_neighbors=3.0,
         )
 
         # === Torch version ===
         torch_module = RealAgnosticResidualInteractionBlockTorch(
-            node_attrs_irreps=o3.Irreps("2x0e"),
-            node_feats_irreps=o3.Irreps("2x0e"),
-            edge_attrs_irreps=o3.Irreps("2x0e"),
-            edge_feats_irreps=o3.Irreps("2x0e"),
-            target_irreps=o3.Irreps("2x0e"),
-            hidden_irreps=o3.Irreps("2x0e"),
+            node_attrs_irreps=o3.Irreps('2x0e'),
+            node_feats_irreps=o3.Irreps('2x0e'),
+            edge_attrs_irreps=o3.Irreps('2x0e'),
+            edge_feats_irreps=o3.Irreps('2x0e'),
+            target_irreps=o3.Irreps('2x0e'),
+            hidden_irreps=o3.Irreps('2x0e'),
             avg_num_neighbors=3.0,
         )
 
@@ -253,7 +239,7 @@ class TestRealAgnosticResidualInteractionBlock:
                 jax_arr,
                 rtol=0.01,
                 atol=0.001,
-                err_msg=f"Torch and JAX RealAgnosticResidualInteractionBlock output[{i}] differ!",
+                err_msg=f'Torch and JAX RealAgnosticResidualInteractionBlock output[{i}] differ!',
             )
 
 
@@ -271,14 +257,10 @@ class TestRealAgnosticDensityInteractionBlock:
     def test_torch_vs_jax(self, dummy_data):
         node_attrs, node_feats, edge_attrs, edge_feats, edge_index = dummy_data
 
-        assert node_attrs.shape[1] == o3.Irreps("2x0e").dim
-        assert node_feats.shape[1] == o3.Irreps("2x0e").dim
-        assert edge_attrs.shape[1] == o3.Irreps("2x0e").dim
-        assert edge_feats.shape[1] == o3.Irreps("2x0e").dim
-
-        # === Set dtype ===
-        torch.set_default_dtype(torch.float64)
-        jax_config.update("jax_enable_x64", True)
+        assert node_attrs.shape[1] == o3.Irreps('2x0e').dim
+        assert node_feats.shape[1] == o3.Irreps('2x0e').dim
+        assert edge_attrs.shape[1] == o3.Irreps('2x0e').dim
+        assert edge_feats.shape[1] == o3.Irreps('2x0e').dim
 
         # === Run JAX version ===
         jax_inputs = (
@@ -291,23 +273,23 @@ class TestRealAgnosticDensityInteractionBlock:
         jax_out, jax_params = run_jax_forward(
             RealAgnosticDensityInteractionBlockJAX,
             jax_inputs,
-            node_attrs_irreps=Irreps("2x0e"),
-            node_feats_irreps=Irreps("2x0e"),
-            edge_attrs_irreps=Irreps("2x0e"),
-            edge_feats_irreps=Irreps("2x0e"),
-            target_irreps=Irreps("2x0e"),
-            hidden_irreps=Irreps("2x0e"),
+            node_attrs_irreps=Irreps('2x0e'),
+            node_feats_irreps=Irreps('2x0e'),
+            edge_attrs_irreps=Irreps('2x0e'),
+            edge_feats_irreps=Irreps('2x0e'),
+            target_irreps=Irreps('2x0e'),
+            hidden_irreps=Irreps('2x0e'),
             avg_num_neighbors=3.0,
         )
 
         # === Torch version ===
         torch_module = RealAgnosticDensityInteractionBlockTorch(
-            node_attrs_irreps=o3.Irreps("2x0e"),
-            node_feats_irreps=o3.Irreps("2x0e"),
-            edge_attrs_irreps=o3.Irreps("2x0e"),
-            edge_feats_irreps=o3.Irreps("2x0e"),
-            target_irreps=o3.Irreps("2x0e"),
-            hidden_irreps=o3.Irreps("2x0e"),
+            node_attrs_irreps=o3.Irreps('2x0e'),
+            node_feats_irreps=o3.Irreps('2x0e'),
+            edge_attrs_irreps=o3.Irreps('2x0e'),
+            edge_feats_irreps=o3.Irreps('2x0e'),
+            target_irreps=o3.Irreps('2x0e'),
+            hidden_irreps=o3.Irreps('2x0e'),
             avg_num_neighbors=3.0,
         )
 
@@ -332,5 +314,5 @@ class TestRealAgnosticDensityInteractionBlock:
             jax_arr,
             rtol=0.01,
             atol=0.001,
-            err_msg="Torch and JAX RealAgnosticDensityInteractionBlock outputs differ!",
+            err_msg='Torch and JAX RealAgnosticDensityInteractionBlock outputs differ!',
         )

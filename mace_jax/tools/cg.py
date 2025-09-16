@@ -8,13 +8,14 @@
 import collections
 import itertools
 import os
-from typing import Iterator, List, Union
+from collections.abc import Iterator
+from typing import List, Union
 
-import torch
-import numpy as np
 import jax.numpy as jnp
+import numpy as np
+import torch
 from e3nn import o3
-from e3nn_jax import Irreps, Irrep
+from e3nn_jax import Irrep, Irreps
 
 try:
     import cuequivariance as cue
@@ -23,18 +24,18 @@ try:
 except ImportError:
     CUET_AVAILABLE = False
 
-USE_CUEQ_CG = os.environ.get("MACE_USE_CUEQ_CG", "0").lower() in (
-    "1",
-    "true",
-    "yes",
-    "y",
+USE_CUEQ_CG = os.environ.get('MACE_USE_CUEQ_CG', '0').lower() in (
+    '1',
+    'true',
+    'yes',
+    'y',
 )
 
-_TP = collections.namedtuple("_TP", "op, args")
-_INPUT = collections.namedtuple("_INPUT", "tensor, start, stop")
+_TP = collections.namedtuple('_TP', 'op, args')
+_INPUT = collections.namedtuple('_INPUT', 'tensor, start, stop')
 
 
-def wigner_3j_jax(l3: int, l1: int, l2: int, dtype=jnp.float32) -> jnp.ndarray:
+def wigner_3j(l3: int, l1: int, l2: int, dtype=None) -> jnp.ndarray:
     """
     Return the Wigner-3j array for (l3, l1, l2) as a jax numpy array.
 
@@ -62,7 +63,7 @@ def wigner_3j_jax(l3: int, l1: int, l2: int, dtype=jnp.float32) -> jnp.ndarray:
 
 def _wigner_nj(
     irrepss: List[Irreps],
-    normalization: str = "component",
+    normalization: str = 'component',
     filter_ir_mid=None,
     dtype=None,
 ):
@@ -96,13 +97,13 @@ def _wigner_nj(
                 if filter_ir_mid is not None and ir_out not in filter_ir_mid:
                     continue
 
-                C = wigner_3j_jax(ir_out.l, ir_left.l, ir.l, dtype=dtype)
-                if normalization == "component":
+                C = wigner_3j(ir_out.l, ir_left.l, ir.l, dtype=dtype)
+                if normalization == 'component':
                     C *= ir_out.dim**0.5
-                if normalization == "norm":
+                if normalization == 'norm':
                     C *= ir_left.dim**0.5 * ir.dim**0.5
 
-                C = jnp.einsum("jk,ijl->ikl", C_left.reshape(C_left.shape[0], -1), C)
+                C = jnp.einsum('jk,ijl->ikl', C_left.reshape(C_left.shape[0], -1), C)
                 C = C.reshape(
                     ir_out.dim, *(irreps.dim for irreps in irrepss_left), ir.dim
                 )
@@ -139,7 +140,7 @@ def U_matrix_real(
     irreps_in: Union[str, Irreps],
     irreps_out: Union[str, Irreps],
     correlation: int,
-    normalization: str = "component",
+    normalization: str = 'component',
     filter_ir_mid=None,
     dtype=None,
     use_cueq_cg=True,
@@ -158,7 +159,7 @@ def U_matrix_real(
         )
 
     try:
-        wigners = _wigner_nj(irrepss, normalization, filter_ir_mid, dtype)
+        wigners = _wigner_nj(irrepss, normalization, filter_ir_mid, dtype=dtype)
     except NotImplementedError as e:
         if CUET_AVAILABLE:
             return compute_U_cueq(
@@ -169,7 +170,7 @@ def U_matrix_real(
                 dtype=dtype,
             )
         raise NotImplementedError(
-            "The requested Clebsch-Gordan coefficients are not implemented, please install cuequivariance; pip install cuequivariance"
+            'The requested Clebsch-Gordan coefficients are not implemented, please install cuequivariance; pip install cuequivariance'
         ) from e
 
     out = []
@@ -211,8 +212,6 @@ if CUET_AVAILABLE:
     def compute_U_cueq(
         irreps_in, irreps_out, correlation=2, use_nonsymmetric_product=False, dtype=None
     ):
-        if dtype is None:
-            dtype = jnp.float32
         U = []
         irreps_in = cue.Irreps(O3_e3nn, str(irreps_in))
         irreps_out = cue.Irreps(O3_e3nn, str(irreps_out))
@@ -270,13 +269,13 @@ if CUET_AVAILABLE:
 
     class O3_e3nn(cue.O3):
         def __mul__(  # pylint: disable=no-self-argument
-            rep1: "O3_e3nn", rep2: "O3_e3nn"
-        ) -> Iterator["O3_e3nn"]:
+            rep1: 'O3_e3nn', rep2: 'O3_e3nn'
+        ) -> Iterator['O3_e3nn']:
             return [O3_e3nn(l=ir.l, p=ir.p) for ir in cue.O3.__mul__(rep1, rep2)]
 
         @classmethod
         def clebsch_gordan(
-            cls, rep1: "O3_e3nn", rep2: "O3_e3nn", rep3: "O3_e3nn"
+            cls, rep1: 'O3_e3nn', rep2: 'O3_e3nn', rep3: 'O3_e3nn'
         ) -> np.ndarray:
             rep1, rep2, rep3 = cls._from(rep1), cls._from(rep2), cls._from(rep3)
 
@@ -287,13 +286,13 @@ if CUET_AVAILABLE:
             return np.zeros((0, rep1.dim, rep2.dim, rep3.dim))
 
         def __lt__(  # pylint: disable=no-self-argument
-            rep1: "O3_e3nn", rep2: "O3_e3nn"
+            rep1: 'O3_e3nn', rep2: 'O3_e3nn'
         ) -> bool:
             rep2 = rep1._from(rep2)
             return (rep1.l, rep1.p) < (rep2.l, rep2.p)
 
         @classmethod
-        def iterator(cls) -> Iterator["O3_e3nn"]:
+        def iterator(cls) -> Iterator['O3_e3nn']:
             for l in itertools.count(0):
                 yield O3_e3nn(l=l, p=1 * (-1) ** l)
                 yield O3_e3nn(l=l, p=-1 * (-1) ** l)
@@ -304,5 +303,5 @@ else:
         pass
 
     print(
-        "cuequivariance or cuequivariance_torch is not available. Cuequivariance acceleration will be disabled."
+        'cuequivariance or cuequivariance_torch is not available. Cuequivariance acceleration will be disabled.'
     )
