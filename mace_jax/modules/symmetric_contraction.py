@@ -64,8 +64,6 @@ class Contraction(hk.Module):
         self.U_matrices: dict[int, jnp.ndarray] = {}
         self.zero_flags: list[bool] = []  # corresponds to path_weight (negated)
 
-        dtype = jnp.array(0.0).dtype
-
         for nu in range(1, self.correlation + 1):
             # Compute U_matrix_real like PyTorch
             raw = U_matrix_real(
@@ -73,7 +71,7 @@ class Contraction(hk.Module):
                 irreps_out=self.irrep_out,
                 correlation=nu,
                 use_cueq_cg=use_reduced_cg,
-                dtype=dtype,
+                dtype=default_dtype(),
             )
             # Take the last array (PyTorch uses [-1])
             last = raw[-1]
