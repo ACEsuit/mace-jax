@@ -47,18 +47,29 @@ from mace_jax.modules.blocks import (
 )
 
 
-# === Helpers ===
 def map_keys(jax_params):
     result = {}
     for k1, v1 in jax_params.items():
-        for k2, _ in v1.items():
+        for k2 in v1.keys():
             key = f'{k1.split("~_setup/")[-1]}.{k2}'
             key = re.sub('/~/', '.', key)
-            if k2 == 'alpha':
+            key = re.sub(r'net_(\d+)', r'net.\1', key)
+
+            # Map haiku param names → torch names
+            if k2 == 'w':
+                key = key.replace('.w', '.weight')
+            elif k2 == 'b':
+                key = key.replace('.b', '.bias')
+            elif k2 == 'scale':
+                key = key.replace('.scale', '.weight')  # LayerNorm
+            elif k2 == 'offset':
+                key = key.replace('.offset', '.bias')  # LayerNorm
+
+            if k2 in ('alpha', 'beta'):
                 key = k2
-            if k2 == 'beta':
-                key = k2
+
             result[key] = (k1, k2)
+
     return result
 
 
@@ -67,22 +78,37 @@ def copy_jax_to_torch(torch_module, jax_params):
     torch_state = torch_module.state_dict()
     key_mapping = map_keys(jax_params)
 
+    new_state = {}
     for k in torch_state.keys():
         if k.endswith('.output_mask'):
+            new_state[k] = torch_state[k]  # leave unchanged
             continue
-        if torch_state[k].numel() == 0:  # empty bias tensor in Torch
+        if torch_state[k].numel() == 0:  # empty bias tensor
+            new_state[k] = torch_state[k]
             continue
+
+        if k not in key_mapping:
+            raise KeyError(f'Missing mapping for Torch key {k}')
+
         k1, k2 = key_mapping[k]
         jax_arr = jax_params[k1][k2]
         jax_tensor = torch.from_numpy(np.array(jax_arr))
 
         if torch_state[k].shape != jax_tensor.shape:
-            raise ValueError(
-                f'Shape mismatch for {k}: torch {torch_state[k].shape}, jax {jax_tensor.shape}'
-            )
-        torch_state[k] = jax_tensor
+            if (
+                'weight' in k
+                and torch_state[k].ndim == 2
+                and torch_state[k].shape == jax_tensor.T.shape
+            ):
+                jax_tensor = jax_tensor.T
+            else:
+                raise ValueError(
+                    f'Shape mismatch for {k}: '
+                    f'Torch {torch_state[k].shape}, JAX {jax_tensor.shape}'
+                )
+        new_state[k] = jax_tensor
 
-    torch_module.load_state_dict(torch_state)
+    torch_module.load_state_dict(new_state)
 
 
 def run_jax_forward(jax_module_cls, inputs, **kwargs):
