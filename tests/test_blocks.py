@@ -54,6 +54,10 @@ def map_keys(jax_params):
         for k2, _ in v1.items():
             key = f'{k1.split("~_setup/")[-1]}.{k2}'
             key = re.sub('/~/', '.', key)
+            if k2 == 'alpha':
+                key = k2
+            if k2 == 'beta':
+                key = k2
             result[key] = (k1, k2)
     return result
 
@@ -66,9 +70,8 @@ def copy_jax_to_torch(torch_module, jax_params):
     for k in torch_state.keys():
         if k.endswith('.output_mask'):
             continue
-        if len(torch_state[k]) == 0:  # empty bias tensor in Torch
+        if torch_state[k].numel() == 0:  # empty bias tensor in Torch
             continue
-
         k1, k2 = key_mapping[k]
         jax_arr = jax_params[k1][k2]
         jax_tensor = torch.from_numpy(np.array(jax_arr))

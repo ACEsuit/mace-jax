@@ -1,4 +1,5 @@
-from typing import Optional
+from collections.abc import Sequence
+from typing import Optional, Tuple, Union
 
 import haiku as hk
 import jax.numpy as jnp
@@ -6,20 +7,20 @@ from e3nn_jax import Irreps, IrrepsArray
 
 
 class Extract(hk.Module):
-    """Extract sub-sets of irreps from an IrrepsArray."""
+    """Extract sub-sets of irreps from a raw array."""
 
     def __init__(
         self,
         irreps_in: Irreps,
-        irreps_outs: list[Irreps],
-        instructions: list[tuple[int, ...]],
+        irreps_outs: Sequence[Irreps],
+        instructions: Sequence[tuple[int, ...]],
         squeeze_out: bool = False,
         name: Optional[str] = None,
     ):
         super().__init__(name=name)
         self.irreps_in = Irreps(irreps_in)
         self.irreps_outs = [Irreps(ir) for ir in irreps_outs]
-        self.instructions = instructions
+        self.instructions = list(instructions)
         self.squeeze_out = squeeze_out
 
         assert len(self.irreps_outs) == len(self.instructions)
@@ -27,7 +28,7 @@ class Extract(hk.Module):
             assert len(ir_out) == len(ins)
 
         # Precompute slices for each output irreps
-        self._slices_out = []
+        self._slices_out: list[list[slice]] = []
         for ir_out, ins in zip(self.irreps_outs, self.instructions):
             slices = []
             for idx in ins:
@@ -36,12 +37,27 @@ class Extract(hk.Module):
                 slices.append(slice(start, end))
             self._slices_out.append(slices)
 
-    def __call__(self, x: IrrepsArray) -> tuple[IrrepsArray, ...]:
-        outputs = []
+    def __call__(self, x: jnp.ndarray) -> Union[jnp.ndarray, Tuple[jnp.ndarray, ...]]:
+        """
+        x: jnp.ndarray [..., irreps_in.dim]
+
+        Returns: either a tuple of arrays (each [..., irreps_out.dim]),
+        or a single array if squeeze_out=True and only one output.
+        """
+        if x.shape[-1] != self.irreps_in.dim:
+            raise ValueError(
+                f'Invalid input shape: expected last dim {self.irreps_in.dim}, '
+                f'got {x.shape[-1]}'
+            )
+
+        outputs: list[jnp.ndarray] = []
         for ir_out, slices in zip(self.irreps_outs, self._slices_out):
-            # concatenate the slices along the last axis
-            arr = jnp.concatenate([x.array[..., s] for s in slices], axis=-1)
-            outputs.append(IrrepsArray(ir_out, arr))
+            if not slices:  # empty irreps_out
+                arr = jnp.zeros(x.shape[:-1] + (0,), dtype=x.dtype)
+            else:
+                parts = [x[..., s] for s in slices]
+                arr = parts[0] if len(parts) == 1 else jnp.concatenate(parts, axis=-1)
+            outputs.append(arr)
 
         if self.squeeze_out and len(outputs) == 1:
             return outputs[0]

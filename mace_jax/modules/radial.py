@@ -5,6 +5,7 @@
 ###########################################################################################
 
 import logging
+from collections.abc import Sequence
 from typing import Optional
 
 import ase
@@ -446,31 +447,32 @@ class SoftTransform(hk.Module):
 
 class RadialMLP(hk.Module):
     """
-    Radial MLP stack: Linear → LayerNorm → SiLU,
-    following the ESEN / FairChem style.
+    Radial MLP in Haiku:
+    Linear → LayerNorm → SiLU stack, as in ESEN / FairChem.
     """
 
-    def __init__(self, channels_list, name: str = None):
+    def __init__(self, channels_list: Sequence[int], name: str = 'RadialMLP') -> None:
         super().__init__(name=name)
-        self.channels_list = channels_list
+        self.hs = list(channels_list)
+
+        layers = []
+
+        for idx, out_channels in enumerate(channels_list[1:], start=1):
+            layers.append(
+                hk.Linear(out_channels, with_bias=True, name=f'net_{len(layers)}')
+            )
+            if idx < len(channels_list) - 1:
+                layers.append(
+                    hk.LayerNorm(
+                        axis=-1,
+                        create_scale=True,
+                        create_offset=True,
+                        name=f'net_{len(layers)}',
+                    )
+                )
+                layers.append(jax.nn.silu)
+
+        self.net = hk.Sequential(layers)
 
     def __call__(self, inputs: jnp.ndarray) -> jnp.ndarray:
-        x = inputs
-        for idx, (in_ch, out_ch) in enumerate(
-            zip(self.channels_list[:-1], self.channels_list[1:])
-        ):
-            # Linear layer
-            linear = hk.Linear(output_size=out_ch, with_bias=True, name=f'linear_{idx}')
-            x = linear(x)
-
-            # Apply LayerNorm + SiLU if not the last layer
-            if idx < len(self.channels_list) - 2:
-                ln = hk.LayerNorm(
-                    axis=-1,
-                    create_scale=True,
-                    create_offset=True,
-                    name=f'layernorm_{idx}',
-                )
-                x = ln(x)
-                x = jax.nn.silu(x)
-        return x
+        return self.net(inputs)

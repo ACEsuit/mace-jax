@@ -1265,7 +1265,8 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
         self.conv_tp_weights = RadialMLP(
             [input_dim + 2 * node_scalar_irreps.dim]
             + self.radial_MLP
-            + [self.conv_tp.weight_numel]
+            + [self.conv_tp.weight_numel],
+            name='conv_tp_weights',
         )
 
         # Output irreps
@@ -1292,6 +1293,7 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
             irreps_gates=irreps_gates,
             act_gates=[jax.nn.sigmoid] * len(irreps_gates),
             irreps_gated=irreps_gated,
+            name='equivariant_nonlin',
         )
         self.irreps_nonlin = self.equivariant_nonlin.irreps_in.simplify()
 
@@ -1324,7 +1326,9 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
         )
 
         # Density normalization
-        self.density_fn = RadialMLP([input_dim + 2 * node_scalar_irreps.dim, 64, 1])
+        self.density_fn = RadialMLP(
+            [input_dim + 2 * node_scalar_irreps.dim, 64, 1], name='density_fn'
+        )
         self.alpha = (
             hk.get_parameter('alpha', shape=(), dtype=default_dtype(), init=jnp.ones)
             * 20.0
