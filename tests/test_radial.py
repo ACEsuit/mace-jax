@@ -1,4 +1,3 @@
-
 import re
 
 import haiku as hk
@@ -107,41 +106,17 @@ class TestChebychevBasisParity:
         np.testing.assert_allclose(out_jax, out_torch, rtol=1e-5, atol=1e-6)
 
 
-def map_keys(jax_params):
-    result = {}
-    for k1, v1 in jax_params.items():
-        for k2 in v1.keys():
-            # Remove top-level module prefix
-            key = k1.split('RadialMLP')[-1].lstrip('/~')
-            key = f'{key}.{k2}' if key else k2
-            key = re.sub('/~/', '.', key)
-            key = re.sub(r'net_(\d+)', r'net.\1', key)
-
-            # Param renames
-            if k2 == 'w':
-                key = key.replace('.w', '.weight')
-            elif k2 == 'b':
-                key = key.replace('.b', '.bias')
-            elif k2 == 'scale':
-                key = key.replace('.scale', '.weight')
-            elif k2 == 'offset':
-                key = key.replace('.offset', '.bias')
-
-            if k2 in ('alpha', 'beta'):
-                key = k2
-
-            result[key] = (k1, k2)
-
-    return result
-
-
 def copy_jax_to_torch(torch_model, jax_params):
     """
     Copy parameters from Haiku RadialMLP to PyTorch RadialMLP.
     Handles weight transpose for Linear layers.
     """
     # Flatten torch modules
-    torch_layers = [m for m in torch_model.net if isinstance(m, (torch.nn.Linear, torch.nn.LayerNorm))]
+    torch_layers = [
+        m
+        for m in torch_model.net
+        if isinstance(m, (torch.nn.Linear, torch.nn.LayerNorm))
+    ]
 
     # Flatten Haiku params into a list of leaf dicts
     def collect_params(d):
@@ -161,11 +136,11 @@ def copy_jax_to_torch(torch_model, jax_params):
         if isinstance(layer, torch.nn.Linear):
             # Transpose weight for PyTorch
             layer.weight.data = torch.tensor(jax_leaves[j].T, dtype=torch.float64)
-            layer.bias.data = torch.tensor(jax_leaves[j+1], dtype=torch.float64)
+            layer.bias.data = torch.tensor(jax_leaves[j + 1], dtype=torch.float64)
             j += 2
         elif isinstance(layer, torch.nn.LayerNorm):
             layer.weight.data = torch.tensor(jax_leaves[j], dtype=torch.float64)
-            layer.bias.data = torch.tensor(jax_leaves[j+1], dtype=torch.float64)
+            layer.bias.data = torch.tensor(jax_leaves[j + 1], dtype=torch.float64)
             j += 2
 
 
@@ -225,4 +200,3 @@ class TestRadialMLP:
             rtol=1e-5,
             atol=1e-6,
         )
-
