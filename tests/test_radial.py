@@ -1,3 +1,4 @@
+
 import re
 
 import haiku as hk
@@ -134,44 +135,38 @@ def map_keys(jax_params):
     return result
 
 
-def copy_jax_to_torch(torch_module, jax_params):
-    """Copy parameters from JAX/Haiku to PyTorch module."""
-    torch_state = torch_module.state_dict()
-    key_mapping = map_keys(jax_params)
+def copy_jax_to_torch(torch_model, jax_params):
+    """
+    Copy parameters from Haiku RadialMLP to PyTorch RadialMLP.
+    Handles weight transpose for Linear layers.
+    """
+    # Flatten torch modules
+    torch_layers = [m for m in torch_model.net if isinstance(m, (torch.nn.Linear, torch.nn.LayerNorm))]
 
-    print('key_mapping:', key_mapping)
-
-    new_state = {}
-    for k in torch_state.keys():
-        if k.endswith('.output_mask'):
-            new_state[k] = torch_state[k]  # leave unchanged
-            continue
-        if torch_state[k].numel() == 0:  # empty bias tensor
-            new_state[k] = torch_state[k]
-            continue
-
-        if k not in key_mapping:
-            raise KeyError(f'Missing mapping for Torch key {k}')
-
-        k1, k2 = key_mapping[k]
-        jax_arr = jax_params[k1][k2]
-        jax_tensor = torch.from_numpy(np.array(jax_arr))
-
-        if torch_state[k].shape != jax_tensor.shape:
-            if (
-                'weight' in k
-                and torch_state[k].ndim == 2
-                and torch_state[k].shape == jax_tensor.T.shape
-            ):
-                jax_tensor = jax_tensor.T
+    # Flatten Haiku params into a list of leaf dicts
+    def collect_params(d):
+        res = []
+        for v in d.values():
+            if isinstance(v, dict):
+                res.extend(collect_params(v))
             else:
-                raise ValueError(
-                    f'Shape mismatch for {k}: '
-                    f'Torch {torch_state[k].shape}, JAX {jax_tensor.shape}'
-                )
-        new_state[k] = jax_tensor
+                res.append(v)
+        return res
 
-    torch_module.load_state_dict(new_state)
+    jax_leaves = collect_params(jax_params)
+
+    # Copy parameters
+    j = 0
+    for layer in torch_layers:
+        if isinstance(layer, torch.nn.Linear):
+            # Transpose weight for PyTorch
+            layer.weight.data = torch.tensor(jax_leaves[j].T, dtype=torch.float64)
+            layer.bias.data = torch.tensor(jax_leaves[j+1], dtype=torch.float64)
+            j += 2
+        elif isinstance(layer, torch.nn.LayerNorm):
+            layer.weight.data = torch.tensor(jax_leaves[j], dtype=torch.float64)
+            layer.bias.data = torch.tensor(jax_leaves[j+1], dtype=torch.float64)
+            j += 2
 
 
 class TestRadialMLP:
@@ -230,3 +225,4 @@ class TestRadialMLP:
             rtol=1e-5,
             atol=1e-6,
         )
+
