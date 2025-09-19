@@ -160,7 +160,6 @@ class TestRadialMLP:
             if name == '':
                 continue
             hk_name = self.torch_to_haiku_name(name, scope)
-            print('name:', name)
 
             for torch_type, mapper in PARAM_MAPPERS.items():
                 if isinstance(module, torch_type):
