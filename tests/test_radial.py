@@ -106,27 +106,66 @@ class TestChebychevBasisParity:
         np.testing.assert_allclose(out_jax, out_torch, rtol=1e-5, atol=1e-6)
 
 
+PARAM_MAPPERS = {}
+
+
+def register_mapper(torch_type):
+    def decorator(fn):
+        PARAM_MAPPERS[torch_type] = fn
+        return fn
+
+    return decorator
+
+
+@register_mapper(torch.nn.Linear)
+def map_linear(module, params):
+    module.weight.data = torch.tensor(np.array(params['w'])).T
+    module.bias.data = torch.tensor(np.array(params['b']))
+
+
+@register_mapper(torch.nn.LayerNorm)
+def map_layernorm(module, params):
+    module.weight.data = torch.tensor(np.array(params['scale']))
+    module.bias.data = torch.tensor(np.array(params['offset']))
+
+
 class TestRadialMLP:
     """Compare RadialMLP implementations in Haiku vs PyTorch."""
 
-    def copy_jax_to_torch(self, torch_model, jax_params):
-        """Copy params from Haiku -> Torch by matching names."""
-        print('jax_params', jax_params)
-        for name, module in torch_model.named_modules():
-            name = f'RadialMLP/~/net_{name.split(".")[-1]}'
-            if isinstance(module, torch.nn.Linear):
-                w = jax_params[name]['w']
-                b = jax_params[name]['b']
-                module.weight.data = torch.tensor(np.array(w), dtype=torch.float64).T
-                module.bias.data = torch.tensor(np.array(b), dtype=torch.float64)
+    def torch_to_haiku_name(self, torch_name, scope='RadialMLP'):
+        """
+        Map Torch module names to Haiku param keys.
 
-            elif isinstance(module, torch.nn.LayerNorm):
-                module.weight.data = torch.tensor(
-                    np.array(jax_params[name]['scale']), dtype=torch.float64
-                )
-                module.bias.data = torch.tensor(
-                    np.array(jax_params[name]['offset']), dtype=torch.float64
-                )
+        Examples:
+        ''        -> 'RadialMLP'
+        'net.0'   -> 'RadialMLP/~/net_0'
+        'net.1'   -> 'RadialMLP/~/net_1'
+        """
+        if torch_name == '':
+            return scope
+
+        parts = torch_name.split('.')
+        mapped = []
+        for p in parts:
+            if p.isdigit():
+                mapped.append(f'net_{p}')
+            elif p == 'net':
+                continue  # skip the container name
+            else:
+                mapped.append(p)
+        return f'{scope}/~/' + '/'.join(mapped)
+
+    def copy_jax_to_torch(self, torch_model, jax_params, scope='RadialMLP'):
+        for name, module in torch_model.named_modules():
+            if name == '':
+                continue
+            hk_name = self.torch_to_haiku_name(name, scope)
+            print('name:', name)
+
+            for torch_type, mapper in PARAM_MAPPERS.items():
+                if isinstance(module, torch_type):
+                    mapper(module, jax_params[hk_name])
+                    break
 
     def build_jax_net(self, channels_list):
         """Wrap RadialMLPJax inside hk.transform correctly."""
