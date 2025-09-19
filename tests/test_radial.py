@@ -106,46 +106,27 @@ class TestChebychevBasisParity:
         np.testing.assert_allclose(out_jax, out_torch, rtol=1e-5, atol=1e-6)
 
 
-def copy_jax_to_torch(torch_model, jax_params):
-    """
-    Copy parameters from Haiku RadialMLP to PyTorch RadialMLP.
-    Handles weight transpose for Linear layers.
-    """
-    # Flatten torch modules
-    torch_layers = [
-        m
-        for m in torch_model.net
-        if isinstance(m, (torch.nn.Linear, torch.nn.LayerNorm))
-    ]
-
-    # Flatten Haiku params into a list of leaf dicts
-    def collect_params(d):
-        res = []
-        for v in d.values():
-            if isinstance(v, dict):
-                res.extend(collect_params(v))
-            else:
-                res.append(v)
-        return res
-
-    jax_leaves = collect_params(jax_params)
-
-    # Copy parameters
-    j = 0
-    for layer in torch_layers:
-        if isinstance(layer, torch.nn.Linear):
-            # Transpose weight for PyTorch
-            layer.weight.data = torch.tensor(jax_leaves[j].T, dtype=torch.float64)
-            layer.bias.data = torch.tensor(jax_leaves[j + 1], dtype=torch.float64)
-            j += 2
-        elif isinstance(layer, torch.nn.LayerNorm):
-            layer.weight.data = torch.tensor(jax_leaves[j], dtype=torch.float64)
-            layer.bias.data = torch.tensor(jax_leaves[j + 1], dtype=torch.float64)
-            j += 2
-
-
 class TestRadialMLP:
     """Compare RadialMLP implementations in Haiku vs PyTorch."""
+
+    def copy_jax_to_torch(self, torch_model, jax_params):
+        """Copy params from Haiku -> Torch by matching names."""
+        print('jax_params', jax_params)
+        for name, module in torch_model.named_modules():
+            name = f'RadialMLP/~/net_{name.split(".")[-1]}'
+            if isinstance(module, torch.nn.Linear):
+                w = jax_params[name]['w']
+                b = jax_params[name]['b']
+                module.weight.data = torch.tensor(np.array(w), dtype=torch.float64).T
+                module.bias.data = torch.tensor(np.array(b), dtype=torch.float64)
+
+            elif isinstance(module, torch.nn.LayerNorm):
+                module.weight.data = torch.tensor(
+                    np.array(jax_params[name]['scale']), dtype=torch.float64
+                )
+                module.bias.data = torch.tensor(
+                    np.array(jax_params[name]['offset']), dtype=torch.float64
+                )
 
     def build_jax_net(self, channels_list):
         """Wrap RadialMLPJax inside hk.transform correctly."""
@@ -188,7 +169,7 @@ class TestRadialMLP:
         torch_model = RadialMLPTorch(channels_list)
 
         # --- Copy JAX params to Torch ---
-        copy_jax_to_torch(torch_model, params)
+        self.copy_jax_to_torch(torch_model, params)
 
         # --- Run Torch version ---
         out_torch = torch_model(x_torch)
