@@ -14,6 +14,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from mace_jax.haiku.torch import copy_torch_to_jax
+from mace_jax.haiku.utility import camel_to_snake
 from mace_jax.tools.dtype import default_dtype
 from mace_jax.tools.scatter import scatter_sum
 
@@ -68,6 +70,25 @@ class BesselBasis(hk.Module):
             f'num_basis={self.num_basis}, trainable={self.trainable})'
         )
 
+    @classmethod
+    def import_from_torch(cls, torch_module, hk_params, scope=None):
+        """
+        Import Torch BesselBasis into Haiku params (only if trainable=True).
+        """
+        import torch  # noqa: PLC0415
+
+        if scope is None:
+            scope = camel_to_snake(cls.__name__)
+
+        hk_params = hk.data_structures.to_mutable_dict(hk_params)
+
+        if isinstance(torch_module.bessel_weights, torch.nn.Parameter):
+            hk_params[scope]['bessel_weights'] = jnp.array(
+                torch_module.bessel_weights.detach().numpy()
+            )
+
+        return hk.data_structures.to_immutable_dict(hk_params)
+
 
 class ChebychevBasis(hk.Module):
     """
@@ -97,6 +118,14 @@ class ChebychevBasis(hk.Module):
         return (
             f'{self.__class__.__name__}(r_max={self.r_max}, num_basis={self.num_basis})'
         )
+
+    @classmethod
+    def import_from_torch(cls, torch_module, hk_params, scope=None):
+        """
+        Import Torch ChebychevBasis into Haiku params.
+        """
+
+        return hk_params
 
 
 class GaussianBasis(hk.Module):
@@ -131,7 +160,7 @@ class GaussianBasis(hk.Module):
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
         # Initialize Gaussian centers (like torch.linspace)
         init_gaussian_weights = jnp.linspace(
-            start=0.0, stop=self.r_max, num=self.num_basis, dtype=jnp.float32
+            start=0.0, stop=self.r_max, num=self.num_basis, dtype=default_dtype()
         )
 
         if self.trainable:
@@ -154,7 +183,27 @@ class GaussianBasis(hk.Module):
 
         # Apply Gaussian basis transform
         x = x[..., None] - gaussian_weights  # expand along basis dimension
+
         return jnp.exp(self.coeff * jnp.square(x))
+
+    @classmethod
+    def import_from_torch(cls, torch_module, hk_params, scope=None):
+        """
+        Import GaussianBasis Torch module into Haiku params/state.
+        """
+        import torch  # noqa: PLC0415
+
+        if scope is None:
+            scope = camel_to_snake(cls.__name__)
+
+        hk_params = hk.data_structures.to_mutable_dict(hk_params)
+
+        if isinstance(torch_module.gaussian_weights, torch.nn.Parameter):
+            hk_params[scope]['gaussian_weights'] = jnp.array(
+                torch_module.gaussian_weights.detach().numpy()
+            )
+
+        return hk.data_structures.to_immutable_dict(hk_params)
 
 
 class PolynomialCutoff(hk.Module):
@@ -201,6 +250,14 @@ class PolynomialCutoff(hk.Module):
 
     def __repr__(self):
         return f'{self.__class__.__name__}(p={int(self.p)}, r_max={float(self.r_max)})'
+
+    @classmethod
+    def import_from_torch(cls, torch_module, hk_params, scope=None):
+        """
+        Copy r_max and p from Torch PolynomialCutoff into Haiku state.
+        """
+
+        return hk_params
 
 
 class ZBLBasis(hk.Module):
@@ -297,6 +354,26 @@ class ZBLBasis(hk.Module):
     def __repr__(self):
         return f'{self.__class__.__name__}(c={self.c})'
 
+    @classmethod
+    def import_zbl_from_torch(cls, torch_module, hk_params, scope=None):
+        """
+        Copy parameters from a Torch ZBLBasis into a Haiku ZBLBasis.
+        Only copies a_exp and a_prefactor if trainable=True.
+        """
+        import torch  # noqa: PLC0415
+
+        if scope is None:
+            scope = camel_to_snake(cls.__name__)
+
+        hk_params = hk.data_structures.to_mutable_dict(hk_params)
+
+        if isinstance(torch_module.a_exp, torch.nn.Parameter):
+            for pname in ['a_exp', 'a_prefactor']:
+                val = getattr(torch_module, pname).detach().numpy()
+                hk_params[scope][pname] = jnp.array(val)
+
+        return hk.data_structures.to_immutable_dict(hk_params)
+
 
 class AgnesiTransform(hk.Module):
     """Agnesi transform - see section on Radial transformations in
@@ -376,6 +453,26 @@ class AgnesiTransform(hk.Module):
     def __repr__(self):
         return f'{self.__class__.__name__}(a={float(self.a):.4f}, q={float(self.q):.4f}, p={float(self.p):.4f})'
 
+    @classmethod
+    def import_from_torch(cls, torch_module, hk_params, scope=None):
+        """
+        Copy parameters from a Torch AgnesiTransform into a Haiku AgnesiTransform.
+        Only relevant if trainable=True (a, q, p become parameters).
+        """
+        import torch  # noqa: PLC0415
+
+        if scope is None:
+            scope = camel_to_snake(cls.__name__)
+
+        hk_params = hk.data_structures.to_mutable_dict(hk_params)
+
+        if isinstance(torch_module.a, torch.nn.Parameter):
+            for pname in ['a', 'q', 'p']:
+                val = getattr(torch_module, pname).detach().numpy()
+                hk_params[scope][pname] = jnp.array(val)
+
+        return hk.data_structures.to_immutable_dict(hk_params)
+
 
 class SoftTransform(hk.Module):
     """
@@ -444,6 +541,26 @@ class SoftTransform(hk.Module):
     def __repr__(self):
         return f'{self.__class__.__name__}(alpha={self.init_alpha:.4f}, trainable={self.trainable})'
 
+    @classmethod
+    def import_from_torch(cls, torch_module, hk_params, scope=None):
+        """
+        Copy parameters from a Torch SoftTransform into a Haiku SoftTransform.
+        Only relevant if trainable=True (alpha becomes a parameter).
+        """
+        import torch  # noqa: PLC0415
+
+        # pick scope automatically if not provided
+        if scope is None:
+            scope = camel_to_snake(cls.__name__)
+
+        hk_params = hk.data_structures.to_mutable_dict(hk_params)
+
+        if isinstance(torch_module.alpha, torch.nn.Parameter):
+            alpha_val = torch_module.alpha.detach().numpy()
+            hk_params[scope]['alpha'] = jnp.array(alpha_val)
+
+        return hk.data_structures.to_immutable_dict(hk_params)
+
 
 class RadialMLP(hk.Module):
     """
@@ -451,7 +568,7 @@ class RadialMLP(hk.Module):
     Linear → LayerNorm → SiLU stack, as in ESEN / FairChem.
     """
 
-    def __init__(self, channels_list: Sequence[int], name: str = 'RadialMLP') -> None:
+    def __init__(self, channels_list: Sequence[int], name: str = None) -> None:
         super().__init__(name=name)
         self.hs = list(channels_list)
 
@@ -476,3 +593,24 @@ class RadialMLP(hk.Module):
 
     def __call__(self, inputs: jnp.ndarray) -> jnp.ndarray:
         return self.net(inputs)
+
+    @classmethod
+    def import_from_torch(cls, torch_model, hk_params, scope=None):
+        """
+        Copy Torch weights into a Haiku param tree.
+        Returns a new param tree.
+        """
+
+        hk_params = hk.data_structures.to_mutable_dict(hk_params)
+
+        if scope is None:
+            scope = camel_to_snake(cls.__name__)
+
+        for name, module in torch_model.named_modules():
+            if name == '':
+                continue
+            hk_name = name.replace('.', '_')
+
+            copy_torch_to_jax(module, hk_params, scope=scope, hk_name=hk_name)
+
+        return hk.data_structures.to_immutable_dict(hk_params)

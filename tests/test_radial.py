@@ -23,6 +23,18 @@ class TestBesselBasisParity:
         batch = 6
 
         # --------------------
+        # Torch version
+        # --------------------
+        torch_module = BesselBasisTorch(
+            r_max=r_max, num_basis=num_basis, trainable=trainable
+        )
+        torch_module.eval()
+
+        x_t = 0.1 + (r_max - 0.1) * torch.rand(batch, 1, dtype=torch.float64)
+
+        out_t = torch_module(x_t).detach().numpy()
+
+        # --------------------
         # JAX version
         # --------------------
         def forward_fn(x):
@@ -34,38 +46,14 @@ class TestBesselBasisParity:
         forward = hk.transform(forward_fn)
 
         key = jax.random.PRNGKey(0)
-        x_j = jax.random.uniform(
-            key, (batch, 1), minval=0.1, maxval=r_max
-        )  # avoid division by 0
+        x_j = jnp.array(x_t.detach().numpy())
 
         params = forward.init(key, x_j)
         out_j = forward.apply(params, None, x_j)
 
-        # --------------------
-        # Torch version
-        # --------------------
-        model_torch = BesselBasisTorch(
-            r_max=r_max, num_basis=num_basis, trainable=trainable
-        )
-        model_torch.eval()
-
         # Copy weights from JAX -> Torch if trainable
         if trainable:
-            w_jax = params['bessel_basis']['bessel_weights']
-            model_torch.bessel_weights.data = torch.tensor(
-                np.array(w_jax), dtype=torch.float32
-            )
-        else:
-            # For non-trainable, Torch has buffer already set, but we force sync
-            w_jax = (
-                np.pi / r_max * np.linspace(1.0, num_basis, num_basis, dtype=np.float32)
-            )
-            model_torch.bessel_weights.copy_(torch.tensor(w_jax, dtype=torch.float32))
-
-        # Torch input
-        x_t = torch.tensor(np.array(x_j), dtype=torch.float32)
-
-        out_t = model_torch(x_t).detach().numpy()
+            params = BesselBasisJAX.import_from_torch(torch_module, params)
 
         # --------------------
         # Compare outputs
@@ -106,29 +94,6 @@ class TestChebychevBasisParity:
         np.testing.assert_allclose(out_jax, out_torch, rtol=1e-5, atol=1e-6)
 
 
-PARAM_MAPPERS = {}
-
-
-def register_mapper(torch_type):
-    def decorator(fn):
-        PARAM_MAPPERS[torch_type] = fn
-        return fn
-
-    return decorator
-
-
-@register_mapper(torch.nn.Linear)
-def map_linear(module, params):
-    module.weight.data = torch.tensor(np.array(params['w'])).T
-    module.bias.data = torch.tensor(np.array(params['b']))
-
-
-@register_mapper(torch.nn.LayerNorm)
-def map_layernorm(module, params):
-    module.weight.data = torch.tensor(np.array(params['scale']))
-    module.bias.data = torch.tensor(np.array(params['offset']))
-
-
 class TestRadialMLP:
     """Compare RadialMLP implementations in Haiku vs PyTorch."""
 
@@ -154,17 +119,6 @@ class TestRadialMLP:
             else:
                 mapped.append(p)
         return f'{scope}/~/' + '/'.join(mapped)
-
-    def copy_jax_to_torch(self, torch_model, jax_params, scope='RadialMLP'):
-        for name, module in torch_model.named_modules():
-            if name == '':
-                continue
-            hk_name = self.torch_to_haiku_name(name, scope)
-
-            for torch_type, mapper in PARAM_MAPPERS.items():
-                if isinstance(module, torch_type):
-                    mapper(module, jax_params[hk_name])
-                    break
 
     def build_jax_net(self, channels_list):
         """Wrap RadialMLPJax inside hk.transform correctly."""
@@ -192,6 +146,12 @@ class TestRadialMLP:
         x_jax = jnp.array(x_np)
         x_torch = torch.tensor(x_np)
 
+        # --- Torch model ---
+        torch_model = RadialMLPTorch(channels_list)
+
+        # --- Run Torch version ---
+        out_torch = torch_model(x_torch)
+
         # --- Build and init JAX net ---
         def forward_fn(x):
             # Instantiated inside the transformed function
@@ -201,16 +161,8 @@ class TestRadialMLP:
         transformed = hk.transform(forward_fn)
         rng = jax.random.PRNGKey(42)
         params = transformed.init(rng, x_jax)
+        params = RadialMLPJax.import_from_torch(torch_model, params)
         out_jax = transformed.apply(params, rng, x_jax)
-
-        # --- Torch model ---
-        torch_model = RadialMLPTorch(channels_list)
-
-        # --- Copy JAX params to Torch ---
-        self.copy_jax_to_torch(torch_model, params)
-
-        # --- Run Torch version ---
-        out_torch = torch_model(x_torch)
 
         # --- Compare outputs ---
         np.testing.assert_allclose(
