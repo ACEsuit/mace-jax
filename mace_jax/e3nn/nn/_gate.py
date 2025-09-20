@@ -4,6 +4,8 @@ import haiku as hk
 import jax.numpy as jnp
 from e3nn_jax import Irreps, IrrepsArray
 
+from mace_jax.haiku.torch import copy_torch_to_jax, register_import
+
 from .._tensor_product._sub import ElementwiseTensorProduct
 from ._activation import Activation
 from ._extract import Extract
@@ -35,6 +37,7 @@ class _Sortcut(hk.Module):
         return self.cut(x)  # returns tuple of extracted IrrepsArrays
 
 
+@register_import('e3nn.nn._gate.Gate')
 class Gate(hk.Module):
     """
     Gate activation function: scalars pass through act_scalars,
@@ -100,3 +103,16 @@ class Gate(hk.Module):
     @property
     def irreps_out(self) -> Irreps:
         return self._irreps_out
+
+    @classmethod
+    def import_from_torch(cls, torch_module, hk_params, scope):
+        hk_params = hk.data_structures.to_mutable_dict(hk_params)
+
+        # Delegate only to mul
+        hk_params = copy_torch_to_jax(
+            torch_module.mul,
+            hk_params,
+            scope=f'{scope}/~/mul',
+        )
+
+        return hk.data_structures.to_immutable_dict(hk_params)

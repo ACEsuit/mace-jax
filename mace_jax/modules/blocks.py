@@ -1600,6 +1600,7 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
             'target_embedding': torch_module.target_embedding,
             'linear_up': torch_module.linear_up,
             'conv_tp_weights': torch_module.conv_tp_weights,
+            'equivariant_nonlin': torch_module.equivariant_nonlin,
             'skip_tp': torch_module.skip_tp,
             'linear_res': torch_module.linear_res,
             'linear_1': torch_module.linear_1,

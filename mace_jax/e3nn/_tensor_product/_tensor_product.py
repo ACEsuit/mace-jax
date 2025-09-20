@@ -586,7 +586,8 @@ class TensorProduct(hk.Module):
         """
         hk_params = hk.data_structures.to_mutable_dict(hk_params)
 
-        hk_params[scope]['weight'] = jnp.array(torch_module.weight.detach().numpy())
+        if torch_module.weight_numel > 0 and torch_module.internal_weights:
+            hk_params[scope]['weight'] = jnp.array(torch_module.weight.detach().numpy())
 
         return hk.data_structures.to_immutable_dict(hk_params)
 
