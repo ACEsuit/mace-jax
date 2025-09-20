@@ -10,6 +10,7 @@ from mace.modules.radial import BesselBasis as BesselBasisTorch
 from mace.modules.radial import ChebychevBasis as ChebychevBasisTorch
 from mace.modules.radial import RadialMLP as RadialMLPTorch
 
+from mace_jax.haiku.torch import copy_torch_to_jax
 from mace_jax.modules.radial import BesselBasis as BesselBasisJAX
 from mace_jax.modules.radial import ChebychevBasis as ChebychevBasisJAX
 from mace_jax.modules.radial import RadialMLP as RadialMLPJax
@@ -53,7 +54,7 @@ class TestBesselBasisParity:
 
         # Copy weights from JAX -> Torch if trainable
         if trainable:
-            params = BesselBasisJAX.import_from_torch(torch_module, params)
+            params = copy_torch_to_jax(torch_module, params)
 
         # --------------------
         # Compare outputs
@@ -97,39 +98,6 @@ class TestChebychevBasisParity:
 class TestRadialMLP:
     """Compare RadialMLP implementations in Haiku vs PyTorch."""
 
-    def torch_to_haiku_name(self, torch_name, scope='RadialMLP'):
-        """
-        Map Torch module names to Haiku param keys.
-
-        Examples:
-        ''        -> 'RadialMLP'
-        'net.0'   -> 'RadialMLP/~/net_0'
-        'net.1'   -> 'RadialMLP/~/net_1'
-        """
-        if torch_name == '':
-            return scope
-
-        parts = torch_name.split('.')
-        mapped = []
-        for p in parts:
-            if p.isdigit():
-                mapped.append(f'net_{p}')
-            elif p == 'net':
-                continue  # skip the container name
-            else:
-                mapped.append(p)
-        return f'{scope}/~/' + '/'.join(mapped)
-
-    def build_jax_net(self, channels_list):
-        """Wrap RadialMLPJax inside hk.transform correctly."""
-
-        def net_fn(x):
-            # Instantiated inside the transformed function
-            model = RadialMLPJax(channels_list)
-            return model(x)
-
-        return hk.without_apply_rng(hk.transform(net_fn))
-
     @pytest.mark.parametrize(
         'channels_list',
         [
@@ -161,8 +129,8 @@ class TestRadialMLP:
         transformed = hk.transform(forward_fn)
         rng = jax.random.PRNGKey(42)
         params = transformed.init(rng, x_jax)
-        params = RadialMLPJax.import_from_torch(torch_model, params)
-        out_jax = transformed.apply(params, rng, x_jax)
+        params = copy_torch_to_jax(torch_model, params)
+        out_jax = transformed.apply(params, None, x_jax)
 
         # --- Compare outputs ---
         np.testing.assert_allclose(

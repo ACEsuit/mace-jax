@@ -4,8 +4,10 @@ import haiku as hk
 import jax.numpy as jnp
 
 from mace_jax.e3nn.math import normalize2mom
+from mace_jax.haiku.torch import copy_torch_to_jax, register_import
 
 
+@register_import('e3nn.nn._fc._Layer')
 class Layer(hk.Module):
     """JAX/Haiku version of _Layer.
 
@@ -65,7 +67,19 @@ class Layer(hk.Module):
 
         return x
 
+    @classmethod
+    def import_from_torch(cls, torch_module, hk_params, scope):
+        """
+        Copy Torch Layer weights directly into Haiku params dict.
+        """
+        hk_params = hk.data_structures.to_mutable_dict(hk_params)
 
+        hk_params[scope]['weight'] = jnp.array(torch_module.weight.detach().numpy())
+
+        return hk.data_structures.to_immutable_dict(hk_params)
+
+
+@register_import('e3nn.nn._fc.FullyConnectedNet')
 class FullyConnectedNet(hk.Module):
     """Fully-connected Neural Network (Haiku version).
 
@@ -123,3 +137,17 @@ class FullyConnectedNet(hk.Module):
 
     def __repr__(self) -> str:
         return f'{self.__class__.__name__}{self.hs}'
+
+    @classmethod
+    def import_from_torch(cls, torch_model, hk_params, scope):
+        hk_params = hk.data_structures.to_mutable_dict(hk_params)
+
+        for name, module in torch_model.named_modules():
+            # Skip container itself
+            if name == '':
+                continue  # Build Haiku key
+            hk_key = f'{scope}/~/{name}'
+            # Delegate to Layer.import_from_torch if leaf
+            hk_params = copy_torch_to_jax(module, hk_params, scope=hk_key)
+
+        return hk.data_structures.to_immutable_dict(hk_params)

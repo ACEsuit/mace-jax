@@ -8,6 +8,7 @@ import numpy as np
 from e3nn_jax import Irrep, Irreps, IrrepsArray
 
 from mace_jax.e3nn import nn
+from mace_jax.haiku.torch import copy_torch_to_jax, register_import
 from mace_jax.modules.wrapper_ops import (
     CuEquivarianceConfig,
     FullyConnectedTensorProduct,
@@ -634,6 +635,7 @@ class InteractionBlock(hk.Module, metaclass=abc.ABCMeta):
         raise NotImplementedError
 
 
+@register_import('mace.modules.blocks.RealAgnosticInteractionBlock')
 class RealAgnosticInteractionBlock(InteractionBlock):
     def _setup(self) -> None:
         # First linear
@@ -732,7 +734,37 @@ class RealAgnosticInteractionBlock(InteractionBlock):
 
         return self.reshape(message), None
 
+    @classmethod
+    def import_from_torch(cls, torch_module, hk_params, scope):
+        """
+        Import parameters from the corresponding Torch RealAgnosticInteractionBlock.
 
+        Args:
+            torch_module: Torch RealAgnosticInteractionBlock
+            hk_params: dict returned from hk.transform.init
+        Returns:
+            Updated hk_params with weights copied from torch_module.
+        """
+
+        # Map submodules one by one
+        submodules = {
+            'linear_up': torch_module.linear_up,
+            'conv_tp_weights': torch_module.conv_tp_weights,
+            'linear': torch_module.linear,
+            'skip_tp': torch_module.skip_tp,
+        }
+
+        for name, torch_submodule in submodules.items():
+            hk_params = copy_torch_to_jax(
+                torch_submodule,
+                hk_params,
+                scope=f'{scope}/~_setup/{name}',
+            )
+
+        return hk_params
+
+
+@register_import('mace.modules.blocks.RealAgnosticResidualInteractionBlock')
 class RealAgnosticResidualInteractionBlock(InteractionBlock):
     def _setup(self) -> None:
         # First linear
@@ -837,7 +869,37 @@ class RealAgnosticResidualInteractionBlock(InteractionBlock):
 
         return self.reshape(message), sc
 
+    @classmethod
+    def import_from_torch(cls, torch_module, hk_params, scope):
+        """
+        Import parameters from the corresponding Torch RealAgnosticInteractionBlock.
 
+        Args:
+            torch_module: Torch RealAgnosticInteractionBlock
+            hk_params: dict returned from hk.transform.init
+        Returns:
+            Updated hk_params with weights copied from torch_module.
+        """
+
+        # Map submodules one by one
+        submodules = {
+            'linear_up': torch_module.linear_up,
+            'conv_tp_weights': torch_module.conv_tp_weights,
+            'linear': torch_module.linear,
+            'skip_tp': torch_module.skip_tp,
+        }
+
+        for name, torch_submodule in submodules.items():
+            hk_params = copy_torch_to_jax(
+                torch_submodule,
+                hk_params,
+                scope=f'{scope}/~_setup/{name}',
+            )
+
+        return hk_params
+
+
+@register_import('mace.modules.blocks.RealAgnosticDensityInteractionBlock')
 class RealAgnosticDensityInteractionBlock(InteractionBlock):
     def _setup(self) -> None:
         # First linear
@@ -959,7 +1021,38 @@ class RealAgnosticDensityInteractionBlock(InteractionBlock):
 
         return self.reshape(message), None
 
+    @classmethod
+    def import_from_torch(cls, torch_module, hk_params, scope):
+        """
+        Import parameters from the corresponding Torch RealAgnosticInteractionBlock.
 
+        Args:
+            torch_module: Torch RealAgnosticInteractionBlock
+            hk_params: dict returned from hk.transform.init
+        Returns:
+            Updated hk_params with weights copied from torch_module.
+        """
+
+        # Map submodules one by one
+        submodules = {
+            'linear_up': torch_module.linear_up,
+            'conv_tp_weights': torch_module.conv_tp_weights,
+            'linear': torch_module.linear,
+            'skip_tp': torch_module.skip_tp,
+            'density_fn': torch_module.density_fn,
+        }
+
+        for name, torch_submodule in submodules.items():
+            hk_params = copy_torch_to_jax(
+                torch_submodule,
+                hk_params,
+                scope=f'{scope}/~_setup/{name}',
+            )
+
+        return hk_params
+
+
+@register_import('mace.modules.blocks.RealAgnosticDensityResidualInteractionBlock')
 class RealAgnosticDensityResidualInteractionBlock(InteractionBlock):
     def _setup(self) -> None:
         # First linear
@@ -1084,7 +1177,38 @@ class RealAgnosticDensityResidualInteractionBlock(InteractionBlock):
 
         return self.reshape(message), sc
 
+    @classmethod
+    def import_from_torch(cls, torch_module, hk_params, scope):
+        """
+        Import parameters from the corresponding Torch RealAgnosticInteractionBlock.
 
+        Args:
+            torch_module: Torch RealAgnosticInteractionBlock
+            hk_params: dict returned from hk.transform.init
+        Returns:
+            Updated hk_params with weights copied from torch_module.
+        """
+
+        # Map submodules one by one
+        submodules = {
+            'linear_up': torch_module.linear_up,
+            'conv_tp_weights': torch_module.conv_tp_weights,
+            'linear': torch_module.linear,
+            'skip_tp': torch_module.skip_tp,
+            'density_fn': torch_module.density_fn,
+        }
+
+        for name, torch_submodule in submodules.items():
+            hk_params = copy_torch_to_jax(
+                torch_submodule,
+                hk_params,
+                scope=f'{scope}/~_setup/{name}',
+            )
+
+        return hk_params
+
+
+@register_import('mace.modules.blocks.RealAgnosticAttResidualInteractionBlock')
 class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
     def _setup(self) -> None:
         # Downsample irreps
@@ -1207,7 +1331,38 @@ class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
 
         return self.reshape(message), sc
 
+    @classmethod
+    def import_from_torch(cls, torch_module, hk_params, scope):
+        """
+        Import parameters from the corresponding Torch RealAgnosticInteractionBlock.
 
+        Args:
+            torch_module: Torch RealAgnosticInteractionBlock
+            hk_params: dict returned from hk.transform.init
+        Returns:
+            Updated hk_params with weights copied from torch_module.
+        """
+
+        # Map submodules one by one
+        submodules = {
+            'linear_up': torch_module.linear_up,
+            'linear_down': torch_module.linear_down,
+            'conv_tp_weights': torch_module.conv_tp_weights,
+            'linear': torch_module.linear,
+            'skip_linear': torch_module.skip_linear,
+        }
+
+        for name, torch_submodule in submodules.items():
+            hk_params = copy_torch_to_jax(
+                torch_submodule,
+                hk_params,
+                scope=f'{scope}/~_setup/{name}',
+            )
+
+        return hk_params
+
+
+@register_import('mace.modules.blocks.RealAgnosticResidualNonLinearInteractionBlock')
 class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
     def _setup(self) -> None:
         # Compute scalar irreps
@@ -1426,6 +1581,40 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
         message = self.linear_2(message)
 
         return self.reshape(message), sc
+
+    @classmethod
+    def import_from_torch(cls, torch_module, hk_params, scope):
+        """
+        Import parameters from the corresponding Torch RealAgnosticInteractionBlock.
+
+        Args:
+            torch_module: Torch RealAgnosticInteractionBlock
+            hk_params: dict returned from hk.transform.init
+        Returns:
+            Updated hk_params with weights copied from torch_module.
+        """
+
+        # Map submodules one by one
+        submodules = {
+            'source_embedding': torch_module.source_embedding,
+            'target_embedding': torch_module.target_embedding,
+            'linear_up': torch_module.linear_up,
+            'conv_tp_weights': torch_module.conv_tp_weights,
+            'skip_tp': torch_module.skip_tp,
+            'linear_res': torch_module.linear_res,
+            'linear_1': torch_module.linear_1,
+            'linear_2': torch_module.linear_2,
+            'density_fn': torch_module.density_fn,
+        }
+
+        for name, torch_submodule in submodules.items():
+            hk_params = copy_torch_to_jax(
+                torch_submodule,
+                hk_params,
+                scope=f'{scope}/~_setup/{name}',
+            )
+
+        return hk_params
 
 
 class ScaleShiftBlock(hk.Module):

@@ -1,10 +1,24 @@
 import haiku as hk
 import jax.numpy as jnp
-import torch
 
 from .utility import camel_to_snake
 
 _IMPORT_MAPPERS = {}
+
+
+def register_import(torch_type_str: str):
+    """
+    Register a Haiku module for Torch->JAX import.
+    torch_type_str is a string like "torch.nn.Linear"
+    """
+
+    def decorator(cls):
+        if not hasattr(cls, 'import_from_torch'):
+            raise ValueError(f"{cls.__name__} must define 'import_from_torch'")
+        _IMPORT_MAPPERS[torch_type_str] = cls.import_from_torch
+        return cls
+
+    return decorator
 
 
 def register_import_mapper(torch_type):
@@ -17,44 +31,48 @@ def register_import_mapper(torch_type):
     return decorator
 
 
-@register_import_mapper(torch.nn.Linear)
-def _import_linear(module, params):
+@register_import_mapper('e3nn.math._normalize_activation.normalize2mom')
+def _import_normalize2mom(module, params, scope):
+    return params
+
+
+@register_import_mapper('torch.nn.modules.linear.Linear')
+def _import_linear(module, params, scope):
     # Note: Torch stores weight as [out, in], Haiku wants [in, out]
-    params['w'] = jnp.array(module.weight.detach().numpy().T)
-    params['b'] = jnp.array(module.bias.detach().numpy())
+    params[scope]['w'] = jnp.array(module.weight.detach().numpy().T)
+    params[scope]['b'] = jnp.array(module.bias.detach().numpy())
+    return params
 
 
-@register_import_mapper(torch.nn.LayerNorm)
-def _import_layernorm(module, params):
-    params['scale'] = jnp.array(module.weight.detach().numpy())
-    params['offset'] = jnp.array(module.bias.detach().numpy())
+@register_import_mapper('torch.nn.modules.normalization.LayerNorm')
+def _import_layernorm(module, params, scope):
+    params[scope]['scale'] = jnp.array(module.weight.detach().numpy())
+    params[scope]['offset'] = jnp.array(module.bias.detach().numpy())
+    return params
 
 
-def copy_torch_to_jax(torch_module, jax_params, scope=None, hk_name=None):
+def copy_torch_to_jax(torch_module, jax_params, scope=None):
     """
     Copy parameters from Torch -> JAX Haiku params dict.
     Returns a new params dict (immutability preserved).
     """
-    name = torch_module.__class__.__name__
 
-    if hk_name is None:
-        hk_name = camel_to_snake(name)
-
-    key = f'{scope}/~/{hk_name}'
+    if scope is None:
+        scope = f'{camel_to_snake(torch_module.__class__.__name__)}'
 
     # Convert to mutable dict so we can update
     jax_params = hk.data_structures.to_mutable_dict(jax_params)
 
-    for torch_type, mapper in _IMPORT_MAPPERS.items():
-        if isinstance(torch_module, torch_type):
-            mapper(torch_module, jax_params[key])
-            break
+    torch_module_str = (
+        f'{torch_module.__class__.__module__}.{torch_module.__class__.__name__}'
+    )
+
+    if (mapper := _IMPORT_MAPPERS.get(torch_module_str, None)) is not None:
+        jax_params = mapper(torch_module, jax_params, scope=scope)
     else:
-        # Only complain if module actually has parameters
-        if any(p.requires_grad for p in torch_module.parameters(recurse=False)):
-            raise NotImplementedError(
-                f"No import mapper registered for Torch module '{name}' "
-                f"of type {type(torch_module)} (Haiku key '{hk_name}')"
-            )
+        raise NotImplementedError(
+            f"No import mapper registered for Torch module '{torch_module_str}' "
+            f'of type {type(torch_module)})'
+        )
 
     return hk.data_structures.to_immutable_dict(jax_params)

@@ -6,6 +6,8 @@ import haiku as hk
 import jax.numpy as jnp
 from e3nn_jax import Irreps
 
+from mace_jax.haiku.torch import register_import
+
 from ._tensor_product._codegen import _sum_tensors
 
 
@@ -16,6 +18,7 @@ class Instruction(NamedTuple):
     path_weight: float
 
 
+@register_import('e3nn.o3._linear.Linear')
 class Linear(hk.Module):
     """Linear operation equivariant to O(3), JAX/Haiku version."""
 
@@ -218,6 +221,34 @@ class Linear(hk.Module):
                 yield ins_i, ins, this_weight
             else:
                 yield this_weight
+
+    @classmethod
+    def import_from_torch(cls, torch_module, hk_params, scope):
+        """
+        Import parameters from a Torch Linear into this Haiku Linear.
+
+        Args:
+            torch_module: Torch Linear module (O3 equivariant version)
+            hk_params: dict of Haiku params
+        Returns:
+            Updated hk_params
+        """
+
+        hk_params = hk.data_structures.to_mutable_dict(hk_params)
+
+        # Copy weight if present
+        if hasattr(torch_module, 'weight') and torch_module.weight is not None:
+            hk_params[scope]['weight'] = jnp.array(
+                torch_module.weight.detach().cpu().numpy()
+            )
+
+        # Copy bias if present
+        if hasattr(torch_module, 'bias') and torch_module.bias is not None:
+            hk_params[scope]['bias'] = jnp.array(
+                torch_module.bias.detach().cpu().numpy()
+            )
+
+        return hk.data_structures.to_immutable_dict(hk_params)
 
 
 def _codegen_linear(

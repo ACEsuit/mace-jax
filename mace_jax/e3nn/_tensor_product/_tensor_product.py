@@ -11,6 +11,8 @@ import numpy as np
 from e3nn import get_optimization_defaults
 from e3nn_jax import Irreps
 
+from mace_jax.haiku.torch import register_import
+
 from ._codegen import codegen_tensor_product_left_right, codegen_tensor_product_right
 from ._instruction import Instruction
 
@@ -23,6 +25,7 @@ def sqrt(x):
     return jnp.sqrt(x)
 
 
+@register_import('e3nn.o3._tensor_product._tensor_product.TensorProduct')
 class TensorProduct(hk.Module):
     r"""Tensor product with parametrized paths (JAX/Haiku version).
 
@@ -399,21 +402,19 @@ class TensorProduct(hk.Module):
 
         # --- Output mask (static, non-trainable) ---
         if self.irreps_out.dim > 0:
-            self.output_mask = jnp.concatenate(
-                [
-                    (
-                        jnp.ones(mul * ir.dim)
-                        if any(
-                            (ins.i_out == i_out)
-                            and (ins.path_weight != 0)
-                            and (0 not in ins.path_shape)
-                            for ins in self.instructions
-                        )
-                        else jnp.zeros(mul * ir.dim)
+            self.output_mask = jnp.concatenate([
+                (
+                    jnp.ones(mul * ir.dim)
+                    if any(
+                        (ins.i_out == i_out)
+                        and (ins.path_weight != 0)
+                        and (0 not in ins.path_shape)
+                        for ins in self.instructions
                     )
-                    for i_out, (mul, ir) in enumerate(self.irreps_out)
-                ]
-            )
+                    else jnp.zeros(mul * ir.dim)
+                )
+                for i_out, (mul, ir) in enumerate(self.irreps_out)
+            ])
         else:
             self.output_mask = jnp.ones(0)
 
@@ -577,6 +578,17 @@ class TensorProduct(hk.Module):
             self.shared_weights,
             self._specialized_code,
         )
+
+    @classmethod
+    def import_from_torch(cls, torch_module, hk_params, scope):
+        """
+        Import Torch BesselBasis into Haiku params (only if trainable=True).
+        """
+        hk_params = hk.data_structures.to_mutable_dict(hk_params)
+
+        hk_params[scope]['weight'] = jnp.array(torch_module.weight.detach().numpy())
+
+        return hk.data_structures.to_immutable_dict(hk_params)
 
     def weight_view_for_instruction(
         self, instruction: int, weight: Optional[jnp.ndarray] = None

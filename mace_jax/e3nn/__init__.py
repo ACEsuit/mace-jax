@@ -1,3 +1,4 @@
+from ._linear import Linear
 from ._tensor_product import (
     ElementwiseTensorProduct,
     FullTensorProduct,
@@ -14,6 +15,7 @@ __all__ = [
     'ElementwiseTensorProduct',
     'FullyConnectedTensorProduct',
     'FullTensorProduct',
+    'Linear',
     'TensorProduct',
     'TensorSquare',
 ]
