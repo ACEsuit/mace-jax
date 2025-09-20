@@ -5,6 +5,7 @@ import jax.numpy as jnp
 import opt_einsum as oe
 from e3nn_jax import Irrep, Irreps
 
+from mace_jax.haiku.torch import copy_torch_to_jax, register_import
 from mace_jax.tools.cg import U_matrix_real
 from mace_jax.tools.dtype import default_dtype
 
@@ -31,6 +32,7 @@ def _ensure_array_from_U(u_obj: Any) -> jnp.ndarray:
     return jnp.asarray(u_obj)
 
 
+@register_import('mace.modules.symmetric_contraction.Contraction')
 class Contraction(hk.Module):
     """Haiku/JAX rewrite of the PyTorch Contraction.
     Instantiate *inside* hk.transform context (or via a closure).
@@ -295,7 +297,29 @@ class Contraction(hk.Module):
     def U_tensors(self, nu: int) -> jnp.ndarray:
         return self.U_matrices[int(nu)]
 
+    @classmethod
+    def import_from_torch(cls, torch_module, hk_params, scope):
+        """
+        Import Torch parameters (weights_max and weights_i) into Haiku params.
+        No submodules, so we copy directly.
+        """
+        hk_params = hk.data_structures.to_mutable_dict(hk_params)
 
+        # Copy weights_max
+        hk_params[scope]['weights_max'] = jnp.array(
+            torch_module.weights_max.detach().cpu().numpy()
+        )
+
+        # Copy weights_1, weights_2, ..., weights_{correlation-1}
+        for i in range(1, torch_module.correlation):
+            hk_params[scope][f'weights_{i}'] = jnp.array(
+                getattr(torch_module, 'weights')[i - 1].detach().cpu().numpy()
+            )
+
+        return hk.data_structures.to_immutable_dict(hk_params)
+
+
+@register_import('mace.modules.symmetric_contraction.SymmetricContraction')
 class SymmetricContraction(hk.Module):
     def __init__(
         self,
@@ -340,7 +364,7 @@ class SymmetricContraction(hk.Module):
 
     def __call__(self, x: jnp.ndarray, y: jnp.ndarray) -> jnp.ndarray:
         outs = []
-        for irrep_out in self.irreps_out:
+        for i, irrep_out in enumerate(self.irreps_out):
             contraction = Contraction(
                 irreps_in=self.irreps_in,
                 irrep_out=Irreps(str(irrep_out.ir)),
@@ -351,6 +375,25 @@ class SymmetricContraction(hk.Module):
                 # a boolean
                 weights=self.shared_weights,
                 use_reduced_cg=self.use_reduced_cg,
+                name=f'contraction_{i}',
             )
             outs.append(contraction(x, y))
+
         return jnp.concatenate(outs, axis=-1)
+
+    @classmethod
+    def import_from_torch(cls, torch_module, hk_params, scope):
+        """
+        Import Torch SymmetricContraction into Haiku params.
+        Delegates parameter copying to each Contraction block.
+        """
+        hk_params = hk.data_structures.to_mutable_dict(hk_params)
+
+        for i, contraction in enumerate(torch_module.contractions):
+            hk_params = copy_torch_to_jax(
+                contraction,
+                hk_params,
+                scope=f'{scope}/contraction_{i}',
+            )
+
+        return hk.data_structures.to_immutable_dict(hk_params)

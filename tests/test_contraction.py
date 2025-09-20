@@ -13,6 +13,7 @@ from mace.modules.symmetric_contraction import (
     SymmetricContraction as SymmetricContractionTorch,
 )
 
+from mace_jax.haiku.torch import copy_torch_to_jax
 from mace_jax.modules.symmetric_contraction import (
     Contraction as ContractionJax,
 )
@@ -30,7 +31,7 @@ class TestContractionParity:
         irrep_out = o3.Irreps(f'{lmax}e')
 
         # Torch version
-        model_torch = ContractionTorch(
+        torch_model = ContractionTorch(
             irreps_in=irreps_in,
             irrep_out=irrep_out,
             correlation=correlation,
@@ -38,12 +39,12 @@ class TestContractionParity:
             use_reduced_cg=False,
             num_elements=3,
         )
-        model_torch.eval()
+        torch_model.eval()
 
         batch = 4
-        num_feats = model_torch.num_features  # from irreps_in
+        num_feats = torch_model.num_features  # from irreps_in
         num_elements = 3
-        num_ell = model_torch.U_tensors(correlation).shape[-2]
+        num_ell = torch_model.U_tensors(correlation).shape[-2]
 
         # Torch inputs
         x_t = torch.randn(batch, num_feats, num_ell)
@@ -68,21 +69,10 @@ class TestContractionParity:
         forward = hk.transform(forward_fn)
         key = jax.random.PRNGKey(0)
         params = forward.init(key, x_j, y_j)
-
-        # --- Transfer weights from JAX → Torch ---
-        jax_wmax = np.array(params['contraction']['weights_max'])
-        jax_ws = [
-            np.array(params['contraction'][f'weights_{i + 1}'])
-            for i in range(len(model_torch.weights))
-        ]
-
-        with torch.no_grad():
-            model_torch.weights_max.copy_(torch.tensor(jax_wmax))
-            for tw, jw in zip(model_torch.weights, jax_ws):
-                tw.copy_(torch.tensor(jw))
+        params = copy_torch_to_jax(torch_model, params)
 
         # --- Forward passes ---
-        out_t = model_torch(x_t, y_t).detach().numpy()
+        out_t = torch_model(x_t, y_t).detach().numpy()
         out_j = forward.apply(params, None, x_j, y_j)
 
         # --- Compare ---
@@ -103,7 +93,7 @@ class TestSymmetricContractionParity:
         num_feats = irreps_in.count((0, 1))
 
         # --- PyTorch version ---
-        model_torch = SymmetricContractionTorch(
+        torch_model = SymmetricContractionTorch(
             irreps_in=irreps_in,
             irreps_out=irreps_out,
             correlation=correlation,
@@ -111,8 +101,8 @@ class TestSymmetricContractionParity:
             use_reduced_cg=False,
             num_elements=num_elements,
         )
-        model_torch.eval()
-        num_ell = model_torch.contractions[0].U_tensors(correlation).shape[-2]
+        torch_model.eval()
+        num_ell = torch_model.contractions[0].U_tensors(correlation).shape[-2]
 
         x_j = jax.random.normal(jax.random.PRNGKey(0), (batch, num_feats, num_ell))
         y_j = jax.random.normal(jax.random.PRNGKey(1), (batch, num_elements))
@@ -131,32 +121,14 @@ class TestSymmetricContractionParity:
         forward = hk.transform(forward_fn)
         key = jax.random.PRNGKey(42)
         params = forward.init(key, x_j, y_j)
-
-        # --- Copy JAX params -> PyTorch ---
-        for idx, contraction_torch in enumerate(model_torch.contractions):
-            contraction_name = f'contraction_{idx}' if idx > 0 else 'contraction'
-            contraction_jax = params[f'symmetric_contraction/{contraction_name}']
-
-            # Copy weights_max
-            w_max = contraction_jax['weights_max']
-            contraction_torch.weights_max.data = torch.tensor(np.array(w_max))
-
-            # Copy lower-correlation weights
-            for key_name, w_jax in contraction_jax.items():
-                if key_name == 'weights_max':
-                    continue
-                if key_name.startswith('weights_'):
-                    i = int(key_name.split('_')[1])
-                    contraction_torch.weights[i - 1].data = torch.tensor(
-                        np.array(w_jax)
-                    )
+        params = copy_torch_to_jax(torch_model, params)
 
         # Torch inputs
         x_t = torch.tensor(np.array(x_j))
         y_t = torch.tensor(np.array(y_j))
 
         # Forward pass
-        out_t = model_torch(x_t, y_t).detach().numpy()
+        out_t = torch_model(x_t, y_t).detach().numpy()
 
         # Forward JAX with same params
         out_j = forward.apply(params, None, x_j, y_j)
