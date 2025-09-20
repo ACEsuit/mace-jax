@@ -14,9 +14,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from mace_jax.haiku.activations import SiLU
 from mace_jax.haiku.torch import (
     auto_import_from_torch,
-    copy_torch_to_jax,
     register_import,
 )
 from mace_jax.tools.dtype import default_dtype
@@ -466,6 +466,7 @@ class SoftTransform(hk.Module):
 
 
 @register_import('mace.modules.radial.RadialMLP')
+@auto_import_from_torch(separator='~')
 class RadialMLP(hk.Module):
     """
     Radial MLP in Haiku:
@@ -491,31 +492,9 @@ class RadialMLP(hk.Module):
                         name=f'net_{len(layers)}',
                     )
                 )
-                layers.append(jax.nn.silu)
+                layers.append(SiLU(name=f'net_{len(layers)}'))
 
         self.net = hk.Sequential(layers)
 
     def __call__(self, inputs: jnp.ndarray) -> jnp.ndarray:
         return self.net(inputs)
-
-    @classmethod
-    def import_from_torch(cls, torch_model, hk_params, scope):
-        """
-        Copy Torch weights into a Haiku param tree.
-        Returns a new param tree.
-        """
-
-        hk_params = hk.data_structures.to_mutable_dict(hk_params)
-
-        for name, module in torch_model.named_modules():
-            if name == '' or name == 'net':
-                continue
-
-            if module.__class__.__name__ == 'SiLU':
-                continue
-
-            hk_params = copy_torch_to_jax(
-                module, hk_params, scope=f'{scope}/~/{name.replace(".", "_")}'
-            )
-
-        return hk.data_structures.to_immutable_dict(hk_params)

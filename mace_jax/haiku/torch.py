@@ -51,6 +51,13 @@ def _import_layernorm(module, params, scope):
     return params
 
 
+@register_import_mapper('torch.nn.modules.container.Sequential')
+def _import_sequential(module, params, scope):
+    for idx, child in enumerate(module):
+        params = copy_torch_to_jax(child, params, f'{scope}_{idx}')
+    return params
+
+
 def copy_torch_to_jax(torch_module, jax_params, scope=None):
     """
     Copy parameters from Torch -> JAX Haiku params dict.
