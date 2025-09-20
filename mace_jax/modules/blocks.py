@@ -8,7 +8,10 @@ import numpy as np
 from e3nn_jax import Irrep, Irreps, IrrepsArray
 
 from mace_jax.e3nn import nn
-from mace_jax.haiku.torch import copy_torch_to_jax, register_import
+from mace_jax.haiku.torch import (
+    auto_import_from_torch,
+    register_import,
+)
 from mace_jax.modules.wrapper_ops import (
     CuEquivarianceConfig,
     FullyConnectedTensorProduct,
@@ -34,6 +37,7 @@ from .radial import (
 
 
 @register_import('mace.modules.blocks.LinearNodeEmbeddingBlock')
+@auto_import_from_torch(separator='~')
 class LinearNodeEmbeddingBlock(hk.Module):
     """
     JAX/Haiku version of LinearNodeEmbeddingBlock.
@@ -69,29 +73,9 @@ class LinearNodeEmbeddingBlock(hk.Module):
             f'irreps_out={self.irreps_out}, cueq_config={self.cueq_config})'
         )
 
-    @classmethod
-    def import_from_torch(cls, torch_module, hk_params, scope):
-        """
-        Import Torch LinearNodeEmbeddingBlock into Haiku params.
-        Delegates parameter copying to the underlying Linear layer.
-        """
-        hk_params = hk.data_structures.to_mutable_dict(hk_params)
-
-        submodules = {
-            'linear': torch_module.linear,
-        }
-
-        for name, torch_submodule in submodules.items():
-            hk_params = copy_torch_to_jax(
-                torch_submodule,
-                hk_params,
-                scope=f'{scope}/~/{name}',
-            )
-
-        return hk.data_structures.to_immutable_dict(hk_params)
-
 
 @register_import('mace.modules.blocks.LinearReadoutBlock')
+@auto_import_from_torch(separator='~')
 class LinearReadoutBlock(hk.Module):
     """
     JAX/Haiku version of LinearReadoutBlock.
@@ -135,29 +119,9 @@ class LinearReadoutBlock(hk.Module):
             f'oeq_config={self.oeq_config})'
         )
 
-    @classmethod
-    def import_from_torch(cls, torch_module, hk_params, scope):
-        """
-        Import Torch LinearReadoutBlock into Haiku params.
-        Delegates parameter copying to the underlying Linear layer.
-        """
-        hk_params = hk.data_structures.to_mutable_dict(hk_params)
-
-        submodules = {
-            'linear': torch_module.linear,
-        }
-
-        for name, torch_submodule in submodules.items():
-            hk_params = copy_torch_to_jax(
-                torch_submodule,
-                hk_params,
-                scope=f'{scope}/~/{name}',
-            )
-
-        return hk.data_structures.to_immutable_dict(hk_params)
-
 
 @register_import('mace.modules.blocks.NonLinearReadoutBlock')
+@auto_import_from_torch(separator='~')
 class NonLinearReadoutBlock(hk.Module):
     def __init__(
         self,
@@ -206,30 +170,9 @@ class NonLinearReadoutBlock(hk.Module):
         # Final linear projection
         return self.linear_2(x)
 
-    @classmethod
-    def import_from_torch(cls, torch_module, hk_params, scope):
-        """
-        Import Torch LinearReadoutBlock into Haiku params.
-        Delegates parameter copying to the underlying Linear layer.
-        """
-        hk_params = hk.data_structures.to_mutable_dict(hk_params)
-
-        submodules = {
-            'linear_1': torch_module.linear_1,
-            'linear_2': torch_module.linear_2,
-        }
-
-        for name, torch_submodule in submodules.items():
-            hk_params = copy_torch_to_jax(
-                torch_submodule,
-                hk_params,
-                scope=f'{scope}/~/{name}',
-            )
-
-        return hk.data_structures.to_immutable_dict(hk_params)
-
 
 @register_import('mace.modules.blocks.NonLinearBiasReadoutBlock')
+@auto_import_from_torch(separator='~')
 class NonLinearBiasReadoutBlock(hk.Module):
     """
     Non-linear readout with intermediate bias linear layers and optional multi-head masking.
@@ -291,31 +234,9 @@ class NonLinearBiasReadoutBlock(hk.Module):
         # Final linear projection
         return self.linear_2(x)
 
-    @classmethod
-    def import_from_torch(cls, torch_module, hk_params, scope):
-        """
-        Import Torch LinearReadoutBlock into Haiku params.
-        Delegates parameter copying to the underlying Linear layer.
-        """
-        hk_params = hk.data_structures.to_mutable_dict(hk_params)
-
-        submodules = {
-            'linear_1': torch_module.linear_1,
-            'linear_mid': torch_module.linear_mid,
-            'linear_2': torch_module.linear_2,
-        }
-
-        for name, torch_submodule in submodules.items():
-            hk_params = copy_torch_to_jax(
-                torch_submodule,
-                hk_params,
-                scope=f'{scope}/~/{name}',
-            )
-
-        return hk.data_structures.to_immutable_dict(hk_params)
-
 
 @register_import('mace.modules.blocks.LinearDipoleReadoutBlock')
+@auto_import_from_torch(separator='~')
 class LinearDipoleReadoutBlock(hk.Module):
     """
     Linear readout block for dipoles or scalar+dipole.
@@ -348,29 +269,9 @@ class LinearDipoleReadoutBlock(hk.Module):
     def __call__(self, x: IrrepsArray) -> IrrepsArray:
         return self.linear(x)  # [n_nodes, 1] or [n_nodes, irreps_out]
 
-    @classmethod
-    def import_from_torch(cls, torch_module, hk_params, scope):
-        """
-        Import Torch LinearReadoutBlock into Haiku params.
-        Delegates parameter copying to the underlying Linear layer.
-        """
-        hk_params = hk.data_structures.to_mutable_dict(hk_params)
-
-        submodules = {
-            'linear': torch_module.linear,
-        }
-
-        for name, torch_submodule in submodules.items():
-            hk_params = copy_torch_to_jax(
-                torch_submodule,
-                hk_params,
-                scope=f'{scope}/~/{name}',
-            )
-
-        return hk.data_structures.to_immutable_dict(hk_params)
-
 
 @register_import('mace.modules.blocks.NonLinearDipoleReadoutBlock')
+@auto_import_from_torch(separator='~')
 class NonLinearDipoleReadoutBlock(hk.Module):
     """
     Non-linear readout block for dipoles or scalar+dipole, with gated nonlinearity.
@@ -435,31 +336,9 @@ class NonLinearDipoleReadoutBlock(hk.Module):
         x = self.equivariant_nonlin(self.linear_1(x))
         return self.linear_2(x)  # [n_nodes, irreps_out]
 
-    @classmethod
-    def import_from_torch(cls, torch_module, hk_params, scope):
-        """
-        Import Torch LinearReadoutBlock into Haiku params.
-        Delegates parameter copying to the underlying Linear layer.
-        """
-        hk_params = hk.data_structures.to_mutable_dict(hk_params)
-
-        submodules = {
-            'equivariant_nonlin': torch_module.equivariant_nonlin,
-            'linear_1': torch_module.linear_1,
-            'linear_2': torch_module.linear_2,
-        }
-
-        for name, torch_submodule in submodules.items():
-            hk_params = copy_torch_to_jax(
-                torch_submodule,
-                hk_params,
-                scope=f'{scope}/~/{name}',
-            )
-
-        return hk.data_structures.to_immutable_dict(hk_params)
-
 
 @register_import('mace.modules.blocks.LinearDipolePolarReadoutBlock')
+@auto_import_from_torch(separator='~')
 class LinearDipolePolarReadoutBlock(hk.Module):
     """Linear readout for dipole and polarizability."""
 
@@ -493,29 +372,9 @@ class LinearDipolePolarReadoutBlock(hk.Module):
         y = self.linear(x)  # [n_nodes, irreps_out]
         return y
 
-    @classmethod
-    def import_from_torch(cls, torch_module, hk_params, scope):
-        """
-        Import Torch LinearReadoutBlock into Haiku params.
-        Delegates parameter copying to the underlying Linear layer.
-        """
-        hk_params = hk.data_structures.to_mutable_dict(hk_params)
-
-        submodules = {
-            'linear': torch_module.linear,
-        }
-
-        for name, torch_submodule in submodules.items():
-            hk_params = copy_torch_to_jax(
-                torch_submodule,
-                hk_params,
-                scope=f'{scope}/~/{name}',
-            )
-
-        return hk.data_structures.to_immutable_dict(hk_params)
-
 
 @register_import('mace.modules.blocks.NonLinearDipolePolarReadoutBlock')
+@auto_import_from_torch(separator='~')
 class NonLinearDipolePolarReadoutBlock(hk.Module):
     """Non-linear readout for dipole and polarizability with equivariant gate."""
 
@@ -578,31 +437,9 @@ class NonLinearDipolePolarReadoutBlock(hk.Module):
         x = self.equivariant_nonlin(self.linear_1(x))
         return self.linear_2(x)
 
-    @classmethod
-    def import_from_torch(cls, torch_module, hk_params, scope):
-        """
-        Import Torch LinearReadoutBlock into Haiku params.
-        Delegates parameter copying to the underlying Linear layer.
-        """
-        hk_params = hk.data_structures.to_mutable_dict(hk_params)
-
-        submodules = {
-            'equivariant_nonlin': torch_module.equivariant_nonlin,
-            'linear_1': torch_module.linear_1,
-            'linear_2': torch_module.linear_2,
-        }
-
-        for name, torch_submodule in submodules.items():
-            hk_params = copy_torch_to_jax(
-                torch_submodule,
-                hk_params,
-                scope=f'{scope}/~/{name}',
-            )
-
-        return hk.data_structures.to_immutable_dict(hk_params)
-
 
 @register_import('mace.modules.blocks.AtomicEnergiesBlock')
+@auto_import_from_torch(separator='~')
 class AtomicEnergiesBlock(hk.Module):
     """Block that returns atomic energies from one-hot element vectors."""
 
@@ -640,22 +477,9 @@ class AtomicEnergiesBlock(hk.Module):
         )
         return f'{self.__class__.__name__}(energies=[{formatted_energies}])'
 
-    @classmethod
-    def import_from_torch(cls, torch_module, hk_params, scope):
-        """
-        Import Torch LinearReadoutBlock into Haiku params.
-        Delegates parameter copying to the underlying Linear layer.
-        """
-        hk_params = hk.data_structures.to_mutable_dict(hk_params)
-
-        hk_params[scope]['atomic_energies'] = jnp.array(
-            torch_module.atomic_energies.detach().numpy()
-        )
-
-        return hk.data_structures.to_immutable_dict(hk_params)
-
 
 @register_import('mace.modules.blocks.RadialEmbeddingBlock')
+@auto_import_from_torch(separator='~')
 class RadialEmbeddingBlock(hk.Module):
     """Radial basis embedding block for edges."""
 
@@ -712,31 +536,9 @@ class RadialEmbeddingBlock(hk.Module):
         else:
             return radial, cutoff
 
-    @classmethod
-    def import_from_torch(cls, torch_module, hk_params, scope):
-        """
-        Import Torch LinearReadoutBlock into Haiku params.
-        Delegates parameter copying to the underlying Linear layer.
-        """
-        hk_params = hk.data_structures.to_mutable_dict(hk_params)
-
-        submodules = {
-            'bessel_fn': torch_module.bessel_fn,
-        }
-        if hasattr(torch_module, 'distance_transform'):
-            submodules['distance_transform'] = torch_module.distance_transform
-
-        for name, torch_submodule in submodules.items():
-            hk_params = copy_torch_to_jax(
-                torch_submodule,
-                hk_params,
-                scope=f'{scope}/~/{name}',
-            )
-
-        return hk.data_structures.to_immutable_dict(hk_params)
-
 
 @register_import('mace.modules.blocks.EquivariantProductBasisBlock')
+@auto_import_from_torch(separator='~')
 class EquivariantProductBasisBlock(hk.Module):
     def __init__(
         self,
@@ -813,28 +615,6 @@ class EquivariantProductBasisBlock(hk.Module):
             return self.linear(node_feats) + sc
 
         return self.linear(node_feats)
-
-    @classmethod
-    def import_from_torch(cls, torch_module, hk_params, scope):
-        """
-        Import Torch LinearReadoutBlock into Haiku params.
-        Delegates parameter copying to the underlying Linear layer.
-        """
-        hk_params = hk.data_structures.to_mutable_dict(hk_params)
-
-        submodules = {
-            'symmetric_contractions': torch_module.symmetric_contractions,
-            'linear': torch_module.linear,
-        }
-
-        for name, torch_submodule in submodules.items():
-            hk_params = copy_torch_to_jax(
-                torch_submodule,
-                hk_params,
-                scope=f'{scope}/~/{name}',
-            )
-
-        return hk.data_structures.to_immutable_dict(hk_params)
 
 
 class InteractionBlock(hk.Module, metaclass=abc.ABCMeta):
@@ -914,6 +694,7 @@ class InteractionBlock(hk.Module, metaclass=abc.ABCMeta):
 
 
 @register_import('mace.modules.blocks.RealAgnosticInteractionBlock')
+@auto_import_from_torch(separator='~_setup')
 class RealAgnosticInteractionBlock(InteractionBlock):
     def _setup(self) -> None:
         # First linear
@@ -1012,37 +793,9 @@ class RealAgnosticInteractionBlock(InteractionBlock):
 
         return self.reshape(message), None
 
-    @classmethod
-    def import_from_torch(cls, torch_module, hk_params, scope):
-        """
-        Import parameters from the corresponding Torch RealAgnosticInteractionBlock.
-
-        Args:
-            torch_module: Torch RealAgnosticInteractionBlock
-            hk_params: dict returned from hk.transform.init
-        Returns:
-            Updated hk_params with weights copied from torch_module.
-        """
-
-        # Map submodules one by one
-        submodules = {
-            'linear_up': torch_module.linear_up,
-            'conv_tp_weights': torch_module.conv_tp_weights,
-            'linear': torch_module.linear,
-            'skip_tp': torch_module.skip_tp,
-        }
-
-        for name, torch_submodule in submodules.items():
-            hk_params = copy_torch_to_jax(
-                torch_submodule,
-                hk_params,
-                scope=f'{scope}/~_setup/{name}',
-            )
-
-        return hk_params
-
 
 @register_import('mace.modules.blocks.RealAgnosticResidualInteractionBlock')
+@auto_import_from_torch(separator='~_setup')
 class RealAgnosticResidualInteractionBlock(InteractionBlock):
     def _setup(self) -> None:
         # First linear
@@ -1147,37 +900,9 @@ class RealAgnosticResidualInteractionBlock(InteractionBlock):
 
         return self.reshape(message), sc
 
-    @classmethod
-    def import_from_torch(cls, torch_module, hk_params, scope):
-        """
-        Import parameters from the corresponding Torch RealAgnosticInteractionBlock.
-
-        Args:
-            torch_module: Torch RealAgnosticInteractionBlock
-            hk_params: dict returned from hk.transform.init
-        Returns:
-            Updated hk_params with weights copied from torch_module.
-        """
-
-        # Map submodules one by one
-        submodules = {
-            'linear_up': torch_module.linear_up,
-            'conv_tp_weights': torch_module.conv_tp_weights,
-            'linear': torch_module.linear,
-            'skip_tp': torch_module.skip_tp,
-        }
-
-        for name, torch_submodule in submodules.items():
-            hk_params = copy_torch_to_jax(
-                torch_submodule,
-                hk_params,
-                scope=f'{scope}/~_setup/{name}',
-            )
-
-        return hk_params
-
 
 @register_import('mace.modules.blocks.RealAgnosticDensityInteractionBlock')
+@auto_import_from_torch(separator='~_setup')
 class RealAgnosticDensityInteractionBlock(InteractionBlock):
     def _setup(self) -> None:
         # First linear
@@ -1299,38 +1024,9 @@ class RealAgnosticDensityInteractionBlock(InteractionBlock):
 
         return self.reshape(message), None
 
-    @classmethod
-    def import_from_torch(cls, torch_module, hk_params, scope):
-        """
-        Import parameters from the corresponding Torch RealAgnosticInteractionBlock.
-
-        Args:
-            torch_module: Torch RealAgnosticInteractionBlock
-            hk_params: dict returned from hk.transform.init
-        Returns:
-            Updated hk_params with weights copied from torch_module.
-        """
-
-        # Map submodules one by one
-        submodules = {
-            'linear_up': torch_module.linear_up,
-            'conv_tp_weights': torch_module.conv_tp_weights,
-            'linear': torch_module.linear,
-            'skip_tp': torch_module.skip_tp,
-            'density_fn': torch_module.density_fn,
-        }
-
-        for name, torch_submodule in submodules.items():
-            hk_params = copy_torch_to_jax(
-                torch_submodule,
-                hk_params,
-                scope=f'{scope}/~_setup/{name}',
-            )
-
-        return hk_params
-
 
 @register_import('mace.modules.blocks.RealAgnosticDensityResidualInteractionBlock')
+@auto_import_from_torch(separator='~_setup')
 class RealAgnosticDensityResidualInteractionBlock(InteractionBlock):
     def _setup(self) -> None:
         # First linear
@@ -1455,38 +1151,9 @@ class RealAgnosticDensityResidualInteractionBlock(InteractionBlock):
 
         return self.reshape(message), sc
 
-    @classmethod
-    def import_from_torch(cls, torch_module, hk_params, scope):
-        """
-        Import parameters from the corresponding Torch RealAgnosticInteractionBlock.
-
-        Args:
-            torch_module: Torch RealAgnosticInteractionBlock
-            hk_params: dict returned from hk.transform.init
-        Returns:
-            Updated hk_params with weights copied from torch_module.
-        """
-
-        # Map submodules one by one
-        submodules = {
-            'linear_up': torch_module.linear_up,
-            'conv_tp_weights': torch_module.conv_tp_weights,
-            'linear': torch_module.linear,
-            'skip_tp': torch_module.skip_tp,
-            'density_fn': torch_module.density_fn,
-        }
-
-        for name, torch_submodule in submodules.items():
-            hk_params = copy_torch_to_jax(
-                torch_submodule,
-                hk_params,
-                scope=f'{scope}/~_setup/{name}',
-            )
-
-        return hk_params
-
 
 @register_import('mace.modules.blocks.RealAgnosticAttResidualInteractionBlock')
+@auto_import_from_torch(separator='~_setup')
 class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
     def _setup(self) -> None:
         # Downsample irreps
@@ -1609,38 +1276,9 @@ class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
 
         return self.reshape(message), sc
 
-    @classmethod
-    def import_from_torch(cls, torch_module, hk_params, scope):
-        """
-        Import parameters from the corresponding Torch RealAgnosticInteractionBlock.
-
-        Args:
-            torch_module: Torch RealAgnosticInteractionBlock
-            hk_params: dict returned from hk.transform.init
-        Returns:
-            Updated hk_params with weights copied from torch_module.
-        """
-
-        # Map submodules one by one
-        submodules = {
-            'linear_up': torch_module.linear_up,
-            'linear_down': torch_module.linear_down,
-            'conv_tp_weights': torch_module.conv_tp_weights,
-            'linear': torch_module.linear,
-            'skip_linear': torch_module.skip_linear,
-        }
-
-        for name, torch_submodule in submodules.items():
-            hk_params = copy_torch_to_jax(
-                torch_submodule,
-                hk_params,
-                scope=f'{scope}/~_setup/{name}',
-            )
-
-        return hk_params
-
 
 @register_import('mace.modules.blocks.RealAgnosticResidualNonLinearInteractionBlock')
+@auto_import_from_torch(separator='~_setup')
 class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
     def _setup(self) -> None:
         # Compute scalar irreps
@@ -1762,9 +1400,11 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
         self.density_fn = RadialMLP(
             [input_dim + 2 * node_scalar_irreps.dim, 64, 1], name='density_fn'
         )
-        self.alpha = (
-            hk.get_parameter('alpha', shape=(), dtype=default_dtype(), init=jnp.ones)
-            * 20.0
+        self.alpha = hk.get_parameter(
+            'alpha',
+            shape=(),
+            dtype=default_dtype(),
+            init=lambda *_: jnp.array(20.0, dtype=default_dtype()),
         )
         self.beta = hk.get_parameter(
             'beta', shape=(), dtype=default_dtype(), init=jnp.zeros
@@ -1859,41 +1499,6 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
         message = self.linear_2(message)
 
         return self.reshape(message), sc
-
-    @classmethod
-    def import_from_torch(cls, torch_module, hk_params, scope):
-        """
-        Import parameters from the corresponding Torch RealAgnosticInteractionBlock.
-
-        Args:
-            torch_module: Torch RealAgnosticInteractionBlock
-            hk_params: dict returned from hk.transform.init
-        Returns:
-            Updated hk_params with weights copied from torch_module.
-        """
-
-        # Map submodules one by one
-        submodules = {
-            'source_embedding': torch_module.source_embedding,
-            'target_embedding': torch_module.target_embedding,
-            'linear_up': torch_module.linear_up,
-            'conv_tp_weights': torch_module.conv_tp_weights,
-            'equivariant_nonlin': torch_module.equivariant_nonlin,
-            'skip_tp': torch_module.skip_tp,
-            'linear_res': torch_module.linear_res,
-            'linear_1': torch_module.linear_1,
-            'linear_2': torch_module.linear_2,
-            'density_fn': torch_module.density_fn,
-        }
-
-        for name, torch_submodule in submodules.items():
-            hk_params = copy_torch_to_jax(
-                torch_submodule,
-                hk_params,
-                scope=f'{scope}/~_setup/{name}',
-            )
-
-        return hk_params
 
 
 class ScaleShiftBlock(hk.Module):

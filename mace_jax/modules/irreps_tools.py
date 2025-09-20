@@ -10,6 +10,11 @@ import haiku as hk
 import jax.numpy as jnp
 from e3nn_jax import Irreps
 
+from mace_jax.haiku.torch import (
+    auto_import_from_torch,
+    copy_torch_to_jax,
+    register_import,
+)
 from mace_jax.modules.wrapper_ops import CuEquivarianceConfig
 
 
@@ -64,6 +69,8 @@ def linear_out_irreps(irreps: Irreps, target_irreps: Irreps) -> Irreps:
     return Irreps(irreps_mid)
 
 
+@register_import('mace.modules.irreps_tools.reshape_irreps')
+@auto_import_from_torch()
 class reshape_irreps(hk.Module):
     """
     Haiku module that reshapes a flat tensor according to an Irreps specification.

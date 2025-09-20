@@ -76,3 +76,42 @@ def copy_torch_to_jax(torch_module, jax_params, scope=None):
         )
 
     return hk.data_structures.to_immutable_dict(jax_params)
+
+
+def auto_import_from_torch(separator: str = '~'):
+    """
+    Decorator that adds a generic `import_from_torch` classmethod
+    to a Haiku module. It automatically:
+    - copies torch Parameters (weight, bias, etc.)
+    - imports submodules recursively
+    """
+
+    def decorator(cls):
+        @classmethod
+        def import_from_torch(cls, torch_module, hk_params, scope):
+            hk_params = hk.data_structures.to_mutable_dict(hk_params)
+
+            # --- Copy direct parameters ---
+            for name, param in torch_module.named_parameters(recurse=False):
+                if param is not None:
+                    hk_params[scope][name] = jnp.array(param.detach().cpu().numpy())
+
+            # --- Copy submodules ---
+            for name, submodule in torch_module.named_children():
+                if separator == '' or separator is None:
+                    subscope = f'{scope}/{name}'
+                else:
+                    subscope = f'{scope}/{separator}/{name}'
+
+                hk_params = copy_torch_to_jax(
+                    submodule,
+                    hk_params,
+                    scope=subscope,
+                )
+
+            return hk.data_structures.to_immutable_dict(hk_params)
+
+        cls.import_from_torch = import_from_torch
+        return cls
+
+    return decorator
