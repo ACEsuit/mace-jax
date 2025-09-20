@@ -33,53 +33,131 @@ from .radial import (
 )
 
 
+@register_import('mace.modules.blocks.LinearNodeEmbeddingBlock')
 class LinearNodeEmbeddingBlock(hk.Module):
+    """
+    JAX/Haiku version of LinearNodeEmbeddingBlock.
+    Wraps a Haiku Linear layer with equivariant support.
+    """
+
     def __init__(
-        self, num_species: int, irreps_out: Irreps, name: Optional[str] = None
+        self,
+        irreps_in: Irreps,
+        irreps_out: Irreps,
+        cueq_config: Optional['CuEquivarianceConfig'] = None,
+        name: str = None,
     ):
         super().__init__(name=name)
-        self.num_species = num_species
-        self.irreps_out = Irreps(irreps_out).filter('0e').regroup()
+        self.irreps_in = irreps_in
+        self.irreps_out = irreps_out
+        self.cueq_config = cueq_config
 
-    def __call__(self, node_specie: jnp.ndarray) -> IrrepsArray:
-        w = hk.get_parameter(
-            'embeddings',
-            shape=(self.num_species, self.irreps_out.dim),
-            dtype=default_dtype(),
-            init=hk.initializers.RandomNormal(),
-            name='linear',
+        # Assuming you already have a Haiku-compatible Linear implementation
+        # that mirrors the Torch version in `mace.modules.linear.Linear`.
+        self.linear = Linear(
+            irreps_in=irreps_in,
+            irreps_out=irreps_out,
+            cueq_config=cueq_config,
         )
-        return IrrepsArray(self.irreps_out, w[node_specie])
+
+    def __call__(self, node_attrs: jnp.ndarray) -> jnp.ndarray:  # [n_nodes, irreps]
+        return self.linear(node_attrs)
+
+    def __repr__(self):
+        return (
+            f'{self.__class__.__name__}(irreps_in={self.irreps_in}, '
+            f'irreps_out={self.irreps_out}, cueq_config={self.cueq_config})'
+        )
+
+    @classmethod
+    def import_from_torch(cls, torch_module, hk_params, scope):
+        """
+        Import Torch LinearNodeEmbeddingBlock into Haiku params.
+        Delegates parameter copying to the underlying Linear layer.
+        """
+        hk_params = hk.data_structures.to_mutable_dict(hk_params)
+
+        submodules = {
+            'linear': torch_module.linear,
+        }
+
+        for name, torch_submodule in submodules.items():
+            hk_params = copy_torch_to_jax(
+                torch_submodule,
+                hk_params,
+                scope=f'{scope}/~/{name}',
+            )
+
+        return hk.data_structures.to_immutable_dict(hk_params)
 
 
+@register_import('mace.modules.blocks.LinearReadoutBlock')
 class LinearReadoutBlock(hk.Module):
+    """
+    JAX/Haiku version of LinearReadoutBlock.
+    Wraps a Haiku Linear layer with equivariant support.
+    """
+
     def __init__(
         self,
         irreps_in: Irreps,
         irrep_out: Irreps = Irreps('0e'),
-        cueq_config: Optional[CuEquivarianceConfig] = None,
-        oeq_config: Optional[OEQConfig] = None,  # pylint: disable=unused-argument
-        name: Optional[str] = None,
+        cueq_config: Optional['CuEquivarianceConfig'] = None,
+        oeq_config: Optional[
+            'OEQConfig'
+        ] = None,  # unused but kept for API compatibility
+        name: str = None,
     ):
         super().__init__(name=name)
         self.irreps_in = irreps_in
         self.irrep_out = irrep_out
         self.cueq_config = cueq_config
+        self.oeq_config = oeq_config
+
+        # Haiku-compatible Linear implementation
+        self.linear = Linear(
+            irreps_in=irreps_in,
+            irreps_out=irrep_out,
+            cueq_config=cueq_config,
+        )
 
     def __call__(
         self,
-        x: IrrepsArray,
-        heads: Optional[jnp.ndarray] = None,  # pylint: disable=unused-argument
-    ) -> IrrepsArray:
-        # x = [n_nodes, irreps]
-        return Linear(
-            irreps_in=self.irreps_in,
-            irreps_out=self.irrep_out,
-            cueq_config=self.cueq_config,
-            name='linear',
-        )(x)  # [n_nodes, output_irreps]
+        x: jnp.ndarray,
+        heads: Optional[jnp.ndarray] = None,  # unused but kept for Torch parity
+    ) -> jnp.ndarray:  # [n_nodes, irreps] -> [n_nodes, 1]
+        return self.linear(x)
+
+    def __repr__(self):
+        return (
+            f'{self.__class__.__name__}(irreps_in={self.irreps_in}, '
+            f'irrep_out={self.irrep_out}, cueq_config={self.cueq_config}, '
+            f'oeq_config={self.oeq_config})'
+        )
+
+    @classmethod
+    def import_from_torch(cls, torch_module, hk_params, scope):
+        """
+        Import Torch LinearReadoutBlock into Haiku params.
+        Delegates parameter copying to the underlying Linear layer.
+        """
+        hk_params = hk.data_structures.to_mutable_dict(hk_params)
+
+        submodules = {
+            'linear': torch_module.linear,
+        }
+
+        for name, torch_submodule in submodules.items():
+            hk_params = copy_torch_to_jax(
+                torch_submodule,
+                hk_params,
+                scope=f'{scope}/~/{name}',
+            )
+
+        return hk.data_structures.to_immutable_dict(hk_params)
 
 
+@register_import('mace.modules.blocks.NonLinearReadoutBlock')
 class NonLinearReadoutBlock(hk.Module):
     def __init__(
         self,
@@ -128,7 +206,30 @@ class NonLinearReadoutBlock(hk.Module):
         # Final linear projection
         return self.linear_2(x)
 
+    @classmethod
+    def import_from_torch(cls, torch_module, hk_params, scope):
+        """
+        Import Torch LinearReadoutBlock into Haiku params.
+        Delegates parameter copying to the underlying Linear layer.
+        """
+        hk_params = hk.data_structures.to_mutable_dict(hk_params)
 
+        submodules = {
+            'linear_1': torch_module.linear_1,
+            'linear_2': torch_module.linear_2,
+        }
+
+        for name, torch_submodule in submodules.items():
+            hk_params = copy_torch_to_jax(
+                torch_submodule,
+                hk_params,
+                scope=f'{scope}/~/{name}',
+            )
+
+        return hk.data_structures.to_immutable_dict(hk_params)
+
+
+@register_import('mace.modules.blocks.NonLinearBiasReadoutBlock')
 class NonLinearBiasReadoutBlock(hk.Module):
     """
     Non-linear readout with intermediate bias linear layers and optional multi-head masking.
@@ -190,7 +291,31 @@ class NonLinearBiasReadoutBlock(hk.Module):
         # Final linear projection
         return self.linear_2(x)
 
+    @classmethod
+    def import_from_torch(cls, torch_module, hk_params, scope):
+        """
+        Import Torch LinearReadoutBlock into Haiku params.
+        Delegates parameter copying to the underlying Linear layer.
+        """
+        hk_params = hk.data_structures.to_mutable_dict(hk_params)
 
+        submodules = {
+            'linear_1': torch_module.linear_1,
+            'linear_mid': torch_module.linear_mid,
+            'linear_2': torch_module.linear_2,
+        }
+
+        for name, torch_submodule in submodules.items():
+            hk_params = copy_torch_to_jax(
+                torch_submodule,
+                hk_params,
+                scope=f'{scope}/~/{name}',
+            )
+
+        return hk.data_structures.to_immutable_dict(hk_params)
+
+
+@register_import('mace.modules.blocks.LinearDipoleReadoutBlock')
 class LinearDipoleReadoutBlock(hk.Module):
     """
     Linear readout block for dipoles or scalar+dipole.
@@ -223,7 +348,29 @@ class LinearDipoleReadoutBlock(hk.Module):
     def __call__(self, x: IrrepsArray) -> IrrepsArray:
         return self.linear(x)  # [n_nodes, 1] or [n_nodes, irreps_out]
 
+    @classmethod
+    def import_from_torch(cls, torch_module, hk_params, scope):
+        """
+        Import Torch LinearReadoutBlock into Haiku params.
+        Delegates parameter copying to the underlying Linear layer.
+        """
+        hk_params = hk.data_structures.to_mutable_dict(hk_params)
 
+        submodules = {
+            'linear': torch_module.linear,
+        }
+
+        for name, torch_submodule in submodules.items():
+            hk_params = copy_torch_to_jax(
+                torch_submodule,
+                hk_params,
+                scope=f'{scope}/~/{name}',
+            )
+
+        return hk.data_structures.to_immutable_dict(hk_params)
+
+
+@register_import('mace.modules.blocks.NonLinearDipoleReadoutBlock')
 class NonLinearDipoleReadoutBlock(hk.Module):
     """
     Non-linear readout block for dipoles or scalar+dipole, with gated nonlinearity.
@@ -288,7 +435,31 @@ class NonLinearDipoleReadoutBlock(hk.Module):
         x = self.equivariant_nonlin(self.linear_1(x))
         return self.linear_2(x)  # [n_nodes, irreps_out]
 
+    @classmethod
+    def import_from_torch(cls, torch_module, hk_params, scope):
+        """
+        Import Torch LinearReadoutBlock into Haiku params.
+        Delegates parameter copying to the underlying Linear layer.
+        """
+        hk_params = hk.data_structures.to_mutable_dict(hk_params)
 
+        submodules = {
+            'equivariant_nonlin': torch_module.equivariant_nonlin,
+            'linear_1': torch_module.linear_1,
+            'linear_2': torch_module.linear_2,
+        }
+
+        for name, torch_submodule in submodules.items():
+            hk_params = copy_torch_to_jax(
+                torch_submodule,
+                hk_params,
+                scope=f'{scope}/~/{name}',
+            )
+
+        return hk.data_structures.to_immutable_dict(hk_params)
+
+
+@register_import('mace.modules.blocks.LinearDipolePolarReadoutBlock')
 class LinearDipolePolarReadoutBlock(hk.Module):
     """Linear readout for dipole and polarizability."""
 
@@ -322,7 +493,29 @@ class LinearDipolePolarReadoutBlock(hk.Module):
         y = self.linear(x)  # [n_nodes, irreps_out]
         return y
 
+    @classmethod
+    def import_from_torch(cls, torch_module, hk_params, scope):
+        """
+        Import Torch LinearReadoutBlock into Haiku params.
+        Delegates parameter copying to the underlying Linear layer.
+        """
+        hk_params = hk.data_structures.to_mutable_dict(hk_params)
 
+        submodules = {
+            'linear': torch_module.linear,
+        }
+
+        for name, torch_submodule in submodules.items():
+            hk_params = copy_torch_to_jax(
+                torch_submodule,
+                hk_params,
+                scope=f'{scope}/~/{name}',
+            )
+
+        return hk.data_structures.to_immutable_dict(hk_params)
+
+
+@register_import('mace.modules.blocks.NonLinearDipolePolarReadoutBlock')
 class NonLinearDipolePolarReadoutBlock(hk.Module):
     """Non-linear readout for dipole and polarizability with equivariant gate."""
 
@@ -385,7 +578,31 @@ class NonLinearDipolePolarReadoutBlock(hk.Module):
         x = self.equivariant_nonlin(self.linear_1(x))
         return self.linear_2(x)
 
+    @classmethod
+    def import_from_torch(cls, torch_module, hk_params, scope):
+        """
+        Import Torch LinearReadoutBlock into Haiku params.
+        Delegates parameter copying to the underlying Linear layer.
+        """
+        hk_params = hk.data_structures.to_mutable_dict(hk_params)
 
+        submodules = {
+            'equivariant_nonlin': torch_module.equivariant_nonlin,
+            'linear_1': torch_module.linear_1,
+            'linear_2': torch_module.linear_2,
+        }
+
+        for name, torch_submodule in submodules.items():
+            hk_params = copy_torch_to_jax(
+                torch_submodule,
+                hk_params,
+                scope=f'{scope}/~/{name}',
+            )
+
+        return hk.data_structures.to_immutable_dict(hk_params)
+
+
+@register_import('mace.modules.blocks.AtomicEnergiesBlock')
 class AtomicEnergiesBlock(hk.Module):
     """Block that returns atomic energies from one-hot element vectors."""
 
@@ -394,7 +611,7 @@ class AtomicEnergiesBlock(hk.Module):
     ):
         super().__init__(name=name)
         atomic_energies = jnp.array(
-            atomic_energies, dtype=jnp.float32
+            atomic_energies, dtype=default_dtype()
         )  # convert to JAX array
         self.atomic_energies = hk.get_parameter(
             'atomic_energies',
@@ -423,7 +640,22 @@ class AtomicEnergiesBlock(hk.Module):
         )
         return f'{self.__class__.__name__}(energies=[{formatted_energies}])'
 
+    @classmethod
+    def import_from_torch(cls, torch_module, hk_params, scope):
+        """
+        Import Torch LinearReadoutBlock into Haiku params.
+        Delegates parameter copying to the underlying Linear layer.
+        """
+        hk_params = hk.data_structures.to_mutable_dict(hk_params)
 
+        hk_params[scope]['atomic_energies'] = jnp.array(
+            torch_module.atomic_energies.detach().numpy()
+        )
+
+        return hk.data_structures.to_immutable_dict(hk_params)
+
+
+@register_import('mace.modules.blocks.RadialEmbeddingBlock')
 class RadialEmbeddingBlock(hk.Module):
     """Radial basis embedding block for edges."""
 
@@ -480,7 +712,31 @@ class RadialEmbeddingBlock(hk.Module):
         else:
             return radial, cutoff
 
+    @classmethod
+    def import_from_torch(cls, torch_module, hk_params, scope):
+        """
+        Import Torch LinearReadoutBlock into Haiku params.
+        Delegates parameter copying to the underlying Linear layer.
+        """
+        hk_params = hk.data_structures.to_mutable_dict(hk_params)
 
+        submodules = {
+            'bessel_fn': torch_module.bessel_fn,
+        }
+        if hasattr(torch_module, 'distance_transform'):
+            submodules['distance_transform'] = torch_module.distance_transform
+
+        for name, torch_submodule in submodules.items():
+            hk_params = copy_torch_to_jax(
+                torch_submodule,
+                hk_params,
+                scope=f'{scope}/~/{name}',
+            )
+
+        return hk.data_structures.to_immutable_dict(hk_params)
+
+
+@register_import('mace.modules.blocks.EquivariantProductBasisBlock')
 class EquivariantProductBasisBlock(hk.Module):
     def __init__(
         self,
@@ -557,6 +813,28 @@ class EquivariantProductBasisBlock(hk.Module):
             return self.linear(node_feats) + sc
 
         return self.linear(node_feats)
+
+    @classmethod
+    def import_from_torch(cls, torch_module, hk_params, scope):
+        """
+        Import Torch LinearReadoutBlock into Haiku params.
+        Delegates parameter copying to the underlying Linear layer.
+        """
+        hk_params = hk.data_structures.to_mutable_dict(hk_params)
+
+        submodules = {
+            'symmetric_contractions': torch_module.symmetric_contractions,
+            'linear': torch_module.linear,
+        }
+
+        for name, torch_submodule in submodules.items():
+            hk_params = copy_torch_to_jax(
+                torch_submodule,
+                hk_params,
+                scope=f'{scope}/~/{name}',
+            )
+
+        return hk.data_structures.to_immutable_dict(hk_params)
 
 
 class InteractionBlock(hk.Module, metaclass=abc.ABCMeta):
