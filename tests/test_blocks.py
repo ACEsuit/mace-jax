@@ -7,6 +7,15 @@ import torch
 from e3nn import o3
 from e3nn_jax import Irreps
 from mace.modules.blocks import (
+    LinearNodeEmbeddingBlock as LinearNodeEmbeddingBlockTorch,
+)
+from mace.modules.blocks import (
+    LinearReadoutBlock as LinearReadoutBlockTorch,
+)
+from mace.modules.blocks import (
+    NonLinearReadoutBlock as NonLinearReadoutBlockTorch,
+)
+from mace.modules.blocks import (
     RealAgnosticAttResidualInteractionBlock as RealAgnosticAttResidualInteractionBlockTorch,
 )
 from mace.modules.blocks import (
@@ -27,6 +36,15 @@ from mace.modules.blocks import (
 
 from mace_jax.haiku.torch import copy_torch_to_jax
 from mace_jax.modules.blocks import (
+    LinearNodeEmbeddingBlock as LinearNodeEmbeddingBlockJAX,
+)
+from mace_jax.modules.blocks import (
+    LinearReadoutBlock as LinearReadoutBlockJAX,
+)
+from mace_jax.modules.blocks import (
+    NonLinearReadoutBlock as NonLinearReadoutBlockJAX,
+)
+from mace_jax.modules.blocks import (
     RealAgnosticAttResidualInteractionBlock as RealAgnosticAttResidualInteractionBlockJAX,
 )
 from mace_jax.modules.blocks import (
@@ -44,6 +62,182 @@ from mace_jax.modules.blocks import (
 from mace_jax.modules.blocks import (
     RealAgnosticResidualNonLinearInteractionBlock as RealAgnosticResidualNonLinearInteractionBlockJAX,
 )
+
+
+class TestLinearNodeEmbeddingBlock:
+    """Compare LinearNodeEmbeddingBlock in Haiku vs PyTorch."""
+
+    @pytest.mark.parametrize(
+        'irreps_in, irreps_out',
+        [
+            ('3x0e', '2x0e'),  # scalars → scalars
+            ('1x0e + 1x1o', '1x0e + 1x1o'),  # mixed scalar + vector → same
+        ],
+    )
+    def test_forward_match(self, irreps_in, irreps_out):
+        """Check JAX and Torch implementations match on forward pass."""
+
+        irreps_in_obj = o3.Irreps(irreps_in)
+        irreps_out_obj = o3.Irreps(irreps_out)
+
+        n_nodes = 5
+
+        # --- Create random input ---
+        np.random.seed(0)
+        x_np = np.random.randn(n_nodes, irreps_in_obj.dim).astype(np.float64)
+        x_jax = jnp.array(x_np)
+        x_torch = torch.tensor(x_np)
+
+        # --- Torch model ---
+        torch_model = LinearNodeEmbeddingBlockTorch(irreps_in_obj, irreps_out_obj)
+
+        # --- Torch output ---
+        out_torch = torch_model(x_torch)
+
+        # --- JAX model ---
+        def forward_fn(x):
+            model = LinearNodeEmbeddingBlockJAX(
+                irreps_in=irreps_in_obj,
+                irreps_out=irreps_out_obj,
+            )
+            return model(x)
+
+        transformed = hk.transform(forward_fn)
+        rng = jax.random.PRNGKey(42)
+        params = transformed.init(rng, x_jax)
+
+        # Copy Torch → JAX
+        params = copy_torch_to_jax(torch_model, params)
+
+        out_jax = transformed.apply(params, None, x_jax)
+
+        # --- Compare ---
+        np.testing.assert_allclose(
+            np.array(out_jax),
+            out_torch.detach().numpy(),
+            rtol=1e-5,
+            atol=1e-6,
+        )
+
+
+class TestLinearReadoutBlock:
+    """Compare LinearReadoutBlock in Haiku vs PyTorch."""
+
+    @pytest.mark.parametrize(
+        'irreps_in, irrep_out',
+        [
+            ('3x0e', '1x0e'),  # scalars → scalar
+            ('1x0e + 1x1o', '2x0e'),  # mixed input → scalar outputs
+        ],
+    )
+    def test_forward_match(self, irreps_in, irrep_out):
+        """Check JAX and Torch implementations match on forward pass."""
+
+        irreps_in_obj = o3.Irreps(irreps_in)
+        irrep_out_obj = o3.Irreps(irrep_out)
+
+        n_nodes = 5
+
+        # --- Create random input ---
+        np.random.seed(0)
+        x_np = np.random.randn(n_nodes, irreps_in_obj.dim).astype(np.float64)
+        x_jax = jnp.array(x_np)
+        x_torch = torch.tensor(x_np)
+
+        # --- Torch model ---
+        torch_model = LinearReadoutBlockTorch(irreps_in_obj, irrep_out_obj)
+
+        # --- Torch output ---
+        out_torch = torch_model(x_torch)
+
+        # --- JAX model ---
+        def forward_fn(x):
+            model = LinearReadoutBlockJAX(
+                irreps_in=irreps_in_obj,
+                irrep_out=irrep_out_obj,
+            )
+            return model(x)
+
+        transformed = hk.transform(forward_fn)
+        rng = jax.random.PRNGKey(42)
+        params = transformed.init(rng, x_jax)
+
+        # Copy Torch → JAX
+        params = copy_torch_to_jax(torch_model, params)
+
+        out_jax = transformed.apply(params, None, x_jax)
+
+        # --- Compare ---
+        np.testing.assert_allclose(
+            np.array(out_jax),
+            out_torch.detach().numpy(),
+            rtol=1e-5,
+            atol=1e-6,
+        )
+
+
+class TestNonLinearReadoutBlock:
+    """Compare NonLinearReadoutBlock in Haiku vs PyTorch."""
+
+    @pytest.mark.parametrize(
+        'irreps_in, MLP_irreps, irrep_out, num_heads',
+        [
+            ('3x0e', '4x0e', '1x0e', 1),  # simple scalar case
+            ('10x0e', '2x0e', '1x0e', 1),  # mixed scalars + vector
+        ],
+    )
+    def test_forward_match(self, irreps_in, MLP_irreps, irrep_out, num_heads):
+        """Check forward pass matches between JAX and Torch."""
+
+        irreps_in_obj = o3.Irreps(irreps_in)
+        MLP_irreps_obj = o3.Irreps(MLP_irreps)
+        irrep_out_obj = o3.Irreps(irrep_out)
+
+        n_nodes = 5
+
+        # --- Create random input ---
+        np.random.seed(0)
+        x_np = np.random.randn(n_nodes, irreps_in_obj.dim).astype(np.float64)
+        x_jax = jnp.array(x_np)
+        x_torch = torch.tensor(x_np)
+
+        # --- Torch model ---
+        torch_model = NonLinearReadoutBlockTorch(
+            irreps_in=irreps_in_obj,
+            MLP_irreps=MLP_irreps_obj,
+            gate=torch.nn.SiLU(),
+            irrep_out=irrep_out_obj,
+            num_heads=num_heads,
+        )
+
+        # --- Torch output ---
+        out_torch = torch_model(x_torch)
+
+        # --- JAX model ---
+        def forward_fn(x):
+            model = NonLinearReadoutBlockJAX(
+                irreps_in=irreps_in_obj,
+                MLP_irreps=MLP_irreps_obj,
+                gate=jax.nn.silu,
+                irrep_out=irrep_out_obj,
+                num_heads=num_heads,
+            )
+            return model(x)
+
+        transformed = hk.transform(forward_fn)
+        rng = jax.random.PRNGKey(42)
+        params = transformed.init(rng, x_jax)
+        params = copy_torch_to_jax(torch_model, params)
+
+        out_jax = transformed.apply(params, None, x_jax)
+
+        # --- Compare outputs ---
+        np.testing.assert_allclose(
+            np.array(out_jax),
+            out_torch.detach().numpy(),
+            rtol=5e-4,
+            atol=5e-3,
+        )
 
 
 class TestRealAgnosticBlocks:

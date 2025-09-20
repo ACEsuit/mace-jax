@@ -31,8 +31,13 @@ def register_import_mapper(torch_type):
     return decorator
 
 
+@register_import_mapper('e3nn.nn._activation.Activation')
+def _import_e3nn_activation(module, params, scope):
+    return params
+
+
 @register_import_mapper('e3nn.math._normalize_activation.normalize2mom')
-def _import_normalize2mom(module, params, scope):
+def _import_e3nn_normalize2mom(module, params, scope):
     return params
 
 
