@@ -7,6 +7,8 @@ import numpy as np
 import pytest
 import torch
 from e3nn.o3 import Irreps
+from e3nn.o3 import Irreps as TorchIrreps
+from e3nn.o3 import SphericalHarmonics as TorchSphericalHarmonics
 from e3nn.o3 import TensorProduct as TensorProductTorch
 from e3nn.o3._linear import Linear as LinearTorch
 from e3nn.o3._tensor_product._codegen import (
@@ -18,6 +20,8 @@ from e3nn.o3._tensor_product._codegen import (
 from e3nn.o3._tensor_product._codegen import (
     codegen_tensor_product_right as codegen_tensor_product_right_torch,
 )
+from e3nn_jax import Irreps as JaxIrreps
+from e3nn_jax import spherical_harmonics
 
 from mace_jax.e3nn._linear import Linear as LinearJax
 from mace_jax.e3nn._tensor_product._codegen import (
@@ -375,4 +379,46 @@ class TestCodegenLinear:
         # Compare outputs
         assert jnp.allclose(out_jax, out_torch_np, atol=1e-5), (
             f'JAX and PyTorch outputs differ:\nJAX: {out_jax}\nPyTorch: {out_torch_np}'
+        )
+
+
+class TestSphericalHarmonicsParity:
+    def setup_method(self):
+        self.max_ell = 2
+        self.irreps_torch = TorchIrreps.spherical_harmonics(self.max_ell)
+        self.irreps_jax = JaxIrreps.spherical_harmonics(self.max_ell)
+
+    @pytest.mark.parametrize('normalize', [False, True])
+    @pytest.mark.parametrize(
+        'vec',
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 1.0, 0.0],
+            [1.0, 1.0, 1.0],
+        ],
+    )
+    def test_jax_vs_torch(self, vec, normalize):
+        vec_np = np.array(vec, dtype=np.float32)[None, :]  # [1,3]
+
+        # Torch version (module interface)
+        sh_torch = TorchSphericalHarmonics(
+            self.irreps_torch, normalize=normalize, normalization='component'
+        )
+        x_torch = torch.tensor(vec_np)
+        y_torch = sh_torch(x_torch).detach().numpy()
+
+        # JAX version (functional)
+        x_jax = jnp.array(vec_np)
+        y_jax = spherical_harmonics(
+            self.irreps_jax, x_jax, normalize=normalize, normalization='component'
+        ).array
+
+        # Compare
+        np.testing.assert_allclose(
+            np.array(y_jax),
+            y_torch,
+            rtol=1e-5,
+            atol=1e-6,
         )
