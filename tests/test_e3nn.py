@@ -7,8 +7,8 @@ import numpy as np
 import pytest
 import torch
 from e3nn.o3 import Irreps
-from e3nn.o3 import Irreps as TorchIrreps
-from e3nn.o3 import SphericalHarmonics as TorchSphericalHarmonics
+from e3nn.o3 import Irreps as IrrepsTorch
+from e3nn.o3 import SphericalHarmonics as SphericalHarmonicsTorch
 from e3nn.o3 import TensorProduct as TensorProductTorch
 from e3nn.o3._linear import Linear as LinearTorch
 from e3nn.o3._tensor_product._codegen import (
@@ -20,7 +20,7 @@ from e3nn.o3._tensor_product._codegen import (
 from e3nn.o3._tensor_product._codegen import (
     codegen_tensor_product_right as codegen_tensor_product_right_torch,
 )
-from e3nn_jax import Irreps as JaxIrreps
+from e3nn_jax import Irreps as IrrepsJAX
 from e3nn_jax import spherical_harmonics
 
 from mace_jax.e3nn._linear import Linear as LinearJax
@@ -37,6 +37,7 @@ from mace_jax.e3nn._tensor_product._instruction import Instruction
 from mace_jax.e3nn._tensor_product._tensor_product import (
     TensorProduct as TensorProductJAX,
 )
+from mace_jax.e3nn.o3 import SphericalHarmonics as SphericalHarmonicsJAX
 
 
 class TestSumTensors:
@@ -385,8 +386,8 @@ class TestCodegenLinear:
 class TestSphericalHarmonicsParity:
     def setup_method(self):
         self.max_ell = 2
-        self.irreps_torch = TorchIrreps.spherical_harmonics(self.max_ell)
-        self.irreps_jax = JaxIrreps.spherical_harmonics(self.max_ell)
+        self.irreps_torch = IrrepsTorch.spherical_harmonics(self.max_ell)
+        self.irreps_jax = IrrepsJAX.spherical_harmonics(self.max_ell)
 
     @pytest.mark.parametrize('normalize', [False, True])
     @pytest.mark.parametrize(
@@ -403,7 +404,7 @@ class TestSphericalHarmonicsParity:
         vec_np = np.array(vec, dtype=np.float32)[None, :]  # [1,3]
 
         # Torch version (module interface)
-        sh_torch = TorchSphericalHarmonics(
+        sh_torch = SphericalHarmonicsTorch(
             self.irreps_torch, normalize=normalize, normalization='component'
         )
         x_torch = torch.tensor(vec_np)
@@ -422,3 +423,63 @@ class TestSphericalHarmonicsParity:
             rtol=1e-5,
             atol=1e-6,
         )
+
+
+class TestSphericalHarmonicsComparison:
+    def setup_method(self):
+        self.max_ell = 2
+        self.sh_irreps = Irreps.spherical_harmonics(self.max_ell)
+        self.sh_irreps_jax = IrrepsJAX.spherical_harmonics(self.max_ell)
+
+        # Torch modules
+        self.torch_sh_normed = SphericalHarmonicsTorch(
+            self.sh_irreps, normalize=True, normalization='component'
+        )
+        self.torch_sh_raw = SphericalHarmonicsTorch(
+            self.sh_irreps, normalize=False, normalization='component'
+        )
+
+        # Batch of input vectors
+        self.x = np.random.randn(10, 3).astype(np.float32)
+
+        # Haiku transformed functions
+        def forward_normed(x):
+            sh = SphericalHarmonicsJAX(
+                self.sh_irreps_jax, normalize=True, normalization='component'
+            )
+            return sh(x)
+
+        def forward_raw(x):
+            sh = SphericalHarmonicsJAX(
+                self.sh_irreps_jax, normalize=False, normalization='component'
+            )
+            return sh(x)
+
+        self.hk_normed = hk.without_apply_rng(hk.transform(forward_normed))
+        self.hk_raw = hk.without_apply_rng(hk.transform(forward_raw))
+
+        # Initialize Haiku modules
+        self.rng = jax.random.PRNGKey(42)
+        self.params_normed = self.hk_normed.init(self.rng, jnp.array(self.x))
+        self.params_raw = self.hk_raw.init(self.rng, jnp.array(self.x))
+
+    def test_output_shapes(self):
+        # Haiku
+        hk_out = self.hk_raw.apply(self.params_raw, jnp.array(self.x))
+        assert hk_out.shape == (self.x.shape[0], self.sh_irreps.dim)
+
+        # Torch
+        torch_out = self.torch_sh_raw(torch.tensor(self.x))
+        assert torch_out.shape == (self.x.shape[0], self.sh_irreps.dim)
+
+    def test_compare_raw(self):
+        hk_out = self.hk_raw.apply(self.params_raw, jnp.array(self.x))
+        torch_out = self.torch_sh_raw(torch.tensor(self.x)).detach().numpy()
+
+        np.testing.assert_allclose(hk_out, torch_out, rtol=1e-5, atol=1e-5)
+
+    def test_compare_normalized(self):
+        torch_out = self.torch_sh_normed(torch.tensor(self.x)).detach().numpy()
+        hk_out = np.array(self.hk_normed.apply(self.params_normed, jnp.array(self.x)))
+
+        np.testing.assert_allclose(hk_out, torch_out, rtol=1e-5, atol=1e-5)

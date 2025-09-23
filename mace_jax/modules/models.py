@@ -5,6 +5,7 @@ import jax.numpy as jnp
 import numpy as np
 from e3nn_jax import Irrep, Irreps
 
+from mace_jax.e3nn.o3 import SphericalHarmonics
 from mace_jax.haiku.torch import (
     auto_import_from_torch,
     register_import,
@@ -136,7 +137,7 @@ class MACE(hk.Module):
         interaction_irreps_first = (sh_irreps * num_features).sort()[0].simplify()
 
         # TODO
-        self.spherical_harmonics = o3.SphericalHarmonics(
+        self.spherical_harmonics = SphericalHarmonics(
             sh_irreps, normalize=True, normalization='component'
         )
         if radial_MLP is None:
