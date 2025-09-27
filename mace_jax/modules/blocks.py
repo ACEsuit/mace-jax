@@ -298,12 +298,12 @@ class NonLinearDipoleReadoutBlock(hk.Module):
             self.irreps_out = Irreps('1x0e + 1x1o')
 
         # Partition hidden irreps into scalars and gated irreps
-        irreps_scalars = Irreps([
-            (mul, ir) for mul, ir in MLP_irreps if ir.l == 0 and ir in self.irreps_out
-        ])
-        irreps_gated = Irreps([
-            (mul, ir) for mul, ir in MLP_irreps if ir.l > 0 and ir in self.irreps_out
-        ])
+        irreps_scalars = Irreps(
+            [(mul, ir) for mul, ir in MLP_irreps if ir.l == 0 and ir in self.irreps_out]
+        )
+        irreps_gated = Irreps(
+            [(mul, ir) for mul, ir in MLP_irreps if ir.l > 0 and ir in self.irreps_out]
+        )
         irreps_gates = Irreps([(mul, Irreps('0e')[0][1]) for mul, _ in irreps_gated])
 
         # Gated nonlinearity
@@ -402,12 +402,12 @@ class NonLinearDipolePolarReadoutBlock(hk.Module):
                 'If you want to calculate only the dipole, use AtomicDipolesMACE.'
             )
 
-        irreps_scalars = Irreps([
-            (mul, ir) for mul, ir in MLP_irreps if ir.l == 0 and ir in self.irreps_out
-        ])
-        irreps_gated = Irreps([
-            (mul, ir) for mul, ir in MLP_irreps if ir.l > 0 and ir in self.irreps_out
-        ])
+        irreps_scalars = Irreps(
+            [(mul, ir) for mul, ir in MLP_irreps if ir.l == 0 and ir in self.irreps_out]
+        )
+        irreps_gated = Irreps(
+            [(mul, ir) for mul, ir in MLP_irreps if ir.l > 0 and ir in self.irreps_out]
+        )
         irreps_gates = Irreps([(mul, '0e') for mul, _ in irreps_gated])
 
         # Equivariant nonlinearity
@@ -764,6 +764,7 @@ class RealAgnosticInteractionBlock(InteractionBlock):
         edge_index: jnp.ndarray,
         cutoff: Optional[jnp.ndarray] = None,
         n_real: Optional[int] = None,
+        first_layer: bool = False,
     ) -> tuple[jnp.ndarray, None]:
         # First linear projection
         node_feats = self.linear_up(node_feats)
@@ -865,6 +866,7 @@ class RealAgnosticResidualInteractionBlock(InteractionBlock):
         edge_index: jnp.ndarray,
         cutoff: Optional[jnp.ndarray] = None,
         n_real: Optional[int] = None,
+        first_layer: bool = False,
     ) -> tuple[jnp.ndarray, jnp.ndarray]:
         # Skip connection
         sc = self.skip_tp(node_feats, node_attrs)
@@ -981,6 +983,7 @@ class RealAgnosticDensityInteractionBlock(InteractionBlock):
         edge_index: jnp.ndarray,
         cutoff: Optional[jnp.ndarray] = None,
         n_real: Optional[int] = None,
+        first_layer: bool = False,
     ) -> tuple[jnp.ndarray, None]:
         receiver = edge_index[1]
         num_nodes = node_feats.shape[0]
@@ -1105,6 +1108,7 @@ class RealAgnosticDensityResidualInteractionBlock(InteractionBlock):
         edge_index: jnp.ndarray,
         cutoff: Optional[jnp.ndarray] = None,
         n_real: Optional[int] = None,
+        first_layer: bool = False,
     ) -> tuple[jnp.ndarray, jnp.ndarray]:
         receiver = edge_index[1]
         num_nodes = node_feats.shape[0]
@@ -1239,6 +1243,7 @@ class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
         edge_index: jnp.ndarray,
         cutoff: Optional[jnp.ndarray] = None,
         n_real: Optional[int] = None,
+        first_layer: bool = False,
     ) -> tuple[jnp.ndarray, jnp.ndarray]:
         sender = edge_index[0]
         receiver = edge_index[1]
@@ -1282,9 +1287,9 @@ class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
 class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
     def _setup(self) -> None:
         # Compute scalar irreps
-        node_scalar_irreps = Irreps([
-            (self.node_feats_irreps.count(Irrep(0, 1)), (0, 1))
-        ])
+        node_scalar_irreps = Irreps(
+            [(self.node_feats_irreps.count(Irrep(0, 1)), (0, 1))]
+        )
 
         # Source/target embeddings
         self.source_embedding = Linear(
@@ -1433,6 +1438,7 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
         edge_index: jnp.ndarray,
         cutoff: Optional[jnp.ndarray] = None,
         n_real: Optional[int] = None,
+        first_layer: bool = False,
     ) -> tuple[jnp.ndarray, jnp.ndarray]:
         num_nodes = node_feats.shape[0]
 

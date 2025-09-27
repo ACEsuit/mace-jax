@@ -497,7 +497,7 @@ class ScaleShiftMACE(MACE):
         inter_e = scatter_sum(node_inter_es, data['batch'], dim=-1, dim_size=num_graphs)
 
         total_energy = e0 + inter_e
-        node_energy = node_e0.clone().double() + node_inter_es.clone().double()
+        node_energy = node_e0 + node_inter_es
 
         # TODO: Compute full output set
 
