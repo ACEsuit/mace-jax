@@ -282,7 +282,7 @@ class MACE(hk.Module):
         ]
         e0 = scatter_sum(
             src=node_e0, index=data['batch'], dim=0, dim_size=num_graphs
-        ).to(vectors.dtype)  # [n_graphs, n_heads]
+        ).astype(vectors.dtype)  # [n_graphs, n_heads]
         # Embeddings
         node_feats = self.node_embedding(data['node_attrs'])
         edge_attrs = self.spherical_harmonics(vectors)
@@ -403,14 +403,14 @@ class ScaleShiftMACE(MACE):
             compute_displacement=compute_displacement,
         )
 
-        num_atoms_arange = ctx.num_atoms_arange.to(jnp.int64)
+        num_atoms_arange = ctx.num_atoms_arange.astype(jnp.int64)
         num_graphs = ctx.num_graphs
         displacement = ctx.displacement
         positions = ctx.positions
         vectors = ctx.vectors
         lengths = ctx.lengths
         cell = ctx.cell
-        node_heads = ctx.node_heads.to(jnp.int64)
+        node_heads = ctx.node_heads.astype(jnp.int64)
 
         # Atomic energies
         node_e0 = self.atomic_energies_fn(data['node_attrs'])[
@@ -418,7 +418,7 @@ class ScaleShiftMACE(MACE):
         ]
         e0 = scatter_sum(
             src=node_e0, index=data['batch'], dim=0, dim_size=num_graphs
-        ).to(vectors.dtype)  # [n_graphs, num_heads]
+        ).astype(vectors.dtype)  # [n_graphs, num_heads]
 
         # Embeddings
         node_feats = self.node_embedding(data['node_attrs'])
