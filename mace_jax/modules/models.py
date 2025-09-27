@@ -144,7 +144,10 @@ class MACE(hk.Module):
 
         # TODO
         self.spherical_harmonics = SphericalHarmonics(
-            sh_irreps, normalize=True, normalization='component'
+            sh_irreps,
+            normalize=True,
+            normalization='component',
+            name='spherical_harmonics',
         )
         if radial_MLP is None:
             radial_MLP = [64, 64, 64]
@@ -162,6 +165,7 @@ class MACE(hk.Module):
             radial_MLP=radial_MLP,
             cueq_config=cueq_config,
             oeq_config=oeq_config,
+            name='interactions_0',
         )
         # TODO: Check torch.ModuleList -> List
         self.interactions = [inter]
@@ -182,6 +186,7 @@ class MACE(hk.Module):
             oeq_config=oeq_config,
             use_reduced_cg=use_reduced_cg,
             use_agnostic_product=use_agnostic_product,
+            name='products_0',
         )
         # TODO: Check torch.ModuleList -> List
         self.products = [prod]
@@ -195,6 +200,7 @@ class MACE(hk.Module):
                     Irreps(f'{len(heads)}x0e'),
                     cueq_config,
                     oeq_config,
+                    name=f'readouts_{len(self.readouts)}',
                 )
             )
 
@@ -217,6 +223,7 @@ class MACE(hk.Module):
                 radial_MLP=radial_MLP,
                 cueq_config=cueq_config,
                 oeq_config=oeq_config,
+                name=f'interactions_{len(self.interactions)}',
             )
             self.interactions.append(inter)
             prod = EquivariantProductBasisBlock(
@@ -229,6 +236,7 @@ class MACE(hk.Module):
                 oeq_config=oeq_config,
                 use_reduced_cg=use_reduced_cg,
                 use_agnostic_product=use_agnostic_product,
+                name=f'products_{len(self.products)}',
             )
             self.products.append(prod)
             if i == num_interactions - 2:
@@ -241,6 +249,7 @@ class MACE(hk.Module):
                         len(heads),
                         cueq_config,
                         oeq_config,
+                        name=f'readouts_{len(self.readouts)}',
                     )
                 )
             elif not use_last_readout_only:
@@ -250,6 +259,7 @@ class MACE(hk.Module):
                         Irreps(f'{len(heads)}x0e'),
                         cueq_config,
                         oeq_config,
+                        name=f'readouts_{len(self.readouts)}',
                     )
                 )
 
@@ -374,7 +384,7 @@ class MACE(hk.Module):
         }
 
 
-@register_import('mace.modules.models.Mace')
+@register_import('mace.modules.models.ScaleShiftMACE')
 @auto_import_from_torch(separator='~')
 class ScaleShiftMACE(MACE):
     def __init__(

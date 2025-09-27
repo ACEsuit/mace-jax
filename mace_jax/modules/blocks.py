@@ -568,6 +568,7 @@ class EquivariantProductBasisBlock(hk.Module):
             use_reduced_cg=use_reduced_cg,
             cueq_config=cueq_config,
             oeq_config=oeq_config,
+            name='symmetric_contractions',
         )
 
         # Linear layer
@@ -577,6 +578,7 @@ class EquivariantProductBasisBlock(hk.Module):
             internal_weights=True,
             shared_weights=True,
             cueq_config=cueq_config,
+            name='linear',
         )
 
         self.cueq_config = cueq_config
@@ -1507,6 +1509,8 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
         return self.reshape(message), sc
 
 
+@register_import('mace.modules.blocks.ScaleShiftBlock')
+@auto_import_from_torch(separator='~')
 class ScaleShiftBlock(hk.Module):
     def __init__(
         self,

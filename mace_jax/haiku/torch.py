@@ -56,6 +56,15 @@ def _import_layernorm(module, params, scope):
     return params
 
 
+@register_import_mapper('torch.nn.modules.container.ModuleList')
+def _import_modulelist(module, params, scope):
+    """Import each sub-module inside a Torch ModuleList into numbered scopes."""
+    for idx, child in enumerate(module):
+        # Re-use existing copy_torch_to_jax for each child
+        params = copy_torch_to_jax(child, params, f'{scope}_{idx}')
+    return params
+
+
 @register_import_mapper('torch.nn.modules.container.Sequential')
 def _import_sequential(module, params, scope):
     for idx, child in enumerate(module):

@@ -273,6 +273,7 @@ def SymmetricContractionWrapper(
     cueq_config: Optional['CuEquivarianceConfig'] = None,
     oeq_config: Optional['OEQConfig'] = None,  # unused for JAX
     use_reduced_cg: bool = True,
+    name: Optional[str] = None,
 ):
     """
     JAX implementation of SymmetricContraction.
@@ -289,6 +290,7 @@ def SymmetricContractionWrapper(
         correlation=correlation,
         num_elements=num_elements,
         use_reduced_cg=use_reduced_cg,
+        name=name,
     )
 
 

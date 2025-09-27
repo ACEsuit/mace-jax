@@ -5,7 +5,14 @@ import haiku as hk
 import jax.numpy as jnp
 from e3nn_jax import Irreps, spherical_harmonics
 
+from mace_jax.haiku.torch import (
+    auto_import_from_torch,
+    register_import,
+)
 
+
+@register_import('e3nn.o3._spherical_harmonics.SphericalHarmonics')
+@auto_import_from_torch(separator='~')
 class SphericalHarmonics(hk.Module):
     """Haiku module version of :func:`e3nn_jax.spherical_harmonics`.
 
