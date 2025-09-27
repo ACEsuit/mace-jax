@@ -101,8 +101,7 @@ def prepare_graph(
     displacement = jnp.zeros((num_graphs, 3, 3), dtype=positions.dtype)
 
     if compute_virials or compute_stress or compute_displacement:
-        # Assuming you port `get_symmetric_displacement` to JAX
-        p, s, displacement = get_symmetric_displacement(
+        positions, shifts, displacement = get_symmetric_displacement(
             positions=positions,
             unit_shifts=data['unit_shifts'],
             cell=cell,
@@ -110,10 +109,10 @@ def prepare_graph(
             num_graphs=num_graphs,
             batch=data['batch'],
         )
-        data = dict(data)  # copy to avoid mutating input
-        data['positions'], data['shifts'] = p, s
+        data = dict(data)
+        data['positions'] = positions
+        data['shifts'] = shifts
 
-    # Assuming you port `get_edge_vectors_and_lengths` to JAX
     vectors, lengths = get_edge_vectors_and_lengths(
         positions=data['positions'],
         edge_index=data['edge_index'],
