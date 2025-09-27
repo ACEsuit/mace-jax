@@ -305,9 +305,7 @@ class ZBLBasis(hk.Module):
         v_edges = 0.5 * v_edges * envelope
 
         # Aggregate edge potentials per receiver node
-        V_ZBL = scatter_sum(
-            v_edges.squeeze(-1), receiver, dim=0, dim_size=node_attrs.shape[0]
-        )
+        V_ZBL = scatter_sum(v_edges, receiver, dim=0, dim_size=node_attrs.shape[0])
         return jnp.squeeze(V_ZBL, axis=-1)
 
     def __repr__(self):

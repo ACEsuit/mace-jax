@@ -89,6 +89,7 @@ class MACE(hk.Module):
             irreps_in=node_attr_irreps,
             irreps_out=node_feats_irreps,
             cueq_config=cueq_config,
+            name='node_embedding',
         )
         embedding_size = node_feats_irreps.count(Irrep(0, 1))
         if embedding_specs is not None:
@@ -97,6 +98,7 @@ class MACE(hk.Module):
                 base_dim=embedding_size,
                 embedding_specs=embedding_specs,
                 out_dim=embedding_size,
+                name='joint_embedding',
             )
             if use_embedding_readout:
                 self.embedding_readout = LinearReadoutBlock(
@@ -104,6 +106,7 @@ class MACE(hk.Module):
                     Irreps(f'{len(heads)}x0e'),
                     cueq_config,
                     oeq_config,
+                    name='embedding_readout',
                 )
 
         self.radial_embedding = RadialEmbeddingBlock(
@@ -113,10 +116,13 @@ class MACE(hk.Module):
             radial_type=radial_type,
             distance_transform=distance_transform,
             apply_cutoff=apply_cutoff,
+            name='radial_embedding',
         )
         edge_feats_irreps = Irreps(f'{self.radial_embedding.out_dim}x0e')
         if pair_repulsion:
-            self.pair_repulsion_fn = ZBLBasis(p=num_polynomial_cutoff)
+            self.pair_repulsion_fn = ZBLBasis(
+                p=num_polynomial_cutoff, name='pair_repulsion_fn'
+            )
             self.pair_repulsion = True
 
         if not use_so3:
