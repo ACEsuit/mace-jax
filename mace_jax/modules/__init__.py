@@ -1,26 +1,73 @@
+from typing import Callable, Optional
+
+import jax
+
 from .blocks import (
-    InteractionBlock,
+    AtomicEnergiesBlock,
     EquivariantProductBasisBlock,
+    InteractionBlock,
+    LinearDipolePolarReadoutBlock,
+    LinearDipoleReadoutBlock,
     LinearNodeEmbeddingBlock,
     LinearReadoutBlock,
+    NonLinearBiasReadoutBlock,
+    NonLinearDipolePolarReadoutBlock,
+    NonLinearDipoleReadoutBlock,
     NonLinearReadoutBlock,
     RadialEmbeddingBlock,
+    RealAgnosticAttResidualInteractionBlock,
+    RealAgnosticDensityInteractionBlock,
+    RealAgnosticDensityResidualInteractionBlock,
+    RealAgnosticInteractionBlock,
+    RealAgnosticResidualInteractionBlock,
+    RealAgnosticResidualNonLinearInteractionBlock,
     ScaleShiftBlock,
 )
 from .loss import WeightedEnergyForcesStressLoss, uber_loss
-from .models import MACE
+from .models import MACE, ScaleShiftMACE
 from .symmetric_contraction import SymmetricContraction
 
 __all__ = [
-    "InteractionBlock",
-    "EquivariantProductBasisBlock",
-    "LinearNodeEmbeddingBlock",
-    "LinearReadoutBlock",
-    "NonLinearReadoutBlock",
-    "RadialEmbeddingBlock",
-    "ScaleShiftBlock",
-    "WeightedEnergyForcesStressLoss",
-    "uber_loss",
-    "MACE",
-    "SymmetricContraction",
+    'AtomicEnergiesBlock',
+    'InteractionBlock',
+    'EquivariantProductBasisBlock',
+    'LinearNodeEmbeddingBlock',
+    'LinearDipolePolarReadoutBlock',
+    'LinearDipoleReadoutBlock',
+    'LinearReadoutBlock',
+    'NonLinearBiasReadoutBlock',
+    'NonLinearDipolePolarReadoutBlock',
+    'NonLinearDipoleReadoutBlock',
+    'NonLinearReadoutBlock',
+    'RadialEmbeddingBlock',
+    'ScaleShiftBlock',
+    'WeightedEnergyForcesStressLoss',
+    'uber_loss',
+    'MACE',
+    'ScaleShiftMACE',
+    'SymmetricContraction',
 ]
+
+interaction_classes: dict[str, type[InteractionBlock]] = {
+    'RealAgnosticResidualInteractionBlock': RealAgnosticResidualInteractionBlock,
+    'RealAgnosticAttResidualInteractionBlock': RealAgnosticAttResidualInteractionBlock,
+    'RealAgnosticInteractionBlock': RealAgnosticInteractionBlock,
+    'RealAgnosticDensityInteractionBlock': RealAgnosticDensityInteractionBlock,
+    'RealAgnosticDensityResidualInteractionBlock': RealAgnosticDensityResidualInteractionBlock,
+    'RealAgnosticResidualNonLinearInteractionBlock': RealAgnosticResidualNonLinearInteractionBlock,
+}
+
+readout_classes: dict[str, type[LinearReadoutBlock]] = {
+    'LinearReadoutBlock': LinearReadoutBlock,
+    'LinearDipoleReadoutBlock': LinearDipoleReadoutBlock,
+    'NonLinearDipoleReadoutBlock': NonLinearDipoleReadoutBlock,
+    'NonLinearReadoutBlock': NonLinearReadoutBlock,
+    'NonLinearBiasReadoutBlock': NonLinearBiasReadoutBlock,
+}
+
+gate_dict: dict[str, Optional[Callable]] = {
+    'abs': jax.numpy.abs,
+    'tanh': jax.nn.tanh,
+    'silu': jax.nn.silu,
+    'None': None,
+}
