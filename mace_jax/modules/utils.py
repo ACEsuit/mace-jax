@@ -16,7 +16,6 @@ def compute_forces(
         positions: [n_nodes, 3] array of positions
 
     Returns:
-        energy: scalar total energy (sum over graphs if energy_fn returns [n_graphs])
         forces: [n_nodes, 3] array of forces
     """
     # Compute energy and gradient in one pass
@@ -27,27 +26,93 @@ def compute_forces(
     return forces
 
 
+def compute_forces_and_stress(
+    energy_fn: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray],
+    positions: jnp.ndarray,  # [n_nodes, 3]
+    cell: jnp.ndarray,  # [n_graphs, 3, 3]
+    num_graphs: int,
+    batch: jnp.ndarray,  # [n_nodes] with graph indices
+) -> tuple[jnp.ndarray, Optional[jnp.ndarray], Optional[jnp.ndarray], jnp.ndarray]:
+    """
+    JAX equivalent of the PyTorch compute_forces_virials.
+    Computes forces, virials, stress, and returns the per-graph energies.
+
+    Args:
+        energy_fn: function returning per-graph energies [n_graphs]
+        positions: [n_nodes, 3]
+        cell: [n_graphs, 3, 3]
+        num_graphs: int
+        batch: [n_nodes] with graph indices
+    """
+
+    # Define a scalar-valued loss = sum over graphs to mimic grad_outputs=ones_like(...)
+    def energy_displacement_fn(positions, displacement):
+        # Make the displacement symmetric:
+        symmetric_displacement = 0.5 * (
+            displacement + jnp.swapaxes(displacement, -1, -2)
+        )  # shape: [n_graphs, 3, 3]
+
+        # Apply symmetric deformation to positions:
+        deformed_positions = positions + jnp.einsum(
+            'be,bec->bc', positions, symmetric_displacement[batch]
+        )
+
+        return jnp.sum(energy_fn(deformed_positions))
+
+    # Create a zero displacement tensor of shape [num_graphs, 3, 3]
+    displacement = jnp.zeros((num_graphs, 3, 3), dtype=positions.dtype)
+
+    # Compute total energy (scalar) and gradients wrt both inputs
+    grad_pos, grad_disp = jax.grad(energy_displacement_fn, argnums=(0, 1))(
+        positions, displacement
+    )
+
+    # Forces and virials follow the physics convention
+    forces = -grad_pos
+    virials = -grad_disp
+
+    # Stress computation
+    volume = jnp.abs(jnp.linalg.det(cell.reshape(-1, 3, 3))).reshape(-1, 1, 1)
+    stress = virials / volume
+    stress = jnp.where(jnp.abs(stress) < 1e10, stress, jnp.zeros_like(stress))
+
+    return forces, stress
+
+
 def get_outputs(
     energy_fn,
-    positions: jnp.ndarray,
+    data: dict[str, jnp.ndarray],
     compute_force: bool = True,
+    compute_stress: bool = False,
 ) -> tuple[
+    Optional[jnp.ndarray],  # energy
     Optional[jnp.ndarray],  # forces
-    Optional[jnp.ndarray],  # virials
     Optional[jnp.ndarray],  # stress
-    Optional[jnp.ndarray],  # hessian
-    Optional[jnp.ndarray],  # edge_forces
 ]:
+    positions = data['positions']
+    cell = data['cell']
+    num_graphs = int(jnp.size(data['ptr']) - 1)
+    batch = data['batch']
+
     total_energy = energy_fn(positions)
     forces = None
+    stress = None
 
-    if compute_force:
+    if compute_force and not compute_stress:
         forces = compute_forces(
             energy_fn=energy_fn,
             positions=positions,
         )
+    elif compute_stress:
+        forces, stress = compute_forces_and_stress(
+            energy_fn=energy_fn,
+            positions=positions,
+            cell=cell,
+            num_graphs=num_graphs,
+            batch=batch,
+        )
 
-    return total_energy, forces
+    return total_energy, forces, stress
 
 
 def get_edge_vectors_and_lengths(
@@ -132,25 +197,31 @@ def add_output_interface(cls=None):
 
     def wrap(cls):
         def __call__(
-            self, data: dict[str, jnp.ndarray], compute_force: bool = True
+            self,
+            data: dict[str, jnp.ndarray],
+            compute_force: bool = True,
+            compute_stress: bool = False,
         ) -> dict[str, Optional[jnp.ndarray]]:
-            def energy_fn(pos):
+            def energy_fn(positions):
                 # Replace the positions in `data` with `pos` before recomputing
                 new_data = dict(data)
-                new_data['positions'] = pos
+                new_data['positions'] = positions
+
                 return self._energy_fn(
                     new_data,
                 )
 
-            total_energy, forces = get_outputs(
+            total_energy, forces, stress = get_outputs(
                 energy_fn=energy_fn,
-                positions=data['positions'],
+                data=data,
                 compute_force=compute_force,
+                compute_stress=compute_stress,
             )
 
             return {
                 'energy': total_energy,
                 'forces': forces,
+                'stress': stress,
             }
 
         # Move __call__ to _energy_fn
