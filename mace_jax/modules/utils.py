@@ -30,8 +30,10 @@ def compute_forces_and_stress(
     energy_fn: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray],
     positions: jnp.ndarray,  # [n_nodes, 3]
     cell: jnp.ndarray,  # [n_graphs, 3, 3]
-    num_graphs: int,
+    unit_shifts: jnp.ndarray,  # [n_edges, 3]
+    edge_index: jnp.ndarray,  # [2, n_edges]
     batch: jnp.ndarray,  # [n_nodes] with graph indices
+    num_graphs: int,
 ) -> tuple[jnp.ndarray, Optional[jnp.ndarray], Optional[jnp.ndarray], jnp.ndarray]:
     """
     JAX equivalent of the PyTorch compute_forces_virials.
@@ -56,8 +58,17 @@ def compute_forces_and_stress(
         deformed_positions = positions + jnp.einsum(
             'be,bec->bc', positions, symmetric_displacement[batch]
         )
+        cell_reshaped = cell.reshape(-1, 3, 3)  # [n_graphs, 3, 3]
+        cell_reshaped = cell_reshaped + jnp.matmul(
+            cell_reshaped, symmetric_displacement
+        )  # [n_graphs, 3, 3]
+        shifts = jnp.einsum(
+            'be,bec->bc',
+            unit_shifts,  # [n_edges, 3]
+            cell_reshaped[batch[edge_index[0]]],  # [n_edges, 3, 3]
+        )  # → [n_edges, 3]
 
-        return jnp.sum(energy_fn(deformed_positions))
+        return jnp.sum(energy_fn(deformed_positions, shifts=shifts))
 
     # Create a zero displacement tensor of shape [num_graphs, 3, 3]
     displacement = jnp.zeros((num_graphs, 3, 3), dtype=positions.dtype)
@@ -73,7 +84,7 @@ def compute_forces_and_stress(
 
     # Stress computation
     volume = jnp.abs(jnp.linalg.det(cell.reshape(-1, 3, 3))).reshape(-1, 1, 1)
-    stress = virials / volume
+    stress = -virials / volume
     stress = jnp.where(jnp.abs(stress) < 1e10, stress, jnp.zeros_like(stress))
 
     return forces, stress
@@ -91,8 +102,10 @@ def get_outputs(
 ]:
     positions = data['positions']
     cell = data['cell']
-    num_graphs = int(jnp.size(data['ptr']) - 1)
+    unit_shifts = data['unit_shifts']
+    edge_index = data['edge_index']
     batch = data['batch']
+    num_graphs = int(jnp.size(data['ptr']) - 1)
 
     total_energy = energy_fn(positions)
     forces = None
@@ -108,8 +121,10 @@ def get_outputs(
             energy_fn=energy_fn,
             positions=positions,
             cell=cell,
-            num_graphs=num_graphs,
+            unit_shifts=unit_shifts,
+            edge_index=edge_index,
             batch=batch,
+            num_graphs=num_graphs,
         )
 
     return total_energy, forces, stress
@@ -202,10 +217,13 @@ def add_output_interface(cls=None):
             compute_force: bool = True,
             compute_stress: bool = False,
         ) -> dict[str, Optional[jnp.ndarray]]:
-            def energy_fn(positions):
+            def energy_fn(positions, shifts=None):
                 # Replace the positions in `data` with `pos` before recomputing
                 new_data = dict(data)
                 new_data['positions'] = positions
+
+                if shifts is not None:
+                    new_data['shifts'] = shifts
 
                 return self._energy_fn(
                     new_data,
