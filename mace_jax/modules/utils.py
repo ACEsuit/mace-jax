@@ -1,47 +1,53 @@
-from typing import Any, NamedTuple, Optional
+from typing import Any, Callable, NamedTuple, Optional
 
+import jax
 import jax.numpy as jnp
 
 
-def get_symmetric_displacement(
+def compute_forces(
+    energy_fn: Callable[[jnp.ndarray], jnp.ndarray],
     positions: jnp.ndarray,
-    unit_shifts: jnp.ndarray,
-    cell: Optional[jnp.ndarray],
-    edge_index: jnp.ndarray,
-    num_graphs: int,
-    batch: jnp.ndarray,
-) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    if cell is None:
-        # shape: (num_graphs * 3, 3)
-        cell = jnp.zeros((num_graphs * 3, 3), dtype=positions.dtype)
+) -> jnp.ndarray:
+    """
+    Compute total energy and forces as the negative gradient of energy w.r.t. positions.
 
-    sender = edge_index[0]
+    Args:
+        energy_fn: function taking positions -> energy (scalar or [n_graphs])
+        positions: [n_nodes, 3] array of positions
 
-    displacement = jnp.zeros((num_graphs, 3, 3), dtype=positions.dtype)
+    Returns:
+        energy: scalar total energy (sum over graphs if energy_fn returns [n_graphs])
+        forces: [n_nodes, 3] array of forces
+    """
+    # Compute energy and gradient in one pass
+    grad_pos = jax.grad(lambda pos: jnp.sum(energy_fn(pos)))(positions)
 
-    # symmetric version: (num_graphs, 3, 3)
-    symmetric_displacement = 0.5 * (displacement + jnp.swapaxes(displacement, -1, -2))
+    # Forces = -∂E/∂R
+    forces = -grad_pos
+    return forces
 
-    # apply symmetric displacement to positions
-    # "be,bec->bc": positions (N,3), sym_disp[batch] (N,3,3) -> (N,3)
-    positions = positions + jnp.einsum(
-        'be,bec->bc', positions, symmetric_displacement[batch]
-    )
 
-    # reshape cell to (-1,3,3) like in torch.view
-    cell = cell.reshape(-1, 3, 3)
+def get_outputs(
+    energy_fn,
+    positions: jnp.ndarray,
+    compute_force: bool = True,
+) -> tuple[
+    Optional[jnp.ndarray],  # forces
+    Optional[jnp.ndarray],  # virials
+    Optional[jnp.ndarray],  # stress
+    Optional[jnp.ndarray],  # hessian
+    Optional[jnp.ndarray],  # edge_forces
+]:
+    total_energy = energy_fn(positions)
+    forces = None
 
-    # update cell
-    cell = cell + jnp.matmul(cell, symmetric_displacement)
+    if compute_force:
+        forces = compute_forces(
+            energy_fn=energy_fn,
+            positions=positions,
+        )
 
-    # shifts: "be,bec->bc"
-    shifts = jnp.einsum(
-        'be,bec->bc',
-        unit_shifts,
-        cell[batch[sender]],
-    )
-
-    return positions, shifts, displacement
+    return total_energy, forces
 
 
 def get_edge_vectors_and_lengths(
@@ -85,9 +91,6 @@ class GraphContext(NamedTuple):
 
 def prepare_graph(
     data: dict[str, jnp.ndarray],
-    compute_virials: bool = False,
-    compute_stress: bool = False,
-    compute_displacement: bool = False,
 ) -> GraphContext:
     if 'head' in data:
         node_heads = data['head'][data['batch']]
@@ -99,19 +102,6 @@ def prepare_graph(
     num_atoms_arange = jnp.arange(positions.shape[0])
     num_graphs = int(data['ptr'].shape[0] - 1)
     displacement = jnp.zeros((num_graphs, 3, 3), dtype=positions.dtype)
-
-    if compute_virials or compute_stress or compute_displacement:
-        positions, shifts, displacement = get_symmetric_displacement(
-            positions=positions,
-            unit_shifts=data['unit_shifts'],
-            cell=cell,
-            edge_index=data['edge_index'],
-            num_graphs=num_graphs,
-            batch=data['batch'],
-        )
-        data = dict(data)
-        data['positions'] = positions
-        data['shifts'] = shifts
 
     vectors, lengths = get_edge_vectors_and_lengths(
         positions=data['positions'],

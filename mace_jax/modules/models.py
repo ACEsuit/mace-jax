@@ -25,6 +25,7 @@ from .blocks import (
     ScaleShiftBlock,
 )
 from .utils import (
+    get_outputs,
     prepare_graph,
 )
 
@@ -142,7 +143,6 @@ class MACE(hk.Module):
         interaction_irreps = (sh_irreps_inter * num_features).sort()[0].simplify()
         interaction_irreps_first = (sh_irreps * num_features).sort()[0].simplify()
 
-        # TODO
         self.spherical_harmonics = SphericalHarmonics(
             sh_irreps,
             normalize=True,
@@ -167,7 +167,6 @@ class MACE(hk.Module):
             oeq_config=oeq_config,
             name='interactions_0',
         )
-        # TODO: Check torch.ModuleList -> List
         self.interactions = [inter]
 
         # Use the appropriate self connection at the first layer for proper E0
@@ -188,10 +187,8 @@ class MACE(hk.Module):
             use_agnostic_product=use_agnostic_product,
             name='products_0',
         )
-        # TODO: Check torch.ModuleList -> List
         self.products = [prod]
 
-        # TODO: Check torch.ModuleList -> List
         self.readouts = []
         if not use_last_readout_only:
             self.readouts.append(
@@ -263,33 +260,15 @@ class MACE(hk.Module):
                     )
                 )
 
-    def __call__(
+    def _energy_fn(
         self,
         data: dict[str, jnp.ndarray],
-        training: bool = False,
-        compute_force: bool = True,
-        compute_virials: bool = False,
-        compute_stress: bool = False,
-        compute_displacement: bool = False,
-        compute_hessian: bool = False,
-        compute_edge_forces: bool = False,
-        compute_atomic_stresses: bool = False,
     ) -> dict[str, Optional[jnp.ndarray]]:
-        # Setup
-        # TODO
-        ctx = prepare_graph(
-            data,
-            compute_virials=compute_virials,
-            compute_stress=compute_stress,
-            compute_displacement=compute_displacement,
-        )
+        ctx = prepare_graph(data)
         num_atoms_arange = jnp.asarray(ctx.num_atoms_arange, dtype=jnp.int64)
         num_graphs = ctx.num_graphs
-        displacement = ctx.displacement
-        positions = ctx.positions
         vectors = ctx.vectors
         lengths = ctx.lengths
-        cell = ctx.cell
         node_heads = jnp.asarray(ctx.node_heads, dtype=jnp.int64)
 
         # Atomic energies
@@ -370,17 +349,29 @@ class MACE(hk.Module):
 
         contributions = jnp.stack(energies, axis=-1)
         total_energy = jnp.sum(contributions, axis=-1)
-        node_energy = jnp.sum(jnp.stack(node_energies_list, axis=-1), axis=-1)
-        node_feats_out = jnp.concatenate(node_feats_concat, axis=-1)
 
-        # TODO: Compute full output set
+        return total_energy
+
+    def __call__(
+        self, data: dict[str, jnp.ndarray], compute_force: bool = True
+    ) -> dict[str, Optional[jnp.ndarray]]:
+        def energy_fn(pos):
+            # Replace the positions in `data` with `pos` before recomputing
+            new_data = dict(data)
+            new_data['positions'] = pos
+            return self._energy_fn(
+                new_data,
+            )
+
+        total_energy, forces = get_outputs(
+            energy_fn=energy_fn,
+            positions=data['positions'],
+            compute_force=compute_force,
+        )
 
         return {
             'energy': total_energy,
-            'node_energy': node_energy,
-            'contributions': contributions,
-            'displacement': displacement,
-            'node_feats': node_feats_out,
+            'forces': forces,
         }
 
 
@@ -398,34 +389,16 @@ class ScaleShiftMACE(MACE):
             scale=atomic_inter_scale, shift=atomic_inter_shift
         )
 
-    def __call__(
+    def _energy_fn(
         self,
         data: dict[str, jnp.ndarray],
-        training: bool = False,
-        compute_force: bool = True,
-        compute_virials: bool = False,
-        compute_stress: bool = False,
-        compute_displacement: bool = False,
-        compute_hessian: bool = False,
-        compute_edge_forces: bool = False,
-        compute_atomic_stresses: bool = False,
     ) -> dict[str, Optional[jnp.ndarray]]:
-        # Setup
-        # TODO
-        ctx = prepare_graph(
-            data,
-            compute_virials=compute_virials,
-            compute_stress=compute_stress,
-            compute_displacement=compute_displacement,
-        )
+        ctx = prepare_graph(data)
 
         num_atoms_arange = ctx.num_atoms_arange.astype(jnp.int64)
         num_graphs = ctx.num_graphs
-        displacement = ctx.displacement
-        positions = ctx.positions
         vectors = ctx.vectors
         lengths = ctx.lengths
-        cell = ctx.cell
         node_heads = ctx.node_heads.astype(jnp.int64)
 
         # Atomic energies
@@ -501,20 +474,30 @@ class ScaleShiftMACE(MACE):
                 ]
             )
 
-        node_feats_out = jnp.concatenate(node_feats_list, axis=-1)
         node_inter_es = jnp.sum(jnp.stack(node_es_list, axis=0), axis=0)
         node_inter_es = self.scale_shift(node_inter_es, node_heads)
         inter_e = scatter_sum(node_inter_es, data['batch'], dim=-1, dim_size=num_graphs)
 
-        total_energy = e0 + inter_e
-        node_energy = node_e0 + node_inter_es
+        return e0 + inter_e
 
-        # TODO: Compute full output set
+    def __call__(
+        self, data: dict[str, jnp.ndarray], compute_force: bool = True
+    ) -> dict[str, Optional[jnp.ndarray]]:
+        def energy_fn(pos):
+            # Replace the positions in `data` with `pos` before recomputing
+            new_data = dict(data)
+            new_data['positions'] = pos
+            return self._energy_fn(
+                new_data,
+            )
+
+        total_energy, forces = get_outputs(
+            energy_fn=energy_fn,
+            positions=data['positions'],
+            compute_force=compute_force,
+        )
 
         return {
             'energy': total_energy,
-            'node_energy': node_energy,
-            'interaction_energy': inter_e,
-            'displacement': displacement,
-            'node_feats': node_feats_out,
+            'forces': forces,
         }
