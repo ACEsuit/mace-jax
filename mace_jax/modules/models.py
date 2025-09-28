@@ -25,13 +25,14 @@ from .blocks import (
     ScaleShiftBlock,
 )
 from .utils import (
-    get_outputs,
+    add_output_interface,
     prepare_graph,
 )
 
 
 @register_import('mace.modules.models.Mace')
 @auto_import_from_torch(separator='~')
+@add_output_interface
 class MACE(hk.Module):
     def __init__(
         self,
@@ -260,7 +261,7 @@ class MACE(hk.Module):
                     )
                 )
 
-    def _energy_fn(
+    def __call__(
         self,
         data: dict[str, jnp.ndarray],
     ) -> dict[str, Optional[jnp.ndarray]]:
@@ -352,31 +353,10 @@ class MACE(hk.Module):
 
         return total_energy
 
-    def __call__(
-        self, data: dict[str, jnp.ndarray], compute_force: bool = True
-    ) -> dict[str, Optional[jnp.ndarray]]:
-        def energy_fn(pos):
-            # Replace the positions in `data` with `pos` before recomputing
-            new_data = dict(data)
-            new_data['positions'] = pos
-            return self._energy_fn(
-                new_data,
-            )
-
-        total_energy, forces = get_outputs(
-            energy_fn=energy_fn,
-            positions=data['positions'],
-            compute_force=compute_force,
-        )
-
-        return {
-            'energy': total_energy,
-            'forces': forces,
-        }
-
 
 @register_import('mace.modules.models.ScaleShiftMACE')
 @auto_import_from_torch(separator='~')
+@add_output_interface
 class ScaleShiftMACE(MACE):
     def __init__(
         self,
@@ -389,7 +369,7 @@ class ScaleShiftMACE(MACE):
             scale=atomic_inter_scale, shift=atomic_inter_shift
         )
 
-    def _energy_fn(
+    def __call__(
         self,
         data: dict[str, jnp.ndarray],
     ) -> dict[str, Optional[jnp.ndarray]]:
@@ -479,25 +459,3 @@ class ScaleShiftMACE(MACE):
         inter_e = scatter_sum(node_inter_es, data['batch'], dim=-1, dim_size=num_graphs)
 
         return e0 + inter_e
-
-    def __call__(
-        self, data: dict[str, jnp.ndarray], compute_force: bool = True
-    ) -> dict[str, Optional[jnp.ndarray]]:
-        def energy_fn(pos):
-            # Replace the positions in `data` with `pos` before recomputing
-            new_data = dict(data)
-            new_data['positions'] = pos
-            return self._energy_fn(
-                new_data,
-            )
-
-        total_energy, forces = get_outputs(
-            energy_fn=energy_fn,
-            positions=data['positions'],
-            compute_force=compute_force,
-        )
-
-        return {
-            'energy': total_energy,
-            'forces': forces,
-        }

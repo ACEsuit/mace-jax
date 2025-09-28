@@ -121,3 +121,43 @@ def prepare_graph(
         node_heads=node_heads,
         interaction_kwargs=ikw,
     )
+
+
+def add_output_interface(cls=None):
+    """
+    Decorator that injects a __call__ method into a class that already defines
+    __call_energy__(self, data, training=False) -> dict with at least 'energy'
+    and possibly other intermediate values.
+    """
+
+    def wrap(cls):
+        def __call__(
+            self, data: dict[str, jnp.ndarray], compute_force: bool = True
+        ) -> dict[str, Optional[jnp.ndarray]]:
+            def energy_fn(pos):
+                # Replace the positions in `data` with `pos` before recomputing
+                new_data = dict(data)
+                new_data['positions'] = pos
+                return self._energy_fn(
+                    new_data,
+                )
+
+            total_energy, forces = get_outputs(
+                energy_fn=energy_fn,
+                positions=data['positions'],
+                compute_force=compute_force,
+            )
+
+            return {
+                'energy': total_energy,
+                'forces': forces,
+            }
+
+        # Move __call__ to _energy_fn
+        setattr(cls, '_energy_fn', getattr(cls, '__call__'))
+        # Attach the new __call__
+        setattr(cls, '__call__', __call__)
+        return cls
+
+    # Allow decorator to be used with or without parentheses
+    return wrap if cls is None else wrap(cls)
