@@ -1,8 +1,9 @@
 import logging
 from collections import defaultdict, namedtuple
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from random import shuffle
-from typing import IO, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import IO, Dict, Optional, Tuple, Union
 
 import ase.data
 import ase.io
@@ -22,7 +23,7 @@ Cell = np.ndarray  # [3,3]
 Stress = np.ndarray  # [3,3]
 Pbc = tuple  # (3,)
 
-DEFAULT_CONFIG_TYPE = "Default"
+DEFAULT_CONFIG_TYPE = 'Default'
 DEFAULT_CONFIG_TYPE_WEIGHTS = {DEFAULT_CONFIG_TYPE: 1.0}
 
 
@@ -40,12 +41,12 @@ class Configuration:
     config_type: Optional[str] = DEFAULT_CONFIG_TYPE  # config_type of config
 
 
-Configurations = List[Configuration]
+Configurations = list[Configuration]
 
 
 def random_train_valid_split(
     items: Sequence, valid_num: int, seed: int
-) -> Tuple[List, List]:
+) -> Tuple[list, list]:
     size = len(items)
     train_size = size - valid_num
 
@@ -61,9 +62,9 @@ def random_train_valid_split(
 
 def config_from_atoms(
     atoms: ase.Atoms,
-    energy_key="energy",
-    forces_key="forces",
-    stress_key="stress",
+    energy_key='energy',
+    forces_key='forces',
+    stress_key='stress',
     config_type_weights: Dict[str, float] = None,
     prefactor_stress: float = 1.0,
     remap_stress: np.ndarray = None,
@@ -84,7 +85,7 @@ def config_from_atoms(
         if remap_stress is not None:
             remap_stress = np.asarray(remap_stress)
             assert remap_stress.shape == (3, 3)
-            assert remap_stress.dtype.kind == "i"
+            assert remap_stress.dtype.kind == 'i'
             stress = stress.flatten()[remap_stress]
 
         assert stress.shape == (3, 3)
@@ -103,7 +104,7 @@ def config_from_atoms(
     pbc = tuple(atoms.get_pbc())
     cell = np.array(atoms.get_cell())
     assert np.linalg.det(cell) >= 0.0
-    config_type = atoms.info.get("config_type", "Default")
+    config_type = atoms.info.get('config_type', 'Default')
     weight = config_type_weights.get(config_type, 1.0)
     return Configuration(
         atomic_numbers=atomic_numbers,
@@ -120,7 +121,7 @@ def config_from_atoms(
 
 def test_config_types(
     test_configs: Configurations,
-) -> List[Tuple[Optional[str], List[Configuration]]]:
+) -> list[Tuple[Optional[str], list[Configuration]]]:
     """Split test set based on config_type-s"""
     test_by_ct = defaultdict(list)
     for conf in test_configs:
@@ -131,21 +132,21 @@ def test_config_types(
 def load_from_xyz(
     file_or_path: Union[str, IO],
     config_type_weights: Dict = None,
-    energy_key: str = "energy",
-    forces_key: str = "forces",
-    stress_key: str = "stress",
+    energy_key: str = 'energy',
+    forces_key: str = 'forces',
+    stress_key: str = 'stress',
     extract_atomic_energies: bool = False,
     num_configs: int = None,
     prefactor_stress: float = 1.0,
     remap_stress: np.ndarray = None,
 ) -> Tuple[Dict[int, float], Configurations]:
     if num_configs is None:
-        atoms_list = ase.io.read(file_or_path, format="extxyz", index=":")
+        atoms_list = ase.io.read(file_or_path, format='extxyz', index=':')
     else:
-        atoms_list = ase.io.read(file_or_path, format="extxyz", index=f":{num_configs}")
+        atoms_list = ase.io.read(file_or_path, format='extxyz', index=f':{num_configs}')
         if len(atoms_list) < num_configs:
             logging.warning(
-                f"Only {len(atoms_list)} configurations found. Expected at least {num_configs}."
+                f'Only {len(atoms_list)} configurations found. Expected at least {num_configs}.'
             )
 
     if not isinstance(atoms_list, list):
@@ -158,7 +159,7 @@ def load_from_xyz(
         for idx, atoms in enumerate(atoms_list):
             if (
                 len(atoms) == 1
-                and getattr(atoms, "config_type", None) == "IsolatedAtom"
+                and getattr(atoms, 'config_type', None) == 'IsolatedAtom'
             ):
                 if energy_key in atoms.info.keys():
                     atomic_energies_dict[atoms.get_atomic_numbers()[0]] = atoms.info[
@@ -167,13 +168,13 @@ def load_from_xyz(
                 else:
                     logging.warning(
                         f"Configuration '{idx}' is marked as 'IsolatedAtom' "
-                        "but does not contain an energy."
+                        'but does not contain an energy.'
                     )
             else:
                 atoms_without_iso_atoms.append(atoms)
 
         if len(atomic_energies_dict) > 0:
-            logging.info("Using isolated atom energies from training file")
+            logging.info('Using isolated atom energies from training file')
 
         atoms_list = atoms_without_iso_atoms
 
@@ -206,7 +207,7 @@ class AtomicNumberTable:
         return len(self.zs)
 
     def __str__(self):
-        return f"AtomicNumberTable: {tuple(s for s in self.zs)}"
+        return f'AtomicNumberTable: {tuple(s for s in self.zs)}'
 
     def index_to_z(self, index: int) -> int:
         return self.zs[index]
@@ -233,7 +234,7 @@ def atomic_numbers_to_indices(
 
 
 def compute_average_E0s(
-    graphs: List[jraph.GraphsTuple], z_table: AtomicNumberTable
+    graphs: list[jraph.GraphsTuple], z_table: AtomicNumberTable
 ) -> Dict[int, float]:
     """
     Function to compute the average interaction energy of each chemical element
@@ -254,7 +255,7 @@ def compute_average_E0s(
             atomic_energies_dict[z] = E0s[i]
     except np.linalg.LinAlgError:
         logging.warning(
-            "Failed to compute E0s using least squares regression, using the same for all atoms"
+            'Failed to compute E0s using least squares regression, using the same for all atoms'
         )
         atomic_energies_dict = {}
         for i, z in enumerate(z_table.zs):
@@ -263,7 +264,7 @@ def compute_average_E0s(
 
 
 def compute_average_E0s_from_species(
-    graphs: List[jraph.GraphsTuple], num_species: int
+    graphs: list[jraph.GraphsTuple], num_species: int
 ) -> Dict[int, float]:
     """
     Function to compute the average interaction energy of each chemical element
@@ -280,15 +281,15 @@ def compute_average_E0s_from_species(
         E0s = np.linalg.lstsq(A, B, rcond=None)[0]
     except np.linalg.LinAlgError:
         logging.warning(
-            "Failed to compute E0s using least squares regression, using the same for all atoms"
+            'Failed to compute E0s using least squares regression, using the same for all atoms'
         )
         E0s = np.zeros(num_species)
     return E0s
 
 
-GraphNodes = namedtuple("Nodes", ["positions", "forces", "species"])
-GraphEdges = namedtuple("Edges", ["shifts"])
-GraphGlobals = namedtuple("Globals", ["cell", "energy", "stress", "weight"])
+GraphNodes = namedtuple('Nodes', ['positions', 'forces', 'species'])
+GraphEdges = namedtuple('Edges', ['shifts'])
+GraphGlobals = namedtuple('Globals', ['cell', 'energy', 'stress', 'weight'])
 
 
 def graph_from_configuration(
@@ -329,7 +330,7 @@ def graph_from_configuration(
 class GraphDataLoader:
     def __init__(
         self,
-        graphs: List[jraph.GraphsTuple],
+        graphs: list[jraph.GraphsTuple],
         n_node: int,
         n_edge: int,
         n_graph: int,
@@ -358,7 +359,7 @@ class GraphDataLoader:
         ]
         if len(keep_graphs) != len(self.graphs):
             logging.warning(
-                f"Discarded {len(self.graphs) - len(keep_graphs)} graphs due to size constraints."
+                f'Discarded {len(self.graphs) - len(keep_graphs)} graphs due to size constraints.'
             )
         self.graphs = keep_graphs
 
@@ -391,7 +392,7 @@ class GraphDataLoader:
 
     def __len__(self):
         if self.shuffle:
-            raise NotImplementedError("Cannot compute length of shuffled data loader.")
+            raise NotImplementedError('Cannot compute length of shuffled data loader.')
         return self.approx_length()
 
     def approx_length(self):
@@ -424,7 +425,7 @@ class GraphDataLoader:
             n_mantissa_bits=self.n_mantissa_bits,
         )
 
-    def replace_graphs(self, graphs: List[jraph.GraphsTuple]):
+    def replace_graphs(self, graphs: list[jraph.GraphsTuple]):
         return GraphDataLoader(
             graphs=graphs,
             n_node=self.n_node,

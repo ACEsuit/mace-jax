@@ -1,326 +1,461 @@
-import functools
-import math
-from typing import Callable, Optional, Union
+from typing import Any, Callable, Optional, Union
 
-import e3nn_jax as e3nn
 import haiku as hk
-import jax
 import jax.numpy as jnp
+import numpy as np
+from e3nn_jax import Irrep, Irreps
 
-from ..tools import safe_norm
+from mace_jax.e3nn.o3 import SphericalHarmonics
+from mace_jax.haiku.torch import (
+    auto_import_from_torch,
+    register_import,
+)
+from mace_jax.modules.embeddings import GenericJointEmbedding
+from mace_jax.modules.radial import ZBLBasis
+from mace_jax.tools.scatter import scatter_sum
+
 from .blocks import (
+    AtomicEnergiesBlock,
     EquivariantProductBasisBlock,
     InteractionBlock,
     LinearNodeEmbeddingBlock,
     LinearReadoutBlock,
     NonLinearReadoutBlock,
     RadialEmbeddingBlock,
+    ScaleShiftBlock,
+)
+from .utils import (
+    add_output_interface,
+    prepare_graph,
 )
 
-try:
-    from profile_nn_jax import profile
-except ImportError:
 
-    def profile(_, x, __=None):
-        return x
-
-
+@register_import('mace.modules.models.Mace')
+@auto_import_from_torch(separator='~')
+@add_output_interface
 class MACE(hk.Module):
     def __init__(
         self,
-        *,
-        output_irreps: e3nn.Irreps,  # Irreps of the output, default 1x0e
         r_max: float,
-        num_interactions: int,  # Number of interactions (layers), default 2
-        hidden_irreps: e3nn.Irreps,  # 256x0e or 128x0e + 128x1o
-        readout_mlp_irreps: e3nn.Irreps,  # Hidden irreps of the MLP in last readout, default 16x0e
+        num_bessel: int,
+        num_polynomial_cutoff: int,
+        max_ell: int,
+        interaction_cls: type[InteractionBlock],
+        interaction_cls_first: type[InteractionBlock],
+        num_interactions: int,
+        num_elements: int,
+        hidden_irreps: Irreps,
+        MLP_irreps: Irreps,
+        atomic_energies: np.ndarray,
         avg_num_neighbors: float,
-        num_species: int,
-        num_features: int = None,  # Number of features per node, default gcd of hidden_irreps multiplicities
-        avg_r_min: float = None,
-        radial_basis: Callable[[jnp.ndarray], jnp.ndarray],
-        radial_envelope: Callable[[jnp.ndarray], jnp.ndarray],
-        # Number of zero derivatives at small and large distances, default 4 and 2
-        # If both are None, it uses a smooth C^inf envelope function
-        max_ell: int = 3,  # Max spherical harmonic degree, default 3
-        epsilon: Optional[float] = None,
-        correlation: int = 3,  # Correlation order at each layer (~ node_features^correlation), default 3
-        gate: Callable = jax.nn.silu,  # activation function
-        soft_normalization: Optional[float] = None,
-        symmetric_tensor_product_basis: bool = True,
-        off_diagonal: bool = False,
-        interaction_irreps: Union[str, e3nn.Irreps] = "o3_restricted",  # or o3_full
-        node_embedding: hk.Module = LinearNodeEmbeddingBlock,
-        skip_connection_first_layer: bool = False,
+        atomic_numbers: list[int],
+        correlation: Union[int, list[int]],
+        gate: Optional[Callable],
+        pair_repulsion: bool = False,
+        apply_cutoff: bool = True,
+        use_reduced_cg: bool = True,
+        use_so3: bool = False,
+        use_agnostic_product: bool = False,
+        use_last_readout_only: bool = False,
+        use_embedding_readout: bool = False,
+        distance_transform: str = 'None',
+        edge_irreps: Optional[Irreps] = None,
+        radial_MLP: Optional[list[int]] = None,
+        radial_type: Optional[str] = 'bessel',
+        heads: Optional[list[str]] = None,
+        cueq_config: Optional[dict[str, Any]] = None,
+        embedding_specs: Optional[dict[str, Any]] = None,
+        oeq_config: Optional[dict[str, Any]] = None,
+        readout_cls: Optional[type[NonLinearReadoutBlock]] = NonLinearReadoutBlock,
     ):
         super().__init__()
+        self.atomic_numbers = jnp.array(atomic_numbers, dtype=jnp.int64)
+        self.r_max = float(r_max)
+        self.num_interactions = int(num_interactions)
+        if heads is None:
+            heads = ['Default']
+        self.heads = heads
+        if isinstance(correlation, int):
+            correlation = [correlation] * num_interactions
+        self.apply_cutoff = apply_cutoff
+        self.edge_irreps = edge_irreps
+        self.use_reduced_cg = use_reduced_cg
+        self.use_agnostic_product = use_agnostic_product
+        self.use_so3 = use_so3
+        self.use_last_readout_only = use_last_readout_only
 
-        output_irreps = e3nn.Irreps(output_irreps)
-        hidden_irreps = e3nn.Irreps(hidden_irreps)
-        readout_mlp_irreps = e3nn.Irreps(readout_mlp_irreps)
-
-        if num_features is None:
-            self.num_features = functools.reduce(
-                math.gcd, (mul for mul, _ in hidden_irreps)
-            )
-            self.hidden_irreps = e3nn.Irreps(
-                [(mul // self.num_features, ir) for mul, ir in hidden_irreps]
-            )
-        else:
-            self.num_features = num_features
-            self.hidden_irreps = hidden_irreps
-
-        if interaction_irreps == "o3_restricted":
-            self.interaction_irreps = e3nn.Irreps.spherical_harmonics(max_ell)
-        elif interaction_irreps == "o3_full":
-            self.interaction_irreps = e3nn.Irreps(e3nn.Irrep.iterator(max_ell))
-        else:
-            self.interaction_irreps = e3nn.Irreps(interaction_irreps)
-
-        self.r_max = r_max
-        self.correlation = correlation
-        self.avg_num_neighbors = avg_num_neighbors
-        self.epsilon = epsilon
-        self.readout_mlp_irreps = readout_mlp_irreps
-        self.activation = gate
-        self.num_interactions = num_interactions
-        self.output_irreps = output_irreps
-        self.num_species = num_species
-        self.symmetric_tensor_product_basis = symmetric_tensor_product_basis
-        self.off_diagonal = off_diagonal
-        self.max_ell = max_ell
-        self.soft_normalization = soft_normalization
-        self.skip_connection_first_layer = skip_connection_first_layer
-
-        # Embeddings
-        self.node_embedding = node_embedding(
-            self.num_species, self.num_features * self.hidden_irreps
+        # Embedding
+        node_attr_irreps = Irreps([(num_elements, (0, 1))])
+        node_feats_irreps = Irreps([(hidden_irreps.count(Irrep(0, 1)), (0, 1))])
+        self.node_embedding = LinearNodeEmbeddingBlock(
+            irreps_in=node_attr_irreps,
+            irreps_out=node_feats_irreps,
+            cueq_config=cueq_config,
+            name='node_embedding',
         )
+        embedding_size = node_feats_irreps.count(Irrep(0, 1))
+        if embedding_specs is not None:
+            self.embedding_specs = embedding_specs
+            self.joint_embedding = GenericJointEmbedding(
+                base_dim=embedding_size,
+                embedding_specs=embedding_specs,
+                out_dim=embedding_size,
+                name='joint_embedding',
+            )
+            if use_embedding_readout:
+                self.embedding_readout = LinearReadoutBlock(
+                    node_feats_irreps,
+                    Irreps(f'{len(heads)}x0e'),
+                    cueq_config,
+                    oeq_config,
+                    name='embedding_readout',
+                )
+
         self.radial_embedding = RadialEmbeddingBlock(
             r_max=r_max,
-            avg_r_min=avg_r_min,
-            basis_functions=radial_basis,
-            envelope_function=radial_envelope,
+            num_bessel=num_bessel,
+            num_polynomial_cutoff=num_polynomial_cutoff,
+            radial_type=radial_type,
+            distance_transform=distance_transform,
+            apply_cutoff=apply_cutoff,
+            name='radial_embedding',
         )
+        edge_feats_irreps = Irreps(f'{self.radial_embedding.out_dim}x0e')
+        if pair_repulsion:
+            self.pair_repulsion_fn = ZBLBasis(
+                p=num_polynomial_cutoff, name='pair_repulsion_fn'
+            )
+            self.pair_repulsion = True
+
+        if not use_so3:
+            sh_irreps = Irreps.spherical_harmonics(max_ell)
+        else:
+            sh_irreps = Irreps.spherical_harmonics(max_ell, p=1)
+        num_features = hidden_irreps.count(Irrep(0, 1))
+
+        # interaction_irreps = (sh_irreps * num_features).sort()[0].simplify()
+        def generate_irreps(l):
+            str_irrep = '+'.join([f'1x{i}e+1x{i}o' for i in range(l + 1)])
+            return Irreps(str_irrep)
+
+        sh_irreps_inter = sh_irreps
+        if hidden_irreps.count(Irrep(0, -1)) > 0:
+            sh_irreps_inter = generate_irreps(max_ell)
+        interaction_irreps = (sh_irreps_inter * num_features).sort()[0].simplify()
+        interaction_irreps_first = (sh_irreps * num_features).sort()[0].simplify()
+
+        self.spherical_harmonics = SphericalHarmonics(
+            sh_irreps,
+            normalize=True,
+            normalization='component',
+            name='spherical_harmonics',
+        )
+        if radial_MLP is None:
+            radial_MLP = [64, 64, 64]
+        # Interactions and readout
+        self.atomic_energies_fn = AtomicEnergiesBlock(atomic_energies)
+
+        inter = interaction_cls_first(
+            node_attrs_irreps=node_attr_irreps,
+            node_feats_irreps=node_feats_irreps,
+            edge_attrs_irreps=sh_irreps,
+            edge_feats_irreps=edge_feats_irreps,
+            target_irreps=interaction_irreps_first,
+            hidden_irreps=hidden_irreps,
+            avg_num_neighbors=avg_num_neighbors,
+            radial_MLP=radial_MLP,
+            cueq_config=cueq_config,
+            oeq_config=oeq_config,
+            name='interactions_0',
+        )
+        self.interactions = [inter]
+
+        # Use the appropriate self connection at the first layer for proper E0
+        use_sc_first = False
+        if 'Residual' in str(interaction_cls_first):
+            use_sc_first = True
+
+        node_feats_irreps_out = inter.target_irreps
+        prod = EquivariantProductBasisBlock(
+            node_feats_irreps=node_feats_irreps_out,
+            target_irreps=hidden_irreps,
+            correlation=correlation[0],
+            num_elements=num_elements,
+            use_sc=use_sc_first,
+            cueq_config=cueq_config,
+            oeq_config=oeq_config,
+            use_reduced_cg=use_reduced_cg,
+            use_agnostic_product=use_agnostic_product,
+            name='products_0',
+        )
+        self.products = [prod]
+
+        self.readouts = []
+        if not use_last_readout_only:
+            self.readouts.append(
+                LinearReadoutBlock(
+                    hidden_irreps,
+                    Irreps(f'{len(heads)}x0e'),
+                    cueq_config,
+                    oeq_config,
+                    name=f'readouts_{len(self.readouts)}',
+                )
+            )
+
+        for i in range(num_interactions - 1):
+            if i == num_interactions - 2:
+                hidden_irreps_out = str(
+                    hidden_irreps[0]
+                )  # Select only scalars for last layer
+            else:
+                hidden_irreps_out = hidden_irreps
+            inter = interaction_cls(
+                node_attrs_irreps=node_attr_irreps,
+                node_feats_irreps=hidden_irreps,
+                edge_attrs_irreps=sh_irreps,
+                edge_feats_irreps=edge_feats_irreps,
+                target_irreps=interaction_irreps,
+                hidden_irreps=hidden_irreps_out,
+                avg_num_neighbors=avg_num_neighbors,
+                edge_irreps=edge_irreps,
+                radial_MLP=radial_MLP,
+                cueq_config=cueq_config,
+                oeq_config=oeq_config,
+                name=f'interactions_{len(self.interactions)}',
+            )
+            self.interactions.append(inter)
+            prod = EquivariantProductBasisBlock(
+                node_feats_irreps=interaction_irreps,
+                target_irreps=hidden_irreps_out,
+                correlation=correlation[i + 1],
+                num_elements=num_elements,
+                use_sc=True,
+                cueq_config=cueq_config,
+                oeq_config=oeq_config,
+                use_reduced_cg=use_reduced_cg,
+                use_agnostic_product=use_agnostic_product,
+                name=f'products_{len(self.products)}',
+            )
+            self.products.append(prod)
+            if i == num_interactions - 2:
+                self.readouts.append(
+                    readout_cls(
+                        hidden_irreps_out,
+                        (len(heads) * MLP_irreps).simplify(),
+                        gate,
+                        Irreps(f'{len(heads)}x0e'),
+                        len(heads),
+                        cueq_config,
+                        oeq_config,
+                        name=f'readouts_{len(self.readouts)}',
+                    )
+                )
+            elif not use_last_readout_only:
+                self.readouts.append(
+                    LinearReadoutBlock(
+                        hidden_irreps,
+                        Irreps(f'{len(heads)}x0e'),
+                        cueq_config,
+                        oeq_config,
+                        name=f'readouts_{len(self.readouts)}',
+                    )
+                )
 
     def __call__(
         self,
-        vectors: e3nn.IrrepsArray,  # [n_edges, 3]
-        node_specie: jnp.ndarray,  # [n_nodes] int between 0 and num_species-1
-        senders: jnp.ndarray,  # [n_edges]
-        receivers: jnp.ndarray,  # [n_edges]
-        node_mask: Optional[jnp.ndarray] = None,  # [n_nodes] only used for profiling
-    ) -> e3nn.IrrepsArray:
-        assert vectors.ndim == 2 and vectors.shape[1] == 3
-        assert node_specie.ndim == 1
-        assert senders.ndim == 1 and receivers.ndim == 1
-        assert vectors.shape[0] == senders.shape[0] == receivers.shape[0]
+        data: dict[str, jnp.ndarray],
+    ) -> dict[str, Optional[jnp.ndarray]]:
+        ctx = prepare_graph(data)
+        num_atoms_arange = jnp.asarray(ctx.num_atoms_arange, dtype=jnp.int64)
+        num_graphs = ctx.num_graphs
+        vectors = ctx.vectors
+        lengths = ctx.lengths
+        node_heads = jnp.asarray(ctx.node_heads, dtype=jnp.int64)
 
-        if node_mask is None:
-            node_mask = jnp.ones(node_specie.shape[0], dtype=jnp.bool_)
-
+        # Atomic energies
+        node_e0 = self.atomic_energies_fn(data['node_attrs'])[
+            num_atoms_arange, node_heads
+        ]
+        e0 = scatter_sum(
+            src=node_e0, index=data['batch'], dim=0, dim_size=num_graphs
+        ).astype(vectors.dtype)  # [n_graphs, n_heads]
         # Embeddings
-        node_feats = self.node_embedding(node_specie).astype(
-            vectors.dtype
-        )  # [n_nodes, feature * irreps]
-        node_feats = profile("embedding: node_feats", node_feats, node_mask[:, None])
+        node_feats = self.node_embedding(data['node_attrs'])
+        edge_attrs = self.spherical_harmonics(vectors)
+        edge_feats, cutoff = self.radial_embedding(
+            lengths, data['node_attrs'], data['edge_index'], self.atomic_numbers
+        )
+        if hasattr(self, 'pair_repulsion'):
+            pair_node_energy = self.pair_repulsion_fn(
+                lengths, data['node_attrs'], data['edge_index'], self.atomic_numbers
+            )
+            pair_energy = scatter_sum(
+                src=pair_node_energy, index=data['batch'], dim=-1, dim_size=num_graphs
+            )  # [n_graphs,]
+        else:
+            pair_node_energy = jnp.zeros_like(node_e0)
+            pair_energy = jnp.zeros_like(e0)
 
-        if not (hasattr(vectors, "irreps") and hasattr(vectors, "array")):
-            vectors = e3nn.IrrepsArray("1o", vectors)
-
-        radial_embedding = self.radial_embedding(safe_norm(vectors.array, axis=-1))
+        if hasattr(self, 'joint_embedding'):
+            embedding_features: dict[str, jnp.ndarray] = {}
+            for name, _ in self.embedding_specs.items():
+                embedding_features[name] = data[name]
+            node_feats += self.joint_embedding(
+                data['batch'],
+                embedding_features,
+            )
+            if hasattr(self, 'embedding_readout'):
+                embedding_node_energy = self.embedding_readout(
+                    node_feats, node_heads
+                ).squeeze(-1)
+                embedding_energy = scatter_sum(
+                    src=embedding_node_energy,
+                    index=data['batch'],
+                    dim=0,
+                    dim_size=num_graphs,
+                )
+                e0 += embedding_energy
 
         # Interactions
-        outputs = []
-        for i in range(self.num_interactions):
-            first = i == 0
-            last = i == self.num_interactions - 1
+        energies = [e0, pair_energy]
+        node_energies_list = [node_e0, pair_node_energy]
+        node_feats_concat: list[jnp.ndarray] = []
 
-            hidden_irreps = (
-                self.hidden_irreps
-                if not last
-                else self.hidden_irreps.filter(self.output_irreps)
+        for i, (interaction, product) in enumerate(
+            zip(self.interactions, self.products)
+        ):
+            node_attrs_slice = data['node_attrs']
+            node_feats, sc = interaction(
+                node_attrs=node_attrs_slice,
+                node_feats=node_feats,
+                edge_attrs=edge_attrs,
+                edge_feats=edge_feats,
+                edge_index=data['edge_index'],
+                cutoff=cutoff,
+                first_layer=(i == 0),
             )
-
-            node_outputs, node_feats = MACELayer(
-                first=first,
-                last=last,
-                num_features=self.num_features,
-                interaction_irreps=self.interaction_irreps,
-                hidden_irreps=hidden_irreps,
-                max_ell=self.max_ell,
-                avg_num_neighbors=self.avg_num_neighbors,
-                activation=self.activation,
-                num_species=self.num_species,
-                epsilon=self.epsilon,
-                correlation=self.correlation,
-                output_irreps=self.output_irreps,
-                readout_mlp_irreps=self.readout_mlp_irreps,
-                symmetric_tensor_product_basis=self.symmetric_tensor_product_basis,
-                off_diagonal=self.off_diagonal,
-                soft_normalization=self.soft_normalization,
-                skip_connection_first_layer=self.skip_connection_first_layer,
-                name=f"layer_{i}",
-            )(
-                vectors,
-                node_feats,
-                node_specie,
-                radial_embedding,
-                senders,
-                receivers,
-                node_mask,
+            node_feats = product(
+                node_feats=node_feats, sc=sc, node_attrs=node_attrs_slice
             )
-            outputs += [node_outputs]  # list of [n_nodes, output_irreps]
+            node_feats_concat.append(node_feats)
 
-        return e3nn.stack(outputs, axis=1)  # [n_nodes, num_interactions, output_irreps]
+        for i, readout in enumerate(self.readouts):
+            feat_idx = -1 if len(self.readouts) == 1 else i
+            node_es = readout(node_feats_concat[feat_idx], node_heads)[
+                num_atoms_arange, node_heads
+            ]
+            energy = scatter_sum(node_es, data['batch'], dim=0, dim_size=num_graphs)
+            energies.append(energy)
+            node_energies_list.append(node_es)
+
+        contributions = jnp.stack(energies, axis=-1)
+        total_energy = jnp.sum(contributions, axis=-1)
+
+        return total_energy
 
 
-class MACELayer(hk.Module):
+@register_import('mace.modules.models.ScaleShiftMACE')
+@auto_import_from_torch(separator='~')
+@add_output_interface
+class ScaleShiftMACE(MACE):
     def __init__(
         self,
-        *,
-        first: bool,
-        last: bool,
-        num_features: int,
-        interaction_irreps: e3nn.Irreps,
-        hidden_irreps: e3nn.Irreps,
-        activation: Callable,
-        num_species: int,
-        epsilon: Optional[float],
-        name: Optional[str],
-        # InteractionBlock:
-        max_ell: int,
-        avg_num_neighbors: float,
-        # EquivariantProductBasisBlock:
-        correlation: int,
-        symmetric_tensor_product_basis: bool,
-        off_diagonal: bool,
-        soft_normalization: Optional[float],
-        # ReadoutBlock:
-        output_irreps: e3nn.Irreps,
-        readout_mlp_irreps: e3nn.Irreps,
-        skip_connection_first_layer: bool = False,
-    ) -> None:
-        super().__init__(name=name)
-
-        self.first = first
-        self.last = last
-        self.num_features = num_features
-        self.interaction_irreps = interaction_irreps
-        self.hidden_irreps = hidden_irreps
-        self.max_ell = max_ell
-        self.avg_num_neighbors = avg_num_neighbors
-        self.activation = activation
-        self.num_species = num_species
-        self.epsilon = epsilon
-        self.correlation = correlation
-        self.output_irreps = output_irreps
-        self.readout_mlp_irreps = readout_mlp_irreps
-        self.symmetric_tensor_product_basis = symmetric_tensor_product_basis
-        self.off_diagonal = off_diagonal
-        self.soft_normalization = soft_normalization
-        self.skip_connection_first_layer = skip_connection_first_layer
+        atomic_inter_scale: float,
+        atomic_inter_shift: float,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.scale_shift = ScaleShiftBlock(
+            scale=atomic_inter_scale, shift=atomic_inter_shift
+        )
 
     def __call__(
         self,
-        vectors: e3nn.IrrepsArray,  # [n_edges, 3]
-        node_feats: e3nn.IrrepsArray,  # [n_nodes, irreps]
-        node_specie: jnp.ndarray,  # [n_nodes] int between 0 and num_species-1
-        radial_embedding: jnp.ndarray,  # [n_edges, radial_embedding_dim]
-        senders: jnp.ndarray,  # [n_edges]
-        receivers: jnp.ndarray,  # [n_edges]
-        node_mask: Optional[jnp.ndarray] = None,  # [n_nodes] only used for profiling
-    ):
-        if node_mask is None:
-            node_mask = jnp.ones(node_specie.shape[0], dtype=jnp.bool_)
+        data: dict[str, jnp.ndarray],
+    ) -> dict[str, Optional[jnp.ndarray]]:
+        ctx = prepare_graph(data)
 
-        node_feats = profile(f"{self.name}: input", node_feats, node_mask[:, None])
+        num_atoms_arange = ctx.num_atoms_arange.astype(jnp.int64)
+        num_graphs = ctx.num_graphs
+        vectors = ctx.vectors
+        lengths = ctx.lengths
+        node_heads = ctx.node_heads.astype(jnp.int64)
 
-        sc = None
-        if not self.first or self.skip_connection_first_layer:
-            sc = e3nn.haiku.Linear(
-                self.num_features * self.hidden_irreps,
-                num_indexed_weights=self.num_species,
-                name="skip_tp",
-            )(
-                node_specie, node_feats
-            )  # [n_nodes, feature * hidden_irreps]
-            sc = profile(f"{self.name}: self-connexion", sc, node_mask[:, None])
+        # Atomic energies
+        node_e0 = self.atomic_energies_fn(data['node_attrs'])[
+            num_atoms_arange, node_heads
+        ]
+        e0 = scatter_sum(
+            src=node_e0, index=data['batch'], dim=0, dim_size=num_graphs
+        ).astype(vectors.dtype)  # [n_graphs, num_heads]
 
-        node_feats = InteractionBlock(
-            target_irreps=self.num_features * self.interaction_irreps,
-            avg_num_neighbors=self.avg_num_neighbors,
-            max_ell=self.max_ell,
-            activation=self.activation,
-        )(
-            vectors=vectors,
-            node_feats=node_feats,
-            radial_embedding=radial_embedding,
-            receivers=receivers,
-            senders=senders,
+        # Embeddings
+        node_feats = self.node_embedding(data['node_attrs'])
+        edge_attrs = self.spherical_harmonics(vectors)
+        edge_feats, cutoff = self.radial_embedding(
+            lengths, data['node_attrs'], data['edge_index'], self.atomic_numbers
         )
 
-        if self.epsilon is not None:
-            node_feats *= self.epsilon
+        if hasattr(self, 'pair_repulsion'):
+            pair_node_energy = self.pair_repulsion_fn(
+                lengths, data['node_attrs'], data['edge_index'], self.atomic_numbers
+            )
         else:
-            node_feats /= jnp.sqrt(self.avg_num_neighbors)
+            pair_node_energy = jnp.zeros_like(node_e0)
 
-        node_feats = profile(
-            f"{self.name}: interaction", node_feats, node_mask[:, None]
-        )
+        # Embeddings of additional features
+        if hasattr(self, 'joint_embedding'):
+            embedding_features: dict[str, jnp.ndarray] = {}
+            for name, _ in self.embedding_specs.items():
+                embedding_features[name] = data[name]
+            node_feats += self.joint_embedding(
+                data['batch'],
+                embedding_features,
+            )
+            if hasattr(self, 'embedding_readout'):
+                embedding_node_energy = self.embedding_readout(
+                    node_feats, node_heads
+                ).squeeze(-1)
+                embedding_energy = scatter_sum(
+                    src=embedding_node_energy,
+                    index=data['batch'],
+                    dim=0,
+                    dim_size=num_graphs,
+                )
+                e0 += embedding_energy
 
-        if self.first:
-            # Selector TensorProduct
-            node_feats = e3nn.haiku.Linear(
-                self.num_features * self.interaction_irreps,
-                num_indexed_weights=self.num_species,
-                name="skip_tp_first",
-            )(node_specie, node_feats)
-            node_feats = profile(
-                f"{self.name}: skip_tp_first", node_feats, node_mask[:, None]
+        # Interactions
+        node_es_list = [pair_node_energy]
+        node_feats_list: list[jnp.ndarray] = []
+
+        for i, (interaction, product) in enumerate(
+            zip(self.interactions, self.products)
+        ):
+            node_attrs_slice = data['node_attrs']
+            node_feats, sc = interaction(
+                node_attrs=node_attrs_slice,
+                node_feats=node_feats,
+                edge_attrs=edge_attrs,
+                edge_feats=edge_feats,
+                edge_index=data['edge_index'],
+                cutoff=cutoff,
+                first_layer=(i == 0),
+            )
+            node_feats = product(
+                node_feats=node_feats, sc=sc, node_attrs=node_attrs_slice
+            )
+            node_feats_list.append(node_feats)
+
+        for i, readout in enumerate(self.readouts):
+            feat_idx = -1 if len(self.readouts) == 1 else i
+            node_es_list.append(
+                readout(node_feats_list[feat_idx], node_heads)[
+                    num_atoms_arange, node_heads
+                ]
             )
 
-        node_feats = EquivariantProductBasisBlock(
-            target_irreps=self.num_features * self.hidden_irreps,
-            correlation=self.correlation,
-            num_species=self.num_species,
-            symmetric_tensor_product_basis=self.symmetric_tensor_product_basis,
-            off_diagonal=self.off_diagonal,
-        )(node_feats=node_feats, node_specie=node_specie)
+        node_inter_es = jnp.sum(jnp.stack(node_es_list, axis=0), axis=0)
+        node_inter_es = self.scale_shift(node_inter_es, node_heads)
+        inter_e = scatter_sum(node_inter_es, data['batch'], dim=-1, dim_size=num_graphs)
 
-        node_feats = profile(
-            f"{self.name}: tensor power", node_feats, node_mask[:, None]
-        )
-
-        if self.soft_normalization is not None:
-
-            def phi(n):
-                n = n / self.soft_normalization
-                return 1.0 / (1.0 + n * e3nn.sus(n))
-
-            node_feats = e3nn.norm_activation(
-                node_feats, [phi] * len(node_feats.irreps)
-            )
-
-            node_feats = profile(
-                f"{self.name}: soft normalization", node_feats, node_mask[:, None]
-            )
-
-        if sc is not None:
-            node_feats = node_feats + sc  # [n_nodes, feature * hidden_irreps]
-
-        if not self.last:
-            node_outputs = LinearReadoutBlock(self.output_irreps)(
-                node_feats
-            )  # [n_nodes, output_irreps]
-        else:  # Non linear readout for last layer
-            node_outputs = NonLinearReadoutBlock(
-                self.readout_mlp_irreps,
-                self.output_irreps,
-                activation=self.activation,
-            )(
-                node_feats
-            )  # [n_nodes, output_irreps]
-
-        node_outputs = profile(f"{self.name}: output", node_outputs, node_mask[:, None])
-        return node_outputs, node_feats
+        return e0 + inter_e
