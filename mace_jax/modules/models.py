@@ -65,7 +65,6 @@ class MACE(hk.Module):
         heads: Optional[list[str]] = None,
         cueq_config: Optional[dict[str, Any]] = None,
         embedding_specs: Optional[dict[str, Any]] = None,
-        oeq_config: Optional[dict[str, Any]] = None,
         readout_cls: Optional[type[NonLinearReadoutBlock]] = NonLinearReadoutBlock,
     ):
         super().__init__()
@@ -107,7 +106,6 @@ class MACE(hk.Module):
                     node_feats_irreps,
                     Irreps(f'{len(heads)}x0e'),
                     cueq_config,
-                    oeq_config,
                     name='embedding_readout',
                 )
 
@@ -165,7 +163,6 @@ class MACE(hk.Module):
             avg_num_neighbors=avg_num_neighbors,
             radial_MLP=radial_MLP,
             cueq_config=cueq_config,
-            oeq_config=oeq_config,
             name='interactions_0',
         )
         self.interactions = [inter]
@@ -183,7 +180,6 @@ class MACE(hk.Module):
             num_elements=num_elements,
             use_sc=use_sc_first,
             cueq_config=cueq_config,
-            oeq_config=oeq_config,
             use_reduced_cg=use_reduced_cg,
             use_agnostic_product=use_agnostic_product,
             name='products_0',
@@ -197,7 +193,6 @@ class MACE(hk.Module):
                     hidden_irreps,
                     Irreps(f'{len(heads)}x0e'),
                     cueq_config,
-                    oeq_config,
                     name=f'readouts_{len(self.readouts)}',
                 )
             )
@@ -220,7 +215,6 @@ class MACE(hk.Module):
                 edge_irreps=edge_irreps,
                 radial_MLP=radial_MLP,
                 cueq_config=cueq_config,
-                oeq_config=oeq_config,
                 name=f'interactions_{len(self.interactions)}',
             )
             self.interactions.append(inter)
@@ -231,7 +225,6 @@ class MACE(hk.Module):
                 num_elements=num_elements,
                 use_sc=True,
                 cueq_config=cueq_config,
-                oeq_config=oeq_config,
                 use_reduced_cg=use_reduced_cg,
                 use_agnostic_product=use_agnostic_product,
                 name=f'products_{len(self.products)}',
@@ -246,7 +239,6 @@ class MACE(hk.Module):
                         Irreps(f'{len(heads)}x0e'),
                         len(heads),
                         cueq_config,
-                        oeq_config,
                         name=f'readouts_{len(self.readouts)}',
                     )
                 )
@@ -256,7 +248,6 @@ class MACE(hk.Module):
                         hidden_irreps,
                         Irreps(f'{len(heads)}x0e'),
                         cueq_config,
-                        oeq_config,
                         name=f'readouts_{len(self.readouts)}',
                     )
                 )

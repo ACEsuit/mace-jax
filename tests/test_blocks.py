@@ -5,7 +5,10 @@ import numpy as np
 import pytest
 import torch
 from e3nn import o3
-from e3nn_jax import Irreps
+from e3nn_jax import Irrep, Irreps
+from mace.modules.blocks import (
+    EquivariantProductBasisBlock as EquivariantProductBasisBlockTorch,
+)
 from mace.modules.blocks import (
     LinearNodeEmbeddingBlock as LinearNodeEmbeddingBlockTorch,
 )
@@ -35,6 +38,9 @@ from mace.modules.blocks import (
 )
 
 from mace_jax.haiku.torch import copy_torch_to_jax
+from mace_jax.modules.blocks import (
+    EquivariantProductBasisBlock as EquivariantProductBasisBlockJAX,
+)
 from mace_jax.modules.blocks import (
     LinearNodeEmbeddingBlock as LinearNodeEmbeddingBlockJAX,
 )
@@ -232,6 +238,80 @@ class TestNonLinearReadoutBlock:
         out_jax = transformed.apply(params, None, x_jax)
 
         # --- Compare outputs ---
+        np.testing.assert_allclose(
+            np.array(out_jax),
+            out_torch.detach().numpy(),
+            rtol=5e-4,
+            atol=5e-3,
+        )
+
+
+class TestEquivariantProductBasisBlock:
+    """Compare EquivariantProductBasisBlock in Haiku (JAX) vs PyTorch."""
+
+    @pytest.mark.parametrize(
+        'node_feats_irreps,target_irreps,correlation,use_sc,num_elements',
+        [
+            # Simple scalar contraction
+            ('128x0e+128x1o+128x2e+128x3o', '128x0e+128x1o+128x2e', 2, False, 10),
+            ('128x0e+128x1o+128x2e+128x3o', '128x0e+128x1o+128x2e', 2, True, 10),
+            ('128x0e+128x1o+128x2e+128x3o', '128x0e+128x1o+128x2e', 1, False, 10),
+        ],
+    )
+    def test_forward_match(
+        self, node_feats_irreps, target_irreps, correlation, use_sc, num_elements
+    ):
+        """Check forward pass matches between JAX and Torch."""
+
+        node_feats_irreps = Irreps(node_feats_irreps)
+        target_irreps = Irreps(target_irreps)
+
+        n_nodes = 6
+        np.random.seed(0)
+
+        # --- Inputs ---
+        x_np = np.random.randn(n_nodes, target_irreps[0].dim, 16)
+        sc_np = np.random.randn(n_nodes, target_irreps.dim) if use_sc else None
+        attrs_np = np.random.randn(n_nodes, num_elements)
+
+        x_jax = jnp.array(x_np)
+        x_torch = torch.tensor(x_np)
+        sc_jax = jnp.array(sc_np) if sc_np is not None else None
+        sc_torch = torch.tensor(sc_np) if sc_np is not None else None
+        attrs_jax = jnp.array(attrs_np)
+        attrs_torch = torch.tensor(attrs_np)
+
+        # --- Torch model ---
+        torch_model = EquivariantProductBasisBlockTorch(
+            node_feats_irreps=str(node_feats_irreps),
+            target_irreps=str(target_irreps),
+            correlation=correlation,
+            use_sc=use_sc,
+            num_elements=num_elements,
+        )
+
+        # Torch forward pass
+        out_torch = torch_model(x_torch, sc_torch, attrs_torch)
+
+        # --- JAX model ---
+        def forward_fn(x, sc, attrs):
+            model = EquivariantProductBasisBlockJAX(
+                node_feats_irreps=node_feats_irreps,
+                target_irreps=target_irreps,
+                correlation=correlation,
+                use_sc=use_sc,
+                num_elements=num_elements,
+            )
+            return model(x, sc, attrs)
+
+        transformed = hk.transform(forward_fn)
+        rng = jax.random.PRNGKey(42)
+        params = transformed.init(rng, x_jax, sc_jax, attrs_jax)
+        params = copy_torch_to_jax(torch_model, params)
+
+        out_jax = transformed.apply(params, None, x_jax, sc_jax, attrs_jax)
+
+        # --- Compare ---
         np.testing.assert_allclose(
             np.array(out_jax),
             out_torch.detach().numpy(),

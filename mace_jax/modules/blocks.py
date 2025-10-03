@@ -16,7 +16,6 @@ from mace_jax.modules.wrapper_ops import (
     CuEquivarianceConfig,
     FullyConnectedTensorProduct,
     Linear,
-    OEQConfig,
     SymmetricContractionWrapper,
     TensorProduct,
     TransposeIrrepsLayoutWrapper,
@@ -87,16 +86,12 @@ class LinearReadoutBlock(hk.Module):
         irreps_in: Irreps,
         irrep_out: Irreps = Irreps('0e'),
         cueq_config: Optional['CuEquivarianceConfig'] = None,
-        oeq_config: Optional[
-            'OEQConfig'
-        ] = None,  # unused but kept for API compatibility
         name: str = None,
     ):
         super().__init__(name=name)
         self.irreps_in = irreps_in
         self.irrep_out = irrep_out
         self.cueq_config = cueq_config
-        self.oeq_config = oeq_config
 
         # Haiku-compatible Linear implementation
         self.linear = Linear(
@@ -115,8 +110,7 @@ class LinearReadoutBlock(hk.Module):
     def __repr__(self):
         return (
             f'{self.__class__.__name__}(irreps_in={self.irreps_in}, '
-            f'irrep_out={self.irrep_out}, cueq_config={self.cueq_config}, '
-            f'oeq_config={self.oeq_config})'
+            f'irrep_out={self.irrep_out}, cueq_config={self.cueq_config})'
         )
 
 
@@ -131,7 +125,6 @@ class NonLinearReadoutBlock(hk.Module):
         irrep_out: Irreps = Irreps('0e'),
         num_heads: int = 1,
         cueq_config: Optional[CuEquivarianceConfig] = None,
-        oeq_config: Optional[OEQConfig] = None,  # unused
         name: Optional[str] = None,
     ):
         super().__init__(name=name)
@@ -186,7 +179,6 @@ class NonLinearBiasReadoutBlock(hk.Module):
         irrep_out: Irreps = Irreps('0e'),
         num_heads: int = 1,
         cueq_config: Optional['CuEquivarianceConfig'] = None,
-        oeq_config: Optional['OEQConfig'] = None,
         name: Optional[str] = None,
     ):
         super().__init__(name=name)
@@ -247,7 +239,6 @@ class LinearDipoleReadoutBlock(hk.Module):
         irreps_in: Irreps,
         dipole_only: bool = False,
         cueq_config: Optional['CuEquivarianceConfig'] = None,
-        oeq_config: Optional['OEQConfig'] = None,
         name: Optional[str] = None,
     ):
         super().__init__(name=name)
@@ -284,7 +275,6 @@ class NonLinearDipoleReadoutBlock(hk.Module):
         gate: Callable,
         dipole_only: bool = False,
         cueq_config: Optional['CuEquivarianceConfig'] = None,
-        oeq_config: Optional['OEQConfig'] = None,
         name: Optional[str] = None,
     ):
         super().__init__(name=name)
@@ -298,12 +288,12 @@ class NonLinearDipoleReadoutBlock(hk.Module):
             self.irreps_out = Irreps('1x0e + 1x1o')
 
         # Partition hidden irreps into scalars and gated irreps
-        irreps_scalars = Irreps(
-            [(mul, ir) for mul, ir in MLP_irreps if ir.l == 0 and ir in self.irreps_out]
-        )
-        irreps_gated = Irreps(
-            [(mul, ir) for mul, ir in MLP_irreps if ir.l > 0 and ir in self.irreps_out]
-        )
+        irreps_scalars = Irreps([
+            (mul, ir) for mul, ir in MLP_irreps if ir.l == 0 and ir in self.irreps_out
+        ])
+        irreps_gated = Irreps([
+            (mul, ir) for mul, ir in MLP_irreps if ir.l > 0 and ir in self.irreps_out
+        ])
         irreps_gates = Irreps([(mul, Irreps('0e')[0][1]) for mul, _ in irreps_gated])
 
         # Gated nonlinearity
@@ -347,7 +337,6 @@ class LinearDipolePolarReadoutBlock(hk.Module):
         irreps_in: Irreps,
         use_polarizability: bool = True,
         cueq_config: Optional['CuEquivarianceConfig'] = None,
-        oeq_config: Optional['OEQConfig'] = None,
         name: Optional[str] = None,
     ):
         super().__init__(name=name)
@@ -385,7 +374,6 @@ class NonLinearDipolePolarReadoutBlock(hk.Module):
         gate: Callable,
         use_polarizability: bool = True,
         cueq_config: Optional['CuEquivarianceConfig'] = None,
-        oeq_config: Optional['OEQConfig'] = None,
         name: Optional[str] = None,
     ):
         super().__init__(name=name)
@@ -402,12 +390,12 @@ class NonLinearDipolePolarReadoutBlock(hk.Module):
                 'If you want to calculate only the dipole, use AtomicDipolesMACE.'
             )
 
-        irreps_scalars = Irreps(
-            [(mul, ir) for mul, ir in MLP_irreps if ir.l == 0 and ir in self.irreps_out]
-        )
-        irreps_gated = Irreps(
-            [(mul, ir) for mul, ir in MLP_irreps if ir.l > 0 and ir in self.irreps_out]
-        )
+        irreps_scalars = Irreps([
+            (mul, ir) for mul, ir in MLP_irreps if ir.l == 0 and ir in self.irreps_out
+        ])
+        irreps_gated = Irreps([
+            (mul, ir) for mul, ir in MLP_irreps if ir.l > 0 and ir in self.irreps_out
+        ])
         irreps_gates = Irreps([(mul, '0e') for mul, _ in irreps_gated])
 
         # Equivariant nonlinearity
@@ -550,10 +538,15 @@ class EquivariantProductBasisBlock(hk.Module):
         use_agnostic_product: bool = False,
         use_reduced_cg: Optional[bool] = None,
         cueq_config: Optional[object] = None,  # replace with CuEquivarianceConfig type
-        oeq_config: Optional[object] = None,
         name: Optional[str] = None,
     ):
         super().__init__(name=name)
+        print('node_feats_irreps:', node_feats_irreps)
+        print('target_irreps:', target_irreps)
+
+        print('node_feats_irreps.dim:', Irreps(node_feats_irreps).dim)
+        print('target_irreps.dim:', Irreps(target_irreps).dim)
+
         self.use_sc = use_sc
         self.use_agnostic_product = use_agnostic_product
         if self.use_agnostic_product:
@@ -567,7 +560,6 @@ class EquivariantProductBasisBlock(hk.Module):
             num_elements=num_elements,
             use_reduced_cg=use_reduced_cg,
             cueq_config=cueq_config,
-            oeq_config=oeq_config,
             name='symmetric_contractions',
         )
 
@@ -640,7 +632,6 @@ class InteractionBlock(hk.Module, metaclass=abc.ABCMeta):
         edge_irreps: Optional[Irreps] = None,
         radial_MLP: Optional[list[int]] = None,
         cueq_config: Optional['CuEquivarianceConfig'] = None,
-        oeq_config: Optional['OEQConfig'] = None,
         name: Optional[str] = None,
     ):
         super().__init__(name=name)
@@ -660,11 +651,8 @@ class InteractionBlock(hk.Module, metaclass=abc.ABCMeta):
         self.radial_MLP = radial_MLP
         self.edge_irreps = Irreps(edge_irreps)
         self.cueq_config = cueq_config
-        self.oeq_config = oeq_config
 
         # Handle conv_fusion flag
-        if self.oeq_config and getattr(self.oeq_config, 'conv_fusion', None):
-            self.conv_fusion = self.oeq_config.conv_fusion
         if self.cueq_config and getattr(self.cueq_config, 'conv_fusion', None):
             self.conv_fusion = self.cueq_config.conv_fusion
 
@@ -723,7 +711,6 @@ class RealAgnosticInteractionBlock(InteractionBlock):
             shared_weights=False,
             internal_weights=False,
             cueq_config=self.cueq_config,
-            oeq_config=self.oeq_config,
             name='conv_tp',
         )
 
@@ -825,7 +812,6 @@ class RealAgnosticResidualInteractionBlock(InteractionBlock):
             shared_weights=False,
             internal_weights=False,
             cueq_config=self.cueq_config,
-            oeq_config=self.oeq_config,
             name='conv_tp',
         )
 
@@ -933,7 +919,6 @@ class RealAgnosticDensityInteractionBlock(InteractionBlock):
             shared_weights=False,
             internal_weights=False,
             cueq_config=self.cueq_config,
-            oeq_config=self.oeq_config,
             name='conv_tp',
         )
 
@@ -1058,7 +1043,6 @@ class RealAgnosticDensityResidualInteractionBlock(InteractionBlock):
             shared_weights=False,
             internal_weights=False,
             cueq_config=self.cueq_config,
-            oeq_config=self.oeq_config,
             name='conv_tp',
         )
 
@@ -1189,7 +1173,6 @@ class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
             shared_weights=False,
             internal_weights=False,
             cueq_config=self.cueq_config,
-            oeq_config=self.oeq_config,
             name='conv_tp',
         )
 
@@ -1289,9 +1272,9 @@ class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
 class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
     def _setup(self) -> None:
         # Compute scalar irreps
-        node_scalar_irreps = Irreps(
-            [(self.node_feats_irreps.count(Irrep(0, 1)), (0, 1))]
-        )
+        node_scalar_irreps = Irreps([
+            (self.node_feats_irreps.count(Irrep(0, 1)), (0, 1))
+        ])
 
         # Source/target embeddings
         self.source_embedding = Linear(
