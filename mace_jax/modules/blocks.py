@@ -541,12 +541,6 @@ class EquivariantProductBasisBlock(hk.Module):
         name: Optional[str] = None,
     ):
         super().__init__(name=name)
-        print('node_feats_irreps:', node_feats_irreps)
-        print('target_irreps:', target_irreps)
-
-        print('node_feats_irreps.dim:', Irreps(node_feats_irreps).dim)
-        print('target_irreps.dim:', Irreps(target_irreps).dim)
-
         self.use_sc = use_sc
         self.use_agnostic_product = use_agnostic_product
         if self.use_agnostic_product:

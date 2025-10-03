@@ -303,5 +303,5 @@ else:
         pass
 
     print(
-        'cuequivariance or cuequivariance_torch is not available. Cuequivariance acceleration will be disabled.'
+        'cuequivariance is not available. Cuequivariance acceleration will be disabled.'
     )
