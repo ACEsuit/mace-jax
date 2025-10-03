@@ -14,13 +14,8 @@ from mace_jax.modules.symmetric_contraction import SymmetricContraction
 from mace_jax.tools.cg import O3_e3nn
 from mace_jax.tools.scatter import scatter_sum
 
-try:
-    import cuequivariance as cue
-    import cuequivariance_jax as cuex
-
-    CUEX_AVAILABLE = True
-except (ImportError, ModuleNotFoundError):
-    CUEX_AVAILABLE = False
+import cuequivariance as cue
+import cuequivariance_jax as cuex
 
 
 @dataclasses.dataclass
@@ -39,14 +34,12 @@ class CuEquivarianceConfig:
     conv_fusion: bool = False  # Set to True to enable conv fusion
 
     def __post_init__(self):
-        if self.enabled and CUEX_AVAILABLE:
+        if self.enabled:
             self.layout_str = self.layout
             self.layout = getattr(cue, self.layout)
             self.group = (
                 O3_e3nn if self.group == 'O3_e3nn' else getattr(cue, self.group)
             )
-        if not CUEX_AVAILABLE:
-            self.enabled = False
 
 
 class Linear:
@@ -62,8 +55,7 @@ class Linear:
         name: Optional[str] = None,
     ):
         if (
-            CUEX_AVAILABLE
-            and cueq_config is not None
+            cueq_config is not None
             and cueq_config.enabled
             and (cueq_config.optimize_all or cueq_config.optimize_linear)
         ):
@@ -214,12 +206,11 @@ def FullyConnectedTensorProduct(
 ):
     """
     Wrapper around o3.FullyConnectedTensorProduct (JAX version).
-    If cuequivariance is available and enabled, would return an accelerated version.
-    Otherwise, defaults to e3nn_jax.o3.FullyConnectedTensorProduct.
+    When CuEquivariance acceleration is requested, this raises since a JAX binding
+    is not yet available; otherwise defaults to the e3nn_jax implementation.
     """
     if (
-        CUEX_AVAILABLE
-        and cueq_config is not None
+        cueq_config is not None
         and cueq_config.enabled
         and (cueq_config.optimize_all or cueq_config.optimize_fctp)
     ):
@@ -245,21 +236,19 @@ def SymmetricContractionWrapper(
     correlation: int,
     num_elements: Optional[int] = None,
     cueq_config: Optional['CuEquivarianceConfig'] = None,
-    use_reduced_cg: bool = True,
+    use_reduced_cg: bool = False,
     name: Optional[str] = None,
 ):
     """
-    JAX implementation of SymmetricContraction.
+    JAX implementation of SymmetricContraction powered by cuequivariance-jax.
 
-    Notes:
-    - In PyTorch, cuet.SymmetricContraction can accelerate this.
-    - In JAX, cuequivariance_jax does NOT expose SymmetricContraction, so we
-      always build it ourselves from tensor products.
+    ``use_reduced_cg`` is accepted for API compatibility but ignored because the
+    cue backend always operates on the full CG tables.
     """
 
     if use_reduced_cg:
-        # Reduced CG tables are not supported by the JAX implementation; fall back to
-        # the standard contraction while ignoring the flag to preserve compatibility.
+        # Reduced CG tables are not supported by the JAX implementation. The flag is
+        # accepted for API compatibility but ignored.
         use_reduced_cg = False
 
     method = 'naive'
