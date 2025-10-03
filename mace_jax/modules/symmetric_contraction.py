@@ -1,326 +1,44 @@
-from typing import Any, Optional, Union
+from dataclasses import dataclass
+from typing import Optional, Union
 
+import cuequivariance as cue
+import cuequivariance_jax as cuex
 import haiku as hk
 import jax.numpy as jnp
-import opt_einsum as oe
+import numpy as np
+from cuequivariance.group_theory.experimental.mace.symmetric_contractions import (
+    _symmetric_contraction,
+    symmetric_contraction,
+)
 from e3nn_jax import Irrep, Irreps
 
-from mace_jax.haiku.torch import copy_torch_to_jax, register_import
-from mace_jax.tools.cg import U_matrix_real
+from mace_jax.haiku.torch import register_import
 from mace_jax.tools.dtype import default_dtype
 
-BATCH_EXAMPLE = 10
-ALPHABET = ['w', 'x', 'v', 'n', 'z', 'r', 't', 'y', 'u', 'o', 'p', 's']
+
+def _convert_to_cue_irreps(e3_irreps: Irreps) -> cue.Irreps:
+    """Convert an :class:`e3nn_jax.Irreps` to :class:`cue.Irreps`."""
+    mul_irreps: list[cue.MulIrrep] = []
+    for mul, ir in e3_irreps:
+        cue_ir = cue.O3(ir.l, 1 if ir.p == 1 else -1)
+        mul_irreps.append(cue.MulIrrep(mul=mul, ir=cue_ir))
+    return cue.Irreps(cue.O3, mul_irreps)
 
 
-def _ensure_array_from_U(u_obj: Any) -> jnp.ndarray:
-    """
-    U_matrix_real may return a list of (ir, array) pairs or sometimes only an array.
-    This helper returns the numeric array (the last element).
-    """
-    if isinstance(u_obj, jnp.ndarray):
-        return u_obj
-    # if it is a tuple like (ir, array)
-    if isinstance(u_obj, (list, tuple)) and len(u_obj) >= 2:
-        # commonly (ir, array) or list [ir_str, array]
-        candidate = u_obj[-1]
-        if isinstance(candidate, jnp.ndarray):
-            return candidate
-        # fallback: try convert
-        return jnp.asarray(candidate)
-    # last-resort conversion
-    return jnp.asarray(u_obj)
+@dataclass(frozen=True)
+class _BlockConfig:
+    """Per-output contraction data."""
 
-
-@register_import('mace.modules.symmetric_contraction.Contraction')
-class Contraction(hk.Module):
-    """Haiku/JAX rewrite of the PyTorch Contraction.
-    Instantiate *inside* hk.transform context (or via a closure).
-    """
-
-    def __init__(
-        self,
-        irreps_in: Irreps,
-        irrep_out: Irreps,
-        correlation: int,
-        internal_weights: bool = True,
-        use_reduced_cg: bool = False,
-        num_elements: Optional[int] = None,
-        weights: Optional[jnp.array] = None,
-        name: Optional[str] = None,
-    ):
-        super().__init__(name=name)
-
-        self.irreps_in = Irreps(irreps_in)
-        self.irrep_out = Irreps(irrep_out)
-        self.coupling_irreps = Irreps([irrep.ir for irrep in irreps_in])
-        self.correlation = int(correlation)
-        self.internal_weights = bool(internal_weights)
-        # count of scalar features (mul for (0,x) in irreps)
-        self.num_features = irreps_in.count((0, 1))
-        self.num_elements = int(num_elements or 1)
-        # lmax (max l among output irreps)
-        self.lmax = max((ir.ir.l for ir in self.irrep_out), default=0)
-
-        # --- Precompute U matrices (numeric arrays) and path weights ---
-        self.U_matrices: dict[int, jnp.ndarray] = {}
-        self.zero_flags: list[bool] = []  # corresponds to path_weight (negated)
-
-        for nu in range(1, self.correlation + 1):
-            # Compute U_matrix_real like PyTorch
-            raw = U_matrix_real(
-                irreps_in=self.coupling_irreps,
-                irreps_out=self.irrep_out,
-                correlation=nu,
-                use_cueq_cg=use_reduced_cg,
-                dtype=default_dtype(),
-            )
-            # Take the last array (PyTorch uses [-1])
-            last = raw[-1]
-            U = _ensure_array_from_U(last)  # convert to jnp.ndarray if needed
-
-            # Determine num_params and num_ell to match PyTorch shapes
-            num_params = int(U.shape[-1])
-            num_ell = int(U.shape[-2])
-
-            # Optionally slice to match PyTorch batch-equivalent shapes if needed
-            # For example, PyTorch might have slightly smaller num_ell
-            # num_ell = min(num_ell, expected_from_irreps)
-            # U = U[..., :num_ell, :num_params]
-
-            # Store cleaned U_matrix
-            self.U_matrices[nu] = jnp.asarray(U)
-
-            # Compute zero flag for this path
-            is_nonzero = jnp.any(self.U_matrices[nu] != 0.0)
-            self.zero_flags.append(not bool(is_nonzero))
-
-        num_equivariance = 2 * irrep_out.lmax + 1
-
-        # --- Build main einsum expression (i == correlation) ---
-        U_main = self.U_matrices[self.correlation]
-        # U_main shape: (..., num_params) where last dim is parameter dim (k)
-        num_params = int(U_main.shape[-1])
-        num_ell = int(U_main.shape[-2])
-
-        # prefix letters like PyTorch
-        prefix = [ALPHABET[j] for j in range(self.correlation + min(self.lmax, 1) - 1)]
-        main_sub = ''.join(prefix) + 'ik,ekc,bci,be->bc' + ''.join(prefix)
-
-        # When calling contract_expression, pass shapes WITHOUT batch dims.
-        # For U_main we pass exactly U_main.shape
-        if num_equivariance == 1:
-            shapes_main = (
-                (num_ell,) * self.correlation + (num_params,),
-                (self.num_elements, num_params, self.num_features),
-                (BATCH_EXAMPLE, self.num_features, num_ell),
-                (BATCH_EXAMPLE, self.num_elements),
-            )
-        else:
-            shapes_main = (
-                (num_equivariance,) + (num_ell,) * self.correlation + (num_params,),
-                (self.num_elements, num_params, self.num_features),
-                (BATCH_EXAMPLE, self.num_features, num_ell),
-                (BATCH_EXAMPLE, self.num_elements),
-            )
-        assert shapes_main[1][2] == self.num_features, (
-            "weights ekc 'c' != self.num_features"
-        )
-        assert shapes_main[2][1] == self.num_features, "x bci 'c' != self.num_features"
-
-        self._main_expr = oe.contract_expression(main_sub, *shapes_main)
-        self._shapes_main = shapes_main
-
-        # --- Prepare weighting/feature expressions for i < correlation ---
-        self._weight_exprs: list[Any] = []
-        self._shapes_weight: list[Any] = []
-        self._feature_exprs: list[Any] = []
-
-        # iterate descending (correlation-1 .. 1) as PyTorch
-        for i in range(self.correlation - 1, 0, -1):
-            U_i = self.U_matrices[i]
-            num_params_i = int(U_i.shape[-1])
-            num_ell_i = int(U_i.shape[-2])
-
-            prefix_i = [ALPHABET[j] for j in range(max(0, i + min(self.lmax, 1)))]
-            subs_weight = ''.join(prefix_i) + 'k,ekc,be->bc' + ''.join(prefix_i)
-            # feature subs: match PyTorch construction
-            subs_feat = (
-                'bc'
-                + ''.join(prefix_i[: i - 1 + min(self.lmax, 1)])
-                + 'i,bci->bc'
-                + ''.join(prefix_i[: i - 1 + min(self.lmax, 1)])
-            )
-
-            # contract_expression shapes
-            if num_equivariance == 1:
-                shapes_weight = (
-                    (num_ell_i,) * i + (num_params_i,),
-                    (
-                        self.num_elements,
-                        num_params_i,
-                        self.num_features,
-                    ),  # ekc
-                    (
-                        BATCH_EXAMPLE,
-                        self.num_elements,
-                    ),
-                )
-            else:
-                shapes_weight = (
-                    (num_equivariance,) + (num_ell_i,) * i + (num_params_i,),
-                    (
-                        self.num_elements,
-                        num_params_i,
-                        self.num_features,
-                    ),  # ekc
-                    (
-                        BATCH_EXAMPLE,
-                        self.num_elements,
-                    ),
-                )
-            expr_w = oe.contract_expression(subs_weight, *shapes_weight)
-            self._weight_exprs.append(expr_w)
-            self._shapes_weight.append((num_elements, num_params_i, self.num_features))
-
-            # For feature expr: first operand is c_tensor shape WITHOUT batch
-            # c_tensor shape (after weighting conv) corresponds to expr result "bc..." -> we
-            # must provide the shape of that operand without batch. In PyTorch they used
-            # example_inputs with shape (BATCH_EXAMPLE, self.num_features, num_equivariance, ...).
-            # We construct a conservative shape consistent with "bci" second operand:
-            if num_equivariance == 1:
-                shapes_feat = (
-                    (BATCH_EXAMPLE, self.num_features) + (num_ell_i,) * i,
-                    (BATCH_EXAMPLE, self.num_features, num_ell_i),
-                )
-            else:
-                shapes_feat = (
-                    (BATCH_EXAMPLE, self.num_features, num_equivariance)
-                    + (num_ell_i,) * i,
-                    (BATCH_EXAMPLE, self.num_features, num_ell_i),
-                )
-            expr_f = oe.contract_expression(subs_feat, *shapes_feat)
-            self._feature_exprs.append(expr_f)
-
-        if not internal_weights:
-            self.weights = weights[:-1]
-            self.weights_max = weights[-1]
-
-    def __call__(self, x: jnp.ndarray, y: jnp.ndarray) -> jnp.ndarray:
-        # Ensure arrays
-        x = jnp.asarray(x)  # expected shape (batch, self.num_features, num_ell_main)
-        y = jnp.asarray(y)  # expected shape (batch, self.num_elements)
-
-        # expected shape: (batch, c, i) for x
-        if x.ndim < 2:
-            raise ValueError(
-                f'x must have at least 2 dims (batch,c,...) but got shape {x.shape}'
-            )
-        if x.shape[1] != self.num_features:
-            raise ValueError(
-                f'Mismatch: x.shape[1] == {x.shape[1]} but self.num_features == {self.num_features}. '
-                'Check the Irreps you passed to this Contraction and the input ordering.'
-            )
-        if y.ndim < 2:
-            raise ValueError(f'y must have shape (batch, elements), got {y.shape}')
-        if y.shape[1] != self.num_elements:
-            raise ValueError(
-                f'Mismatch: y.shape[1] == {y.shape[1]} but self.num_elements == {self.num_elements}.'
-            )
-
-        weights_max = hk.get_parameter(
-            'weights_max',
-            shape=(
-                self.num_elements,
-                self.U_matrices[self.correlation].shape[-1],
-                self.num_features,
-            ),
-            init=hk.initializers.RandomNormal(
-                stddev=1.0 / self.U_matrices[self.correlation].shape[-1]
-            ),
-            dtype=default_dtype(),
-        )
-
-        weights = []
-        for i in range(1, self.correlation):
-            w = hk.get_parameter(
-                f'weights_{i}',
-                shape=self._shapes_weight[i - 1],
-                init=hk.initializers.RandomNormal(
-                    stddev=1.0 / self._shapes_weight[i - 1][1]
-                ),
-                dtype=default_dtype(),
-            )
-            weights.append(w)
-
-        # If a given path was flagged zero, use zeros instead of the parameter (like EmptyParam)
-        # For weights_max it's the last path flag
-        if self.zero_flags and self.zero_flags[-1]:
-            w_main = jnp.zeros_like(weights_max)
-        else:
-            w_main = weights_max
-
-        # Call main expr. opt_einsum supports leading batch dims and will broadcast.
-        U_main = self.U_matrices[self.correlation]
-        out = self._main_expr(U_main, w_main, x, y)
-
-        # subsequent weighting + feature contractions (mirror PyTorch loop order)
-        # weights list corresponds to i = correlation-1, correlation-2, ..., 1 in that order
-        for idx, (w_param, expr_w, expr_f) in enumerate(
-            zip(weights, self._weight_exprs, self._feature_exprs)
-        ):
-            # nu maps to correlation - (idx+1)
-            nu = self.correlation - (idx + 1)
-            nu = max(nu, 1)
-            U_nu = self.U_matrices[nu]
-
-            # zero-flag handling for this stage (indexing zero_flags[nu-1])
-            zero_flag = False
-            if len(self.zero_flags) >= nu:
-                zero_flag = self.zero_flags[nu - 1]
-            if zero_flag:
-                w = jnp.zeros_like(w_param)
-            else:
-                w = w_param
-
-            # compute weighting contraction: expr_w(U_nu, w, y)
-            c_tensor = expr_w(U_nu, w, y)
-            # add residual
-            c_tensor = c_tensor + out
-            # feature contraction: expr_f(c_tensor, x)
-            out = expr_f(c_tensor, x)
-
-        # reshape final result to (batch, -1) as in PyTorch
-        out = jnp.reshape(out, (out.shape[0], -1))
-        return out
-
-    def U_tensors(self, nu: int) -> jnp.ndarray:
-        return self.U_matrices[int(nu)]
-
-    @classmethod
-    def import_from_torch(cls, torch_module, hk_params, scope):
-        """
-        Import Torch parameters (weights_max and weights_i) into Haiku params.
-        No submodules, so we copy directly.
-        """
-        hk_params = hk.data_structures.to_mutable_dict(hk_params)
-
-        # Copy weights_max
-        hk_params[scope]['weights_max'] = jnp.array(
-            torch_module.weights_max.detach().cpu().numpy()
-        )
-
-        # Copy weights_1, weights_2, ..., weights_{correlation-1}
-        for i in range(1, torch_module.correlation):
-            hk_params[scope][f'weights_{i}'] = jnp.array(
-                getattr(torch_module, 'weights')[i - 1].detach().cpu().numpy()
-            )
-
-        return hk.data_structures.to_immutable_dict(hk_params)
+    poly: Optional[cue.EquivariantPolynomial]
+    projection: Optional[jnp.ndarray]
+    total_params: int  # number of pyro parameters per feature (sum over degrees)
+    output_dim: int
 
 
 @register_import('mace.modules.symmetric_contraction.SymmetricContraction')
 class SymmetricContraction(hk.Module):
+    """Symmetric contraction using ``cuequivariance-jax`` polynomials."""
+
     def __init__(
         self,
         irreps_in: Union[str, Irreps],
@@ -332,6 +50,7 @@ class SymmetricContraction(hk.Module):
         internal_weights: Optional[bool] = None,
         shared_weights: Optional[bool] = None,
         num_elements: Optional[int] = None,
+        method: str = 'naive',
         name: Optional[str] = None,
     ):
         super().__init__(name=name)
@@ -341,59 +60,207 @@ class SymmetricContraction(hk.Module):
         if path_normalization is None:
             path_normalization = 'element'
 
-        assert irrep_normalization in ['component', 'norm', 'none']
-        assert path_normalization in ['element', 'path', 'none']
-
-        self.irreps_in = Irreps(irreps_in)
-        self.irreps_out = Irreps(irreps_out)
-        self.num_elements = int(num_elements or 1)
-        self.use_reduced_cg = bool(use_reduced_cg)
-
-        # Normalize correlation into dict[Irrep, int]
-        if not isinstance(correlation, dict):
-            corr_val = correlation
-            self.correlation = {irrep_out: corr_val for irrep_out in self.irreps_out}
-
-        assert shared_weights or not internal_weights
+        assert irrep_normalization in {'component', 'norm', 'none'}
+        assert path_normalization in {'element', 'path', 'none'}
 
         if internal_weights is None:
             internal_weights = True
-
-        self.internal_weights = internal_weights
-        self.shared_weights = shared_weights
-
-    def __call__(self, x: jnp.ndarray, y: jnp.ndarray) -> jnp.ndarray:
-        outs = []
-        for i, irrep_out in enumerate(self.irreps_out):
-            contraction = Contraction(
-                irreps_in=self.irreps_in,
-                irrep_out=Irreps(str(irrep_out.ir)),
-                correlation=self.correlation[irrep_out],
-                internal_weights=self.internal_weights,
-                num_elements=self.num_elements,
-                # TODO: Bug in MACE implementation, array expected but passing
-                # a boolean
-                weights=self.shared_weights,
-                use_reduced_cg=self.use_reduced_cg,
-                name=f'contraction_{i}',
+        if not internal_weights:
+            raise NotImplementedError(
+                'External weights are not supported in cue backend yet.'
             )
-            outs.append(contraction(x, y))
+        if shared_weights:
+            raise NotImplementedError(
+                'Shared weights are not supported in cue backend yet.'
+            )
+        if use_reduced_cg:
+            raise NotImplementedError('Reduced CGs are not yet wired for cue backend.')
 
-        return jnp.concatenate(outs, axis=-1)
+        self.method = method
 
+        self.e3_irreps_in = Irreps(irreps_in)
+        self.e3_irreps_out = Irreps(irreps_out)
+        self.num_elements = int(num_elements or 1)
+
+        num_features = self.e3_irreps_in.count((0, 1))
+        if num_features <= 0:
+            raise ValueError('Input irreps must contain at least one scalar channel.')
+        self.num_features = num_features
+
+        # Drop multiplicities when constructing coupling irreps (matches Torch behaviour)
+        coupling_irreps = Irreps([ir for _, ir in self.e3_irreps_in])
+        self.cue_irreps_in_base = _convert_to_cue_irreps(coupling_irreps)
+        self.cue_irreps_in = self.cue_irreps_in_base.set_mul(self.num_features)
+
+        # Normalise correlation argument into a map keyed by Irrep objects
+        if isinstance(correlation, dict):
+            corr_map: dict[Irrep, int] = {}
+            for key, value in correlation.items():
+                key_ir = key if isinstance(key, Irrep) else Irrep(key)
+                corr_map[key_ir] = int(value)
+        else:
+            corr_map = {ir: int(correlation) for _, ir in self.e3_irreps_out}
+        self.correlation_map = corr_map
+
+        self.blocks: list[_BlockConfig] = []
+
+        for _, ir in self.e3_irreps_out:
+            corr = self.correlation_map[ir]
+            degrees = tuple(range(1, corr + 1))
+            degrees_desc = tuple(range(corr, 0, -1))
+
+            cue_irrep_out_base = _convert_to_cue_irreps(Irreps([(1, ir)]))
+            cue_irrep_out = cue_irrep_out_base.set_mul(self.num_features)
+
+            try:
+                poly, projection = symmetric_contraction(
+                    self.cue_irreps_in,
+                    cue_irrep_out,
+                    degrees,
+                )
+                projection = jnp.asarray(projection, dtype=default_dtype())
+            except ValueError:
+                poly, projection = None, None
+
+            # Determine number of parameters per degree following Torch ordering (descending)
+            params_per_degree: list[int] = []
+            for deg in degrees_desc:
+                poly_deg = _symmetric_contraction(
+                    self.cue_irreps_in,
+                    cue_irrep_out,
+                    deg,
+                )
+                dim = poly_deg.inputs[0].irreps.dim
+                params_per_degree.append(dim // self.num_features)
+
+            total_params = int(sum(params_per_degree))
+            self.blocks.append(
+                _BlockConfig(
+                    poly=poly,
+                    projection=projection,
+                    total_params=total_params,
+                    output_dim=cue_irrep_out.dim,
+                )
+            )
+
+    # ---------------------------------------------------------------------
+    # helpers
+    # ------------------------------------------------------------------
+    def _features_to_rep(self, x: jnp.ndarray) -> cuex.RepArray:
+        if x.ndim != 3:
+            raise ValueError(
+                f'x must have shape (batch, num_features, num_ell); got {x.shape}'
+            )
+        if x.shape[1] != self.num_features:
+            raise ValueError(
+                f'x.shape[1] ({x.shape[1]}) != expected num_features {self.num_features}'
+            )
+        segments: list[jnp.ndarray] = []
+        start = 0
+        for mul_ir in self.cue_irreps_in_base:
+            dim = mul_ir.ir.dim
+            seg = x[:, :, start : start + dim]
+            if seg.shape[-1] != dim:
+                raise ValueError('Input feature dimension mismatch with irreps.')
+            segments.append(jnp.swapaxes(seg, -2, -1))  # -> (batch, dim, num_features)
+            start += dim
+        return cuex.from_segments(
+            self.cue_irreps_in,
+            segments,
+            (x.shape[0], self.num_features),
+            cue.ir_mul,
+            dtype=x.dtype,
+        )
+
+    # ------------------------------------------------------------------
+    def __call__(self, x: jnp.ndarray, y: jnp.ndarray) -> jnp.ndarray:
+        x = jnp.asarray(x)
+        y = jnp.asarray(y)
+        if y.ndim != 2:
+            raise ValueError(f'y must have shape (batch, num_elements); got {y.shape}')
+        if y.shape[1] != self.num_elements:
+            raise ValueError(
+                f'y.shape[1] ({y.shape[1]}) != expected num_elements {self.num_elements}'
+            )
+
+        x_rep = self._features_to_rep(x)
+        outputs: list[jnp.ndarray] = []
+
+        batch_size = x.shape[0]
+
+        for idx, block in enumerate(self.blocks):
+            if (
+                block.total_params <= 0
+                or block.poly is None
+                or block.projection is None
+            ):
+                outputs.append(jnp.zeros((batch_size, block.output_dim), dtype=x.dtype))
+                continue
+
+            weights = hk.get_parameter(
+                f'weights_{idx}',
+                shape=(self.num_elements, block.total_params, self.num_features),
+                init=hk.initializers.RandomNormal(
+                    stddev=1.0 / max(block.total_params, 1)
+                ),
+                dtype=default_dtype(),
+            )
+
+            weights_combined = jnp.einsum('be,epf->bpf', y, weights)
+            weights_projected = jnp.einsum(
+                'bpf,pa->baf', weights_combined, block.projection
+            )
+            weights_flat = weights_projected.reshape(weights_projected.shape[0], -1)
+
+            out_rep = cuex.equivariant_polynomial(
+                block.poly,
+                [weights_flat, x_rep],
+                method=self.method,
+            )
+            outputs.append(out_rep.change_layout(cue.mul_ir).array)
+
+        return jnp.concatenate(outputs, axis=-1)
+
+    # ------------------------------------------------------------------
     @classmethod
     def import_from_torch(cls, torch_module, hk_params, scope):
-        """
-        Import Torch SymmetricContraction into Haiku params.
-        Delegates parameter copying to each Contraction block.
-        """
         hk_params = hk.data_structures.to_mutable_dict(hk_params)
 
-        for i, contraction in enumerate(torch_module.contractions):
-            hk_params = copy_torch_to_jax(
-                contraction,
-                hk_params,
-                scope=f'{scope}/contraction_{i}',
-            )
+        for idx, contraction in enumerate(torch_module.contractions):
+            param_key = f'weights_{idx}'
+            if param_key not in hk_params[scope]:
+                continue  # Block has no learnable parameters (zero projection)
+
+            weights = [
+                contraction.weights_max.detach().cpu().numpy(),
+                *[w.detach().cpu().numpy() for w in contraction.weights],
+            ]
+            expected = hk_params[scope][param_key].shape[1]
+            if expected == 0:
+                continue
+
+            collected = []
+            remaining = expected
+            for w in weights:
+                w_flat = w.reshape(w.shape[0], -1, w.shape[-1])
+                if remaining <= 0:
+                    break
+                if w_flat.shape[1] <= remaining:
+                    collected.append(w_flat)
+                    remaining -= w_flat.shape[1]
+                else:
+                    collected.append(w_flat[:, :remaining])
+                    remaining = 0
+
+            if remaining > 0:
+                # pad with zeros if Torch had fewer active params than expected
+                zeros = np.zeros(
+                    (weights[0].shape[0], remaining, weights[0].shape[-1]),
+                    dtype=weights[0].dtype,
+                )
+                collected.append(zeros)
+
+            concat = np.concatenate(collected, axis=1)
+            hk_params[scope][param_key] = jnp.asarray(concat, dtype=default_dtype())
 
         return hk.data_structures.to_immutable_dict(hk_params)

@@ -593,9 +593,12 @@ class EquivariantProductBasisBlock(hk.Module):
             if use_cueq_mul_ir:
                 node_feats = jnp.transpose(node_feats, (0, 2, 1))
             index_attrs = jnp.nonzero(node_attrs, size=node_attrs.shape[0])[1]
-            node_feats = self.symmetric_contractions(
-                node_feats.reshape(node_feats.shape[0], -1), index_attrs
+            node_attrs = jax.nn.one_hot(
+                index_attrs,
+                self.symmetric_contractions.num_elements,
+                dtype=node_feats.dtype,
             )
+            node_feats = self.symmetric_contractions(node_feats, node_attrs)
         else:
             node_feats = self.symmetric_contractions(node_feats, node_attrs)
 

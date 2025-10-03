@@ -257,12 +257,24 @@ def SymmetricContractionWrapper(
       always build it ourselves from tensor products.
     """
 
+    if use_reduced_cg:
+        # Reduced CG tables are not supported by the JAX implementation; fall back to
+        # the standard contraction while ignoring the flag to preserve compatibility.
+        use_reduced_cg = False
+
+    method = 'naive'
+    if cueq_config is not None and cueq_config.enabled:
+        if cueq_config.layout_str not in {'mul_ir', 'ir_mul'}:
+            raise ValueError(
+                f"Unsupported cuequivariance layout '{cueq_config.layout_str}'."
+            )
+
     return SymmetricContraction(
         irreps_in=irreps_in,
         irreps_out=irreps_out,
         correlation=correlation,
         num_elements=num_elements,
-        use_reduced_cg=use_reduced_cg,
+        method=method,
         name=name,
     )
 
