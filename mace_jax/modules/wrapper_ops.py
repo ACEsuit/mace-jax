@@ -16,14 +16,11 @@ from mace_jax.tools.scatter import scatter_sum
 
 try:
     import cuequivariance as cue
-    import cuequivariance_jax as cuej
+    import cuequivariance_jax as cuex
 
-    CUET_AVAILABLE = True
+    CUEX_AVAILABLE = True
 except (ImportError, ModuleNotFoundError):
-    CUET_AVAILABLE = False
-
-# OpenEquivariance is primarily PyTorch-focused, no JAX bindings found
-OEQ_AVAILABLE = False
+    CUEX_AVAILABLE = False
 
 
 @dataclasses.dataclass
@@ -42,27 +39,13 @@ class CuEquivarianceConfig:
     conv_fusion: bool = False  # Set to True to enable conv fusion
 
     def __post_init__(self):
-        if self.enabled and CUET_AVAILABLE:
+        if self.enabled and CUEX_AVAILABLE:
             self.layout_str = self.layout
             self.layout = getattr(cue, self.layout)
             self.group = (
                 O3_e3nn if self.group == 'O3_e3nn' else getattr(cue, self.group)
             )
-        if not CUET_AVAILABLE:
-            self.enabled = False
-
-
-@dataclasses.dataclass
-class OEQConfig:
-    """Configuration for cuequivariance acceleration"""
-
-    enabled: bool = False
-    optimize_all: bool = False
-    optimize_channelwise: bool = False
-    conv_fusion: Optional[str] = 'atomic'
-
-    def __post_init__(self):
-        if not OEQ_AVAILABLE:
+        if not CUEX_AVAILABLE:
             self.enabled = False
 
 
@@ -79,17 +62,13 @@ class Linear:
         name: Optional[str] = None,
     ):
         if (
-            CUET_AVAILABLE
+            CUEX_AVAILABLE
             and cueq_config is not None
             and cueq_config.enabled
             and (cueq_config.optimize_all or cueq_config.optimize_linear)
         ):
-            return cuej.Linear(
-                cue.Irreps(cueq_config.group, irreps_in),
-                cue.Irreps(cueq_config.group, irreps_out),
-                layout=cueq_config.layout,
-                shared_weights=shared_weights,
-                use_fallback=True,
+            raise NotImplementedError(
+                'cuex.Linear is not available in cuequivariance-jax.'
             )
 
         return _linear.Linear(
@@ -180,17 +159,16 @@ class TensorProduct:
         shared_weights: bool = False,
         internal_weights: bool = False,
         cueq_config=None,
-        oeq_config=None,
         name: Optional[str] = None,
     ):
         # --- Case 1: CuEquivariance backend ---
         if cueq_config is not None and cueq_config.enabled:
             # build polynomial descriptor
             poly_desc = (
-                cuej.descriptors.channelwise_tensor_product(
-                    cuej.Irreps(cueq_config.group, irreps_in1),
-                    cuej.Irreps(cueq_config.group, irreps_in2),
-                    cuej.Irreps(cueq_config.group, irreps_out),
+                cuex.descriptors.channelwise_tensor_product(
+                    cuex.Irreps(cueq_config.group, irreps_in1),
+                    cuex.Irreps(cueq_config.group, irreps_in2),
+                    cuex.Irreps(cueq_config.group, irreps_out),
                 )
                 .flatten_coefficient_modes()
                 .squeeze_modes()
@@ -202,7 +180,7 @@ class TensorProduct:
                 num_nodes = node_feats.shape[0]
                 output_shape = (num_nodes, irreps_out.dim)
 
-                return cuej.segmented_polynomial(
+                return cuex.segmented_polynomial(
                     polynomial=poly_desc,
                     inputs=[tp_weights, node_feats, edge_attrs],
                     outputs_shape_dtype=(output_shape, jnp.float32),
@@ -212,10 +190,6 @@ class TensorProduct:
                 )
 
             return forward
-
-        # --- Case 2: OEQ backend (not ported yet) ---
-        if oeq_config is not None and oeq_config.enabled:
-            raise NotImplementedError('OEQ backend not yet ported to JAX')
 
         # --- Default: fallback to e3nn_jax.TensorProduct ---
         return _tp.TensorProduct(
@@ -244,14 +218,14 @@ def FullyConnectedTensorProduct(
     Otherwise, defaults to e3nn_jax.o3.FullyConnectedTensorProduct.
     """
     if (
-        CUET_AVAILABLE
+        CUEX_AVAILABLE
         and cueq_config is not None
         and cueq_config.enabled
         and (cueq_config.optimize_all or cueq_config.optimize_fctp)
     ):
         # No JAX cuet binding available (PyTorch only).
         raise NotImplementedError(
-            'cuet.FullyConnectedTensorProduct is not available in JAX.'
+            'cuex.FullyConnectedTensorProduct is not available in JAX.'
         )
 
     # Default: e3nn_jax implementation
@@ -271,7 +245,6 @@ def SymmetricContractionWrapper(
     correlation: int,
     num_elements: Optional[int] = None,
     cueq_config: Optional['CuEquivarianceConfig'] = None,
-    oeq_config: Optional['OEQConfig'] = None,  # unused for JAX
     use_reduced_cg: bool = True,
     name: Optional[str] = None,
 ):
@@ -295,7 +268,7 @@ def SymmetricContractionWrapper(
 
 
 class TransposeIrrepsLayoutWrapper:
-    """Wrapper around cuet.TransposeIrrepsLayout"""
+    """Wrapper around cuex.TransposeIrrepsLayout"""
 
     def __new__(
         cls,
