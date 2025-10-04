@@ -6,6 +6,7 @@ import dataclasses
 from typing import Optional
 
 import cuequivariance as cue
+import jax.numpy as jnp
 from e3nn_jax import Irreps
 
 from mace_jax.cuequivariance import (
@@ -210,4 +211,59 @@ class TransposeIrrepsLayoutWrapper:
         target: str,
         cueq_config: Optional[CuEquivarianceConfig] = None,
     ):
-        return None
+        if cueq_config is None or not cueq_config.enabled:
+            return None
+
+        source = source.lower()
+        target = target.lower()
+
+        if source == target:
+            return _IdentityTranspose()
+
+        if {source, target} != {'mul_ir', 'ir_mul'}:
+            raise ValueError(
+                "TransposeIrrepsLayoutWrapper only supports conversions between 'mul_ir' and 'ir_mul' layouts"
+                f' (got source={source!r}, target={target!r}).'
+            )
+
+        return _IrrepsLayoutTranspose(irreps=Irreps(irreps), swap_to=target)
+
+
+class _IdentityTranspose:
+    def __call__(self, tensor: jnp.ndarray) -> jnp.ndarray:
+        return tensor
+
+
+class _IrrepsLayoutTranspose:
+    def __init__(self, *, irreps: Irreps, swap_to: str) -> None:
+        self.irreps = irreps
+        self.swap_to = swap_to
+
+    def __call__(self, tensor: jnp.ndarray) -> jnp.ndarray:
+        leading_shape = tensor.shape[:-1]
+        offset = 0
+        pieces = []
+
+        for mul, ir in self.irreps:
+            dim = ir.dim
+            block_size = mul * dim
+            if block_size == 0:
+                continue
+
+            segment = tensor[..., offset : offset + block_size]
+            offset += block_size
+
+            if self.swap_to == 'ir_mul':
+                segment = segment.reshape(leading_shape + (mul, dim))
+                segment = jnp.swapaxes(segment, -2, -1)
+            else:  # target is 'mul_ir'
+                segment = segment.reshape(leading_shape + (dim, mul))
+                segment = jnp.swapaxes(segment, -2, -1)
+
+            segment = segment.reshape(leading_shape + (block_size,))
+            pieces.append(segment)
+
+        if not pieces:
+            return tensor
+
+        return jnp.concatenate(pieces, axis=-1)

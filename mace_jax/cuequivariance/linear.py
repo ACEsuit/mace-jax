@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from math import prod
-from typing import Optional, Sequence, Union
+from typing import Optional, Union
 
 import haiku as hk
-import jax
 import jax.numpy as jnp
 from e3nn_jax import Irreps
 
@@ -82,14 +82,20 @@ class Linear(hk.Module):
         def alpha(ins: LinearInstruction) -> float:
             if path_normalization == 'element':
                 accumulator = sum(
-                    self.irreps_in[i.i_in].mul for i in lin_instructions if i.i_out == ins.i_out
+                    self.irreps_in[i.i_in].mul
+                    for i in lin_instructions
+                    if i.i_out == ins.i_out
                 )
             elif path_normalization == 'path':
                 accumulator = sum(
-                    self.irreps_in[i.i_in].mul for i in lin_instructions if i.i_out == ins.i_out
+                    self.irreps_in[i.i_in].mul
+                    for i in lin_instructions
+                    if i.i_out == ins.i_out
                 )
             else:
-                raise ValueError(f'Unsupported path_normalization {path_normalization!r}.')
+                raise ValueError(
+                    f'Unsupported path_normalization {path_normalization!r}.'
+                )
             return 1.0 if accumulator == 0 else accumulator
 
         lin_instructions = [
