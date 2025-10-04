@@ -12,6 +12,9 @@ from mace_jax.cuequivariance import (
     FullyConnectedTensorProduct as CueFullyConnectedTensorProduct,
 )
 from mace_jax.cuequivariance import (
+    Linear as CueLinear,
+)
+from mace_jax.cuequivariance import (
     TensorProduct as CueTensorProduct,
 )
 from mace_jax.e3nn import _linear
@@ -56,13 +59,14 @@ class Linear:
         cueq_config: Optional[CuEquivarianceConfig] = None,
         name: Optional[str] = None,
     ):
-        if (
-            cueq_config is not None
-            and cueq_config.enabled
-            and (cueq_config.optimize_all or cueq_config.optimize_linear)
-        ):
-            raise NotImplementedError(
-                'cuex.Linear is not available in cuequivariance-jax.'
+        if cueq_config is not None and cueq_config.enabled:
+            return CueLinear(
+                irreps_in,
+                irreps_out,
+                shared_weights=shared_weights,
+                internal_weights=internal_weights,
+                cueq_config=cueq_config,
+                name=name,
             )
 
         return _linear.Linear(
