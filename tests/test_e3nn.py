@@ -1,4 +1,3 @@
-from collections.abc import Sequence
 from math import prod
 
 import haiku as hk
@@ -7,6 +6,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import torch
+from e3nn.o3 import FullyConnectedTensorProduct as FullyConnectedTensorProductTorch
 from e3nn.o3 import Irreps
 from e3nn.o3 import Irreps as IrrepsTorch
 from e3nn.o3 import SphericalHarmonics as SphericalHarmonicsTorch
@@ -15,120 +15,255 @@ from e3nn.o3._linear import Linear as LinearTorch
 from e3nn_jax import Irreps as IrrepsJAX
 from e3nn_jax import spherical_harmonics
 
-from mace_jax.cuequivariance.tensor_product import (
-    TensorProduct as CuTensorProduct,
-)
-from mace_jax.cuequivariance.tensor_product import (
-    _infer_path_shape,
-)
 from mace_jax.e3nn._linear import Linear as LinearJax
 from mace_jax.e3nn._tensor_product._tensor_product import (
     TensorProduct as TensorProductJAX,
 )
 from mace_jax.e3nn.o3 import SphericalHarmonics as SphericalHarmonicsJAX
 from mace_jax.modules.irreps_tools import tp_out_irreps_with_instructions
-from mace_jax.modules.wrapper_ops import CuEquivarianceConfig
-from mace_jax.modules.wrapper_ops import TensorProduct as WrapperTensorProduct
+from mace_jax.modules.wrapper_ops import (
+    CuEquivarianceConfig,
+    FullyConnectedTensorProduct,
+)
+from mace_jax.modules.wrapper_ops import (
+    TensorProduct as WrapperTensorProduct,
+)
 
 
-class TestTensorProductAllExamples:
-    @pytest.mark.parametrize('example_idx', list(range(6)))  # we have 6 examples
-    def test_tensor_product_examples(self, example_idx):
-        # ------------------------
-        # Define examples
-        if example_idx == 0:
-            irreps_in1 = irreps_in2 = Irreps('16x1o')
-            irreps_out = Irreps('16x1e')
-            instructions = [(0, 0, 0, 'uuu', False)]
-        elif example_idx == 1:
-            irreps_in1 = Irreps('16x1o')
-            irreps_in2 = Irreps('16x1o')
-            irreps_out = Irreps('16x1e')
-            instructions = [(0, 0, 0, 'uvw', True)]
-        elif example_idx == 2:
-            irreps_in1 = Irreps('8x0o + 8x1o')
-            irreps_in2 = Irreps('16x1o')
-            irreps_out = Irreps('16x1e')
-            instructions = [
-                (0, 0, 0, 'uvw', True, 3),
-                (1, 0, 0, 'uvw', True, 1),
-            ]
-        elif example_idx == 3:
-            irreps = Irreps('3x0e + 4x0o + 1e + 2o + 3o')
-            irreps_in1 = irreps_in2 = irreps
-            irreps_out = Irreps('0e')
-            instructions = [
-                (i, i, 0, 'uuw', False) for i, (mul, ir) in enumerate(irreps)
-            ]
-        elif example_idx == 4:
-            irreps_in1 = Irreps('8x0o + 7x1o + 3x2e')
-            irreps_in2 = Irreps('10x0e + 10x1e + 10x2e')
-            irreps_out = Irreps('8x0o + 7x1o + 3x2e')
-            instructions = [
-                (0, 0, 0, 'uvu', True),
-                (1, 0, 1, 'uvu', True),
-                (1, 1, 1, 'uvu', True),
-                (1, 2, 1, 'uvu', True),
-                (2, 0, 2, 'uvu', True),
-                (2, 1, 2, 'uvu', True),
-                (2, 2, 2, 'uvu', True),
-            ]
-        elif example_idx == 5:
-            irreps_in1 = Irreps('5x0e + 10x1o + 1x2e')
-            irreps_in2 = Irreps('5x0e + 10x1o + 1x2e')
-            irreps_out = Irreps('5x0e + 10x1o + 1x2e')
-            instructions = [
-                (i1, i2, i_out, 'uvw', True, mul1 * mul2)
-                for i1, (mul1, ir1) in enumerate(irreps_in1)
-                for i2, (mul2, ir2) in enumerate(irreps_in2)
-                for i_out, (mul_out, ir_out) in enumerate(irreps_out)
-                if ir_out in ir1 * ir2
-            ]
-        else:
-            raise ValueError(f'Unexpected example_idx {example_idx}')
+class TestFullyConnectedTensorProduct:
+    _CASES = [
+        ('1x0e + 1x1o', '1x0e + 1x1o', '1x0e + 1x1o + 1x2e', 4, 0),
+        ('1x0e + 2x1o', '1x0e + 2x1o', '1x0e + 2x1o + 1x2e', 3, 1),
+        ('2x0e + 1x1o', '1x0e + 1x1o', '2x0e + 2x1o', 2, 2),
+    ]
 
-        # ------------------------
-        # Random inputs
-        batch_size = 4
-        x1 = torch.randn(batch_size, irreps_in1.dim)
-        x2 = torch.randn(batch_size, irreps_in2.dim)
+    @pytest.mark.parametrize(
+        'irreps_in1_str,irreps_in2_str,irreps_out_str,batch,seed', _CASES
+    )
+    def test_torch_vs_jax(
+        self,
+        irreps_in1_str: str,
+        irreps_in2_str: str,
+        irreps_out_str: str,
+        batch: int,
+        seed: int,
+    ) -> None:
+        irreps_in1 = Irreps(irreps_in1_str)
+        irreps_in2 = Irreps(irreps_in2_str)
+        irreps_out = Irreps(irreps_out_str)
 
-        total_weight_numel = sum(
-            np.prod((irreps_in1[i1].mul, irreps_in2[i2].mul, irreps_out[i_out].mul))
-            if mode == 'uvw'
-            else np.prod((irreps_in1[i1].mul, irreps_in2[i2].mul))
-            if mode in ['uvu', 'uvv']
-            else np.prod((irreps_in1[i1].mul, irreps_out[i_out].mul))
-            if mode == 'uuw'
-            else 1
-            for i1, i2, i_out, mode, has_weight, *rest in instructions
-            if has_weight
+        rng = np.random.default_rng(seed)
+        x1_np = rng.standard_normal((batch, irreps_in1.dim))
+        x2_np = rng.standard_normal((batch, irreps_in2.dim))
+
+        x1_torch = torch.tensor(x1_np, dtype=torch.float64)
+        x2_torch = torch.tensor(x2_np, dtype=torch.float64)
+
+        tp_torch = FullyConnectedTensorProductTorch(
+            irreps_in1,
+            irreps_in2,
+            irreps_out,
+            shared_weights=True,
+            internal_weights=False,
         )
-        w = torch.randn(total_weight_numel) if total_weight_numel > 0 else None
+        weight_np = rng.standard_normal(tp_torch.weight_numel)
+        weight_torch = torch.tensor(weight_np, dtype=torch.float64)
 
-        # ------------------------
-        # PyTorch
-        tp_torch = TensorProductTorch(irreps_in1, irreps_in2, irreps_out, instructions)
-        out_torch = tp_torch(x1, x2, w).detach().cpu().numpy()
+        x1_jax = jnp.array(x1_np, dtype=jnp.float64)
+        x2_jax = jnp.array(x2_np, dtype=jnp.float64)
+        weight_jax = jnp.array(weight_np, dtype=jnp.float64)
 
-        # ------------------------
-        # JAX
         def forward_fn(x1_, x2_, w_):
-            tp_jax = TensorProductJAX(irreps_in1, irreps_in2, irreps_out, instructions)
-            return tp_jax(x1_, x2_, w_)
+            tp = FullyConnectedTensorProduct(
+                irreps_in1,
+                irreps_in2,
+                irreps_out,
+                shared_weights=True,
+                internal_weights=False,
+            )
+            return tp(x1_, x2_, w_)
 
-        forward_transformed = hk.transform(forward_fn)
-        rng = jax.random.PRNGKey(42)
-        x1_j = jnp.array(x1.detach().cpu().numpy())
-        x2_j = jnp.array(x2.detach().cpu().numpy())
-        w_j = jnp.array(w.detach().cpu().numpy()) if w is not None else None
-        params = forward_transformed.init(rng, x1_j, x2_j, w_j)
-        out_jax = forward_transformed.apply(params, None, x1_j, x2_j, w_j)
-        out_jax_np = np.array(out_jax)
+        hk_tp = hk.without_apply_rng(hk.transform(forward_fn))
+        params = hk_tp.init(jax.random.PRNGKey(seed + 7), x1_jax, x2_jax, weight_jax)
 
-        # ------------------------
-        # Compare outputs
-        np.testing.assert_allclose(out_torch, out_jax_np, rtol=1e-5, atol=1e-6)
+        out_torch = tp_torch(x1_torch, x2_torch, weight_torch).detach().cpu().numpy()
+        out_jax = hk_tp.apply(params, x1_jax, x2_jax, weight_jax)
+        np.testing.assert_allclose(out_torch, np.array(out_jax), rtol=1e-5, atol=1e-5)
+
+
+class TestTensorProductWithIrrepsTool:
+    _CASES = [
+        ('1x0e + 1x1o', '1x0e + 1x1o', '1x0e + 1x1o + 1x2e', 4, 0),
+        ('1x0e + 2x1o', '1x0e + 2x1o', '1x0e + 2x1o + 1x2e', 3, 1),
+        ('2x0e + 1x1o', '1x0e + 1x1o', '2x0e + 2x1o', 2, 2),
+    ]
+
+    @staticmethod
+    def _prepare_case(
+        irreps_in1_str: str,
+        irreps_in2_str: str,
+        target_irreps_str: str,
+        *,
+        batch: int,
+        seed: int,
+    ) -> dict:
+        irreps_in1 = Irreps(irreps_in1_str)
+        irreps_in2 = Irreps(irreps_in2_str)
+        target_irreps = Irreps(target_irreps_str)
+
+        irreps_out, instructions = tp_out_irreps_with_instructions(
+            irreps_in1, irreps_in2, target_irreps
+        )
+        instructions = list(instructions)
+
+        rng = np.random.default_rng(seed)
+        x1_np = rng.standard_normal((batch, irreps_in1.dim))
+        x2_np = rng.standard_normal((batch, irreps_in2.dim))
+
+        weight_numel = 0
+        for i_in1, i_in2, i_out, mode, has_weight in instructions:
+            if not has_weight:
+                continue
+            if mode != 'uvu':
+                raise AssertionError(
+                    'tp_out_irreps_with_instructions returned an unsupported mode.'
+                )
+            weight_numel += irreps_in1[i_in1].mul * irreps_in2[i_in2].mul
+
+        weight_np = rng.standard_normal(weight_numel)
+
+        x1_torch = torch.tensor(x1_np, dtype=torch.float64)
+        x2_torch = torch.tensor(x2_np, dtype=torch.float64)
+        weight_torch = torch.tensor(weight_np, dtype=torch.float64)
+
+        x1_jax = jnp.array(x1_np, dtype=jnp.float64)
+        x2_jax = jnp.array(x2_np, dtype=jnp.float64)
+        weight_jax = jnp.array(weight_np, dtype=jnp.float64)
+
+        cue_config = CuEquivarianceConfig(enabled=True)
+
+        tp_torch = TensorProductTorch(
+            IrrepsTorch(str(irreps_in1)),
+            IrrepsTorch(str(irreps_in2)),
+            IrrepsTorch(str(irreps_out)),
+            instructions,
+            shared_weights=True,
+            internal_weights=False,
+        )
+
+        def jax_forward(x1_, x2_, w_):
+            tp = TensorProductJAX(
+                irreps_in1,
+                irreps_in2,
+                irreps_out,
+                instructions=instructions,
+                shared_weights=True,
+                internal_weights=False,
+            )
+            return tp(x1_, x2_, w_)
+
+        def cue_forward(x1_, x2_, w_):
+            tp = WrapperTensorProduct(
+                irreps_in1,
+                irreps_in2,
+                irreps_out,
+                instructions=instructions,
+                shared_weights=True,
+                internal_weights=False,
+                cueq_config=cue_config,
+            )
+            return tp(x1_, x2_, w_)
+
+        hk_tp = hk.without_apply_rng(hk.transform(jax_forward))
+        hk_cue = hk.without_apply_rng(hk.transform(cue_forward))
+        key = jax.random.PRNGKey(seed + 11)
+        key_jax, key_cue = jax.random.split(key)
+        params_jax = hk_tp.init(key_jax, x1_jax, x2_jax, weight_jax)
+        params_cue = hk_cue.init(key_cue, x1_jax, x2_jax, weight_jax)
+
+        return {
+            'tp_torch': tp_torch,
+            'x1_torch': x1_torch,
+            'x2_torch': x2_torch,
+            'weight_torch': weight_torch,
+            'hk_tp': hk_tp,
+            'params_jax': params_jax,
+            'hk_cue': hk_cue,
+            'params_cue': params_cue,
+            'x1_jax': x1_jax,
+            'x2_jax': x2_jax,
+            'weight_jax': weight_jax,
+        }
+
+    @pytest.mark.parametrize(
+        'irreps_in1_str,irreps_in2_str,target_irreps_str,batch,seed', _CASES
+    )
+    def test_torch_vs_jax(
+        self,
+        irreps_in1_str: str,
+        irreps_in2_str: str,
+        target_irreps_str: str,
+        batch: int,
+        seed: int,
+    ) -> None:
+        setup = self._prepare_case(
+            irreps_in1_str,
+            irreps_in2_str,
+            target_irreps_str,
+            batch=batch,
+            seed=seed,
+        )
+
+        out_torch = (
+            setup['tp_torch'](
+                setup['x1_torch'], setup['x2_torch'], setup['weight_torch']
+            )
+            .detach()
+            .cpu()
+            .numpy()
+        )
+        out_jax = setup['hk_tp'].apply(
+            setup['params_jax'],
+            setup['x1_jax'],
+            setup['x2_jax'],
+            setup['weight_jax'],
+        )
+        np.testing.assert_allclose(out_torch, np.array(out_jax), rtol=1e-5, atol=1e-5)
+
+    @pytest.mark.parametrize(
+        'irreps_in1_str,irreps_in2_str,target_irreps_str,batch,seed', _CASES
+    )
+    def test_torch_vs_cue_wrapper(
+        self,
+        irreps_in1_str: str,
+        irreps_in2_str: str,
+        target_irreps_str: str,
+        batch: int,
+        seed: int,
+    ) -> None:
+        setup = self._prepare_case(
+            irreps_in1_str,
+            irreps_in2_str,
+            target_irreps_str,
+            batch=batch,
+            seed=seed,
+        )
+
+        out_torch = (
+            setup['tp_torch'](
+                setup['x1_torch'], setup['x2_torch'], setup['weight_torch']
+            )
+            .detach()
+            .cpu()
+            .numpy()
+        )
+        out_cue = setup['hk_cue'].apply(
+            setup['params_cue'],
+            setup['x1_jax'],
+            setup['x2_jax'],
+            setup['weight_jax'],
+        )
+        np.testing.assert_allclose(out_torch, np.array(out_cue), rtol=1e-5, atol=1e-5)
 
 
 class TestCodegenLinear:
@@ -290,228 +425,3 @@ class TestSphericalHarmonicsComparison:
         hk_out = np.array(self.hk_normed.apply(self.params_normed, jnp.array(self.x)))
 
         np.testing.assert_allclose(hk_out, torch_out, rtol=1e-5, atol=1e-5)
-
-
-class TestCueTensorProduct:
-    @classmethod
-    def setup_class(cls):
-        cls.irreps_in1 = Irreps('1x0e + 1x1o')
-        cls.irreps_in2 = Irreps('1x0e + 1x1o')
-        cls.irreps_out, instructions = tp_out_irreps_with_instructions(
-            cls.irreps_in1, cls.irreps_in2, Irreps('1x0e + 1x1o')
-        )
-        cls.instructions = list(instructions)
-
-        base_weights = []
-        cue_weights = []
-        keys = jax.random.split(jax.random.PRNGKey(123), len(cls.instructions))
-
-        for key_inst, ins in zip(keys, cls.instructions):
-            i_in1, i_in2, i_out, mode, has_weight = ins[:5]
-            if not has_weight:
-                continue
-            mul_in1 = cls.irreps_in1[i_in1].mul
-            mul_in2 = cls.irreps_in2[i_in2].mul
-            mul_out = cls.irreps_out[i_out].mul
-
-            if mode == 'uvw':
-                shape_ref = (mul_in1, mul_in2, mul_out)
-                weight_ref = jax.random.normal(key_inst, shape_ref)
-                base_weights.append(weight_ref.reshape(-1))
-                cue_weights.append(weight_ref.reshape(-1))
-            elif mode == 'uvu':
-                shape_ref = (mul_in1, mul_in2)
-                weight_ref = jax.random.normal(key_inst, shape_ref)
-                base_weights.append(weight_ref.reshape(-1))
-
-                expanded = jnp.broadcast_to(
-                    weight_ref[..., None], (mul_in1, mul_in2, mul_out)
-                )
-                cue_weights.append(expanded.reshape(-1))
-            else:
-                raise NotImplementedError(mode)
-
-        cls.weight_ref = (
-            jnp.concatenate(base_weights) if base_weights else jnp.zeros((0,))
-        )
-        cls.weight_cue = (
-            jnp.concatenate(cue_weights) if cue_weights else jnp.zeros((0,))
-        )
-
-        key = jax.random.PRNGKey(0)
-        key_x1, key_x2, key_ref, key_cue = jax.random.split(key, 4)
-        cls.x1 = jax.random.normal(key_x1, (3, cls.irreps_in1.dim))
-        cls.x2 = jax.random.normal(key_x2, (3, cls.irreps_in2.dim))
-        cls.config = CuEquivarianceConfig(enabled=True)
-
-        def ref_forward(x1_, x2_, w_):
-            tp = TensorProductJAX(
-                cls.irreps_in1,
-                cls.irreps_in2,
-                cls.irreps_out,
-                instructions=cls.instructions,
-                shared_weights=True,
-                internal_weights=False,
-            )
-            return tp(x1_, x2_, w_)
-
-        def cue_forward(x1_, x2_, w_):
-            tp = WrapperTensorProduct(
-                cls.irreps_in1,
-                cls.irreps_in2,
-                cls.irreps_out,
-                instructions=cls.instructions,
-                shared_weights=True,
-                internal_weights=False,
-                cueq_config=cls.config,
-            )
-            return tp(x1_, x2_, w_)
-
-        cls.hk_ref = hk.without_apply_rng(hk.transform(ref_forward))
-        cls.hk_cue = hk.without_apply_rng(hk.transform(cue_forward))
-
-        cls.params_ref = cls.hk_ref.init(key_ref, cls.x1, cls.x2, cls.weight_ref)
-        cls.params_cue = cls.hk_cue.init(key_cue, cls.x1, cls.x2, cls.weight_cue)
-
-    def test_outputs_match(self):
-        out_ref = self.hk_ref.apply(self.params_ref, self.x1, self.x2, self.weight_ref)
-        out_cue = self.hk_cue.apply(self.params_cue, self.x1, self.x2, self.weight_cue)
-        np.testing.assert_allclose(out_ref, out_cue, rtol=1e-5, atol=1e-5)
-
-
-class TestCueTensorProductAdditionalModes:
-    _CASES = [
-        (
-            Irreps('1x0e'),
-            Irreps('1x0e'),
-            Irreps('1x0e'),
-            [(0, 0, 0, 'uvw', True)],
-        ),
-        (
-            Irreps('1x0e'),
-            Irreps('2x0e'),
-            Irreps('2x0e'),
-            [(0, 0, 0, 'uvv', True)],
-        ),
-        (
-            Irreps('2x0e'),
-            Irreps('2x0e'),
-            Irreps('2x0e'),
-            [(0, 0, 0, 'uvu', True)],
-        ),
-        (
-            Irreps('2x0e'),
-            Irreps('2x0e'),
-            Irreps('1x0e'),
-            [(0, 0, 0, 'uuw', True)],
-        ),
-        (
-            Irreps('2x0e'),
-            Irreps('2x0e'),
-            Irreps('2x0e'),
-            [(0, 0, 0, 'uuu', True)],
-        ),
-        (
-            Irreps('2x0e'),
-            Irreps('2x0e'),
-            Irreps('4x0e'),
-            [(0, 0, 0, 'uvuv', True)],
-        ),
-    ]
-
-    @pytest.mark.parametrize('shared_weights', [True, False])
-    @pytest.mark.parametrize('irreps_in1,irreps_in2,irreps_out,instructions', _CASES)
-    def test_modes(
-        self,
-        irreps_in1,
-        irreps_in2,
-        irreps_out,
-        instructions,
-        shared_weights,
-    ):
-        instructions = list(instructions)
-
-        weight_shapes = []
-        for ins in instructions:
-            i_in1, i_in2, i_out, mode, has_weight, *rest = ins
-            if not has_weight:
-                continue
-            mul_in1 = irreps_in1[i_in1].mul
-            mul_in2 = irreps_in2[i_in2].mul
-            mul_out = irreps_out[i_out].mul
-            weight_shapes.append(_infer_path_shape(mode, mul_in1, mul_in2, mul_out))
-
-        weight_numel = sum(np.prod(shape) for shape in weight_shapes)
-
-        key = jax.random.PRNGKey(0)
-        key_x1, key_x2, key_w, key_jax, key_cue = jax.random.split(key, 5)
-        batch = 3
-
-        x1 = jax.random.normal(key_x1, (batch, irreps_in1.dim))
-        x2 = jax.random.normal(key_x2, (batch, irreps_in2.dim))
-        if weight_numel == 0:
-            weight_np = None
-            weight_jax = None
-        elif shared_weights:
-            weight_np = np.array(jax.random.normal(key_w, (weight_numel,)))
-            weight_jax = jnp.array(weight_np)
-        else:
-            weight_np = np.array(jax.random.normal(key_w, (batch, weight_numel)))
-            weight_jax = jnp.array(weight_np)
-
-        x1_np = np.array(x1)
-        x2_np = np.array(x2)
-        x1_torch = torch.from_numpy(x1_np)
-        x2_torch = torch.from_numpy(x2_np)
-        weight_torch = None if weight_np is None else torch.from_numpy(weight_np)
-
-        tp_torch = TensorProductTorch(
-            irreps_in1,
-            irreps_in2,
-            irreps_out,
-            instructions,
-            shared_weights=shared_weights,
-            internal_weights=False,
-        )
-        out_torch = tp_torch(x1_torch, x2_torch, weight_torch)
-        out_torch_np = out_torch.detach().cpu().numpy()
-
-        def jax_forward(x1_, x2_, w_):
-            tp = TensorProductJAX(
-                irreps_in1,
-                irreps_in2,
-                irreps_out,
-                instructions=instructions,
-                shared_weights=shared_weights,
-                internal_weights=False,
-            )
-            return tp(x1_, x2_, w_)
-
-        jax_tp = hk.without_apply_rng(hk.transform(jax_forward))
-        params_jax = jax_tp.init(key_jax, x1, x2, weight_jax)
-        out_jax = jax_tp.apply(params_jax, x1, x2, weight_jax)
-
-        config = CuEquivarianceConfig(enabled=True)
-
-        def cue_forward(x1_, x2_, w_):
-            tp = CuTensorProduct(
-                irreps_in1,
-                irreps_in2,
-                irreps_out,
-                instructions=instructions,
-                shared_weights=shared_weights,
-                internal_weights=False,
-                cueq_config=config,
-            )
-            return tp(x1_, x2_, w_)
-
-        cue_tp = hk.without_apply_rng(hk.transform(cue_forward))
-        params_cue = cue_tp.init(key_cue, x1, x2, weight_jax)
-        out_cue = cue_tp.apply(params_cue, x1, x2, weight_jax)
-
-        np.testing.assert_allclose(
-            out_torch_np, np.array(out_jax), rtol=1e-5, atol=1e-5
-        )
-        np.testing.assert_allclose(
-            out_torch_np, np.array(out_cue), rtol=1e-5, atol=1e-5
-        )
