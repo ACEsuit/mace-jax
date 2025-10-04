@@ -5,17 +5,16 @@ Wrapper class for o3.Linear that optionally uses cuet.Linear
 import dataclasses
 from typing import Callable, Optional
 
+import cuequivariance as cue
 import jax.numpy as jnp
 from e3nn_jax import Irreps
 
+from mace_jax.cuequivariance import TensorProduct as CueTensorProduct
 from mace_jax.e3nn import _linear
 from mace_jax.e3nn import _tensor_product as _tp
 from mace_jax.modules.symmetric_contraction import SymmetricContraction
 from mace_jax.tools.cg import O3_e3nn
 from mace_jax.tools.scatter import scatter_sum
-
-import cuequivariance as cue
-import cuequivariance_jax as cuex
 
 
 @dataclasses.dataclass
@@ -155,33 +154,16 @@ class TensorProduct:
     ):
         # --- Case 1: CuEquivariance backend ---
         if cueq_config is not None and cueq_config.enabled:
-            # build polynomial descriptor
-            poly_desc = (
-                cuex.descriptors.channelwise_tensor_product(
-                    cuex.Irreps(cueq_config.group, irreps_in1),
-                    cuex.Irreps(cueq_config.group, irreps_in2),
-                    cuex.Irreps(cueq_config.group, irreps_out),
-                )
-                .flatten_coefficient_modes()
-                .squeeze_modes()
-                .polynomial
+            return CueTensorProduct(
+                irreps_in1,
+                irreps_in2,
+                irreps_out,
+                instructions=instructions,
+                shared_weights=shared_weights,
+                internal_weights=internal_weights,
+                cueq_config=cueq_config,
+                name=name,
             )
-
-            def forward(tp_weights, node_feats, edge_attrs, sender, receiver):
-                """Mimic fused forward in JAX"""
-                num_nodes = node_feats.shape[0]
-                output_shape = (num_nodes, irreps_out.dim)
-
-                return cuex.segmented_polynomial(
-                    polynomial=poly_desc,
-                    inputs=[tp_weights, node_feats, edge_attrs],
-                    outputs_shape_dtype=(output_shape, jnp.float32),
-                    indices={1: sender},  # like message passing index
-                    math_dtype=jnp.float32,
-                    precision='highest',
-                )
-
-            return forward
 
         # --- Default: fallback to e3nn_jax.TensorProduct ---
         return _tp.TensorProduct(
