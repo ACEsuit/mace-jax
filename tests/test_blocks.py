@@ -68,6 +68,7 @@ from mace_jax.modules.blocks import (
 from mace_jax.modules.blocks import (
     RealAgnosticResidualNonLinearInteractionBlock as RealAgnosticResidualNonLinearInteractionBlockJAX,
 )
+from mace_jax.modules.wrapper_ops import CuEquivarianceConfig
 
 
 class TestLinearNodeEmbeddingBlock:
@@ -364,7 +365,10 @@ class TestRealAgnosticBlocks:
             ),
         ],
     )
-    def test_torch_vs_jax(self, dummy_data, jax_cls, torch_cls, multi_output):
+    @pytest.mark.parametrize('cue_enabled', [False, True])
+    def test_torch_vs_jax(
+        self, dummy_data, jax_cls, torch_cls, multi_output, cue_enabled
+    ):
         node_attrs, node_feats, edge_attrs, edge_feats, edge_index = dummy_data
         irreps = Irreps('2x0e')
 
@@ -397,6 +401,8 @@ class TestRealAgnosticBlocks:
         )
         torch_out = torch_module(*torch_inputs)
 
+        cue_config = CuEquivarianceConfig(enabled=cue_enabled)
+
         # === Run JAX ===
         def run_jax_forward(jax_module_cls, inputs, **kwargs):
             """Initialize and run Haiku module once."""
@@ -422,6 +428,7 @@ class TestRealAgnosticBlocks:
             target_irreps=irreps,
             hidden_irreps=irreps,
             avg_num_neighbors=3.0,
+            cueq_config=cue_config,
         )
 
         # === Compare Outputs ===

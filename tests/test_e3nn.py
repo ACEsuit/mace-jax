@@ -391,6 +391,12 @@ class TestCueTensorProductAdditionalModes:
         (
             Irreps('2x0e'),
             Irreps('2x0e'),
+            Irreps('2x0e'),
+            [(0, 0, 0, 'uvu', True)],
+        ),
+        (
+            Irreps('2x0e'),
+            Irreps('2x0e'),
             Irreps('1x0e'),
             [(0, 0, 0, 'uuw', True)],
         ),
@@ -408,19 +414,16 @@ class TestCueTensorProductAdditionalModes:
         ),
     ]
 
+    @pytest.mark.parametrize('shared_weights', [True, False])
     @pytest.mark.parametrize('irreps_in1,irreps_in2,irreps_out,instructions', _CASES)
-    def test_modes(self, irreps_in1, irreps_in2, irreps_out, instructions):
-        self._compare_tensor_product(irreps_in1, irreps_in2, irreps_out, instructions)
-
-    @staticmethod
-    def _compare_tensor_product(
-        irreps_in1: Irreps,
-        irreps_in2: Irreps,
-        irreps_out: Irreps,
-        instructions: Sequence[tuple],
-        *,
-        seed: int = 0,
-    ) -> None:
+    def test_modes(
+        self,
+        irreps_in1,
+        irreps_in2,
+        irreps_out,
+        instructions,
+        shared_weights,
+    ):
         instructions = list(instructions)
 
         weight_shapes = []
@@ -435,11 +438,16 @@ class TestCueTensorProductAdditionalModes:
 
         weight_numel = sum(np.prod(shape) for shape in weight_shapes)
 
-        key = jax.random.PRNGKey(seed)
+        key = jax.random.PRNGKey(0)
         key_x1, key_x2, key_w, key_ref, key_cue = jax.random.split(key, 5)
         x1 = jax.random.normal(key_x1, (3, irreps_in1.dim))
         x2 = jax.random.normal(key_x2, (3, irreps_in2.dim))
-        weight = jax.random.normal(key_w, (weight_numel,))
+        if weight_numel == 0:
+            weight = None
+        elif shared_weights:
+            weight = jax.random.normal(key_w, (weight_numel,))
+        else:
+            weight = jax.random.normal(key_w, (x1.shape[0], weight_numel))
 
         config = CuEquivarianceConfig(enabled=True)
 
@@ -449,7 +457,7 @@ class TestCueTensorProductAdditionalModes:
                 irreps_in2,
                 irreps_out,
                 instructions=instructions,
-                shared_weights=True,
+                shared_weights=shared_weights,
                 internal_weights=False,
             )
             return tp(x1_, x2_, w_)
@@ -460,7 +468,7 @@ class TestCueTensorProductAdditionalModes:
                 irreps_in2,
                 irreps_out,
                 instructions=instructions,
-                shared_weights=True,
+                shared_weights=shared_weights,
                 internal_weights=False,
                 cueq_config=config,
             )

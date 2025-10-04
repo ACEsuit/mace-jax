@@ -89,6 +89,7 @@ class TensorProduct:
                 raise NotImplementedError(
                     'conv_fusion is not supported by the cuequivariance tensor product backend.'
                 )
+
             return CueTensorProduct(
                 irreps_in1,
                 irreps_in2,

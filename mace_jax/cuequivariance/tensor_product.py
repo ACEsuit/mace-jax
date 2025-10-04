@@ -75,7 +75,6 @@ def _make_path_spec(
     mul_out: int,
     weight_shape: tuple[int, ...],
 ) -> _PathSpec:
-    mode = mode
     if mode == 'uvw':
         poly_shape = (mul_in1, mul_in2, mul_out)
         basis = None
@@ -83,6 +82,7 @@ def _make_path_spec(
         poly_shape = (mul_in1, mul_in2, mul_out)
         eye = jnp.eye(mul_out, dtype=jnp.float32)
         basis = jnp.broadcast_to(eye[:, None, :], poly_shape)
+        basis = basis / jnp.sqrt(mul_out)
     elif mode == 'uvv':
         poly_shape = (mul_in1, mul_in2, mul_out)
         eye = jnp.eye(mul_out, dtype=jnp.float32)
@@ -184,6 +184,16 @@ class TensorProduct(hk.Module):
         self._cue_irreps_in1 = _to_cue_irreps(self._group, self.irreps_in1)
         self._cue_irreps_in2 = _to_cue_irreps(self._group, self.irreps_in2)
         self._cue_irreps_out = _to_cue_irreps(self._group, self.irreps_out)
+
+        self._cue_layout_in1 = cue.IrrepsAndLayout(
+            self._cue_irreps_in1, cue.ir_mul
+        )
+        self._cue_layout_in2 = cue.IrrepsAndLayout(
+            self._cue_irreps_in2, cue.ir_mul
+        )
+        self._cue_layout_out = cue.IrrepsAndLayout(
+            self._cue_irreps_out, cue.ir_mul
+        )
 
         self.instructions = self._normalize_instructions(instructions)
 
@@ -345,10 +355,10 @@ class TensorProduct(hk.Module):
                     ),
                     cue.ir_mul,
                 ),
-                cue.IrrepsAndLayout(self._cue_irreps_in1, cue.ir_mul),
-                cue.IrrepsAndLayout(self._cue_irreps_in2, cue.ir_mul),
+                self._cue_layout_in1,
+                self._cue_layout_in2,
             ],
-            [cue.IrrepsAndLayout(self._cue_irreps_out, cue.ir_mul)],
+            [self._cue_layout_out],
             cue.SegmentedPolynomial.eval_last_operand(d),
         )
 
@@ -474,38 +484,38 @@ class TensorProduct(hk.Module):
         if self.weight_numel == 0:
             raise ValueError('Cue TensorProduct expects learnable weights.')
 
-        if not self.shared_weights and weight.shape[:-1] != leading_shape:
-            weight = jnp.broadcast_to(weight, leading_shape + (self.weight_numel,))
-
         expanded_weight = self._expand_weights(weight)
-        if self.shared_weights:
-            expanded_weight = expanded_weight.reshape((self._poly_weight_numel,))
-        elif expanded_weight.shape[:-1] != leading_shape:
-            expanded_weight = jnp.broadcast_to(
-                expanded_weight, leading_shape + (self._poly_weight_numel,)
-            )
 
-        outputs_shape = jax.ShapeDtypeStruct(
-            leading_shape + (self.irreps_out.dim,), x1.dtype
-        )
+        desired_shape = leading_shape + (self._poly_weight_numel,)
+        if expanded_weight.shape != desired_shape:
+            broadcast_shape = (1,) * len(leading_shape) + (self._poly_weight_numel,)
+            expanded_weight = jnp.reshape(expanded_weight, broadcast_shape)
+            expanded_weight = jnp.broadcast_to(expanded_weight, desired_shape)
 
-        with cue.assume(self._group, cue.ir_mul):
-            rep_x1 = cuex.RepArray(
-                {x1.ndim - 1: cue.IrrepsAndLayout(self._cue_irreps_in1, cue.ir_mul)},
-                x1,
-            )
-            rep_x2 = cuex.RepArray(
-                {x2.ndim - 1: cue.IrrepsAndLayout(self._cue_irreps_in2, cue.ir_mul)},
-                x2,
-            )
+        x1_flat = jnp.reshape(x1, (-1, self.irreps_in1.dim))
+        x2_flat = jnp.reshape(x2, (-1, self.irreps_in2.dim))
+        weight_flat = jnp.reshape(expanded_weight, (-1, self._poly_weight_numel))
+
+        out_dtype = x1.dtype
+
+        def _evaluate_single(weight_row, x1_row, x2_row):
+            weight_row = weight_row.astype(out_dtype)
+            rep_x1 = cuex.RepArray({0: self._cue_layout_in1}, x1_row)
+            rep_x2 = cuex.RepArray({0: self._cue_layout_in2}, x2_row)
             outputs = cuex.equivariant_polynomial(
                 self._equivariant_polynomial,
-                [expanded_weight, rep_x1, rep_x2],
-                outputs_shape,
+                [weight_row, rep_x1, rep_x2],
+                jax.ShapeDtypeStruct((self.irreps_out.dim,), out_dtype),
                 method=self._method,
             )
+            return outputs.array
 
-        return outputs.array
+        batched_eval = jax.vmap(_evaluate_single, in_axes=(0, 0, 0))
+
+        with cue.assume(self._group, cue.ir_mul):
+            outputs_flat = batched_eval(weight_flat, x1_flat, x2_flat)
+
+        return jnp.reshape(outputs_flat, desired_shape[:-1] + (self.irreps_out.dim,))
 
     # ---------------------------------------------------------------------
     # Weight inspection utilities
