@@ -3,10 +3,9 @@ Wrapper class for o3.Linear that optionally uses cuet.Linear
 """
 
 import dataclasses
-from typing import Callable, Optional
+from typing import Optional
 
 import cuequivariance as cue
-import jax.numpy as jnp
 from e3nn_jax import Irreps
 
 from mace_jax.cuequivariance import TensorProduct as CueTensorProduct
@@ -14,7 +13,6 @@ from mace_jax.e3nn import _linear
 from mace_jax.e3nn import _tensor_product as _tp
 from mace_jax.modules.symmetric_contraction import SymmetricContraction
 from mace_jax.tools.cg import O3_e3nn
-from mace_jax.tools.scatter import scatter_sum
 
 
 @dataclasses.dataclass
@@ -71,73 +69,6 @@ class Linear:
         )
 
 
-def with_scatter_sum(conv_fn: Callable) -> Callable:
-    """
-    Wrap a convolution-like function with scatter_sum aggregation.
-
-    Args:
-        conv_fn: a function with signature
-            conv_fn(node_feats[sender], edge_attrs, tp_weights) -> messages
-
-    Returns:
-        A wrapped function with signature:
-            (node_feats, edge_attrs, tp_weights, edge_index) -> aggregated messages
-    """
-
-    def wrapped(
-        node_feats: jnp.ndarray,
-        edge_attrs: jnp.ndarray,
-        tp_weights: jnp.ndarray,
-        edge_index: jnp.ndarray,
-    ) -> jnp.ndarray:
-        sender = edge_index[0]
-        receiver = edge_index[1]
-        num_nodes = node_feats.shape[0]
-
-        mji = conv_fn(node_feats[sender], edge_attrs, tp_weights)
-        message = scatter_sum(src=mji, index=receiver, dim=0, dim_size=num_nodes)
-        return message
-
-    return wrapped
-
-
-def with_cueq_conv_fusion(
-    conv_fn: Callable, num_segments: int, num_operands: int
-) -> Callable:
-    """
-    Wrap a ConvTensorProduct-like function to use conv fusion.
-
-    Args:
-        conv_fn: callable implementing the fused cuEQ conv, typically conv_fn(inputs, senders, nodes, receivers).
-        num_segments: number of segments in buffer (analogous to conv_tp.m.buffer_num_segments[0]).
-        num_operands: operand extent (analogous to conv_tp.m.operand_extent).
-
-    Returns:
-        A wrapped function with signature:
-            (node_feats, edge_attrs, tp_weights, edge_index) -> tensor
-    """
-    weight_numel = num_segments * num_operands
-
-    def wrapped(
-        node_feats: jnp.ndarray,
-        edge_attrs: jnp.ndarray,
-        tp_weights: jnp.ndarray,
-        edge_index: jnp.ndarray,
-    ) -> jnp.ndarray:
-        sender = edge_index[0]
-        receiver = edge_index[1]
-        # conv_fn is expected to return a tuple/list, like original_forward(...)[0]
-        return conv_fn(
-            [tp_weights, node_feats, edge_attrs],
-            {1: sender},
-            {0: node_feats},
-            {0: receiver},
-        )[0]
-
-    wrapped.weight_numel = weight_numel
-    return wrapped
-
-
 class TensorProduct:
     """Wrapper around o3.TensorProduct / cuequivariance_jax.segmented_polynomial"""
 
@@ -154,6 +85,10 @@ class TensorProduct:
     ):
         # --- Case 1: CuEquivariance backend ---
         if cueq_config is not None and cueq_config.enabled:
+            if getattr(cueq_config, 'conv_fusion', False):
+                raise NotImplementedError(
+                    'conv_fusion is not supported by the cuequivariance tensor product backend.'
+                )
             return CueTensorProduct(
                 irreps_in1,
                 irreps_in2,
@@ -229,9 +164,9 @@ def SymmetricContractionWrapper(
     """
 
     if use_reduced_cg:
-        # Reduced CG tables are not supported by the JAX implementation. The flag is
-        # accepted for API compatibility but ignored.
-        use_reduced_cg = False
+        raise NotImplementedError(
+            'use_reduced_cg is not supported by the JAX symmetric contraction backend.'
+        )
 
     method = 'naive'
     if cueq_config is not None and cueq_config.enabled:
