@@ -185,15 +185,9 @@ class TensorProduct(hk.Module):
         self._cue_irreps_in2 = _to_cue_irreps(self._group, self.irreps_in2)
         self._cue_irreps_out = _to_cue_irreps(self._group, self.irreps_out)
 
-        self._cue_layout_in1 = cue.IrrepsAndLayout(
-            self._cue_irreps_in1, cue.ir_mul
-        )
-        self._cue_layout_in2 = cue.IrrepsAndLayout(
-            self._cue_irreps_in2, cue.ir_mul
-        )
-        self._cue_layout_out = cue.IrrepsAndLayout(
-            self._cue_irreps_out, cue.ir_mul
-        )
+        self._cue_layout_in1 = cue.IrrepsAndLayout(self._cue_irreps_in1, cue.ir_mul)
+        self._cue_layout_in2 = cue.IrrepsAndLayout(self._cue_irreps_in2, cue.ir_mul)
+        self._cue_layout_out = cue.IrrepsAndLayout(self._cue_irreps_out, cue.ir_mul)
 
         self.instructions = self._normalize_instructions(instructions)
 
@@ -559,3 +553,59 @@ class TensorProduct(hk.Module):
     # ---------------------------------------------------------------------
     def right(self, *args, **kwargs):  # pragma: no cover - compatibility stub
         raise NotImplementedError('The cue TensorProduct does not implement right().')
+
+
+class FullyConnectedTensorProduct(TensorProduct):
+    """Cue-backed fully-connected tensor product.
+
+    Builds the set of ``'uvw'`` instructions that connect every compatible irrep
+    triple and delegates the computation to :class:`TensorProduct`.
+    """
+
+    def __init__(
+        self,
+        irreps_in1: Irreps,
+        irreps_in2: Irreps,
+        irreps_out: Irreps,
+        *,
+        shared_weights: bool = True,
+        internal_weights: bool = True,
+        cueq_config=None,
+        method: Optional[str] = None,
+        name: Optional[str] = None,
+        **unused_kwargs,
+    ) -> None:
+        # Accept extra kwargs for API compatibility but ignore them because the cue
+        # implementation does not expose those tuning knobs.
+        del unused_kwargs
+
+        irreps_in1 = Irreps(irreps_in1)
+        irreps_in2 = Irreps(irreps_in2)
+        irreps_out = Irreps(irreps_out)
+
+        instructions = [
+            (
+                i_1,
+                i_2,
+                i_out,
+                'uvw',
+                True,
+                1.0 / max(1, irreps_out[i_out].mul),
+            )
+            for i_1, (_, ir_1) in enumerate(irreps_in1)
+            for i_2, (_, ir_2) in enumerate(irreps_in2)
+            for i_out, (_, ir_out) in enumerate(irreps_out)
+            if ir_out in ir_1 * ir_2
+        ]
+
+        super().__init__(
+            irreps_in1=irreps_in1,
+            irreps_in2=irreps_in2,
+            irreps_out=irreps_out,
+            instructions=instructions,
+            shared_weights=shared_weights,
+            internal_weights=internal_weights,
+            cueq_config=cueq_config,
+            method=method,
+            name=name,
+        )

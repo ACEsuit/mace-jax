@@ -8,7 +8,12 @@ from typing import Optional
 import cuequivariance as cue
 from e3nn_jax import Irreps
 
-from mace_jax.cuequivariance import TensorProduct as CueTensorProduct
+from mace_jax.cuequivariance import (
+    FullyConnectedTensorProduct as CueFullyConnectedTensorProduct,
+)
+from mace_jax.cuequivariance import (
+    TensorProduct as CueTensorProduct,
+)
 from mace_jax.e3nn import _linear
 from mace_jax.e3nn import _tensor_product as _tp
 from mace_jax.modules.symmetric_contraction import SymmetricContraction
@@ -127,14 +132,19 @@ def FullyConnectedTensorProduct(
     When CuEquivariance acceleration is requested, this raises since a JAX binding
     is not yet available; otherwise defaults to the e3nn_jax implementation.
     """
-    if (
-        cueq_config is not None
-        and cueq_config.enabled
-        and (cueq_config.optimize_all or cueq_config.optimize_fctp)
-    ):
-        # No JAX cuet binding available (PyTorch only).
-        raise NotImplementedError(
-            'cuex.FullyConnectedTensorProduct is not available in JAX.'
+    if cueq_config is not None and cueq_config.enabled:
+        if getattr(cueq_config, 'conv_fusion', False):
+            raise NotImplementedError(
+                'conv_fusion is not supported by the cuequivariance tensor product backend.'
+            )
+        return CueFullyConnectedTensorProduct(
+            irreps_in1,
+            irreps_in2,
+            irreps_out,
+            shared_weights=shared_weights,
+            internal_weights=internal_weights,
+            cueq_config=cueq_config,
+            name=name,
         )
 
     # Default: e3nn_jax implementation

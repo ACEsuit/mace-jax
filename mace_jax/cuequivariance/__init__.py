@@ -1,5 +1,5 @@
 """Cuequivariance-backed layers."""
 
-from .tensor_product import TensorProduct
+from .tensor_product import FullyConnectedTensorProduct, TensorProduct
 
-__all__ = ["TensorProduct"]
+__all__ = ["TensorProduct", "FullyConnectedTensorProduct"]
