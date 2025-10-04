@@ -3,12 +3,11 @@ from math import prod
 from typing import NamedTuple, Optional, Union
 
 import haiku as hk
+import jax
 import jax.numpy as jnp
 from e3nn_jax import Irreps
 
 from mace_jax.haiku.torch import register_import
-
-from ._tensor_product._codegen import _sum_tensors
 
 
 class Instruction(NamedTuple):
@@ -16,6 +15,17 @@ class Instruction(NamedTuple):
     i_out: int
     path_shape: tuple
     path_weight: float
+
+
+def _sum_tensors(xs: list[jax.Array], shape: tuple[int, ...]) -> jax.Array:
+    if len(xs) > 0:
+        out = xs[0]
+        for x in xs[1:]:
+            out = out + x
+        # Ensure output has the full shape
+        return jnp.reshape(out, shape)
+    # Return zeros with the correct 3D shape
+    return jnp.zeros(shape, dtype=jnp.float32)
 
 
 @register_import('e3nn.o3._linear.Linear')

@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 import torch
 from e3nn import o3
-from e3nn_jax import Irrep, Irreps
+from e3nn_jax import Irreps
 from mace.modules.blocks import (
     EquivariantProductBasisBlock as EquivariantProductBasisBlockTorch,
 )

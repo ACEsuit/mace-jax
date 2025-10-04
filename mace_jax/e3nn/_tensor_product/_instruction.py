@@ -1,3 +1,5 @@
+"""Backward-compatible Instruction container."""
+
 from typing import NamedTuple
 
 
@@ -8,4 +10,7 @@ class Instruction(NamedTuple):
     connection_mode: str
     has_weight: bool
     path_weight: float
-    path_shape: tuple
+    path_shape: tuple[int, ...]
+
+
+__all__ = ["Instruction"]

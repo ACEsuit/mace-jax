@@ -72,6 +72,13 @@ def _import_sequential(module, params, scope):
     return params
 
 
+@register_import_mapper('e3nn.o3._tensor_product._sub.ElementwiseTensorProduct')
+def _import_e3nn_elementwise_tp(module, params, scope):
+    """Elementwise TP has no internal parameters; return params unchanged."""
+
+    return params
+
+
 def copy_torch_to_jax(torch_module, jax_params, scope=None):
     """
     Copy parameters from Torch -> JAX Haiku params dict.

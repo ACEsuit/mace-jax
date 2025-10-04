@@ -1,12 +1,12 @@
 from typing import Callable, Optional
 
+import e3nn_jax as e3nn
 import haiku as hk
 import jax.numpy as jnp
 from e3nn_jax import Irreps, IrrepsArray
 
 from mace_jax.haiku.torch import copy_torch_to_jax, register_import
 
-from .._tensor_product._sub import ElementwiseTensorProduct
 from ._activation import Activation
 from ._extract import Extract
 
@@ -78,9 +78,17 @@ class Gate(hk.Module):
         self.act_scalars = Activation(irreps_scalars, act_scalars)
         self.act_gates = Activation(irreps_gates, act_gates)
 
-        # Elementwise multiplication
-        self.mul = ElementwiseTensorProduct(irreps_gated, self.act_gates.irreps_out)
-        self._irreps_out = self.act_scalars.irreps_out + self.mul.irreps_out
+        # Determine gate output irreps via elementwise tensor product
+        if self.irreps_gated.dim > 0 and self.act_gates.irreps_out.dim > 0:
+            sample_gated = e3nn.zeros(self.irreps_gated, ())
+            sample_gates = e3nn.zeros(self.act_gates.irreps_out, ())
+            self._mul_irreps_out = e3nn.elementwise_tensor_product(
+                sample_gated, sample_gates
+            ).irreps
+        else:
+            self._mul_irreps_out = Irreps([])
+
+        self._irreps_out = self.act_scalars.irreps_out + self._mul_irreps_out
 
     def __call__(self, features: IrrepsArray) -> IrrepsArray:
         scalars, gates, gated = self.sc(features)
@@ -88,9 +96,11 @@ class Gate(hk.Module):
         scalars = self.act_scalars(scalars)
         if gates.shape[-1] > 0:
             gates = self.act_gates(gates)
-            gated = self.mul(gated, gates)
+            gated_ir = e3nn.IrrepsArray(self.irreps_gated, gated)
+            gates_ir = e3nn.IrrepsArray(self.act_gates.irreps_out, gates)
+            gated = e3nn.elementwise_tensor_product(gated_ir, gates_ir).array
             out = IrrepsArray.from_array(
-                self._irreps_out, jnp.concatenate([scalars.array, gated.array], axis=-1)
+                self._irreps_out, jnp.concatenate([scalars, gated], axis=-1)
             )
         else:
             out = scalars
