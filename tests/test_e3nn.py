@@ -15,7 +15,12 @@ from e3nn.o3._linear import Linear as LinearTorch
 from e3nn_jax import Irreps as IrrepsJAX
 from e3nn_jax import spherical_harmonics
 
-from mace_jax.cuequivariance.tensor_product import _infer_path_shape
+from mace_jax.cuequivariance.tensor_product import (
+    TensorProduct as CuTensorProduct,
+)
+from mace_jax.cuequivariance.tensor_product import (
+    _infer_path_shape,
+)
 from mace_jax.e3nn._linear import Linear as LinearJax
 from mace_jax.e3nn._tensor_product._tensor_product import (
     TensorProduct as TensorProductJAX,
@@ -439,19 +444,39 @@ class TestCueTensorProductAdditionalModes:
         weight_numel = sum(np.prod(shape) for shape in weight_shapes)
 
         key = jax.random.PRNGKey(0)
-        key_x1, key_x2, key_w, key_ref, key_cue = jax.random.split(key, 5)
-        x1 = jax.random.normal(key_x1, (3, irreps_in1.dim))
-        x2 = jax.random.normal(key_x2, (3, irreps_in2.dim))
+        key_x1, key_x2, key_w, key_jax, key_cue = jax.random.split(key, 5)
+        batch = 3
+
+        x1 = jax.random.normal(key_x1, (batch, irreps_in1.dim))
+        x2 = jax.random.normal(key_x2, (batch, irreps_in2.dim))
         if weight_numel == 0:
-            weight = None
+            weight_np = None
+            weight_jax = None
         elif shared_weights:
-            weight = jax.random.normal(key_w, (weight_numel,))
+            weight_np = np.array(jax.random.normal(key_w, (weight_numel,)))
+            weight_jax = jnp.array(weight_np)
         else:
-            weight = jax.random.normal(key_w, (x1.shape[0], weight_numel))
+            weight_np = np.array(jax.random.normal(key_w, (batch, weight_numel)))
+            weight_jax = jnp.array(weight_np)
 
-        config = CuEquivarianceConfig(enabled=True)
+        x1_np = np.array(x1)
+        x2_np = np.array(x2)
+        x1_torch = torch.from_numpy(x1_np)
+        x2_torch = torch.from_numpy(x2_np)
+        weight_torch = None if weight_np is None else torch.from_numpy(weight_np)
 
-        def ref_forward(x1_, x2_, w_):
+        tp_torch = TensorProductTorch(
+            irreps_in1,
+            irreps_in2,
+            irreps_out,
+            instructions,
+            shared_weights=shared_weights,
+            internal_weights=False,
+        )
+        out_torch = tp_torch(x1_torch, x2_torch, weight_torch)
+        out_torch_np = out_torch.detach().cpu().numpy()
+
+        def jax_forward(x1_, x2_, w_):
             tp = TensorProductJAX(
                 irreps_in1,
                 irreps_in2,
@@ -462,8 +487,14 @@ class TestCueTensorProductAdditionalModes:
             )
             return tp(x1_, x2_, w_)
 
+        jax_tp = hk.without_apply_rng(hk.transform(jax_forward))
+        params_jax = jax_tp.init(key_jax, x1, x2, weight_jax)
+        out_jax = jax_tp.apply(params_jax, x1, x2, weight_jax)
+
+        config = CuEquivarianceConfig(enabled=True)
+
         def cue_forward(x1_, x2_, w_):
-            tp = WrapperTensorProduct(
+            tp = CuTensorProduct(
                 irreps_in1,
                 irreps_in2,
                 irreps_out,
@@ -474,12 +505,13 @@ class TestCueTensorProductAdditionalModes:
             )
             return tp(x1_, x2_, w_)
 
-        ref = hk.without_apply_rng(hk.transform(ref_forward))
-        params_ref = ref.init(key_ref, x1, x2, weight)
-        out_ref = ref.apply(params_ref, x1, x2, weight)
-
         cue_tp = hk.without_apply_rng(hk.transform(cue_forward))
-        params_cue = cue_tp.init(key_cue, x1, x2, weight)
-        out_cue = cue_tp.apply(params_cue, x1, x2, weight)
+        params_cue = cue_tp.init(key_cue, x1, x2, weight_jax)
+        out_cue = cue_tp.apply(params_cue, x1, x2, weight_jax)
 
-        np.testing.assert_allclose(out_ref, out_cue, rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(
+            out_torch_np, np.array(out_jax), rtol=1e-5, atol=1e-5
+        )
+        np.testing.assert_allclose(
+            out_torch_np, np.array(out_cue), rtol=1e-5, atol=1e-5
+        )
