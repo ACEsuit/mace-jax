@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+import dataclasses
 import math
-from typing import Iterable, Optional, Sequence
-
-import haiku as hk
-import jax
-import jax.numpy as jnp
+from collections.abc import Iterable, Sequence
+from typing import Optional
 
 import cuequivariance as cue
 import cuequivariance_jax as cuex
+import haiku as hk
+import jax
+import jax.numpy as jnp
 from e3nn_jax import Irreps
 
 from mace_jax.e3nn._tensor_product._instruction import Instruction as E3Instruction
@@ -19,6 +20,126 @@ from mace_jax.e3nn._tensor_product._instruction import Instruction as E3Instruct
 def _to_cue_irreps(group: cue.Group, irreps: Irreps) -> cue.Irreps:
     """Convert an :mod:`e3nn_jax` Irreps specification to a cuequivariance Irreps."""
     return cue.Irreps(group, str(Irreps(irreps)))
+
+
+@dataclasses.dataclass
+class _PathSpec:
+    mode: str
+    mul_in1: int
+    mul_in2: int
+    mul_out: int
+    weight_shape: tuple[int, ...]
+    poly_shape: tuple[int, int, int]
+    basis: Optional[jnp.ndarray]
+
+    def expand(self, weight: jnp.ndarray) -> jnp.ndarray:
+        batch_ndim = weight.ndim - len(self.weight_shape)
+        batch_shape = weight.shape[:batch_ndim]
+        weight = jnp.reshape(weight, batch_shape + self.weight_shape)
+
+        if self.mode == 'uvw':
+            return jnp.reshape(weight, batch_shape + self.poly_shape)
+
+        basis = self._broadcast_basis(weight.dtype, batch_shape)
+
+        if self.mode == 'uvu':
+            expanded = jnp.expand_dims(weight, axis=-1)
+            return expanded * basis
+        if self.mode == 'uvv':
+            expanded = jnp.expand_dims(weight, axis=-1)
+            return expanded * basis
+        if self.mode == 'uuw':
+            expanded = jnp.expand_dims(weight, axis=-2)
+            return expanded * basis
+        if self.mode == 'uuu':
+            expanded = weight[..., :, None, None]
+            return expanded * basis
+        if self.mode == 'uvuv':
+            expanded = jnp.expand_dims(weight, axis=-1)
+            return expanded * basis
+
+        raise NotImplementedError(f'Unsupported connection mode {self.mode!r}.')
+
+    def _broadcast_basis(
+        self, dtype: jnp.dtype, batch_shape: tuple[int, ...]
+    ) -> jnp.ndarray:
+        assert self.basis is not None
+        basis = self.basis.astype(dtype)
+        return jnp.reshape(basis, (1,) * len(batch_shape) + basis.shape)
+
+
+def _make_path_spec(
+    mode: str,
+    mul_in1: int,
+    mul_in2: int,
+    mul_out: int,
+    weight_shape: tuple[int, ...],
+) -> _PathSpec:
+    mode = mode
+    if mode == 'uvw':
+        poly_shape = (mul_in1, mul_in2, mul_out)
+        basis = None
+    elif mode == 'uvu':
+        poly_shape = (mul_in1, mul_in2, mul_out)
+        eye = jnp.eye(mul_out, dtype=jnp.float32)
+        basis = jnp.broadcast_to(eye[:, None, :], poly_shape)
+    elif mode == 'uvv':
+        poly_shape = (mul_in1, mul_in2, mul_out)
+        eye = jnp.eye(mul_out, dtype=jnp.float32)
+        basis = jnp.broadcast_to(eye[None, :, :], poly_shape)
+    elif mode == 'uuw':
+        if mul_in1 != mul_in2:
+            raise ValueError('uuw mode requires equal input multiplicities.')
+        poly_shape = (mul_in1, mul_in2, mul_out)
+        eye = jnp.eye(mul_in1, dtype=jnp.float32)
+        basis = jnp.broadcast_to(eye[:, :, None], poly_shape)
+        basis = basis / jnp.sqrt(mul_in1)
+    elif mode == 'uuu':
+        if not (mul_in1 == mul_in2 == mul_out):
+            raise ValueError('uuu mode requires equal multiplicities.')
+        poly_shape = (mul_in1, mul_in2, mul_out)
+        basis = jnp.zeros(poly_shape, dtype=jnp.float32)
+        idx = jnp.arange(mul_in1)
+        basis = basis.at[idx, idx, idx].set(1.0)
+    elif mode == 'uvuv':
+        if mul_out != mul_in1 * mul_in2:
+            raise ValueError('uvuv mode expects mul_out == mul_in1 * mul_in2.')
+        poly_shape = (mul_in1, mul_in2, mul_out)
+        basis = jnp.zeros(poly_shape, dtype=jnp.float32)
+        u_idx = jnp.repeat(jnp.arange(mul_in1), mul_in2)
+        v_idx = jnp.tile(jnp.arange(mul_in2), mul_in1)
+        w_idx = jnp.arange(mul_out)
+        basis = basis.at[u_idx, v_idx, w_idx].set(1.0)
+    else:
+        raise NotImplementedError(f'Cue TensorProduct does not support mode {mode!r}.')
+
+    return _PathSpec(
+        mode=mode,
+        mul_in1=mul_in1,
+        mul_in2=mul_in2,
+        mul_out=mul_out,
+        weight_shape=weight_shape,
+        poly_shape=poly_shape,
+        basis=basis,
+    )
+
+
+def _infer_path_shape(
+    mode: str, mul_in1: int, mul_in2: int, mul_out: int
+) -> tuple[int, ...]:
+    if mode == 'uvw':
+        return (mul_in1, mul_in2, mul_out)
+    if mode == 'uvu':
+        return (mul_in1, mul_in2)
+    if mode == 'uvv':
+        return (mul_in1, mul_in2)
+    if mode == 'uuw':
+        return (mul_in1, mul_out)
+    if mode == 'uuu':
+        return (mul_in1,)
+    if mode == 'uvuv':
+        return (mul_in1, mul_in2)
+    raise NotImplementedError(f'Unsupported connection mode {mode!r}.')
 
 
 class TensorProduct(hk.Module):
@@ -86,15 +207,15 @@ class TensorProduct(hk.Module):
         self.internal_weights = internal_weights
 
         self._weight_initializer = (
-            hk.initializers.RandomNormal()
-            if self.weight_numel > 0
-            else None
+            hk.initializers.RandomNormal() if self.weight_numel > 0 else None
         )
 
     # ---------------------------------------------------------------------
     # Instruction utilities
     # ---------------------------------------------------------------------
-    def _normalize_instructions(self, instrs: Optional[Sequence]) -> list[E3Instruction]:
+    def _normalize_instructions(
+        self, instrs: Optional[Sequence]
+    ) -> list[E3Instruction]:
         if instrs is None:
             instrs = self._default_instructions()
 
@@ -103,7 +224,6 @@ class TensorProduct(hk.Module):
             if isinstance(ins, E3Instruction):
                 instruction = ins
             else:
-                # tuple/list form
                 i_in1, i_in2, i_out, mode, has_weight, *rest = ins
                 path_weight = float(rest[0]) if rest else 1.0
                 instruction = E3Instruction(
@@ -113,52 +233,28 @@ class TensorProduct(hk.Module):
                     str(mode),
                     bool(has_weight),
                     path_weight,
-                    (0,),  # placeholder
+                    (0,),
                 )
 
             if not instruction.has_weight:
                 raise NotImplementedError('Cue TensorProduct requires weighted paths.')
 
-            if instruction.connection_mode == 'uvu':
-                mul_in1 = self.irreps_in1[instruction.i_in1].mul
-                mul_in2 = self.irreps_in2[instruction.i_in2].mul
-                mul_out = self.irreps_out[instruction.i_out].mul
-                if mul_out != mul_in1:
-                    raise ValueError(
-                        'Expected output multiplicity to match first input for "uvu" paths.'
-                    )
-                instruction = E3Instruction(
-                    instruction.i_in1,
-                    instruction.i_in2,
-                    instruction.i_out,
-                    'uvw',
-                    instruction.has_weight,
-                    instruction.path_weight,
-                    (mul_in1, mul_in2, mul_out),
-                )
-            elif instruction.connection_mode == 'uvw':
-                mul_in1 = self.irreps_in1[instruction.i_in1].mul
-                mul_in2 = self.irreps_in2[instruction.i_in2].mul
-                mul_out = self.irreps_out[instruction.i_out].mul
-                path_shape = (
-                    mul_in1,
-                    mul_in2,
-                    mul_out,
-                )
-                instruction = E3Instruction(
-                    instruction.i_in1,
-                    instruction.i_in2,
-                    instruction.i_out,
-                    instruction.connection_mode,
-                    instruction.has_weight,
-                    instruction.path_weight,
-                    path_shape,
-                )
-            else:
-                raise NotImplementedError(
-                    f'Unsupported connection mode {instruction.connection_mode!r} '
-                    'for CuEquivariance tensor product.'
-                )
+            mul_in1 = self.irreps_in1[instruction.i_in1].mul
+            mul_in2 = self.irreps_in2[instruction.i_in2].mul
+            mul_out = self.irreps_out[instruction.i_out].mul
+
+            expected_shape = _infer_path_shape(
+                instruction.connection_mode, mul_in1, mul_in2, mul_out
+            )
+            instruction = E3Instruction(
+                instruction.i_in1,
+                instruction.i_in2,
+                instruction.i_out,
+                instruction.connection_mode,
+                instruction.has_weight,
+                instruction.path_weight,
+                expected_shape,
+            )
 
             normalized.append(instruction)
 
@@ -203,37 +299,51 @@ class TensorProduct(hk.Module):
         weight_shapes: list[tuple[int, ...]] = []
         offset = 0
 
+        self._path_specs = []
+        poly_weight_shapes: list[tuple[int, int, int]] = []
+
         for ins in self.instructions:
             mul_ir_in1 = self._cue_irreps_in1[ins.i_in1]
             mul_ir_in2 = self._cue_irreps_in2[ins.i_in2]
             mul_ir_out = self._cue_irreps_out[ins.i_out]
 
-            cg = self._group.clebsch_gordan(
-                mul_ir_in1.ir, mul_ir_in2.ir, mul_ir_out.ir
-            )
+            cg = self._group.clebsch_gordan(mul_ir_in1.ir, mul_ir_in2.ir, mul_ir_out.ir)
             if cg.shape[0] != 1:
                 raise NotImplementedError(
                     'Multiple Clebsch-Gordan solutions are not supported.'
                 )
             coeff = cg[0] * ins.path_weight
 
+            spec = _make_path_spec(
+                ins.connection_mode,
+                mul_ir_in1.mul,
+                mul_ir_in2.mul,
+                mul_ir_out.mul,
+                tuple(ins.path_shape),
+            )
+            self._path_specs.append(spec)
+            poly_weight_shapes.append(spec.poly_shape)
+
             d.add_path(
-                ins.path_shape,
+                spec.poly_shape,
                 ins.i_in1,
                 ins.i_in2,
                 ins.i_out,
                 c=coeff,
             )
 
-            size = int(jnp.prod(jnp.array(ins.path_shape)))
+            size = int(jnp.prod(jnp.array(spec.weight_shape)))
             weight_slices.append(slice(offset, offset + size))
-            weight_shapes.append(ins.path_shape)
+            weight_shapes.append(spec.weight_shape)
             offset += size
 
         equivariant_poly = cue.EquivariantPolynomial(
             [
                 cue.IrrepsAndLayout(
-                    self._cue_irreps_in1.new_scalars(offset), cue.ir_mul
+                    self._cue_irreps_in1.new_scalars(
+                        sum(math.prod(shape) for shape in poly_weight_shapes)
+                    ),
+                    cue.ir_mul,
                 ),
                 cue.IrrepsAndLayout(self._cue_irreps_in1, cue.ir_mul),
                 cue.IrrepsAndLayout(self._cue_irreps_in2, cue.ir_mul),
@@ -242,10 +352,10 @@ class TensorProduct(hk.Module):
             cue.SegmentedPolynomial.eval_last_operand(d),
         )
 
-        # Flatten coefficient modes for better interoperability with segmented_polynomial
-        equivariant_poly = (
-            equivariant_poly.flatten_coefficient_modes().squeeze_modes()
-        )
+        equivariant_poly = equivariant_poly.flatten_coefficient_modes().squeeze_modes()
+
+        self._poly_weight_shapes = poly_weight_shapes
+        self._poly_weight_numel = sum(math.prod(shape) for shape in poly_weight_shapes)
 
         return equivariant_poly, weight_slices, weight_shapes
 
@@ -268,8 +378,7 @@ class TensorProduct(hk.Module):
             flats = [
                 jnp.reshape(
                     w,
-                    w.shape[:-len(shape)]
-                    + (math.prod(shape),),
+                    w.shape[: -len(shape)] + (math.prod(shape),),
                 )
                 for w, shape in zip(weight, self._weight_shapes)
             ]
@@ -316,6 +425,26 @@ class TensorProduct(hk.Module):
             for slc, shape in zip(self._weight_slice_list, self._weight_shapes)
         ]
 
+    def _expand_weights(self, weight: jnp.ndarray) -> jnp.ndarray:
+        if self.weight_numel == 0:
+            if self.shared_weights:
+                return jnp.zeros((0,), dtype=weight.dtype)
+            return jnp.zeros(weight.shape[:-1] + (0,), dtype=weight.dtype)
+
+        splitted = self._split_weights(weight)
+        expanded = [spec.expand(part) for spec, part in zip(self._path_specs, splitted)]
+
+        if self.shared_weights:
+            return jnp.concatenate([arr.reshape(-1) for arr in expanded], axis=-1)
+
+        return jnp.concatenate(
+            [
+                arr.reshape(arr.shape[: -len(spec.poly_shape)] + (-1,))
+                for arr, spec in zip(expanded, self._path_specs)
+            ],
+            axis=-1,
+        )
+
     # ---------------------------------------------------------------------
     # Forward evaluation
     # ---------------------------------------------------------------------
@@ -345,9 +474,17 @@ class TensorProduct(hk.Module):
         if self.weight_numel == 0:
             raise ValueError('Cue TensorProduct expects learnable weights.')
 
-        if not self.shared_weights:
-            if weight.shape[:-1] != leading_shape:
-                weight = jnp.broadcast_to(weight, leading_shape + (self.weight_numel,))
+        if not self.shared_weights and weight.shape[:-1] != leading_shape:
+            weight = jnp.broadcast_to(weight, leading_shape + (self.weight_numel,))
+
+        expanded_weight = self._expand_weights(weight)
+        if self.shared_weights:
+            expanded_weight = expanded_weight.reshape((self._poly_weight_numel,))
+        elif expanded_weight.shape[:-1] != leading_shape:
+            expanded_weight = jnp.broadcast_to(
+                expanded_weight, leading_shape + (self._poly_weight_numel,)
+            )
+
         outputs_shape = jax.ShapeDtypeStruct(
             leading_shape + (self.irreps_out.dim,), x1.dtype
         )
@@ -363,7 +500,7 @@ class TensorProduct(hk.Module):
             )
             outputs = cuex.equivariant_polynomial(
                 self._equivariant_polynomial,
-                [weight, rep_x1, rep_x2],
+                [expanded_weight, rep_x1, rep_x2],
                 outputs_shape,
                 method=self._method,
             )

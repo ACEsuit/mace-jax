@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from math import prod
 
 import haiku as hk
@@ -14,6 +15,7 @@ from e3nn.o3._linear import Linear as LinearTorch
 from e3nn_jax import Irreps as IrrepsJAX
 from e3nn_jax import spherical_harmonics
 
+from mace_jax.cuequivariance.tensor_product import _infer_path_shape
 from mace_jax.e3nn._linear import Linear as LinearJax
 from mace_jax.e3nn._tensor_product._tensor_product import (
     TensorProduct as TensorProductJAX,
@@ -369,4 +371,107 @@ class TestCueTensorProduct:
     def test_outputs_match(self):
         out_ref = self.hk_ref.apply(self.params_ref, self.x1, self.x2, self.weight_ref)
         out_cue = self.hk_cue.apply(self.params_cue, self.x1, self.x2, self.weight_cue)
+        np.testing.assert_allclose(out_ref, out_cue, rtol=1e-5, atol=1e-5)
+
+
+class TestCueTensorProductAdditionalModes:
+    _CASES = [
+        (
+            Irreps('1x0e'),
+            Irreps('1x0e'),
+            Irreps('1x0e'),
+            [(0, 0, 0, 'uvw', True)],
+        ),
+        (
+            Irreps('1x0e'),
+            Irreps('2x0e'),
+            Irreps('2x0e'),
+            [(0, 0, 0, 'uvv', True)],
+        ),
+        (
+            Irreps('2x0e'),
+            Irreps('2x0e'),
+            Irreps('1x0e'),
+            [(0, 0, 0, 'uuw', True)],
+        ),
+        (
+            Irreps('2x0e'),
+            Irreps('2x0e'),
+            Irreps('2x0e'),
+            [(0, 0, 0, 'uuu', True)],
+        ),
+        (
+            Irreps('2x0e'),
+            Irreps('2x0e'),
+            Irreps('4x0e'),
+            [(0, 0, 0, 'uvuv', True)],
+        ),
+    ]
+
+    @pytest.mark.parametrize('irreps_in1,irreps_in2,irreps_out,instructions', _CASES)
+    def test_modes(self, irreps_in1, irreps_in2, irreps_out, instructions):
+        self._compare_tensor_product(irreps_in1, irreps_in2, irreps_out, instructions)
+
+    @staticmethod
+    def _compare_tensor_product(
+        irreps_in1: Irreps,
+        irreps_in2: Irreps,
+        irreps_out: Irreps,
+        instructions: Sequence[tuple],
+        *,
+        seed: int = 0,
+    ) -> None:
+        instructions = list(instructions)
+
+        weight_shapes = []
+        for ins in instructions:
+            i_in1, i_in2, i_out, mode, has_weight, *rest = ins
+            if not has_weight:
+                continue
+            mul_in1 = irreps_in1[i_in1].mul
+            mul_in2 = irreps_in2[i_in2].mul
+            mul_out = irreps_out[i_out].mul
+            weight_shapes.append(_infer_path_shape(mode, mul_in1, mul_in2, mul_out))
+
+        weight_numel = sum(np.prod(shape) for shape in weight_shapes)
+
+        key = jax.random.PRNGKey(seed)
+        key_x1, key_x2, key_w, key_ref, key_cue = jax.random.split(key, 5)
+        x1 = jax.random.normal(key_x1, (3, irreps_in1.dim))
+        x2 = jax.random.normal(key_x2, (3, irreps_in2.dim))
+        weight = jax.random.normal(key_w, (weight_numel,))
+
+        config = CuEquivarianceConfig(enabled=True)
+
+        def ref_forward(x1_, x2_, w_):
+            tp = TensorProductJAX(
+                irreps_in1,
+                irreps_in2,
+                irreps_out,
+                instructions=instructions,
+                shared_weights=True,
+                internal_weights=False,
+            )
+            return tp(x1_, x2_, w_)
+
+        def cue_forward(x1_, x2_, w_):
+            tp = WrapperTensorProduct(
+                irreps_in1,
+                irreps_in2,
+                irreps_out,
+                instructions=instructions,
+                shared_weights=True,
+                internal_weights=False,
+                cueq_config=config,
+            )
+            return tp(x1_, x2_, w_)
+
+        ref = hk.without_apply_rng(hk.transform(ref_forward))
+        params_ref = ref.init(key_ref, x1, x2, weight)
+        out_ref = ref.apply(params_ref, x1, x2, weight)
+
+        cue_tp = hk.without_apply_rng(hk.transform(cue_forward))
+        params_cue = cue_tp.init(key_cue, x1, x2, weight)
+        out_cue = cue_tp.apply(params_cue, x1, x2, weight)
+
         np.testing.assert_allclose(out_ref, out_cue, rtol=1e-5, atol=1e-5)
