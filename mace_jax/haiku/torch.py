@@ -41,6 +41,11 @@ def _import_e3nn_normalize2mom(module, params, scope):
     return params
 
 
+@register_import_mapper('cuequivariance_torch.primitives.transpose.TransposeIrrepsLayout')
+def _import_cue_transpose(module, params, scope):
+    return params
+
+
 @register_import_mapper('torch.nn.modules.linear.Linear')
 def _import_linear(module, params, scope):
     # Note: Torch stores weight as [out, in], Haiku wants [in, out]

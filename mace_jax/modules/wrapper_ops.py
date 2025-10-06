@@ -206,12 +206,17 @@ def SymmetricContractionWrapper(
                 f"Unsupported cuequivariance layout '{cueq_config.layout_str}'."
             )
 
+    input_layout = 'mul_ir'
+    if cueq_config is not None and cueq_config.layout_str == 'mul_ir':
+        input_layout = 'ir_mul'
+
     return CueSymmetricContraction(
         irreps_in=irreps_in,
         irreps_out=irreps_out,
         correlation=correlation,
         num_elements=num_elements,
         use_reduced_cg=False,
+        input_layout=input_layout,
         name=name,
     )
 

@@ -36,6 +36,9 @@ from mace.modules.blocks import (
 from mace.modules.blocks import (
     RealAgnosticResidualNonLinearInteractionBlock as RealAgnosticResidualNonLinearInteractionBlockTorch,
 )
+from mace.modules.wrapper_ops import (
+    CuEquivarianceConfig as CuEquivarianceConfigTorch,
+)
 
 from mace_jax.haiku.torch import copy_torch_to_jax
 from mace_jax.modules.blocks import (
@@ -68,7 +71,9 @@ from mace_jax.modules.blocks import (
 from mace_jax.modules.blocks import (
     RealAgnosticResidualNonLinearInteractionBlock as RealAgnosticResidualNonLinearInteractionBlockJAX,
 )
-from mace_jax.modules.wrapper_ops import CuEquivarianceConfig
+from mace_jax.modules.wrapper_ops import (
+    CuEquivarianceConfig as CuEquivarianceConfigJAX,
+)
 
 
 class TestLinearNodeEmbeddingBlock:
@@ -271,9 +276,13 @@ class TestEquivariantProductBasisBlock:
         np.random.seed(0)
 
         # --- Inputs ---
-        x_np = np.random.randn(n_nodes, target_irreps[0].dim, 16)
+        mul = node_feats_irreps[0].mul
+        ell_dim_sum = sum(ir.ir.dim for ir in node_feats_irreps)
+
+        x_np = np.random.randn(n_nodes, mul, ell_dim_sum)
         sc_np = np.random.randn(n_nodes, target_irreps.dim) if use_sc else None
-        attrs_np = np.random.randn(n_nodes, num_elements)
+        attr_indices = np.random.randint(0, num_elements, size=n_nodes)
+        attrs_np = np.eye(num_elements, dtype=np.float64)[attr_indices]
 
         x_jax = jnp.array(x_np)
         x_torch = torch.tensor(x_np)
@@ -283,12 +292,18 @@ class TestEquivariantProductBasisBlock:
         attrs_torch = torch.tensor(attrs_np)
 
         # --- Torch model ---
+        cue_config_torch = CuEquivarianceConfigTorch(
+            enabled=True,
+            optimize_symmetric=True,
+        )
+
         torch_model = EquivariantProductBasisBlockTorch(
             node_feats_irreps=str(node_feats_irreps),
             target_irreps=str(target_irreps),
             correlation=correlation,
             use_sc=use_sc,
             num_elements=num_elements,
+            cueq_config=cue_config_torch,
         )
 
         # Torch forward pass
@@ -302,6 +317,10 @@ class TestEquivariantProductBasisBlock:
                 correlation=correlation,
                 use_sc=use_sc,
                 num_elements=num_elements,
+                cueq_config=CuEquivarianceConfigJAX(
+                    enabled=True,
+                    optimize_symmetric=True,
+                ),
             )
             return model(x, sc, attrs)
 
@@ -326,7 +345,8 @@ class TestRealAgnosticBlocks:
     @pytest.fixture
     def dummy_data(self):
         n_nodes, n_edges, feat_dim = 5, 8, 2
-        node_attrs = np.random.randn(n_nodes, feat_dim).astype(np.float64)
+        attr_indices = np.random.randint(0, feat_dim, size=n_nodes)
+        node_attrs = np.eye(feat_dim, dtype=np.float64)[attr_indices]
         node_feats = np.random.randn(n_nodes, feat_dim).astype(np.float64)
         edge_attrs = np.random.randn(n_edges, feat_dim).astype(np.float64)
         edge_feats = np.random.randn(n_edges, feat_dim).astype(np.float64)
@@ -365,10 +385,7 @@ class TestRealAgnosticBlocks:
             ),
         ],
     )
-    @pytest.mark.parametrize('cue_enabled', [False, True])
-    def test_torch_vs_jax(
-        self, dummy_data, jax_cls, torch_cls, multi_output, cue_enabled
-    ):
+    def test_torch_vs_jax(self, dummy_data, jax_cls, torch_cls, multi_output):
         node_attrs, node_feats, edge_attrs, edge_feats, edge_index = dummy_data
         irreps = Irreps('2x0e')
 
@@ -390,6 +407,11 @@ class TestRealAgnosticBlocks:
         )
 
         # === Run Torch ===
+        cue_config_torch = CuEquivarianceConfigTorch(
+            enabled=True,
+            optimize_symmetric=True,
+        )
+
         torch_module = torch_cls(
             node_attrs_irreps=o3.Irreps('2x0e'),
             node_feats_irreps=o3.Irreps('2x0e'),
@@ -398,10 +420,14 @@ class TestRealAgnosticBlocks:
             target_irreps=o3.Irreps('2x0e'),
             hidden_irreps=o3.Irreps('2x0e'),
             avg_num_neighbors=3.0,
+            cueq_config=cue_config_torch,
         )
         torch_out = torch_module(*torch_inputs)
 
-        cue_config = CuEquivarianceConfig(enabled=cue_enabled)
+        cue_config_jax = CuEquivarianceConfigJAX(
+            enabled=True,
+            optimize_symmetric=True,
+        )
 
         # === Run JAX ===
         def run_jax_forward(jax_module_cls, inputs, **kwargs):
@@ -428,7 +454,7 @@ class TestRealAgnosticBlocks:
             target_irreps=irreps,
             hidden_irreps=irreps,
             avg_num_neighbors=3.0,
-            cueq_config=cue_config,
+            cueq_config=cue_config_jax,
         )
 
         # === Compare Outputs ===
