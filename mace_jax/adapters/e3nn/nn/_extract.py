@@ -1,9 +1,9 @@
 from collections.abc import Sequence
-from typing import Optional, Tuple, Union
+from typing import Optional, Union
 
 import haiku as hk
 import jax.numpy as jnp
-from e3nn_jax import Irreps, IrrepsArray
+from e3nn_jax import Irreps
 
 
 class Extract(hk.Module):
@@ -37,7 +37,7 @@ class Extract(hk.Module):
                 slices.append(slice(start, end))
             self._slices_out.append(slices)
 
-    def __call__(self, x: jnp.ndarray) -> Union[jnp.ndarray, Tuple[jnp.ndarray, ...]]:
+    def __call__(self, x: jnp.ndarray) -> Union[jnp.ndarray, tuple[jnp.ndarray, ...]]:
         """
         x: jnp.ndarray [..., irreps_in.dim]
 

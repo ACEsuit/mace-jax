@@ -7,7 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 from e3nn_jax import Irrep, Irreps, IrrepsArray
 
-from mace_jax.e3nn import nn
+from mace_jax.adapters.e3nn import nn
 from mace_jax.haiku.torch import (
     auto_import_from_torch,
     register_import,
@@ -288,12 +288,12 @@ class NonLinearDipoleReadoutBlock(hk.Module):
             self.irreps_out = Irreps('1x0e + 1x1o')
 
         # Partition hidden irreps into scalars and gated irreps
-        irreps_scalars = Irreps([
-            (mul, ir) for mul, ir in MLP_irreps if ir.l == 0 and ir in self.irreps_out
-        ])
-        irreps_gated = Irreps([
-            (mul, ir) for mul, ir in MLP_irreps if ir.l > 0 and ir in self.irreps_out
-        ])
+        irreps_scalars = Irreps(
+            [(mul, ir) for mul, ir in MLP_irreps if ir.l == 0 and ir in self.irreps_out]
+        )
+        irreps_gated = Irreps(
+            [(mul, ir) for mul, ir in MLP_irreps if ir.l > 0 and ir in self.irreps_out]
+        )
         irreps_gates = Irreps([(mul, Irreps('0e')[0][1]) for mul, _ in irreps_gated])
 
         # Gated nonlinearity
@@ -390,12 +390,12 @@ class NonLinearDipolePolarReadoutBlock(hk.Module):
                 'If you want to calculate only the dipole, use AtomicDipolesMACE.'
             )
 
-        irreps_scalars = Irreps([
-            (mul, ir) for mul, ir in MLP_irreps if ir.l == 0 and ir in self.irreps_out
-        ])
-        irreps_gated = Irreps([
-            (mul, ir) for mul, ir in MLP_irreps if ir.l > 0 and ir in self.irreps_out
-        ])
+        irreps_scalars = Irreps(
+            [(mul, ir) for mul, ir in MLP_irreps if ir.l == 0 and ir in self.irreps_out]
+        )
+        irreps_gated = Irreps(
+            [(mul, ir) for mul, ir in MLP_irreps if ir.l > 0 and ir in self.irreps_out]
+        )
         irreps_gates = Irreps([(mul, '0e') for mul, _ in irreps_gated])
 
         # Equivariant nonlinearity
@@ -1269,9 +1269,9 @@ class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
 class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
     def _setup(self) -> None:
         # Compute scalar irreps
-        node_scalar_irreps = Irreps([
-            (self.node_feats_irreps.count(Irrep(0, 1)), (0, 1))
-        ])
+        node_scalar_irreps = Irreps(
+            [(self.node_feats_irreps.count(Irrep(0, 1)), (0, 1))]
+        )
 
         # Source/target embeddings
         self.source_embedding = Linear(

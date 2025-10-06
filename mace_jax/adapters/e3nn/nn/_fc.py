@@ -3,8 +3,9 @@ from typing import Callable, Optional
 import haiku as hk
 import jax.numpy as jnp
 
-from mace_jax.e3nn.math import normalize2mom
 from mace_jax.haiku.torch import copy_torch_to_jax, register_import
+
+from ..math import normalize2mom
 
 
 @register_import('e3nn.nn._fc._Layer')

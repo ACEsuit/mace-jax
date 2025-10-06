@@ -4,7 +4,7 @@ import haiku as hk
 import jax.numpy as jnp
 from e3nn_jax import Irreps
 
-from mace_jax.e3nn.math import normalize2mom
+from ..math import normalize2mom
 
 
 class Activation(hk.Module):

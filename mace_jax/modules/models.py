@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import numpy as np
 from e3nn_jax import Irrep, Irreps
 
-from mace_jax.e3nn.o3 import SphericalHarmonics
+from mace_jax.adapters.e3nn.o3 import SphericalHarmonics
 from mace_jax.haiku.torch import (
     auto_import_from_torch,
     register_import,
