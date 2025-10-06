@@ -7,20 +7,20 @@ from typing import Optional
 
 import cuequivariance as cue
 import jax.numpy as jnp
-from e3nn_jax import Irreps
+from e3nn_jax import Irreps  # type: ignore
 
-from mace_jax.cuequivariance import (
+from mace_jax.adapters.cuequivariance import (
     FullyConnectedTensorProduct as CueFullyConnectedTensorProduct,
 )
-from mace_jax.cuequivariance import (
+from mace_jax.adapters.cuequivariance import (
     Linear as CueLinear,
 )
-from mace_jax.cuequivariance import (
+from mace_jax.adapters.cuequivariance import (
+    SymmetricContraction as CueSymmetricContraction,
+)
+from mace_jax.adapters.cuequivariance import (
     TensorProduct as CueTensorProduct,
 )
-from mace_jax.e3nn import _linear
-from mace_jax.e3nn import _tensor_product as _tp
-from mace_jax.modules.symmetric_contraction import SymmetricContraction
 from mace_jax.tools.cg import O3_e3nn
 
 
@@ -60,17 +60,23 @@ class Linear:
         cueq_config: Optional[CuEquivarianceConfig] = None,
         name: Optional[str] = None,
     ):
-        if cueq_config is not None and cueq_config.enabled:
-            return CueLinear(
-                irreps_in,
-                irreps_out,
-                shared_weights=shared_weights,
-                internal_weights=internal_weights,
-                cueq_config=cueq_config,
-                name=name,
-            )
+        if cueq_config is not None:
+            if getattr(cueq_config, 'conv_fusion', False):
+                raise NotImplementedError(
+                    'conv_fusion is not supported by the cuequivariance backend.'
+                )
+            group_value = getattr(cueq_config, 'group', None)
+            if isinstance(group_value, str):
+                group_name = group_value
+            else:
+                group_name = getattr(group_value, '__name__', None)
+            if group_name != 'O3':
+                raise ValueError(
+                    "TensorProduct only supports the 'O3' group; "
+                    f'received {group_value!r}.'
+                )
 
-        return _linear.Linear(
+        return CueLinear(
             irreps_in,
             irreps_out,
             shared_weights=shared_weights,
@@ -93,26 +99,23 @@ class TensorProduct:
         cueq_config=None,
         name: Optional[str] = None,
     ):
-        # --- Case 1: CuEquivariance backend ---
-        if cueq_config is not None and cueq_config.enabled:
+        if cueq_config is not None:
             if getattr(cueq_config, 'conv_fusion', False):
                 raise NotImplementedError(
                     'conv_fusion is not supported by the cuequivariance tensor product backend.'
                 )
+            group_value = getattr(cueq_config, 'group', None)
+            if isinstance(group_value, str):
+                group_name = group_value
+            else:
+                group_name = getattr(group_value, '__name__', None)
+            if group_name != 'O3':
+                raise ValueError(
+                    "TensorProduct only supports the 'O3' group; "
+                    f'received {group_value!r}.'
+                )
 
-            return CueTensorProduct(
-                irreps_in1,
-                irreps_in2,
-                irreps_out,
-                instructions=instructions,
-                shared_weights=shared_weights,
-                internal_weights=internal_weights,
-                cueq_config=cueq_config,
-                name=name,
-            )
-
-        # --- Default: fallback to e3nn_jax.TensorProduct ---
-        return _tp.TensorProduct(
+        return CueTensorProduct(
             irreps_in1,
             irreps_in2,
             irreps_out,
@@ -137,23 +140,23 @@ def FullyConnectedTensorProduct(
     When CuEquivariance acceleration is requested, this raises since a JAX binding
     is not yet available; otherwise defaults to the e3nn_jax implementation.
     """
-    if cueq_config is not None and cueq_config.enabled:
+    if cueq_config is not None:
         if getattr(cueq_config, 'conv_fusion', False):
             raise NotImplementedError(
                 'conv_fusion is not supported by the cuequivariance tensor product backend.'
             )
-        return CueFullyConnectedTensorProduct(
-            irreps_in1,
-            irreps_in2,
-            irreps_out,
-            shared_weights=shared_weights,
-            internal_weights=internal_weights,
-            cueq_config=cueq_config,
-            name=name,
-        )
+        group_value = getattr(cueq_config, 'group', None)
+        if isinstance(group_value, str):
+            group_name = group_value
+        else:
+            group_name = getattr(group_value, '__name__', None)
+        if group_name != 'O3':
+            raise ValueError(
+                "FullyConnectedTensorProduct only supports the 'O3' group; "
+                f'received {group_value!r}.'
+            )
 
-    # Default: e3nn_jax implementation
-    return _tp.FullyConnectedTensorProduct(
+    return CueFullyConnectedTensorProduct(
         irreps_in1,
         irreps_in2,
         irreps_out,
@@ -184,19 +187,31 @@ def SymmetricContractionWrapper(
             'use_reduced_cg is not supported by the JAX symmetric contraction backend.'
         )
 
-    method = 'naive'
-    if cueq_config is not None and cueq_config.enabled:
+    if cueq_config is not None:
+        if getattr(cueq_config, 'conv_fusion', False):
+            raise NotImplementedError(
+                'conv_fusion is not supported by the cuequivariance tensor product backend.'
+            )
+        group_value = getattr(cueq_config, 'group', None)
+        if isinstance(group_value, str):
+            group_name = group_value
+        else:
+            group_name = getattr(group_value, '__name__', None)
+        if group_name != 'O3':
+            raise ValueError(
+                f"TensorProduct only supports the 'O3' group; received {group_value!r}."
+            )
         if cueq_config.layout_str not in {'mul_ir', 'ir_mul'}:
             raise ValueError(
                 f"Unsupported cuequivariance layout '{cueq_config.layout_str}'."
             )
 
-    return SymmetricContraction(
+    return CueSymmetricContraction(
         irreps_in=irreps_in,
         irreps_out=irreps_out,
         correlation=correlation,
         num_elements=num_elements,
-        method=method,
+        use_reduced_cg=False,
         name=name,
     )
 

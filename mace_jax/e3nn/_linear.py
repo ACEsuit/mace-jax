@@ -28,7 +28,7 @@ def _sum_tensors(xs: list[jax.Array], shape: tuple[int, ...]) -> jax.Array:
     return jnp.zeros(shape, dtype=jnp.float32)
 
 
-@register_import('e3nn.o3._linear.Linear')
+# @register_import('e3nn.o3._linear.Linear')
 class Linear(hk.Module):
     """Linear operation equivariant to O(3), JAX/Haiku version."""
 

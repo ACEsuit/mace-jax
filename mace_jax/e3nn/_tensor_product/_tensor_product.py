@@ -92,7 +92,7 @@ def _as_functional_instruction(ins) -> tuple[int, int, int, str, bool, float]:
     )
 
 
-@register_import('e3nn.o3._tensor_product._tensor_product.TensorProduct')
+# @register_import('e3nn.o3._tensor_product._tensor_product.TensorProduct')
 class TensorProduct(hk.Module):
     """Haiku wrapper around :class:`e3nn_jax.legacy.FunctionalTensorProduct`."""
 

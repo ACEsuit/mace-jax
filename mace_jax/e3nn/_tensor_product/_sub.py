@@ -7,7 +7,7 @@ from mace_jax.haiku.torch import register_import
 from ._tensor_product import TensorProduct
 
 
-@register_import('e3nn.o3._tensor_product._sub.FullyConnectedTensorProduct')
+# @register_import('e3nn.o3._tensor_product._sub.FullyConnectedTensorProduct')
 class FullyConnectedTensorProduct(TensorProduct):
     r"""Fully-connected weighted tensor product
 

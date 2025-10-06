@@ -25,7 +25,6 @@ from .blocks import (
 )
 from .loss import WeightedEnergyForcesStressLoss, uber_loss
 from .models import MACE, ScaleShiftMACE
-from .symmetric_contraction import SymmetricContraction
 
 __all__ = [
     'AtomicEnergiesBlock',
@@ -45,7 +44,6 @@ __all__ = [
     'uber_loss',
     'MACE',
     'ScaleShiftMACE',
-    'SymmetricContraction',
 ]
 
 interaction_classes: dict[str, type[InteractionBlock]] = {
