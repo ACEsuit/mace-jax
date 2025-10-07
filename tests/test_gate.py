@@ -53,9 +53,7 @@ class TestGate:
         transformed = hk.transform(forward_fn)
 
         rng = np.random.default_rng(0)
-        features_np = rng.standard_normal(
-            (4, gate_torch.irreps_in.dim)
-        ).astype(np.float32)
+        features_np = rng.standard_normal((4, gate_torch.irreps_in.dim))
         features_jax = jnp.array(features_np)
         features_torch = torch.tensor(features_np)
 
@@ -75,4 +73,3 @@ class TestGate:
             rtol=1e-5,
             atol=1e-6,
         )
-

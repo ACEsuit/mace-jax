@@ -29,9 +29,9 @@ class TestCueLinear:
         transformed = hk.transform(forward_fn)
 
         rng = np.random.default_rng(0)
-        features_np = rng.standard_normal((3, irreps_in.dim)).astype(np.float32)
+        features_np = rng.standard_normal((3, irreps_in.dim))
         features_jax = jnp.array(features_np)
-        features_torch = torch.tensor(features_np, dtype=torch.float32)
+        features_torch = torch.tensor(features_np)
 
         with torch.no_grad():
             out_torch = torch_layer(features_torch).cpu().numpy()

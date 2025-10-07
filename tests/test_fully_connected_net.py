@@ -39,12 +39,12 @@ class TestFullyConnectedNet:
         transformed = hk.transform(forward_fn)
 
         rng = np.random.default_rng(0)
-        features_np = rng.standard_normal((4, hs[0])).astype(np.float64)
-        features_jax = jnp.array(features_np, dtype=jnp.float32)
-        features_torch = torch.tensor(features_np, dtype=torch.float64)
+        features_np = rng.standard_normal((4, hs[0]))
+        features_jax = jnp.array(features_np)
+        features_torch = torch.tensor(features_np)
 
         with torch.no_grad():
-            out_torch = torch_net(features_torch).cpu().numpy().astype(np.float32)
+            out_torch = torch_net(features_torch).cpu().numpy()
 
         params = transformed.init(jax.random.PRNGKey(7), features_jax)
         params = copy_torch_to_jax(torch_net, params)

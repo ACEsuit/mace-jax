@@ -33,7 +33,7 @@ class TestBesselBasisParity:
         )
         torch_module.eval()
 
-        x_t = 0.1 + (r_max - 0.1) * torch.rand(batch, 1, dtype=torch.float64)
+        x_t = 0.1 + (r_max - 0.1) * torch.rand(batch, 1)
 
         out_t = torch_module(x_t).detach().numpy()
 
@@ -112,7 +112,7 @@ class TestRadialMLP:
 
         # --- Create same random input ---
         np.random.seed(0)
-        x_np = np.random.randn(5, channels_list[0]).astype(np.float64)
+        x_np = np.random.randn(5, channels_list[0])
         x_jax = jnp.array(x_np)
         x_torch = torch.tensor(x_np)
 
@@ -158,23 +158,23 @@ class TestZBLBasis:
         # --- Random but reproducible inputs ---
         np.random.seed(0)
 
-        x_np = np.random.rand(n_edges, 1).astype(np.float32) + 0.5  # edge distances
+        x_np = np.random.rand(n_edges, 1) + 0.5  # edge distances
         node_attrs_np = np.eye(n_species)[
             np.random.randint(0, n_species, size=n_nodes)
-        ].astype(np.float32)  # one-hot
+        ]  # one-hot
         edge_index_np = np.vstack(
             [
                 np.random.randint(0, n_nodes, size=n_edges),
                 np.random.randint(0, n_nodes, size=n_edges),
             ]
         ).astype(np.int32)
-        atomic_numbers_np = np.arange(1, n_species + 1).astype(np.int32)
+        atomic_numbers_np = np.arange(1, n_species + 1)
 
         # Torch tensors
-        x_torch = torch.tensor(x_np, dtype=torch.float32)
-        node_attrs_torch = torch.tensor(node_attrs_np, dtype=torch.float32)
-        edge_index_torch = torch.tensor(edge_index_np, dtype=torch.long)
-        atomic_numbers_torch = torch.tensor(atomic_numbers_np, dtype=torch.long)
+        x_torch = torch.tensor(x_np)
+        node_attrs_torch = torch.tensor(node_attrs_np)
+        edge_index_torch = torch.tensor(edge_index_np)
+        atomic_numbers_torch = torch.tensor(atomic_numbers_np)
 
         # JAX arrays
         x_jax = jnp.array(x_np)

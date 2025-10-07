@@ -46,7 +46,7 @@ class TestFullyConnectedTensorProductImport:
             irreps_out,
             shared_weights=shared_weights,
             internal_weights=internal_weights,
-        ).to(torch.float32)
+        )
 
         self._assert_forward_matches(
             torch_module=torch_module,
@@ -85,7 +85,7 @@ class TestFullyConnectedTensorProductImport:
             shared_weights=shared_weights,
             internal_weights=internal_weights,
             method='naive',
-        ).to(torch.float32)
+        )
 
         self._assert_forward_matches(
             torch_module=torch_module,
@@ -114,8 +114,8 @@ class TestFullyConnectedTensorProductImport:
         ir_in2 = Irreps(irreps_in2)
         ir_out = Irreps(irreps_out)
 
-        x1_np = self.rng.standard_normal((self.batch, ir_in1.dim)).astype(np.float32)
-        x2_np = self.rng.standard_normal((self.batch, ir_in2.dim)).astype(np.float32)
+        x1_np = self.rng.standard_normal((self.batch, ir_in1.dim))
+        x2_np = self.rng.standard_normal((self.batch, ir_in2.dim))
         x1_jax = jnp.array(x1_np)
         x2_jax = jnp.array(x2_np)
 
@@ -144,17 +144,11 @@ class TestFullyConnectedTensorProductImport:
         else:
             if shared_weights:
                 if backend == 'cue':
-                    weights_np = self.rng.standard_normal((1, weight_numel)).astype(
-                        np.float32
-                    )
+                    weights_np = self.rng.standard_normal((1, weight_numel))
                 else:
-                    weights_np = self.rng.standard_normal((weight_numel,)).astype(
-                        np.float32
-                    )
+                    weights_np = self.rng.standard_normal((weight_numel,))
             else:
-                weights_np = self.rng.standard_normal(
-                    (self.batch, weight_numel)
-                ).astype(np.float32)
+                weights_np = self.rng.standard_normal((self.batch, weight_numel))
 
             weights_jax = jnp.array(weights_np)
             weights_torch = torch.tensor(weights_np)
@@ -173,8 +167,8 @@ class TestFullyConnectedTensorProductImport:
             params = transformed.init(key, x1_jax, x2_jax)
             out_jax = transformed.apply(params, None, x1_jax, x2_jax)
 
-        x1_torch = torch.tensor(x1_np, dtype=torch.float32)
-        x2_torch = torch.tensor(x2_np, dtype=torch.float32)
+        x1_torch = torch.tensor(x1_np)
+        x2_torch = torch.tensor(x2_np)
         with torch.no_grad():
             if internal_weights:
                 out_torch = torch_module(x1_torch, x2_torch).cpu().numpy()

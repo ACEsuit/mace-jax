@@ -14,10 +14,10 @@ class TestChebyshevPolynomialT:
     def test_parity(self, n, shape):
         # random x in [-2, 2] (to test inside and outside [-1, 1])
         rng = np.random.default_rng(0)
-        x_np = rng.uniform(-2, 2, size=shape).astype(np.float32)
+        x_np = rng.uniform(-2, 2, size=shape)
 
         # torch
-        x_torch = torch.tensor(x_np, dtype=torch.float32)
+        x_torch = torch.tensor(x_np)
         out_torch = torch.special.chebyshev_polynomial_t(x_torch, n).numpy()
 
         # jax
