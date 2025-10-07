@@ -43,9 +43,24 @@ class _Sortcut(hk.Module):
 
 @register_import('e3nn.nn._gate.Gate')
 class Gate(hk.Module):
-    """
-    Gate activation function: scalars pass through act_scalars,
-    gated irreps are multiplied by gates passed through act_gates.
+    """Gate activation function for scalar/gated irreps.
+
+    Notes
+    -----
+    This Haiku implementation mirrors the PyTorch ``e3nn.nn.Gate`` semantics
+    instead of delegating to :func:`e3nn_jax.gate`. The upstream functional
+    helper expects scalar, gate, and gated chunks to be already contiguous in
+    the canonical e3nn ordering and to share one activation per parity. Torch
+    MACE checkpoints store features—and therefore trained weights—in a
+    different order. When importing those weights we must preserve the original
+    permutation and the per-chunk activation choices encoded in the checkpoint.
+
+    The ``_Sortcut`` and ``Extract`` helpers provide that compatibility layer:
+    they reorder activations to match the Torch layout, slice the requested
+    subsets, and hand them to local ``Activation`` modules which apply the
+    exact functions configured by the model. Replacing this module with
+    :func:`e3nn_jax.gate` would break the weight-import path and change the
+    behaviour of existing models.
     """
 
     def __init__(

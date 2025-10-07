@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Callable, Optional
+from typing import Callable
 
 import e3nn_jax as e3nn
 import haiku as hk
