@@ -3,6 +3,7 @@ from typing import Callable, Optional
 import e3nn_jax as e3nn
 import haiku as hk
 import jax.numpy as jnp
+from e3nn import o3
 from e3nn_jax import Irreps, IrrepsArray
 
 from mace_jax.haiku.torch import copy_torch_to_jax, register_import
@@ -26,8 +27,11 @@ class _Sortcut(hk.Module):
             i += len(irreps_out)
         assert len(irreps_in) == i, (len(irreps_in), i)
 
-        # Sort input irreps and update instructions
-        irreps_in, p, _ = irreps_in.sort()
+        # Sort input irreps following the e3nn ordering to stay consistent with Torch
+        torch_irreps_in = o3.Irreps(str(irreps_in))
+        torch_sorted = torch_irreps_in.sort()
+        irreps_in = Irreps(str(torch_sorted.irreps))
+        p = torch_sorted.p
         instructions = [tuple(p[i] for i in x) for x in instructions]
 
         self.cut = Extract(irreps_in, self.irreps_outs, instructions)
