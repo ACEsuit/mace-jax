@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 import torch
 from ase import Atoms
+from ase.build import bulk
 from mace.data.atomic_data import AtomicData
 from mace.data.utils import config_from_atoms
 from mace.tools import torch_geometric
@@ -96,19 +97,18 @@ class TestModelEquivalence:
     stats_path = Path(__file__).parent / 'test_model_statistics.json'
     statistics = _load_statistics(stats_path)
 
-    atoms = Atoms(
-        symbols=['H', 'H', 'Ne', 'O'],
-        positions=np.array(
-            [
-                [0.0, 0.0, 0.0],
-                [0.5, 0.0, 0.0],
-                [0.0, 0.4, 0.0],
-                [0.0, 0.3, 0.3],
-            ]
-        ),
-        cell=np.identity(3),
-        pbc=[True, True, False],
-    )
+    atoms = bulk('NaCl', 'rocksalt', a=5.64).repeat((2, 2, 1))
+    cation_species = ['Na', 'K']
+    anion_species = ['Cl', 'Br']
+    cation_idx = 0
+    anion_idx = 0
+    for atom in atoms:
+        if atom.symbol == 'Na':
+            atom.symbol = cation_species[cation_idx % len(cation_species)]
+            cation_idx += 1
+        else:
+            atom.symbol = anion_species[anion_idx % len(anion_species)]
+            anion_idx += 1
 
     config = config_from_atoms(atoms)
     config.pbc = [bool(x) for x in config.pbc]
