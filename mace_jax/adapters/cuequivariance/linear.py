@@ -14,6 +14,7 @@ from .utility import ir_mul_to_mul_ir, mul_ir_to_ir_mul
 
 
 @register_import('e3nn.o3._linear.Linear')
+@register_import('cuequivariance_torch.operations.linear.Linear')
 class Linear(hk.Module):
     r"""Linear transform evaluated with cuequivariance-jax.
 

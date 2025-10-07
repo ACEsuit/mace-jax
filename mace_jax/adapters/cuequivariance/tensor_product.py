@@ -61,6 +61,9 @@ def _normalise_instruction(inst) -> tuple[int, int, int, str, bool, float]:
 
 
 @register_import('e3nn.o3._tensor_product._tensor_product.TensorProduct')
+@register_import(
+    'cuequivariance_torch.operations.tp_channel_wise.ChannelWiseTensorProduct'
+)
 class TensorProduct(hk.Module):
     r"""Channel-wise tensor product evaluated with cuequivariance-jax.
 
@@ -277,7 +280,15 @@ class TensorProduct(hk.Module):
     def import_from_torch(cls, torch_module, hk_params, scope):
         hk_params = hk.data_structures.to_mutable_dict(hk_params)
         if torch_module.weight_numel > 0 and torch_module.internal_weights:
-            hk_params[scope]['weight'] = jnp.array(
-                torch_module.weight.detach().cpu().numpy()
+            weight_np = torch_module.weight.detach().cpu().numpy()
+            module_path = (
+                f'{torch_module.__class__.__module__}.{torch_module.__class__.__name__}'
             )
+            if module_path.startswith('cuequivariance_torch'):
+                if weight_np.ndim == 1:
+                    weight_np = weight_np[None, :]
+            else:
+                weight_np = weight_np.reshape(1, -1)
+            hk_params.setdefault(scope, {})
+            hk_params[scope]['weight'] = jnp.array(weight_np)
         return hk.data_structures.to_immutable_dict(hk_params)
