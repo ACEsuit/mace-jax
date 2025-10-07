@@ -97,58 +97,114 @@ class TestModelEquivalence:
     stats_path = Path(__file__).parent / 'test_model_statistics.json'
     statistics = _load_statistics(stats_path)
 
-    atoms = bulk('NaCl', 'rocksalt', a=5.64).repeat((2, 2, 1))
-    cation_species = ['Na', 'K']
-    anion_species = ['Cl', 'Br']
-    cation_idx = 0
-    anion_idx = 0
-    for atom in atoms:
-        if atom.symbol == 'Na':
-            atom.symbol = cation_species[cation_idx % len(cation_species)]
-            cation_idx += 1
-        else:
-            atom.symbol = anion_species[anion_idx % len(anion_species)]
-            anion_idx += 1
+    @classmethod
+    def setup_class(cls):
+        cls.structures = cls._build_structures()
+        atomic_data_list = []
+        for atoms in cls.structures:
+            config = config_from_atoms(atoms)
+            config.pbc = [bool(x) for x in config.pbc]
+            atomic_data_list.append(
+                AtomicData.from_config(
+                    config,
+                    z_table=cls.statistics['atomic_numbers'],
+                    cutoff=2.0,
+                )
+            )
 
-    config = config_from_atoms(atoms)
-    config.pbc = [bool(x) for x in config.pbc]
-    atomic_data = AtomicData.from_config(
-        config,
-        z_table=statistics['atomic_numbers'],
-        cutoff=2.0,
-    )
-    batch = torch_geometric.batch.Batch.from_data_list([atomic_data])
+        cls.batch = torch_geometric.batch.Batch.from_data_list(atomic_data_list)
+        cls.batch_jax = _batch_to_jax(cls.batch)
 
-    @pytest.fixture
-    def torch_model(self):
-        args = self._default_args()
-        self._prepare_args(args)
-        model, _ = configure_model_torch(
-            args,
+        cls.args = cls._default_args()
+        cls._prepare_args(cls.args)
+
+        cls.torch_model, _ = configure_model_torch(
+            cls.args,
             train_loader=[],
-            atomic_energies=self.statistics['atomic_energies'],
-            heads=args.heads,
-            z_table=self.statistics['atomic_numbers'],
+            atomic_energies=cls.statistics['atomic_energies'],
+            heads=cls.args.heads,
+            z_table=cls.statistics['atomic_numbers'],
         )
-        model.eval()
-        model._configure_args = args
-        return model
+        cls.torch_model.eval()
 
-    @pytest.fixture
-    def jax_model(self, torch_model):
-        args = torch_model._configure_args
+        torch_output = cls.torch_model(cls.batch, compute_stress=True)
+        cls.torch_energy = torch_output['energy'].detach().cpu().numpy()
+        cls.torch_forces = torch_output['forces'].detach().cpu().numpy()
+        cls.torch_stress = torch_output['stress'].detach().cpu().numpy()
 
         def forward_fn(batch):
             model = configure_model_jax(
-                args,
-                atomic_energies=self.statistics['atomic_energies'],
-                z_table=self.statistics['atomic_numbers'],
+                cls.args,
+                atomic_energies=cls.statistics['atomic_energies'],
+                z_table=cls.statistics['atomic_numbers'],
             )
             return model(batch, compute_stress=True)
 
-        return hk.transform_with_state(forward_fn)
+        cls.jax_transform = hk.transform_with_state(forward_fn)
+        init_rng = jax.random.PRNGKey(0)
+        apply_rng = jax.random.PRNGKey(1)
+        cls.jax_params, cls.jax_state = cls.jax_transform.init(init_rng, cls.batch_jax)
+        cls.jax_params = copy_torch_to_jax(cls.torch_model, cls.jax_params)
+        jax_output, cls.jax_state = cls.jax_transform.apply(
+            cls.jax_params,
+            cls.jax_state,
+            apply_rng,
+            cls.batch_jax,
+        )
 
-    def _default_args(self):
+        cls.jax_energy = np.asarray(jax_output['energy'])
+        cls.jax_forces = np.asarray(jax_output['forces'])
+        cls.jax_stress = np.asarray(jax_output['stress'])
+
+    @classmethod
+    def _build_structures(cls):
+        structures: list[Atoms] = []
+        repeats = [(2, 2, 1), (2, 2, 2)]
+        displacement_scales = [0.08, 0.12]
+        strain_matrices = [
+            np.zeros((3, 3)),
+            np.array(
+                [
+                    [0.00, 0.02, 0.00],
+                    [0.02, 0.00, 0.00],
+                    [0.00, 0.00, -0.015],
+                ]
+            ),
+        ]
+
+        cation_species = ['Na', 'K']
+        anion_species = ['Cl', 'Br']
+
+        for idx, repeat in enumerate(repeats):
+            atoms = bulk('NaCl', 'rocksalt', a=5.64).repeat(repeat)
+
+            cation_idx = idx
+            anion_idx = idx
+            for atom in atoms:
+                if atom.symbol == 'Na':
+                    atom.symbol = cation_species[cation_idx % len(cation_species)]
+                    cation_idx += 1
+                else:
+                    atom.symbol = anion_species[anion_idx % len(anion_species)]
+                    anion_idx += 1
+
+            rng = np.random.default_rng(seed=42 + idx)
+            atoms.positions += displacement_scales[idx] * rng.normal(
+                size=atoms.positions.shape
+            )
+
+            strain = strain_matrices[idx]
+            if np.any(strain):
+                deformation = np.identity(3) + strain
+                atoms.set_cell(atoms.cell @ deformation, scale_atoms=True)
+
+            atoms.wrap()
+            structures.append(atoms)
+
+        return structures
+
+    @classmethod
+    def _default_args(cls):
         from mace.tools import build_default_arg_parser, check_args  # noqa: PLC0415
 
         arguments = [
@@ -183,43 +239,35 @@ class TestModelEquivalence:
         args, _ = check_args(args)
         return args
 
-    def _prepare_args(self, args):
-        args.mean = self.statistics['mean']
-        args.std = self.statistics['std']
+    @classmethod
+    def _prepare_args(cls, args):
+        args.mean = cls.statistics['mean']
+        args.std = cls.statistics['std']
         args.compute_energy = True
         args.compute_dipole = False
         args.key_specification = None
         args.heads = prepare_default_head(args)
-        args.avg_num_neighbors = self.statistics['avg_num_neighbors']
-        args.r_max = self.statistics['r_max']
+        args.avg_num_neighbors = cls.statistics['avg_num_neighbors']
+        args.r_max = cls.statistics['r_max']
         args.scaling = 'no_scaling'
 
-    def test_model_outputs_match(self, torch_model, jax_model):
-        batch_torch = self.batch
-        torch_output = torch_model(batch_torch, compute_stress=True)
-
-        batch_jax = _batch_to_jax(batch_torch)
-        rng = jax.random.PRNGKey(0)
-        params, state = jax_model.init(rng, batch_jax)
-        params = copy_torch_to_jax(torch_model, params)
-
-        jax_output, _ = jax_model.apply(params, state, rng, batch_jax)
-
+    def test_model_outputs_match(self):
+        cls = self.__class__
         np.testing.assert_allclose(
-            np.asarray(jax_output['energy']),
-            torch_output['energy'].detach().cpu().numpy(),
+            cls.jax_energy,
+            cls.torch_energy,
             rtol=1e-2,
             atol=1e-2,
         )
         np.testing.assert_allclose(
-            np.asarray(jax_output['forces']),
-            torch_output['forces'].detach().cpu().numpy(),
+            cls.jax_forces,
+            cls.torch_forces,
             rtol=3e-2,
             atol=3e-2,
         )
         np.testing.assert_allclose(
-            np.asarray(jax_output['stress']),
-            torch_output['stress'].detach().cpu().numpy(),
+            cls.jax_stress,
+            cls.torch_stress,
             rtol=1e-2,
             atol=1e-2,
         )
