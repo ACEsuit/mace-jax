@@ -259,9 +259,12 @@ class TestEquivariantProductBasisBlock:
         'node_feats_irreps,target_irreps,correlation,use_sc,num_elements',
         [
             # Simple scalar contraction
+            ('128x0e+128x1o+128x2e+128x3o', '128x0e+128x1o+128x2e', 1, False, 10),
+            ('128x0e+128x1o+128x2e+128x3o', '128x0e+128x1o+128x2e', 1, True, 10),
             ('128x0e+128x1o+128x2e+128x3o', '128x0e+128x1o+128x2e', 2, False, 10),
             ('128x0e+128x1o+128x2e+128x3o', '128x0e+128x1o+128x2e', 2, True, 10),
-            ('128x0e+128x1o+128x2e+128x3o', '128x0e+128x1o+128x2e', 1, False, 10),
+            ('128x0e+128x1o+128x2e+128x3o', '128x0e+128x1o+128x2e', 3, False, 10),
+            ('128x0e+128x1o+128x2e+128x3o', '128x0e+128x1o+128x2e', 3, True, 10),
         ],
     )
     def test_forward_match(
