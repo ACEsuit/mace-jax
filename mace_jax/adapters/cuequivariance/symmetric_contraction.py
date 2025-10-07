@@ -6,21 +6,23 @@ import cuequivariance_jax as cuex
 import haiku as hk
 import jax
 import jax.numpy as jnp
+from cuequivariance_torch.operations.symmetric_contraction import (
+    SymmetricContraction as CueSymmetricContractionTorch,
+)
 from e3nn_jax import Irreps  # type: ignore
 
 import cuequivariance as cue
 from cuequivariance.group_theory.experimental.mace.symmetric_contractions import (
     symmetric_contraction as cue_mace_symmetric_contraction,
 )
-from cuequivariance_torch.operations.symmetric_contraction import (
-    SymmetricContraction as CueSymmetricContractionTorch,
-)
 from mace_jax.haiku.torch import register_import
 
 from .utility import ir_mul_to_mul_ir
 
 
-@register_import('cuequivariance_torch.operations.symmetric_contraction.SymmetricContraction')
+@register_import(
+    'cuequivariance_torch.operations.symmetric_contraction.SymmetricContraction'
+)
 @register_import('mace.modules.symmetric_contraction.SymmetricContraction')
 class SymmetricContraction(hk.Module):
     r"""Symmetric contraction evaluated with cue-equivariant segmented polynomials.
@@ -305,7 +307,10 @@ class SymmetricContraction(hk.Module):
         )
 
         if not isinstance(torch_module, CueSymmetricContractionTorch):
-            if module_qualname == 'mace.modules.symmetric_contraction.SymmetricContraction':
+            if (
+                module_qualname
+                == 'mace.modules.symmetric_contraction.SymmetricContraction'
+            ):
                 raise TypeError(
                     'Importing native MACE SymmetricContraction is not supported; '
                     'enable cuequivariance in the Torch model so that '

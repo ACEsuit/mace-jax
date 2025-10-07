@@ -177,15 +177,7 @@ def SymmetricContractionWrapper(
 ):
     """
     JAX implementation of SymmetricContraction powered by cuequivariance-jax.
-
-    ``use_reduced_cg`` is accepted for API compatibility but ignored because the
-    cue backend always operates on the full CG tables.
     """
-
-    if use_reduced_cg:
-        raise NotImplementedError(
-            'use_reduced_cg is not supported by the JAX symmetric contraction backend.'
-        )
 
     if cueq_config is not None:
         if getattr(cueq_config, 'conv_fusion', False):
@@ -215,7 +207,7 @@ def SymmetricContractionWrapper(
         irreps_out=irreps_out,
         correlation=correlation,
         num_elements=num_elements,
-        use_reduced_cg=False,
+        use_reduced_cg=use_reduced_cg,
         input_layout=input_layout,
         name=name,
     )
