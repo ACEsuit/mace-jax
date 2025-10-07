@@ -108,7 +108,7 @@ class TestModelEquivalence:
                 AtomicData.from_config(
                     config,
                     z_table=cls.statistics['atomic_numbers'],
-                    cutoff=2.0,
+                    cutoff=float(cls.statistics['r_max']),
                 )
             )
 
@@ -262,12 +262,12 @@ class TestModelEquivalence:
         np.testing.assert_allclose(
             cls.jax_forces,
             cls.torch_forces,
-            rtol=3e-2,
-            atol=3e-2,
+            rtol=3e-4,
+            atol=3e-4,
         )
         np.testing.assert_allclose(
             cls.jax_stress,
             cls.torch_stress,
-            rtol=1e-2,
-            atol=1e-2,
+            rtol=1e-4,
+            atol=1e-4,
         )
