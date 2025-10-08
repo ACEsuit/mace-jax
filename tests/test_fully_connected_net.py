@@ -1,4 +1,3 @@
-import haiku as hk
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -6,11 +5,10 @@ import torch
 from e3nn.nn import FullyConnectedNet as FullyConnectedNetTorch
 
 from mace_jax.adapters.e3nn.nn._fc import FullyConnectedNet as FullyConnectedNetJAX
-from mace_jax.haiku.torch import copy_torch_to_jax
 
 
 class TestFullyConnectedNet:
-    """Compare the Haiku FullyConnectedNet with the e3nn reference implementation."""
+    """Compare the Flax FullyConnectedNet with the e3nn reference implementation."""
 
     def test_forward_matches_e3nn(self):
         hs = [6, 5, 4]
@@ -24,31 +22,26 @@ class TestFullyConnectedNet:
             variance_in=variance_in,
             variance_out=variance_out,
             out_act=out_act,
-        ).double()
-
-        def forward_fn(x):
-            net = FullyConnectedNetJAX(
-                hs=hs,
-                act=None,
-                variance_in=variance_in,
-                variance_out=variance_out,
-                out_act=out_act,
-            )
-            return net(x)
-
-        transformed = hk.transform(forward_fn)
+        ).float()
 
         rng = np.random.default_rng(0)
-        features_np = rng.standard_normal((4, hs[0]))
-        features_jax = jnp.array(features_np)
-        features_torch = torch.tensor(features_np)
+        features_np = rng.standard_normal((4, hs[0])).astype(np.float32)
+        features_jax = jnp.asarray(features_np)
+        features_torch = torch.tensor(features_np, dtype=torch.float32)
 
         with torch.no_grad():
             out_torch = torch_net(features_torch).cpu().numpy()
 
-        params = transformed.init(jax.random.PRNGKey(7), features_jax)
-        params = copy_torch_to_jax(torch_net, params)
-        out_jax = transformed.apply(params, None, features_jax)
+        flax_net = FullyConnectedNetJAX(
+            hs=hs,
+            act=None,
+            variance_in=variance_in,
+            variance_out=variance_out,
+            out_act=out_act,
+        )
+        variables = flax_net.init(jax.random.PRNGKey(7), features_jax)
+        variables = FullyConnectedNetJAX.import_from_torch(torch_net, variables)
+        out_jax = flax_net.apply(variables, features_jax)
         out_jax_array = np.asarray(out_jax)
 
         np.testing.assert_allclose(

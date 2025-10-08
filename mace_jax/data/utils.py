@@ -3,11 +3,12 @@ from collections import defaultdict, namedtuple
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from random import shuffle
-from typing import IO, Dict, Optional, Tuple, Union
+from typing import IO, Optional, Union
 
 import ase.data
 import ase.io
 import jax
+import jax.numpy as jnp
 import jraph
 import numpy as np
 from roundmantissa import ceil_mantissa
@@ -46,7 +47,7 @@ Configurations = list[Configuration]
 
 def random_train_valid_split(
     items: Sequence, valid_num: int, seed: int
-) -> Tuple[list, list]:
+) -> tuple[list, list]:
     size = len(items)
     train_size = size - valid_num
 
@@ -65,7 +66,7 @@ def config_from_atoms(
     energy_key='energy',
     forces_key='forces',
     stress_key='stress',
-    config_type_weights: Dict[str, float] = None,
+    config_type_weights: dict[str, float] = None,
     prefactor_stress: float = 1.0,
     remap_stress: np.ndarray = None,
 ) -> Configuration:
@@ -121,7 +122,7 @@ def config_from_atoms(
 
 def test_config_types(
     test_configs: Configurations,
-) -> list[Tuple[Optional[str], list[Configuration]]]:
+) -> list[tuple[Optional[str], list[Configuration]]]:
     """Split test set based on config_type-s"""
     test_by_ct = defaultdict(list)
     for conf in test_configs:
@@ -131,7 +132,7 @@ def test_config_types(
 
 def load_from_xyz(
     file_or_path: Union[str, IO],
-    config_type_weights: Dict = None,
+    config_type_weights: dict = None,
     energy_key: str = 'energy',
     forces_key: str = 'forces',
     stress_key: str = 'stress',
@@ -139,7 +140,7 @@ def load_from_xyz(
     num_configs: int = None,
     prefactor_stress: float = 1.0,
     remap_stress: np.ndarray = None,
-) -> Tuple[Dict[int, float], Configurations]:
+) -> tuple[dict[int, float], Configurations]:
     if num_configs is None:
         atoms_list = ase.io.read(file_or_path, format='extxyz', index=':')
     else:
@@ -235,7 +236,7 @@ def atomic_numbers_to_indices(
 
 def compute_average_E0s(
     graphs: list[jraph.GraphsTuple], z_table: AtomicNumberTable
-) -> Dict[int, float]:
+) -> dict[int, float]:
     """
     Function to compute the average interaction energy of each chemical element
     returns dictionary of E0s
@@ -265,7 +266,7 @@ def compute_average_E0s(
 
 def compute_average_E0s_from_species(
     graphs: list[jraph.GraphsTuple], num_species: int
-) -> Dict[int, float]:
+) -> dict[int, float]:
     """
     Function to compute the average interaction energy of each chemical element
     returns dictionary of E0s

@@ -1,11 +1,10 @@
-import haiku as hk
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 import torch
 from e3nn import o3
-from e3nn_jax import Irreps
+from e3nn_jax import Irreps, IrrepsArray
 from mace.modules.blocks import (
     EquivariantProductBasisBlock as EquivariantProductBasisBlockTorch,
 )
@@ -40,7 +39,7 @@ from mace.modules.wrapper_ops import (
     CuEquivarianceConfig as CuEquivarianceConfigTorch,
 )
 
-from mace_jax.haiku.torch import copy_torch_to_jax
+from mace_jax.adapters.flax.torch import init_from_torch
 from mace_jax.modules.blocks import (
     EquivariantProductBasisBlock as EquivariantProductBasisBlockJAX,
 )
@@ -71,9 +70,12 @@ from mace_jax.modules.blocks import (
 from mace_jax.modules.blocks import (
     RealAgnosticResidualNonLinearInteractionBlock as RealAgnosticResidualNonLinearInteractionBlockJAX,
 )
-from mace_jax.modules.wrapper_ops import (
-    CuEquivarianceConfig as CuEquivarianceConfigJAX,
-)
+from mace_jax.modules.wrapper_ops import CuEquivarianceConfig as CuEquivarianceConfigJAX
+
+
+def _to_numpy(x):
+    array = x.array if hasattr(x, 'array') else x
+    return np.asarray(array)
 
 
 class TestLinearNodeEmbeddingBlock:
@@ -95,38 +97,37 @@ class TestLinearNodeEmbeddingBlock:
         n_nodes = 5
 
         # --- Create random input ---
-        np.random.seed(0)
-        x_np = np.random.randn(n_nodes, irreps_in_obj.dim).astype(np.float64)
-        x_jax = jnp.array(x_np)
-        x_torch = torch.tensor(x_np)
+        rng = np.random.default_rng(0)
+        x_np = rng.standard_normal((n_nodes, irreps_in_obj.dim)).astype(np.float32)
+        x_jax = jnp.asarray(x_np)
+        x_torch = torch.tensor(x_np, dtype=torch.float32)
 
         # --- Torch model ---
-        torch_model = LinearNodeEmbeddingBlockTorch(irreps_in_obj, irreps_out_obj)
+        torch_model = LinearNodeEmbeddingBlockTorch(
+            irreps_in_obj, irreps_out_obj
+        ).float()
 
         # --- Torch output ---
         out_torch = torch_model(x_torch)
 
         # --- JAX model ---
-        def forward_fn(x):
-            model = LinearNodeEmbeddingBlockJAX(
-                irreps_in=irreps_in_obj,
-                irreps_out=irreps_out_obj,
-            )
-            return model(x)
+        module = LinearNodeEmbeddingBlockJAX(
+            irreps_in=irreps_in_obj,
+            irreps_out=irreps_out_obj,
+        )
+        module, variables = init_from_torch(
+            module,
+            torch_model,
+            jax.random.PRNGKey(42),
+            x_jax,
+        )
 
-        transformed = hk.transform(forward_fn)
-        rng = jax.random.PRNGKey(42)
-        params = transformed.init(rng, x_jax)
-
-        # Copy Torch → JAX
-        params = copy_torch_to_jax(torch_model, params)
-
-        out_jax = transformed.apply(params, None, x_jax)
+        out_jax = module.apply(variables, x_jax)
 
         # --- Compare ---
         np.testing.assert_allclose(
-            np.array(out_jax),
-            out_torch.detach().numpy(),
+            _to_numpy(out_jax),
+            out_torch.detach().cpu().numpy(),
             rtol=1e-5,
             atol=1e-6,
         )
@@ -151,38 +152,35 @@ class TestLinearReadoutBlock:
         n_nodes = 5
 
         # --- Create random input ---
-        np.random.seed(0)
-        x_np = np.random.randn(n_nodes, irreps_in_obj.dim).astype(np.float64)
-        x_jax = jnp.array(x_np)
-        x_torch = torch.tensor(x_np)
+        rng = np.random.default_rng(0)
+        x_np = rng.standard_normal((n_nodes, irreps_in_obj.dim)).astype(np.float32)
+        x_jax = jnp.asarray(x_np)
+        x_torch = torch.tensor(x_np, dtype=torch.float32)
 
         # --- Torch model ---
-        torch_model = LinearReadoutBlockTorch(irreps_in_obj, irrep_out_obj)
+        torch_model = LinearReadoutBlockTorch(irreps_in_obj, irrep_out_obj).float()
 
         # --- Torch output ---
         out_torch = torch_model(x_torch)
 
         # --- JAX model ---
-        def forward_fn(x):
-            model = LinearReadoutBlockJAX(
-                irreps_in=irreps_in_obj,
-                irrep_out=irrep_out_obj,
-            )
-            return model(x)
+        module = LinearReadoutBlockJAX(
+            irreps_in=irreps_in_obj,
+            irrep_out=irrep_out_obj,
+        )
+        module, variables = init_from_torch(
+            module,
+            torch_model,
+            jax.random.PRNGKey(42),
+            x_jax,
+        )
 
-        transformed = hk.transform(forward_fn)
-        rng = jax.random.PRNGKey(42)
-        params = transformed.init(rng, x_jax)
-
-        # Copy Torch → JAX
-        params = copy_torch_to_jax(torch_model, params)
-
-        out_jax = transformed.apply(params, None, x_jax)
+        out_jax = module.apply(variables, x_jax)
 
         # --- Compare ---
         np.testing.assert_allclose(
-            np.array(out_jax),
-            out_torch.detach().numpy(),
+            _to_numpy(out_jax),
+            out_torch.detach().cpu().numpy(),
             rtol=1e-5,
             atol=1e-6,
         )
@@ -208,10 +206,11 @@ class TestNonLinearReadoutBlock:
         n_nodes = 5
 
         # --- Create random input ---
-        np.random.seed(0)
-        x_np = np.random.randn(n_nodes, irreps_in_obj.dim).astype(np.float64)
-        x_jax = jnp.array(x_np)
-        x_torch = torch.tensor(x_np)
+        rng = np.random.default_rng(0)
+        x_np = rng.standard_normal((n_nodes, irreps_in_obj.dim)).astype(np.float32)
+        x_jax = jnp.asarray(x_np)
+        x_ir = IrrepsArray(irreps_in_obj, x_jax)
+        x_torch = torch.tensor(x_np, dtype=torch.float32)
 
         # --- Torch model ---
         torch_model = NonLinearReadoutBlockTorch(
@@ -220,33 +219,32 @@ class TestNonLinearReadoutBlock:
             gate=torch.nn.SiLU(),
             irrep_out=irrep_out_obj,
             num_heads=num_heads,
-        )
+        ).float()
 
         # --- Torch output ---
         out_torch = torch_model(x_torch)
 
         # --- JAX model ---
-        def forward_fn(x):
-            model = NonLinearReadoutBlockJAX(
-                irreps_in=irreps_in_obj,
-                MLP_irreps=MLP_irreps_obj,
-                gate=jax.nn.silu,
-                irrep_out=irrep_out_obj,
-                num_heads=num_heads,
-            )
-            return model(x)
+        module = NonLinearReadoutBlockJAX(
+            irreps_in=irreps_in_obj,
+            MLP_irreps=MLP_irreps_obj,
+            gate=jax.nn.silu,
+            irrep_out=irrep_out_obj,
+            num_heads=num_heads,
+        )
+        module, variables = init_from_torch(
+            module,
+            torch_model,
+            jax.random.PRNGKey(42),
+            x_ir,
+        )
 
-        transformed = hk.transform(forward_fn)
-        rng = jax.random.PRNGKey(42)
-        params = transformed.init(rng, x_jax)
-        params = copy_torch_to_jax(torch_model, params)
-
-        out_jax = transformed.apply(params, None, x_jax)
+        out_jax = module.apply(variables, x_ir)
 
         # --- Compare outputs ---
         np.testing.assert_allclose(
-            np.array(out_jax),
-            out_torch.detach().numpy(),
+            _to_numpy(out_jax),
+            out_torch.detach().cpu().numpy(),
             rtol=5e-4,
             atol=5e-3,
         )
@@ -276,23 +274,29 @@ class TestEquivariantProductBasisBlock:
         target_irreps = Irreps(target_irreps)
 
         n_nodes = 6
-        np.random.seed(0)
+        rng = np.random.default_rng(0)
 
         # --- Inputs ---
         mul = node_feats_irreps[0].mul
         ell_dim_sum = sum(ir.ir.dim for ir in node_feats_irreps)
 
-        x_np = np.random.randn(n_nodes, mul, ell_dim_sum)
-        sc_np = np.random.randn(n_nodes, target_irreps.dim) if use_sc else None
-        attr_indices = np.random.randint(0, num_elements, size=n_nodes)
-        attrs_np = np.eye(num_elements, dtype=np.float64)[attr_indices]
+        x_np = rng.standard_normal((n_nodes, mul, ell_dim_sum)).astype(np.float32)
+        sc_np = (
+            rng.standard_normal((n_nodes, target_irreps.dim)).astype(np.float32)
+            if use_sc
+            else None
+        )
+        attr_indices = rng.integers(0, num_elements, size=n_nodes)
+        attrs_np = np.eye(num_elements, dtype=np.float32)[attr_indices]
 
-        x_jax = jnp.array(x_np)
-        x_torch = torch.tensor(x_np)
-        sc_jax = jnp.array(sc_np) if sc_np is not None else None
-        sc_torch = torch.tensor(sc_np) if sc_np is not None else None
-        attrs_jax = jnp.array(attrs_np)
-        attrs_torch = torch.tensor(attrs_np)
+        x_jax = jnp.asarray(x_np)
+        x_torch = torch.tensor(x_np, dtype=torch.float32)
+        sc_jax = jnp.asarray(sc_np) if sc_np is not None else None
+        sc_torch = (
+            torch.tensor(sc_np, dtype=torch.float32) if sc_np is not None else None
+        )
+        attrs_jax = jnp.asarray(attrs_np)
+        attrs_torch = torch.tensor(attrs_np, dtype=torch.float32)
 
         # --- Torch model ---
         cue_config_torch = CuEquivarianceConfigTorch(
@@ -307,37 +311,38 @@ class TestEquivariantProductBasisBlock:
             use_sc=use_sc,
             num_elements=num_elements,
             cueq_config=cue_config_torch,
-        )
+        ).float()
 
         # Torch forward pass
         out_torch = torch_model(x_torch, sc_torch, attrs_torch)
 
         # --- JAX model ---
-        def forward_fn(x, sc, attrs):
-            model = EquivariantProductBasisBlockJAX(
-                node_feats_irreps=node_feats_irreps,
-                target_irreps=target_irreps,
-                correlation=correlation,
-                use_sc=use_sc,
-                num_elements=num_elements,
-                cueq_config=CuEquivarianceConfigJAX(
-                    enabled=True,
-                    optimize_symmetric=True,
-                ),
-            )
-            return model(x, sc, attrs)
+        module = EquivariantProductBasisBlockJAX(
+            node_feats_irreps=node_feats_irreps,
+            target_irreps=target_irreps,
+            correlation=correlation,
+            use_sc=use_sc,
+            num_elements=num_elements,
+            cueq_config=CuEquivarianceConfigJAX(
+                enabled=True,
+                optimize_symmetric=True,
+            ),
+        )
+        module, variables = init_from_torch(
+            module,
+            torch_model,
+            jax.random.PRNGKey(42),
+            x_jax,
+            sc_jax,
+            attrs_jax,
+        )
 
-        transformed = hk.transform(forward_fn)
-        rng = jax.random.PRNGKey(42)
-        params = transformed.init(rng, x_jax, sc_jax, attrs_jax)
-        params = copy_torch_to_jax(torch_model, params)
-
-        out_jax = transformed.apply(params, None, x_jax, sc_jax, attrs_jax)
+        out_jax = module.apply(variables, x_jax, sc_jax, attrs_jax)
 
         # --- Compare ---
         np.testing.assert_allclose(
-            np.array(out_jax),
-            out_torch.detach().numpy(),
+            _to_numpy(out_jax),
+            out_torch.detach().cpu().numpy(),
             rtol=5e-4,
             atol=5e-3,
         )
@@ -347,13 +352,14 @@ class TestRealAgnosticBlocks:
     # === Fixtures ===
     @pytest.fixture
     def dummy_data(self):
+        rng = np.random.default_rng(0)
         n_nodes, n_edges, feat_dim = 5, 8, 2
-        attr_indices = np.random.randint(0, feat_dim, size=n_nodes)
-        node_attrs = np.eye(feat_dim, dtype=np.float64)[attr_indices]
-        node_feats = np.random.randn(n_nodes, feat_dim).astype(np.float64)
-        edge_attrs = np.random.randn(n_edges, feat_dim).astype(np.float64)
-        edge_feats = np.random.randn(n_edges, feat_dim).astype(np.float64)
-        edge_index = np.random.randint(0, n_nodes, size=(2, n_edges)).astype(np.int64)
+        attr_indices = rng.integers(0, feat_dim, size=n_nodes)
+        node_attrs = np.eye(feat_dim, dtype=np.float32)[attr_indices]
+        node_feats = rng.standard_normal((n_nodes, feat_dim)).astype(np.float32)
+        edge_attrs = rng.standard_normal((n_edges, feat_dim)).astype(np.float32)
+        edge_feats = rng.standard_normal((n_edges, feat_dim)).astype(np.float32)
+        edge_index = rng.integers(0, n_nodes, size=(2, n_edges)).astype(np.int32)
         return node_attrs, node_feats, edge_attrs, edge_feats, edge_index
 
     # === Parametrized Tests for All Blocks ===
@@ -394,19 +400,19 @@ class TestRealAgnosticBlocks:
 
         # === Define inputs ===
         jax_inputs = (
-            jnp.array(node_attrs),
-            jnp.array(node_feats),
-            jnp.array(edge_attrs),
-            jnp.array(edge_feats),
-            jnp.array(edge_index),
+            jnp.asarray(node_attrs),
+            jnp.asarray(node_feats),
+            jnp.asarray(edge_attrs),
+            jnp.asarray(edge_feats),
+            jnp.asarray(edge_index),
         )
 
         torch_inputs = (
-            torch.from_numpy(node_attrs),
-            torch.from_numpy(node_feats),
-            torch.from_numpy(edge_attrs),
-            torch.from_numpy(edge_feats),
-            torch.from_numpy(edge_index),
+            torch.from_numpy(node_attrs).float(),
+            torch.from_numpy(node_feats).float(),
+            torch.from_numpy(edge_attrs).float(),
+            torch.from_numpy(edge_feats).float(),
+            torch.from_numpy(edge_index).long(),
         )
 
         # === Run Torch ===
@@ -424,7 +430,7 @@ class TestRealAgnosticBlocks:
             hidden_irreps=o3.Irreps('2x0e'),
             avg_num_neighbors=3.0,
             cueq_config=cue_config_torch,
-        )
+        ).float()
         torch_out = torch_module(*torch_inputs)
 
         cue_config_jax = CuEquivarianceConfigJAX(
@@ -433,23 +439,7 @@ class TestRealAgnosticBlocks:
         )
 
         # === Run JAX ===
-        def run_jax_forward(jax_module_cls, inputs, **kwargs):
-            """Initialize and run Haiku module once."""
-
-            def forward_fn(*args):
-                mod = jax_module_cls(**kwargs)
-                return mod(*args)
-
-            transformed = hk.transform(forward_fn)
-            rng = jax.random.PRNGKey(42)
-            params = transformed.init(rng, *inputs)
-            params = copy_torch_to_jax(torch_module, params)
-            out = transformed.apply(params, rng, *inputs)
-            return out
-
-        jax_out = run_jax_forward(
-            jax_cls,
-            jax_inputs,
+        module = jax_cls(
             node_attrs_irreps=irreps,
             node_feats_irreps=irreps,
             edge_attrs_irreps=irreps,
@@ -459,14 +449,22 @@ class TestRealAgnosticBlocks:
             avg_num_neighbors=3.0,
             cueq_config=cue_config_jax,
         )
+        module, variables = init_from_torch(
+            module,
+            torch_module,
+            jax.random.PRNGKey(42),
+            *jax_inputs,
+        )
+
+        jax_out = module.apply(variables, *jax_inputs)
 
         # === Compare Outputs ===
         if multi_output == 1:
             torch_arr = torch_out[0].detach().cpu().numpy()
-            jax_arr = np.array(jax_out[0])
+            jax_arr = _to_numpy(jax_out[0])
             np.testing.assert_allclose(torch_arr, jax_arr, rtol=0.01, atol=0.001)
         else:
             for i in range(multi_output):
                 torch_arr = torch_out[i].detach().cpu().numpy()
-                jax_arr = np.array(jax_out[i])
+                jax_arr = _to_numpy(jax_out[i])
                 np.testing.assert_allclose(torch_arr, jax_arr, rtol=0.01, atol=0.001)

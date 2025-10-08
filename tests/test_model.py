@@ -1,7 +1,6 @@
 import json
 from pathlib import Path
 
-import haiku as hk
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -16,9 +15,7 @@ from mace.tools.model_script_utils import configure_model as configure_model_tor
 from mace.tools.multihead_tools import AtomicNumberTable, prepare_default_head
 from mace.tools.torch_geometric.batch import Batch
 
-from mace_jax.haiku.torch import copy_torch_to_jax
-
-jax.config.update('jax_enable_x64', True)
+from mace_jax import modules
 
 
 def _load_statistics(path: Path) -> dict:
@@ -42,8 +39,6 @@ def configure_model_jax(
 
     from e3nn_jax import Irreps  # noqa: PLC0415
 
-    from mace_jax import modules  # noqa: PLC0415
-
     model_config = dict(
         r_max=args.r_max,
         num_bessel=args.num_radial_basis,
@@ -57,7 +52,7 @@ def configure_model_jax(
         atomic_energies=atomic_energies,
         apply_cutoff=args.apply_cutoff,
         avg_num_neighbors=args.avg_num_neighbors,
-        atomic_numbers=z_table.zs,
+        atomic_numbers=tuple(int(z) for z in z_table.zs),
         use_reduced_cg=args.use_reduced_cg,
         use_so3=args.use_so3,
         cueq_config=None,
@@ -74,7 +69,7 @@ def configure_model_jax(
         atomic_inter_shift=args.mean,
         radial_MLP=ast.literal_eval(args.radial_MLP),
         radial_type=args.radial_type,
-        heads=args.heads,
+        heads=tuple(args.heads) if args.heads is not None else None,
         embedding_specs=args.embedding_specs,
         use_embedding_readout=args.use_embedding_readout,
         use_last_readout_only=args.use_last_readout_only,
@@ -93,9 +88,48 @@ def _batch_to_jax(batch: Batch) -> dict:
     return converted
 
 
-class TestModelEquivalence:
+class ModelEquivalenceTestBase:
     stats_path = Path(__file__).parent / 'test_model_statistics.json'
     statistics = _load_statistics(stats_path)
+    structure_repeats: list[tuple[int, int, int]] = [(2, 2, 1), (2, 2, 2)]
+    displacement_scales: list[float] = [0.08, 0.12]
+    strain_matrices: list[np.ndarray] = [
+        np.zeros((3, 3)),
+        np.array(
+            [
+                [0.00, 0.02, 0.00],
+                [0.02, 0.00, 0.00],
+                [0.00, 0.00, -0.015],
+            ]
+        ),
+    ]
+    arguments: list[str] = [
+        '--name',
+        'MACE_large_density',
+        '--interaction_first',
+        'RealAgnosticDensityInteractionBlock',
+        '--interaction',
+        'RealAgnosticDensityResidualInteractionBlock',
+        '--num_channels',
+        '128',
+        '--max_L',
+        '2',
+        '--max_ell',
+        '3',
+        '--num_interactions',
+        '3',
+        '--correlation',
+        '3',
+        '--num_radial_basis',
+        '8',
+        '--MLP_irreps',
+        '16x0e',
+        '--distance_transform',
+        'Agnesi',
+        '--pair_repulsion',
+        '--only_cueq',
+        'True',
+    ]
 
     @classmethod
     def setup_class(cls):
@@ -132,24 +166,21 @@ class TestModelEquivalence:
         cls.torch_forces = torch_output['forces'].detach().cpu().numpy()
         cls.torch_stress = torch_output['stress'].detach().cpu().numpy()
 
-        def forward_fn(batch):
-            model = configure_model_jax(
-                cls.args,
-                atomic_energies=cls.statistics['atomic_energies'],
-                z_table=cls.statistics['atomic_numbers'],
-            )
-            return model(batch, compute_stress=True)
-
-        cls.jax_transform = hk.transform_with_state(forward_fn)
         init_rng = jax.random.PRNGKey(0)
-        apply_rng = jax.random.PRNGKey(1)
-        cls.jax_params, cls.jax_state = cls.jax_transform.init(init_rng, cls.batch_jax)
-        cls.jax_params = copy_torch_to_jax(cls.torch_model, cls.jax_params)
-        jax_output, cls.jax_state = cls.jax_transform.apply(
+        cls.jax_model = configure_model_jax(
+            cls.args,
+            atomic_energies=cls.statistics['atomic_energies'],
+            z_table=cls.statistics['atomic_numbers'],
+        )
+        cls.jax_params = cls.jax_model.init(init_rng, cls.batch_jax)
+        cls.jax_params = modules.ScaleShiftMACE.import_from_torch(
+            cls.torch_model,
             cls.jax_params,
-            cls.jax_state,
-            apply_rng,
+        )
+        jax_output = cls.jax_model.apply(
+            cls.jax_params,
             cls.batch_jax,
+            compute_stress=True,
         )
 
         cls.jax_energy = np.asarray(jax_output['energy'])
@@ -159,23 +190,10 @@ class TestModelEquivalence:
     @classmethod
     def _build_structures(cls):
         structures: list[Atoms] = []
-        repeats = [(2, 2, 1), (2, 2, 2)]
-        displacement_scales = [0.08, 0.12]
-        strain_matrices = [
-            np.zeros((3, 3)),
-            np.array(
-                [
-                    [0.00, 0.02, 0.00],
-                    [0.02, 0.00, 0.00],
-                    [0.00, 0.00, -0.015],
-                ]
-            ),
-        ]
-
         cation_species = ['Na', 'K']
         anion_species = ['Cl', 'Br']
 
-        for idx, repeat in enumerate(repeats):
+        for idx, repeat in enumerate(cls.structure_repeats):
             atoms = bulk('NaCl', 'rocksalt', a=5.64).repeat(repeat)
 
             cation_idx = idx
@@ -189,11 +207,13 @@ class TestModelEquivalence:
                     anion_idx += 1
 
             rng = np.random.default_rng(seed=42 + idx)
-            atoms.positions += displacement_scales[idx] * rng.normal(
+            scale_idx = min(idx, len(cls.displacement_scales) - 1)
+            atoms.positions += cls.displacement_scales[scale_idx] * rng.normal(
                 size=atoms.positions.shape
             )
 
-            strain = strain_matrices[idx]
+            strain_idx = min(idx, len(cls.strain_matrices) - 1)
+            strain = cls.strain_matrices[strain_idx]
             if np.any(strain):
                 deformation = np.identity(3) + strain
                 atoms.set_cell(atoms.cell @ deformation, scale_atoms=True)
@@ -207,35 +227,7 @@ class TestModelEquivalence:
     def _default_args(cls):
         from mace.tools import build_default_arg_parser, check_args  # noqa: PLC0415
 
-        arguments = [
-            '--name',
-            'MACE_large_density',
-            '--interaction_first',
-            'RealAgnosticDensityInteractionBlock',
-            '--interaction',
-            'RealAgnosticDensityResidualInteractionBlock',
-            '--num_channels',
-            '128',
-            '--max_L',
-            '2',
-            '--max_ell',
-            '3',
-            '--num_interactions',
-            '3',
-            '--correlation',
-            '3',
-            '--num_radial_basis',
-            '8',
-            '--MLP_irreps',
-            '16x0e',
-            '--distance_transform',
-            'Agnesi',
-            '--pair_repulsion',
-            '--only_cueq',
-            'True',
-        ]
-
-        args = build_default_arg_parser().parse_args(arguments)
+        args = build_default_arg_parser().parse_args(cls.arguments)
         args, _ = check_args(args)
         return args
 
@@ -250,6 +242,11 @@ class TestModelEquivalence:
         args.avg_num_neighbors = cls.statistics['avg_num_neighbors']
         args.r_max = cls.statistics['r_max']
         args.scaling = 'no_scaling'
+        cls._customise_args(args)
+
+    @classmethod
+    def _customise_args(cls, args):
+        """Hook for subclasses to adjust parsed arguments."""
 
     def test_model_outputs_match(self):
         cls = self.__class__
@@ -271,3 +268,48 @@ class TestModelEquivalence:
             rtol=1e-4,
             atol=1e-4,
         )
+
+
+class TestModelEquivalenceSmall(ModelEquivalenceTestBase):
+    structure_repeats = [(1, 1, 1)]
+    displacement_scales = [0.05]
+    strain_matrices = [np.zeros((3, 3))]
+    arguments = [
+        '--name',
+        'MACE_small_density',
+        '--interaction_first',
+        'RealAgnosticInteractionBlock',
+        '--interaction',
+        'RealAgnosticInteractionBlock',
+        '--num_channels',
+        '32',
+        '--max_L',
+        '1',
+        '--max_ell',
+        '2',
+        '--num_interactions',
+        '1',
+        '--correlation',
+        '1',
+        '--num_radial_basis',
+        '4',
+        '--MLP_irreps',
+        '8x0e',
+        '--distance_transform',
+        'Agnesi',
+        '--pair_repulsion',
+    ]
+
+    @classmethod
+    def _customise_args(cls, args):
+        args.only_cueq = False
+        args.enable_cueq = False
+        args.hidden_irreps = '32x0e+32x1o'
+        args.radial_MLP = '[32]'
+        args.use_agnostic_product = False
+        args.gate = 'silu'
+
+
+@pytest.mark.slow
+class TestModelEquivalenceLarge(ModelEquivalenceTestBase):
+    """Full-size model equivalence aligned with the Torch integration test."""

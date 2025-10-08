@@ -6,18 +6,15 @@
 
 import logging
 from collections.abc import Sequence
-from typing import Optional
 
 import ase
-import haiku as hk
 import jax
 import jax.numpy as jnp
 import numpy as np
+from flax import linen as fnn
 
-from mace_jax.haiku.activations import SiLU
-from mace_jax.haiku.torch import (
-    auto_import_from_torch,
-    register_import,
+from mace_jax.adapters.flax.torch import (
+    auto_import_from_torch_flax,
 )
 from mace_jax.tools.dtype import default_dtype
 from mace_jax.tools.scatter import scatter_sum
@@ -25,82 +22,53 @@ from mace_jax.tools.scatter import scatter_sum
 from .special import chebyshev_polynomial_t
 
 
-@register_import('mace.modules.radial.BesselBasis')
-@auto_import_from_torch(separator='~')
-class BesselBasis(hk.Module):
-    """
-    Equation (7) from the paper.
-    JAX/Haiku version of BesselBasis.
-    """
+@auto_import_from_torch_flax(allow_missing_mapper=True)
+class BesselBasis(fnn.Module):
+    """Flax implementation of the Bessel basis from MACE."""
 
-    def __init__(
-        self,
-        r_max: float,
-        num_basis: int = 8,
-        trainable: bool = False,
-        name: str = None,
-    ):
-        super().__init__(name=name)
-        self.r_max_val = float(r_max)
-        self.num_basis = num_basis
-        self.trainable = trainable
+    r_max: float
+    num_basis: int = 8
+    trainable: bool = False
 
-        # Precompute prefactor (constant)
-        self.prefactor = jnp.sqrt(2.0 / r_max)
-
+    @fnn.compact
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
-        # Compute default bessel weights
+        dtype = x.dtype
         init_bessel = (
             np.pi
-            / self.r_max_val
-            * jnp.linspace(1.0, self.num_basis, self.num_basis, dtype=x.dtype)
+            / float(self.r_max)
+            * jnp.linspace(1.0, self.num_basis, self.num_basis, dtype=default_dtype())
         )
 
         if self.trainable:
-            bessel_weights = hk.get_parameter(
-                'bessel_weights',
-                shape=init_bessel.shape,
-                dtype=default_dtype(),
-                init=lambda *_: init_bessel,
-            )
+            bessel_weights = self.param(
+                'bessel_weights', lambda rng: init_bessel
+            ).astype(dtype)
         else:
-            bessel_weights = init_bessel
+            bessel_weights = init_bessel.astype(dtype)
 
-        numerator = jnp.sin(bessel_weights * x)  # [..., num_basis]
-        return self.prefactor * (numerator / x)
+        prefactor = jnp.sqrt(2.0 / jnp.asarray(self.r_max, dtype=dtype))
+        numerator = jnp.sin(bessel_weights * x)
+        return prefactor * (numerator / x)
 
     def __repr__(self):
         return (
-            f'{self.__class__.__name__}(r_max={self.r_max_val}, '
+            f'{self.__class__.__name__}(r_max={self.r_max}, '
             f'num_basis={self.num_basis}, trainable={self.trainable})'
         )
 
 
-@register_import('mace.modules.radial.ChebychevBasis')
-@auto_import_from_torch(separator='~')
-class ChebychevBasis(hk.Module):
-    """
-    JAX/Haiku version of ChebychevBasis (Equation 7).
-    """
+@auto_import_from_torch_flax(allow_missing_mapper=True)
+class ChebychevBasis(fnn.Module):
+    """Flax implementation of the Chebyshev polynomial basis."""
 
-    def __init__(self, r_max: float, num_basis: int = 8, name: Optional[str] = None):
-        super().__init__(name=name)
-        self.num_basis = num_basis
-        self.r_max = r_max
-
-        # Precompute n values [1..num_basis]
-        self.n = jnp.arange(1, num_basis + 1)
+    r_max: float
+    num_basis: int = 8
 
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
-        """
-        Args:
-            x: shape [..., 1] or [...], radial distances normalized to [-1, 1].
-
-        Returns:
-            shape [..., num_basis]
-        """
-        x = jnp.broadcast_to(x, x.shape[:-1] + (self.num_basis,))
-        return chebyshev_polynomial_t(x, self.n)
+        dtype = x.dtype
+        n = jnp.arange(1, self.num_basis + 1, dtype=dtype)
+        x_broadcast = jnp.broadcast_to(x, x.shape[:-1] + (self.num_basis,))
+        return chebyshev_polynomial_t(x_broadcast, n)
 
     def __repr__(self):
         return (
@@ -108,263 +76,88 @@ class ChebychevBasis(hk.Module):
         )
 
 
-@register_import('mace.modules.radial.GaussianBasis')
-@auto_import_from_torch(separator='~')
-class GaussianBasis(hk.Module):
-    """
-    Gaussian basis functions (Haiku version).
+@auto_import_from_torch_flax(allow_missing_mapper=True)
+class GaussianBasis(fnn.Module):
+    """Gaussian radial basis functions."""
 
-    Parameters
-    ----------
-    r_max : float
-        Maximum radius.
-    num_basis : int, default=128
-        Number of Gaussian basis functions.
-    trainable : bool, default=False
-        Whether the Gaussian centers (weights) are trainable.
-    """
+    r_max: float
+    num_basis: int = 128
+    trainable: bool = False
 
-    def __init__(
-        self,
-        r_max: float,
-        num_basis: int = 128,
-        trainable: bool = False,
-        name: str = None,
-    ):
-        super().__init__(name=name)
-        self.r_max = r_max
-        self.num_basis = num_basis
-        self.trainable = trainable
-
-        # Precompute coefficient
-        self.coeff = -0.5 / (r_max / (num_basis - 1)) ** 2
-
+    @fnn.compact
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
-        # Initialize Gaussian centers (like torch.linspace)
-        init_gaussian_weights = jnp.linspace(
-            start=0.0, stop=self.r_max, num=self.num_basis, dtype=default_dtype()
+        dtype = x.dtype
+        init_gaussians = jnp.linspace(
+            0.0, float(self.r_max), self.num_basis, dtype=default_dtype()
         )
 
         if self.trainable:
-            gaussian_weights = hk.get_parameter(
-                'gaussian_weights',
-                shape=init_gaussian_weights.shape,
-                dtype=default_dtype(),
-                init=lambda *_: init_gaussian_weights,
-            )
+            gaussian_weights = self.param(
+                'gaussian_weights', lambda rng: init_gaussians
+            ).astype(dtype)
         else:
-            # Non-trainable "buffer" -> constant
-            gaussian_weights = hk.get_state(
-                'gaussian_weights',
-                shape=init_gaussian_weights.shape,
-                dtype=default_dtype(),
-                init=lambda *_: init_gaussian_weights,
-            )
-            # Ensure it stays constant
-            hk.set_state('gaussian_weights', gaussian_weights)
+            gaussian_weights = init_gaussians.astype(dtype)
 
-        # Apply Gaussian basis transform
-        x = x[..., None] - gaussian_weights  # expand along basis dimension
-
-        return jnp.exp(self.coeff * jnp.square(x))
+        spacing = float(self.r_max) / float(self.num_basis - 1)
+        coeff = jnp.asarray(-0.5 / (spacing**2), dtype=dtype)
+        shifted = x[..., None] - gaussian_weights
+        return jnp.exp(coeff * jnp.square(shifted))
 
 
-@register_import('mace.modules.radial.PolynomialCutoff')
-@auto_import_from_torch(separator='~')
-class PolynomialCutoff(hk.Module):
-    """Polynomial cutoff function that goes from 1 to 0 as x goes from 0 to r_max.
-    Equation (8) -- TODO: from where?
-    """
+class PolynomialCutoff(fnn.Module):
+    """Polynomial cutoff function that goes from 1 to 0 as r approaches r_max."""
 
-    def __init__(self, r_max: float, p: int = 6, name: str = None):
-        super().__init__(name=name)
-
-        # Store as non-trainable constants (buffers in PyTorch)
-        self.r_max = hk.get_state(
-            'r_max',
-            shape=(),
-            dtype=default_dtype(),
-            init=lambda *_: jnp.array(r_max, dtype=jnp.float32),
-        )
-        self.p = hk.get_state(
-            'p',
-            shape=(),
-            dtype=default_dtype(),
-            init=lambda *_: jnp.array(p, dtype=jnp.int32),
-        )
-
-        # Ensure they stay constant
-        hk.set_state('r_max', self.r_max)
-        hk.set_state('p', self.p)
+    r_max: float
+    p: int = 6
 
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
-        return self.calculate_envelope(x, self.r_max, self.p)
+        r_max = jnp.asarray(self.r_max, dtype=x.dtype)
+        p = jnp.asarray(float(self.p), dtype=x.dtype)
+        return self.calculate_envelope(x, r_max, p)
 
     @staticmethod
     def calculate_envelope(
-        x: jnp.ndarray, r_max: jnp.ndarray, p: jnp.ndarray
+        x: jnp.ndarray,
+        r_max: jnp.ndarray,
+        p: jnp.ndarray,
     ) -> jnp.ndarray:
         r_over_r_max = x / r_max
         envelope = (
             1.0
             - ((p + 1.0) * (p + 2.0) / 2.0) * jnp.power(r_over_r_max, p)
-            + p * (p + 2.0) * jnp.power(r_over_r_max, p + 1)
-            - (p * (p + 1.0) / 2.0) * jnp.power(r_over_r_max, p + 2)
+            + p * (p + 2.0) * jnp.power(r_over_r_max, p + 1.0)
+            - (p * (p + 1.0) / 2.0) * jnp.power(r_over_r_max, p + 2.0)
         )
         return envelope * (x < r_max)
 
     def __repr__(self):
-        return f'{self.__class__.__name__}(p={int(self.p)}, r_max={float(self.r_max)})'
+        return f'{self.__class__.__name__}(p={self.p}, r_max={self.r_max})'
 
 
-@register_import('mace.modules.radial.ZBLBasis')
-@auto_import_from_torch(separator='~')
-class ZBLBasis(hk.Module):
-    """Implementation of the Ziegler-Biersack-Littmark (ZBL) potential
-    with a polynomial cutoff envelope (Haiku version).
-    """
+@auto_import_from_torch_flax(allow_missing_mapper=True)
+class ZBLBasis(fnn.Module):
+    """Ziegler-Biersack-Littmark (ZBL) potential with polynomial cutoff."""
 
-    def __init__(self, p: int = 6, trainable: bool = False, name: str = None, **kwargs):
-        super().__init__(name=name)
+    p: int = 6
+    trainable: bool = False
+    r_max: float | None = None  # kept for backward compatibility
 
-        if 'r_max' in kwargs:
+    def setup(self):
+        if self.r_max is not None:
             logging.warning(
                 'r_max is deprecated. r_max is determined from the covalent radii.'
             )
 
-        # Constants (non-trainable buffers in PyTorch)
-        self.c = jnp.array([0.1818, 0.5099, 0.2802, 0.02817], dtype=jnp.float32)
-        self.p = jnp.array(p, dtype=jnp.int32)
-        self.covalent_radii = jnp.array(ase.data.covalent_radii, dtype=jnp.float32)
-
-        # Parameters (trainable or frozen)
-        if trainable:
-            self.a_exp = hk.get_parameter(
-                'a_exp',
-                shape=(),
-                init=lambda *_: jnp.array(
-                    0.300,
-                    dtype=default_dtype(),
-                ),
-            )
-            self.a_prefactor = hk.get_parameter(
-                'a_prefactor',
-                shape=(),
-                init=lambda *_: jnp.array(
-                    0.4543,
-                    dtype=default_dtype(),
-                ),
-            )
-        else:
-            self.a_exp = jnp.array(
-                0.300,
-                dtype=default_dtype(),
-            )
-            self.a_prefactor = jnp.array(
-                0.4543,
-                dtype=default_dtype(),
-            )
-
-    def __call__(
-        self,
-        x: jnp.ndarray,
-        node_attrs: jnp.ndarray,
-        edge_index: jnp.ndarray,
-        atomic_numbers: jnp.ndarray,
-    ) -> jnp.ndarray:
-        # edge_index: (2, num_edges)
-        sender, receiver = edge_index
-
-        # Convert one-hot node_attrs to atomic numbers
-        node_atomic_numbers = atomic_numbers[jnp.argmax(node_attrs, axis=1)][..., None]
-        Z_u = node_atomic_numbers[sender].astype(jnp.int32)
-        Z_v = node_atomic_numbers[receiver].astype(jnp.int32)
-
-        # Screening length a
-        a = (
-            self.a_prefactor
-            * 0.529
-            / (jnp.power(Z_u, self.a_exp) + jnp.power(Z_v, self.a_exp))
+        self._c = jnp.array(
+            [0.1818, 0.5099, 0.2802, 0.02817],
+            dtype=default_dtype(),
         )
-        r_over_a = x / a
-
-        # Screening function φ(r/a)
-        phi = (
-            self.c[0] * jnp.exp(-3.2 * r_over_a)
-            + self.c[1] * jnp.exp(-0.9423 * r_over_a)
-            + self.c[2] * jnp.exp(-0.4028 * r_over_a)
-            + self.c[3] * jnp.exp(-0.2016 * r_over_a)
-        )
-
-        # Pairwise ZBL potential
-        v_edges = (14.3996 * Z_u * Z_v) / x * phi
-
-        # Smooth cutoff
-        r_max = self.covalent_radii[Z_u] + self.covalent_radii[Z_v]
-        envelope = PolynomialCutoff.calculate_envelope(x, r_max, self.p)
-        v_edges = 0.5 * v_edges * envelope
-
-        # Aggregate edge potentials per receiver node
-        V_ZBL = scatter_sum(v_edges, receiver, dim=0, dim_size=node_attrs.shape[0])
-        return jnp.squeeze(V_ZBL, axis=-1)
-
-    def __repr__(self):
-        return f'{self.__class__.__name__}(c={self.c})'
-
-
-@register_import('mace.modules.radial.AgnesiTransform')
-@auto_import_from_torch(separator='~')
-class AgnesiTransform(hk.Module):
-    """Agnesi transform - see section on Radial transformations in
-    ACEpotentials.jl, JCP 2023 (https://doi.org/10.1063/5.0158783).
-    """
-
-    def __init__(
-        self,
-        q: float = 0.9183,
-        p: float = 4.5791,
-        a: float = 1.0805,
-        trainable: bool = False,
-        name: str = None,
-    ):
-        super().__init__(name=name)
-
-        # Store constants (as JAX arrays)
-        self.covalent_radii = jnp.array(
+        self._covalent_radii = jnp.array(
             ase.data.covalent_radii,
             dtype=default_dtype(),
         )
 
-        if trainable:
-            self.a = hk.get_parameter(
-                'a',
-                shape=(),
-                init=lambda *_: jnp.array(
-                    a,
-                    dtype=default_dtype(),
-                ),
-            )
-            self.q = hk.get_parameter(
-                'q',
-                shape=(),
-                init=lambda *_: jnp.array(
-                    q,
-                    dtype=default_dtype(),
-                ),
-            )
-            self.p = hk.get_parameter(
-                'p',
-                shape=(),
-                init=lambda *_: jnp.array(
-                    p,
-                    dtype=default_dtype(),
-                ),
-            )
-        else:
-            self.a = jnp.array(a, dtype=jnp.float32)
-            self.q = jnp.array(q, dtype=jnp.float32)
-            self.p = jnp.array(p, dtype=jnp.float32)
-
+    @fnn.compact
     def __call__(
         self,
         x: jnp.ndarray,
@@ -372,56 +165,123 @@ class AgnesiTransform(hk.Module):
         edge_index: jnp.ndarray,
         atomic_numbers: jnp.ndarray,
     ) -> jnp.ndarray:
-        # edge_index: (2, num_edges)
         sender, receiver = edge_index
 
-        # Convert one-hot node_attrs to atomic numbers
         node_atomic_numbers = atomic_numbers[jnp.argmax(node_attrs, axis=1)][..., None]
         Z_u = node_atomic_numbers[sender].astype(jnp.int32)
         Z_v = node_atomic_numbers[receiver].astype(jnp.int32)
 
-        # Reference distance
-        r_0 = 0.5 * (self.covalent_radii[Z_u] + self.covalent_radii[Z_v])
+        if self.trainable:
+            a_exp = self.param(
+                'a_exp',
+                lambda rng: jnp.array(0.300, dtype=default_dtype()),
+            )
+            a_prefactor = self.param(
+                'a_prefactor',
+                lambda rng: jnp.array(0.4543, dtype=default_dtype()),
+            )
+        else:
+            a_exp = jnp.array(0.300, dtype=x.dtype)
+            a_prefactor = jnp.array(0.4543, dtype=x.dtype)
+
+        a_exp = a_exp.astype(x.dtype)
+        a_prefactor = a_prefactor.astype(x.dtype)
+
+        a = (
+            a_prefactor
+            * jnp.asarray(0.529, dtype=x.dtype)
+            / (jnp.power(Z_u, a_exp) + jnp.power(Z_v, a_exp))
+        )
+        r_over_a = x / a
+
+        phi = (
+            self._c[0] * jnp.exp(-3.2 * r_over_a)
+            + self._c[1] * jnp.exp(-0.9423 * r_over_a)
+            + self._c[2] * jnp.exp(-0.4028 * r_over_a)
+            + self._c[3] * jnp.exp(-0.2016 * r_over_a)
+        )
+
+        v_edges = (14.3996 * Z_u * Z_v) / x * phi
+
+        r_max = self._covalent_radii[Z_u] + self._covalent_radii[Z_v]
+        envelope = PolynomialCutoff.calculate_envelope(
+            x, r_max.astype(x.dtype), jnp.array(float(self.p), dtype=x.dtype)
+        )
+        v_edges = 0.5 * v_edges * envelope
+
+        V_ZBL = scatter_sum(v_edges, receiver, dim=0, dim_size=node_attrs.shape[0])
+        return jnp.squeeze(V_ZBL, axis=-1)
+
+    def __repr__(self):
+        return f'{self.__class__.__name__}(c={self._c})'
+
+
+@auto_import_from_torch_flax(allow_missing_mapper=True)
+class AgnesiTransform(fnn.Module):
+    """Agnesi transform used for radial scaling."""
+
+    q: float = 0.9183
+    p: float = 4.5791
+    a: float = 1.0805
+    trainable: bool = False
+
+    def setup(self):
+        self._covalent_radii = jnp.array(
+            ase.data.covalent_radii,
+            dtype=default_dtype(),
+        )
+
+    @fnn.compact
+    def __call__(
+        self,
+        x: jnp.ndarray,
+        node_attrs: jnp.ndarray,
+        edge_index: jnp.ndarray,
+        atomic_numbers: jnp.ndarray,
+    ) -> jnp.ndarray:
+        sender, receiver = edge_index
+
+        node_atomic_numbers = atomic_numbers[jnp.argmax(node_attrs, axis=1)][..., None]
+        Z_u = node_atomic_numbers[sender].astype(jnp.int32)
+        Z_v = node_atomic_numbers[receiver].astype(jnp.int32)
+
+        if self.trainable:
+            a = self.param('a', lambda rng: jnp.array(self.a, dtype=default_dtype()))
+            q = self.param('q', lambda rng: jnp.array(self.q, dtype=default_dtype()))
+            p = self.param('p', lambda rng: jnp.array(self.p, dtype=default_dtype()))
+        else:
+            dtype = x.dtype
+            a = jnp.array(self.a, dtype=dtype)
+            q = jnp.array(self.q, dtype=dtype)
+            p = jnp.array(self.p, dtype=dtype)
+
+        a = a.astype(x.dtype)
+        q = q.astype(x.dtype)
+        p = p.astype(x.dtype)
+
+        r_0 = 0.5 * (self._covalent_radii[Z_u] + self._covalent_radii[Z_v])
         r_over_r_0 = x / r_0
 
-        # Agnesi transform
-        numerator = self.a * jnp.power(r_over_r_0, self.q)
-        denominator = 1.0 + jnp.power(r_over_r_0, self.q - self.p)
+        numerator = a * jnp.power(r_over_r_0, q)
+        denominator = 1.0 + jnp.power(r_over_r_0, q - p)
         return 1.0 / (1.0 + numerator / denominator)
 
     def __repr__(self):
-        return f'{self.__class__.__name__}(a={float(self.a):.4f}, q={float(self.q):.4f}, p={float(self.p):.4f})'
+        return (
+            f'{self.__class__.__name__}(a={float(self.a):.4f}, '
+            f'q={float(self.q):.4f}, p={float(self.p):.4f})'
+        )
 
 
-@register_import('mace.modules.radial.SoftTransform')
-@auto_import_from_torch(separator='~')
-class SoftTransform(hk.Module):
-    """
-    Tanh-based smooth transformation:
-        T(x) = p0 + (x - p0)*0.5*[1 + tanh(alpha*(x - m))],
-    which smoothly transitions from ~p0 for x << p0 to ~x for x >> r0.
-    """
+@auto_import_from_torch_flax(allow_missing_mapper=True)
+class SoftTransform(fnn.Module):
+    """Soft transform with a learnable alpha parameter."""
 
-    def __init__(
-        self, alpha: float = 4.0, trainable: bool = False, name: Optional[str] = None
-    ):
-        super().__init__(name=name)
-        self.init_alpha = alpha
-        self.trainable = trainable
-        # Covalent radii as JAX array
-        self.covalent_radii = jnp.array(ase.data.covalent_radii)
+    alpha: float = 4.0
+    trainable: bool = False
 
-    def _get_alpha(self):
-        # If trainable, we store alpha as a Haiku parameter
-        if self.trainable:
-            return hk.get_parameter(
-                'alpha',
-                shape=(),
-                dtype=default_dtype(),
-                nit=lambda *_: jnp.array(self.init_alpha),
-            )
-        else:
-            return jnp.array(self.init_alpha)
+    def setup(self):
+        self._covalent_radii = jnp.array(ase.data.covalent_radii, dtype=default_dtype())
 
     def compute_r_0(
         self,
@@ -429,21 +289,15 @@ class SoftTransform(hk.Module):
         edge_index: jnp.ndarray,
         atomic_numbers: jnp.ndarray,
     ) -> jnp.ndarray:
-        """
-        Compute r_0 based on atomic information.
-        """
-        sender = edge_index[0]
-        receiver = edge_index[1]
-
-        # Convert one-hot node_attrs to atomic numbers
+        sender, receiver = edge_index
         node_atomic_numbers = atomic_numbers[jnp.argmax(node_attrs, axis=1)].reshape(
             -1, 1
         )
         Z_u = node_atomic_numbers[sender].astype(jnp.int32)
         Z_v = node_atomic_numbers[receiver].astype(jnp.int32)
-        r_0 = self.covalent_radii[Z_u] + self.covalent_radii[Z_v]
-        return r_0
+        return self._covalent_radii[Z_u] + self._covalent_radii[Z_v]
 
+    @fnn.compact
     def __call__(
         self,
         x: jnp.ndarray,
@@ -451,48 +305,63 @@ class SoftTransform(hk.Module):
         edge_index: jnp.ndarray,
         atomic_numbers: jnp.ndarray,
     ) -> jnp.ndarray:
-        r_0 = self.compute_r_0(node_attrs, edge_index, atomic_numbers)
+        dtype = x.dtype
+        r_0 = self.compute_r_0(node_attrs, edge_index, atomic_numbers).astype(dtype)
         p_0 = (3.0 / 4.0) * r_0
         p_1 = (4.0 / 3.0) * r_0
         m = 0.5 * (p_0 + p_1)
-        alpha = self._get_alpha() / (p_1 - p_0)
+        if self.trainable:
+            alpha_param = self.param(
+                'alpha', lambda rng: jnp.array(self.alpha, dtype=default_dtype())
+            )
+        else:
+            alpha_param = jnp.array(self.alpha, dtype=dtype)
+        alpha = alpha_param.astype(dtype) / (p_1 - p_0)
         s_x = 0.5 * (1.0 + jnp.tanh(alpha * (x - m)))
         return p_0 + (x - p_0) * s_x
 
     def __repr__(self):
-        return f'{self.__class__.__name__}(alpha={self.init_alpha:.4f}, trainable={self.trainable})'
+        return f'{self.__class__.__name__}(alpha={self.alpha:.4f}, trainable={self.trainable})'
 
 
-@register_import('mace.modules.radial.RadialMLP')
-@auto_import_from_torch(separator='~')
-class RadialMLP(hk.Module):
-    """
-    Radial MLP in Haiku:
-    Linear → LayerNorm → SiLU stack, as in ESEN / FairChem.
-    """
+@auto_import_from_torch_flax(allow_missing_mapper=True)
+class _RadialSequential(fnn.Module):
+    channels: Sequence[int]
 
-    def __init__(self, channels_list: Sequence[int], name: str = None) -> None:
-        super().__init__(name=name)
-        self.hs = list(channels_list)
+    @fnn.compact
+    def __call__(self, inputs: jnp.ndarray) -> jnp.ndarray:
+        if len(self.channels) < 2:
+            raise ValueError('channels must have length >= 2 for RadialMLP')
 
-        layers = []
+        x = inputs
+        last_idx = len(self.channels) - 1
+        layer_idx = 0
+        for idx, out_channels in enumerate(self.channels[1:], start=1):
+            x = fnn.Dense(out_channels, use_bias=True, name=str(layer_idx))(x)
+            layer_idx += 1
+            if idx != last_idx:
+                x = fnn.LayerNorm(
+                    use_bias=True,
+                    use_scale=True,
+                    reduction_axes=-1,
+                    feature_axes=-1,
+                    epsilon=1e-5,
+                    name=str(layer_idx),
+                )(x)
+                layer_idx += 1
+                x = jax.nn.silu(x)
+                layer_idx += 1
+        return x
 
-        for idx, out_channels in enumerate(channels_list[1:], start=1):
-            layers.append(
-                hk.Linear(out_channels, with_bias=True, name=f'net_{len(layers)}')
-            )
-            if idx < len(channels_list) - 1:
-                layers.append(
-                    hk.LayerNorm(
-                        axis=-1,
-                        create_scale=True,
-                        create_offset=True,
-                        name=f'net_{len(layers)}',
-                    )
-                )
-                layers.append(SiLU(name=f'net_{len(layers)}'))
 
-        self.net = hk.Sequential(layers)
+@auto_import_from_torch_flax(allow_missing_mapper=True)
+class RadialMLP(fnn.Module):
+    """Wrapper that aligns with the Torch RadialMLP parameter layout."""
+
+    channels: Sequence[int]
+
+    def setup(self) -> None:
+        self.net = _RadialSequential(tuple(self.channels), name='net')
 
     def __call__(self, inputs: jnp.ndarray) -> jnp.ndarray:
         return self.net(inputs)

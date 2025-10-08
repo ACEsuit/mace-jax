@@ -27,12 +27,12 @@
 # limitations under the License.
 """Modified version of jraph.utils.dynamically_batch."""
 
-from typing import Generator, Iterator
+from collections.abc import Generator, Iterator
 
 import jraph
 import numpy as np
 
-_NUMBER_FIELDS = ("n_node", "n_edge", "n_graph")
+_NUMBER_FIELDS = ('n_node', 'n_edge', 'n_graph')
 
 
 def _get_graph_size(graphs_tuple):
@@ -82,8 +82,8 @@ def dynamically_batch(
     """
     if n_graph < 2:
         raise ValueError(
-            "The number of graphs in a batch size must be greater or "
-            f"equal to `2` for padding with graphs, got {n_graph}."
+            'The number of graphs in a batch size must be greater or '
+            f'equal to `2` for padding with graphs, got {n_graph}.'
         )
     valid_batch_size = (n_node - 1, n_edge, n_graph - 1)
     accumulated_graphs = []
@@ -102,8 +102,8 @@ def dynamically_batch(
             graph_size = {k: v for k, v in zip(_NUMBER_FIELDS, graph_size)}
             batch_size = {k: v for k, v in zip(_NUMBER_FIELDS, valid_batch_size)}
             raise RuntimeError(
-                "Found graph bigger than batch size. Valid Batch "
-                f"Size: {batch_size}, Graph Size: {graph_size}"
+                'Found graph bigger than batch size. Valid Batch '
+                f'Size: {batch_size}, Graph Size: {graph_size}'
             )
 
         # If this is the first element of the batch, set it and continue.

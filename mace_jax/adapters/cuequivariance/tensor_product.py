@@ -1,15 +1,16 @@
-"""Cue-equivariant tensor product implemented via segmented polynomials."""
+"""Cue-equivariant tensor product implemented via segmented polynomials (Flax)."""
 
 from __future__ import annotations
 
 import cuequivariance_jax as cuex
-import haiku as hk
 import jax
 import jax.numpy as jnp
 from e3nn_jax import Irreps  # type: ignore
+from flax import linen as fnn
+from flax.core import freeze, unfreeze
 
 import cuequivariance as cue
-from mace_jax.haiku.torch import register_import
+from mace_jax.adapters.flax.torch import auto_import_from_torch_flax
 
 from .utility import collapse_ir_mul_segments, ir_mul_to_mul_ir, mul_ir_to_ir_mul
 
@@ -17,8 +18,22 @@ from .utility import collapse_ir_mul_segments, ir_mul_to_mul_ir, mul_ir_to_ir_mu
 def _expected_channelwise_instructions(
     irreps_in1: Irreps, irreps_in2: Irreps, target_irreps: Irreps
 ) -> tuple[Irreps, list[tuple[int, int, int, str, bool, float]]]:
-    """Return the sorted output irreps and instruction list for channel-wise TP."""
+    """Return the irreps and instructions for channel-wise tensor products.
 
+    The channel-wise tensor product considered here mimics the ``uvu`` path
+    returned by e3nn: each entry pairs a multiplicity channel from ``irreps_in1``
+    with the compatible irreps from ``irreps_in2`` under Clebsch–Gordan fusion.
+
+    Args:
+        irreps_in1: Irreps carried by the first argument of the tensor product.
+        irreps_in2: Irreps carried by the second argument.
+        target_irreps: Expected output irreps; used as a filter.
+
+    Returns:
+        A tuple containing the sorted output irreps and a list of instruction
+        tuples ``(i_in1, i_in2, i_out, mode, has_weight, path_weight)`` matching
+        the conventions of cue/e3nn tensor products.
+    """
     collected: list[tuple[int, Irreps]] = []
     instructions: list[tuple[int, int, int, str, bool, float]] = []
     for i_in1, (mul_in1, ir_in1) in enumerate(irreps_in1):
@@ -40,6 +55,11 @@ def _expected_channelwise_instructions(
 
 
 def _normalise_instruction(inst) -> tuple[int, int, int, str, bool, float]:
+    """Ensure the instruction tuple conforms to the canonical six-field format.
+
+    Accepts both the five-element format used by e3nn (omitting ``path_weight``)
+    and the expanded representation.
+    """
     if len(inst) == 5:
         i1, i2, i_out, mode, has_weight = inst
         path_weight = 1.0
@@ -60,102 +80,47 @@ def _normalise_instruction(inst) -> tuple[int, int, int, str, bool, float]:
     )
 
 
-@register_import('e3nn.o3._tensor_product._tensor_product.TensorProduct')
-@register_import(
-    'cuequivariance_torch.operations.tp_channel_wise.ChannelWiseTensorProduct'
-)
-class TensorProduct(hk.Module):
-    r"""Channel-wise tensor product evaluated with cuequivariance-jax.
+@auto_import_from_torch_flax(allow_missing_mapper=True)
+class TensorProduct(fnn.Module):
+    """Channel-wise tensor product evaluated with cuequivariance-jax.
 
-    Given two inputs ``x`` and ``y`` carrying irreps ``irreps_in1`` and
-    ``irreps_in2``, and a learned weight tensor ``w`` shaped according to the
-    channel-wise instructions, this module evaluates
-
-    .. math::
-
-        z_{u,k} = \sum_{v} w_{u,v} \,\langle x_u \otimes y_v, \mathrm{CG}_{u,v \to k}\rangle,
-
-    where the indices ``u``/``v`` enumerate multiplicities of the two inputs,
-    ``k`` enumerates the output multiplicities consistent with the Clebsch–
-    Gordan (CG) rules, and the inner product contracts the irrep components with
-    the CG coefficients supplied by the descriptor.  The output ``z`` is then
-    rearranged into ``mul_ir`` layout matching :mod:`e3nn`.
-
-    **Terminology.** In the cuequivariance world a *descriptor* produced by
-    :func:`cue.descriptors.channelwise_tensor_product` contains:
-
-    - *Operands* – arrays laid out in ``ir_mul`` order (irrep components are the
-      slow axis, multiplicity is the fast axis). Each operand is split into
-      *segments*, one per irrep block; the descriptor records the segment sizes.
-    - *Paths* – metadata describing how to combine specific segments of the
-      operands.  Each path corresponds to a weighted contribution that mixes the
-      multiplicity indices of the inputs.  Evaluating all paths is sometimes
-      colloquially called a *contraction*.
-    - A *segmented polynomial representation* – the tensor product is expressed
-      as a polynomial where the operands provide the variables and the path
-      coefficients encode the Clebsch–Gordan data.  Backends such as
-      :mod:`cuequivariance_jax` evaluate this polynomial via
-      :func:`cuequivariance_jax.segmented_polynomial`.
-
-    **Contrast with e3nn.** :mod:`e3nn` offers object-oriented modules like
-    :class:`e3nn.o3.TensorProduct`.  Users provide ``Irreps`` objects plus a list
-    of instructions ``(i_in1, i_in2, i_out, mode, has_weight[, path_weight])``.
-    Multiplicities are captured directly in the ``Irreps`` entries, tensors are
-    stored in ``mul_ir`` layout (multiplicity blocks followed by the irrep
-    components), and the module manages weight sharing semantics.
-
-    **What this adapter does.** Given e3nn-style inputs and configuration we:
-
-    1. Build the cue descriptor mirroring the same tensor product.  This gives
-       us the segmented-polynomial view and the cue-specific ``ir_mul`` layout.
-    2. Map inputs from e3nn's ``mul_ir`` layout into ``ir_mul`` before calling
-       the backend, and convert the result back afterwards so callers continue to
-       see e3nn-compatible shapes.
-    3. When cue expands multiplicities differently (for example, with ``'uvu'``
-       instructions the descriptor treats multiplicities as the product of the
-       input counts) we *collapse output segments*: we reshape the result into
-       ``(ir_dim, mul_in1, mul_in2)``, sum over the redundant axis (a reduction
-       of the segmented polynomial), normalise by ``sqrt(multiplicity)`` so that
-       norms stay comparable to e3nn, and finally flatten back to
-       ``ir_dim * mul_out``.
-    4. Manage shared or internal weights using the same conventions as
-       :class:`e3nn.o3.TensorProduct` while delegating the numeric evaluation to
-       :func:`cuequivariance_jax.segmented_polynomial`.
-
-    The result is a Haiku module with the familiar e3nn API whose computations
-    are carried out by cuequivariance.  Internally we wrap each operand in a
-    :class:`cuequivariance_jax.RepArray`, which couples the raw ``ir_mul`` array
-    with the corresponding cue ``Irreps`` object and layout tag.  This is the
-    canonical entry point for the JAX backend and makes the descriptor/array
-    pairing explicit before the segmented polynomial is evaluated.
+    This module wraps the cue channel-wise tensor product descriptor, taking two
+    inputs each organised in mul_ir order and returning an output in the same
+    convention.  The contraction proceeds per irrep block, mirroring the
+    ``uvu`` instructions produced by e3nn.  Weight handling supports both
+    internal parameters and external arrays with optional sharing across the
+    batch dimension.
     """
 
-    def __init__(
-        self,
-        irreps_in1: Irreps,
-        irreps_in2: Irreps,
-        irreps_out: Irreps,
-        shared_weights: bool = False,
-        internal_weights: bool = False,
-        instructions=None,
-        name: str | None = None,
-    ) -> None:
-        super().__init__(name=name)
+    irreps_in1: Irreps
+    irreps_in2: Irreps
+    irreps_out: Irreps
+    shared_weights: bool = False
+    internal_weights: bool = False
+    instructions: list[tuple[int, int, int, str, bool, float]] | None = None
 
-        if internal_weights and not shared_weights:
+    def setup(self) -> None:
+        """Initialise cue descriptors and validate the instruction template.
+
+        Raises:
+            ValueError: If the requested output irreps cannot be produced by the
+                channel-wise descriptor, or if user-specified instructions are
+                incompatible with the e3nn-generated pattern.
+        """
+        if self.internal_weights and not self.shared_weights:
             raise ValueError(
                 'TensorProduct requires shared_weights=True when internal_weights=True'
             )
-        self.shared_weights = shared_weights
-        self.internal_weights = internal_weights
+        self._shared_weights = self.shared_weights
+        self._internal_weights = self.internal_weights
 
-        self.irreps_in1_o3 = Irreps(irreps_in1)
-        self.irreps_in2_o3 = Irreps(irreps_in2)
-        self.irreps_out_o3 = Irreps(irreps_out)
+        self.irreps_in1_o3 = Irreps(self.irreps_in1)
+        self.irreps_in2_o3 = Irreps(self.irreps_in2)
+        self.irreps_out_o3 = Irreps(self.irreps_out)
 
-        self.irreps_in1_cue = cue.Irreps(cue.O3, irreps_in1)
-        self.irreps_in2_cue = cue.Irreps(cue.O3, irreps_in2)
-        self.irreps_out_cue = cue.Irreps(cue.O3, irreps_out)
+        self.irreps_in1_cue = cue.Irreps(cue.O3, self.irreps_in1_o3)
+        self.irreps_in2_cue = cue.Irreps(cue.O3, self.irreps_in2_o3)
+        self.irreps_out_cue = cue.Irreps(cue.O3, self.irreps_out_o3)
 
         descriptor = cue.descriptors.channelwise_tensor_product(
             self.irreps_in1_cue, self.irreps_in2_cue, self.irreps_out_cue
@@ -163,8 +128,9 @@ class TensorProduct(hk.Module):
         self.descriptor = descriptor
         self.weight_irreps = descriptor.inputs[0].irreps
         self.weight_numel = descriptor.polynomial.operands[0].size
-        self.descriptor_out_irreps_o3 = Irreps(str(descriptor.outputs[0].irreps))
+        self.descriptor_out_irreps_str = str(descriptor.outputs[0].irreps)
         self.output_segment_shapes = tuple(descriptor.polynomial.operands[-1].segments)
+        self.descriptor_out_dim = Irreps(self.descriptor_out_irreps_str).dim
 
         expected_irreps, expected_instructions = _expected_channelwise_instructions(
             self.irreps_in1_o3, self.irreps_in2_o3, self.irreps_out_o3
@@ -174,121 +140,154 @@ class TensorProduct(hk.Module):
                 'TensorProduct irreps_out is incompatible with channel-wise descriptor'
             )
 
-        if instructions is not None:
-            normalised = [_normalise_instruction(inst) for inst in instructions]
+        if self.instructions is not None:
+            normalised = [_normalise_instruction(inst) for inst in self.instructions]
             if normalised != expected_instructions:
                 raise ValueError(
                     'TensorProduct only supports channel-wise "uvu" instructions '
                     'matching those returned by e3nn; received '
-                    f'{instructions!r}'
+                    f'{self.instructions!r}'
                 )
 
+    def _weight_param(self) -> jnp.ndarray:
+        """Create the shared/internal weight parameter."""
+        init = lambda rng: jax.random.normal(rng, (1, self.weight_numel))
+        return self.param('weight', init)
+
+    def _as_rep(
+        self,
+        array: jnp.ndarray,
+        irreps_o3: Irreps,
+        irreps_cue: cue.Irreps,
+    ) -> cuex.RepArray:
+        """Convert mul_ir array to cue RepArray with matching metadata."""
+        ir_mul = mul_ir_to_ir_mul(array, irreps_o3)
+        return cuex.RepArray(irreps_cue, jnp.asarray(ir_mul), cue.ir_mul)
+
+    def _resolve_weight_tensor(
+        self,
+        weights: jnp.ndarray | None,
+        *,
+        dtype: jnp.dtype,
+        batch_size: int,
+    ) -> jnp.ndarray:
+        """Return a validated weight tensor with shape ``(batch, weight_numel)``."""
+        if self._internal_weights:
+            if weights is not None:
+                raise ValueError(
+                    'TensorProduct uses internal weights; weights argument must be None'
+                )
+            tensor = self._weight_param().astype(dtype)
+        else:
+            if weights is None:
+                raise ValueError(
+                    'TensorProduct requires explicit weights when internal_weights=False'
+                )
+            tensor = jnp.asarray(weights, dtype=dtype)
+
+        if tensor.ndim == 1:
+            tensor = tensor[jnp.newaxis, :]
+        elif tensor.ndim != 2:
+            raise ValueError(f'Weights must have rank 1 or 2, got rank {tensor.ndim}')
+
+        if tensor.shape[-1] != self.weight_numel:
+            raise ValueError(
+                f'Expected weights last dimension {self.weight_numel}, got {tensor.shape[-1]}'
+            )
+
+        leading = tensor.shape[0]
+        if self._shared_weights:
+            if leading not in (1, batch_size):
+                raise ValueError(
+                    'Shared weights require leading dimension 1 or equal to the batch size'
+                )
+            if leading == 1 and batch_size != 1:
+                tensor = jnp.broadcast_to(tensor, (batch_size, self.weight_numel))
+        else:
+            if leading != batch_size:
+                raise ValueError(
+                    'Unshared weights require leading dimension equal to the batch size'
+                )
+
+        return tensor
+
+    @fnn.compact
     def __call__(
         self,
         x1: jnp.ndarray,
         x2: jnp.ndarray,
         weights: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
+        """Evaluate the tensor product on two mul_ir inputs.
+
+        Under the hood each input is re-expressed in cue's ``ir_mul`` layout,
+        multiplied via the segmented polynomial corresponding to the ``uvu``
+        contraction, and the result is collapsed back into ``mul_ir`` order.
+
+        Args:
+            x1: First input batch in mul_ir ordering.
+            x2: Second input batch in mul_ir ordering.
+            weights: Optional external weights; required when
+                ``internal_weights`` is ``False``.
+
+        Returns:
+            ``jax.numpy`` array carrying irreps ``self.irreps_out`` in mul_ir order.
+
+        Raises:
+            ValueError: On weight shape mismatches or invalid sharing policy.
+        """
         batch_size = x1.shape[0]
+        dtype = x1.dtype
 
-        if self.internal_weights:
-            if weights is not None:
-                raise ValueError(
-                    'TensorProduct uses internal weights; weights argument must be None'
-                )
-            parameter = hk.get_parameter(
-                'weight',
-                shape=(1, self.weight_numel),
-                dtype=x1.dtype,
-                init=hk.initializers.RandomNormal(),
-            )
-            weight_tensor = parameter
-        else:
-            if weights is None:
-                raise ValueError(
-                    'TensorProduct requires explicit weights when internal_weights=False'
-                )
-            weight_tensor = jnp.asarray(weights, dtype=x1.dtype)
+        irreps_in1 = Irreps(self.irreps_in1_o3)
+        irreps_in2 = Irreps(self.irreps_in2_o3)
+        irreps_out = Irreps(self.irreps_out_o3)
 
-        if weight_tensor.ndim == 1:
-            weight_tensor = weight_tensor[jnp.newaxis, :]
-        elif weight_tensor.ndim != 2:
-            raise ValueError(
-                f'Weights must have rank 1 or 2, got rank {weight_tensor.ndim}'
-            )
-
-        if weight_tensor.shape[-1] != self.weight_numel:
-            raise ValueError(
-                f'Expected weights last dimension {self.weight_numel}, got {weight_tensor.shape[-1]}'
-            )
-
-        if self.shared_weights:
-            if weight_tensor.shape[0] not in (1, batch_size):
-                raise ValueError(
-                    'Shared weights require leading dimension 1 or equal to the batch size'
-                )
-            if weight_tensor.shape[0] == 1 and batch_size != 1:
-                weight_tensor = jnp.broadcast_to(
-                    weight_tensor, (batch_size, self.weight_numel)
-                )
-        else:
-            if weight_tensor.shape[0] != batch_size:
-                raise ValueError(
-                    'Unshared weights require leading dimension equal to the batch size'
-                )
-
-        x1_ir_mul = mul_ir_to_ir_mul(x1, self.irreps_in1_o3)
-        x2_ir_mul = mul_ir_to_ir_mul(x2, self.irreps_in2_o3)
-
-        x1_rep = cuex.RepArray(
-            self.irreps_in1_cue,
-            jnp.asarray(x1_ir_mul),
-            cue.ir_mul,
+        x1_rep = self._as_rep(x1, irreps_in1, self.irreps_in1_cue)
+        x2_rep = self._as_rep(x2, irreps_in2, self.irreps_in2_cue)
+        weight_tensor = self._resolve_weight_tensor(
+            weights, dtype=dtype, batch_size=batch_size
         )
-        x2_rep = cuex.RepArray(
-            self.irreps_in2_cue,
-            jnp.asarray(x2_ir_mul),
-            cue.ir_mul,
-        )
-        weight_rep = cuex.RepArray(
-            self.weight_irreps,
-            weight_tensor,
-            cue.ir_mul,
-        )
+        weight_rep = cuex.RepArray(self.weight_irreps, weight_tensor, cue.ir_mul)
+
+        descriptor_out_irreps = Irreps(self.descriptor_out_irreps_str)
 
         [out_ir_mul] = cuex.segmented_polynomial(
             self.descriptor.polynomial,
             [weight_rep.array, x1_rep.array, x2_rep.array],
-            [
-                jax.ShapeDtypeStruct(
-                    (*x1.shape[:-1], self.descriptor_out_irreps_o3.dim), x1.dtype
-                )
-            ],
+            [jax.ShapeDtypeStruct((*x1.shape[:-1], descriptor_out_irreps.dim), dtype)],
             method='naive',
-            math_dtype=x1.dtype,
+            math_dtype=dtype,
         )
+
         out_ir_mul = collapse_ir_mul_segments(
             out_ir_mul,
-            self.descriptor_out_irreps_o3,
-            self.irreps_out_o3,
+            descriptor_out_irreps,
+            irreps_out,
             self.output_segment_shapes,
         )
-        out_mul_ir = ir_mul_to_mul_ir(out_ir_mul, self.irreps_out_o3)
+        out_mul_ir = ir_mul_to_mul_ir(out_ir_mul, irreps_out)
         return out_mul_ir
 
-    @classmethod
-    def import_from_torch(cls, torch_module, hk_params, scope):
-        hk_params = hk.data_structures.to_mutable_dict(hk_params)
-        if torch_module.weight_numel > 0 and torch_module.internal_weights:
-            weight_np = torch_module.weight.detach().cpu().numpy()
-            module_path = (
-                f'{torch_module.__class__.__module__}.{torch_module.__class__.__name__}'
-            )
-            if module_path.startswith('cuequivariance_torch'):
-                if weight_np.ndim == 1:
-                    weight_np = weight_np[None, :]
-            else:
-                weight_np = weight_np.reshape(1, -1)
-            hk_params.setdefault(scope, {})
-            hk_params[scope]['weight'] = jnp.array(weight_np)
-        return hk.data_structures.to_immutable_dict(hk_params)
+
+def _tensor_product_import_from_torch(cls, torch_module, flax_variables):
+    """Copy Torch tensor product weights into the Flax parameter tree."""
+    variables = unfreeze(flax_variables)
+    params = variables.setdefault('params', {})
+
+    if (
+        getattr(torch_module, 'internal_weights', False)
+        and getattr(torch_module, 'weight_numel', 0) > 0
+    ):
+        weight_np = torch_module.weight.detach().cpu().numpy()
+        if weight_np.ndim == 1:
+            weight_np = weight_np.reshape(1, -1)
+        existing = params.get('weight')
+        dtype = existing.dtype if existing is not None else weight_np.dtype
+        params['weight'] = jnp.asarray(weight_np, dtype=dtype)
+
+    variables['params'] = params
+    return freeze(variables)
+
+
+TensorProduct.import_from_torch = classmethod(_tensor_product_import_from_torch)

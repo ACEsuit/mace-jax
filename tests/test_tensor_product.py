@@ -1,5 +1,4 @@
 import cuequivariance as cue
-import haiku as hk
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -15,7 +14,6 @@ from e3nn_jax import Irreps
 from mace_jax.adapters.cuequivariance.tensor_product import (
     TensorProduct as TensorProductJAX,
 )
-from mace_jax.haiku.torch import copy_torch_to_jax
 
 
 class TestTensorProductImport:
@@ -83,6 +81,7 @@ class TestTensorProductImport:
             shared_weights=shared_weights,
             internal_weights=internal_weights,
             method='naive',
+            layout=cue.mul_ir,
         )
 
         self._assert_forward_matches(
@@ -124,25 +123,20 @@ class TestTensorProductImport:
 
         weight_numel = torch_module.weight_numel
 
+        module = TensorProductJAX(
+            irreps_in1=jax_irreps_in1,
+            irreps_in2=jax_irreps_in2,
+            irreps_out=jax_irreps_out,
+            shared_weights=shared_weights,
+            internal_weights=internal_weights,
+            instructions=instructions,
+        )
+
         if internal_weights:
-            weights_jax = None
+            variables = module.init(key, x1_jax, x2_jax)
+            variables = TensorProductJAX.import_from_torch(torch_module, variables)
+            out_jax = module.apply(variables, x1_jax, x2_jax)
             weights_torch = None
-
-            def forward_fn(x1, x2):
-                module = TensorProductJAX(
-                    irreps_in1=jax_irreps_in1,
-                    irreps_in2=jax_irreps_in2,
-                    irreps_out=jax_irreps_out,
-                    shared_weights=shared_weights,
-                    internal_weights=internal_weights,
-                    instructions=instructions,
-                )
-                return module(x1, x2)
-
-            transformed = hk.transform(forward_fn)
-            params = transformed.init(key, x1_jax, x2_jax)
-            params = copy_torch_to_jax(torch_module, params, scope='tensor_product')
-            out_jax = transformed.apply(params, None, x1_jax, x2_jax)
         else:
             if shared_weights:
                 if backend == 'cue':
@@ -153,22 +147,9 @@ class TestTensorProductImport:
                 weights_np = self.rng.standard_normal((self.batch, weight_numel))
 
             weights_jax = jnp.array(weights_np)
+            variables = module.init(key, x1_jax, x2_jax, weights=weights_jax)
+            out_jax = module.apply(variables, x1_jax, x2_jax, weights=weights_jax)
             weights_torch = torch.tensor(weights_np)
-
-            def forward_fn(x1, x2):
-                module = TensorProductJAX(
-                    irreps_in1=jax_irreps_in1,
-                    irreps_in2=jax_irreps_in2,
-                    irreps_out=jax_irreps_out,
-                    shared_weights=shared_weights,
-                    internal_weights=internal_weights,
-                    instructions=instructions,
-                )
-                return module(x1, x2, weights=weights_jax)
-
-            transformed = hk.transform(forward_fn)
-            params = transformed.init(key, x1_jax, x2_jax)
-            out_jax = transformed.apply(params, None, x1_jax, x2_jax)
 
         x1_torch = torch.tensor(x1_np)
         x2_torch = torch.tensor(x2_np)
