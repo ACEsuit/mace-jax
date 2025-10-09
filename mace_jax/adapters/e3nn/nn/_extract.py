@@ -1,13 +1,14 @@
+"""Utilities for slicing arrays according to ``e3nn`` irreps layouts."""
+
 from collections.abc import Sequence
 from typing import Optional, Union
 
-import haiku as hk
 import jax.numpy as jnp
-from e3nn_jax import Irreps
+from e3nn_jax import Irreps, IrrepsArray
 
 
-class Extract(hk.Module):
-    """Extract sub-sets of irreps from a raw array."""
+class Extract:
+    """Extract contiguous irreps slices following ``e3nn`` indexing rules."""
 
     def __init__(
         self,
@@ -17,45 +18,52 @@ class Extract(hk.Module):
         squeeze_out: bool = False,
         name: Optional[str] = None,
     ):
-        super().__init__(name=name)
+        del name  # kept for backward-compatible signature
         self.irreps_in = Irreps(irreps_in)
         self.irreps_outs = [Irreps(ir) for ir in irreps_outs]
-        self.instructions = list(instructions)
+        self.instructions = [tuple(ins) for ins in instructions]
         self.squeeze_out = squeeze_out
 
-        assert len(self.irreps_outs) == len(self.instructions)
+        if len(self.irreps_outs) != len(self.instructions):
+            raise ValueError(
+                'Number of output irreps must match number of instruction sets.'
+            )
         for ir_out, ins in zip(self.irreps_outs, self.instructions):
-            assert len(ir_out) == len(ins)
+            if len(ir_out) != len(ins):
+                raise ValueError('Instruction length must match irreps length.')
 
-        # Precompute slices for each output irreps
-        self._slices_out: list[list[slice]] = []
-        for ir_out, ins in zip(self.irreps_outs, self.instructions):
-            slices = []
+        dims = [mul_ir.dim for mul_ir in self.irreps_in]
+        offsets = [0]
+        for dim in dims:
+            offsets.append(offsets[-1] + dim)
+
+        self._slices_out: list[tuple[slice, ...]] = []
+        for ins in self.instructions:
+            slices: list[slice] = []
             for idx in ins:
-                start = sum(mul_ir.dim for mul_ir in self.irreps_in[:idx])
-                end = start + self.irreps_in[idx].dim
+                start = offsets[idx]
+                end = offsets[idx + 1]
                 slices.append(slice(start, end))
-            self._slices_out.append(slices)
+            self._slices_out.append(tuple(slices))
 
-    def __call__(self, x: jnp.ndarray) -> Union[jnp.ndarray, tuple[jnp.ndarray, ...]]:
-        """
-        x: jnp.ndarray [..., irreps_in.dim]
+    def __call__(
+        self, x: Union[jnp.ndarray, IrrepsArray]
+    ) -> Union[jnp.ndarray, tuple[jnp.ndarray, ...]]:
+        """Return the slices specified by the instruction set."""
+        array = x.array if isinstance(x, IrrepsArray) else x
 
-        Returns: either a tuple of arrays (each [..., irreps_out.dim]),
-        or a single array if squeeze_out=True and only one output.
-        """
-        if x.shape[-1] != self.irreps_in.dim:
+        if array.shape[-1] != self.irreps_in.dim:
             raise ValueError(
                 f'Invalid input shape: expected last dim {self.irreps_in.dim}, '
-                f'got {x.shape[-1]}'
+                f'got {array.shape[-1]}'
             )
 
         outputs: list[jnp.ndarray] = []
-        for ir_out, slices in zip(self.irreps_outs, self._slices_out):
+        for slices in self._slices_out:
             if not slices:  # empty irreps_out
-                arr = jnp.zeros(x.shape[:-1] + (0,), dtype=x.dtype)
+                arr = jnp.zeros(array.shape[:-1] + (0,), dtype=array.dtype)
             else:
-                parts = [x[..., s] for s in slices]
+                parts = [array[..., s] for s in slices]
                 arr = parts[0] if len(parts) == 1 else jnp.concatenate(parts, axis=-1)
             outputs.append(arr)
 

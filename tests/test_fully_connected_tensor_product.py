@@ -1,5 +1,4 @@
 import cuequivariance as cue
-import haiku as hk
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -17,7 +16,6 @@ from e3nn_jax import Irreps
 from mace_jax.adapters.cuequivariance.fully_connected_tensor_product import (
     FullyConnectedTensorProduct as FullyConnectedTensorProductJAX,
 )
-from mace_jax.haiku.torch import copy_torch_to_jax
 
 
 class TestFullyConnectedTensorProductImport:
@@ -85,6 +83,7 @@ class TestFullyConnectedTensorProductImport:
             shared_weights=shared_weights,
             internal_weights=internal_weights,
             method='naive',
+            layout=cue.mul_ir,
         )
 
         self._assert_forward_matches(
@@ -121,26 +120,21 @@ class TestFullyConnectedTensorProductImport:
 
         weight_numel = torch_module.weight_numel
 
+        module = FullyConnectedTensorProductJAX(
+            ir_in1,
+            ir_in2,
+            ir_out,
+            shared_weights=shared_weights,
+            internal_weights=internal_weights,
+        )
+
         if internal_weights:
-            weights_jax = None
-            weights_torch = None
-
-            def forward_fn(x1, x2):
-                module = FullyConnectedTensorProductJAX(
-                    ir_in1,
-                    ir_in2,
-                    ir_out,
-                    shared_weights=shared_weights,
-                    internal_weights=internal_weights,
-                )
-                return module(x1, x2)
-
-            transformed = hk.transform(forward_fn)
-            params = transformed.init(key, x1_jax, x2_jax)
-            params = copy_torch_to_jax(
-                torch_module, params, scope='fully_connected_tensor_product'
+            variables = module.init(key, x1_jax, x2_jax)
+            variables = FullyConnectedTensorProductJAX.import_from_torch(
+                torch_module, variables
             )
-            out_jax = transformed.apply(params, None, x1_jax, x2_jax)
+            out_jax = module.apply(variables, x1_jax, x2_jax)
+            weights_torch = None
         else:
             if shared_weights:
                 if backend == 'cue':
@@ -151,21 +145,9 @@ class TestFullyConnectedTensorProductImport:
                 weights_np = self.rng.standard_normal((self.batch, weight_numel))
 
             weights_jax = jnp.array(weights_np)
+            variables = module.init(key, x1_jax, x2_jax, weights=weights_jax)
+            out_jax = module.apply(variables, x1_jax, x2_jax, weights=weights_jax)
             weights_torch = torch.tensor(weights_np)
-
-            def forward_fn(x1, x2):
-                module = FullyConnectedTensorProductJAX(
-                    ir_in1,
-                    ir_in2,
-                    ir_out,
-                    shared_weights=shared_weights,
-                    internal_weights=internal_weights,
-                )
-                return module(x1, x2, weights=weights_jax)
-
-            transformed = hk.transform(forward_fn)
-            params = transformed.init(key, x1_jax, x2_jax)
-            out_jax = transformed.apply(params, None, x1_jax, x2_jax)
 
         x1_torch = torch.tensor(x1_np)
         x2_torch = torch.tensor(x2_np)

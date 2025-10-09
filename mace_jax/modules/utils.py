@@ -8,22 +8,15 @@ def compute_forces(
     energy_fn: Callable[[jnp.ndarray], jnp.ndarray],
     positions: jnp.ndarray,
 ) -> jnp.ndarray:
-    """
-    Compute total energy and forces as the negative gradient of energy w.r.t. positions.
+    """Return forces as ``-∂E/∂R`` for the provided configuration.
 
-    Args:
-        energy_fn: function taking positions -> energy (scalar or [n_graphs])
-        positions: [n_nodes, 3] array of positions
-
-    Returns:
-        forces: [n_nodes, 3] array of forces
+    We reduce the per-graph energies down to a scalar so that ``jax.grad`` mirrors the
+    scalar-valued backwards pass used by Torch, ensuring the gradient is accumulated
+    across graphs with identical weights.
     """
-    # Compute energy and gradient in one pass
+
     grad_pos = jax.grad(lambda pos: jnp.sum(energy_fn(pos)))(positions)
-
-    # Forces = -∂E/∂R
-    forces = -grad_pos
-    return forces
+    return -grad_pos
 
 
 def compute_forces_and_stress(
@@ -35,56 +28,39 @@ def compute_forces_and_stress(
     batch: jnp.ndarray,  # [n_nodes] with graph indices
     num_graphs: int,
 ) -> tuple[jnp.ndarray, Optional[jnp.ndarray], Optional[jnp.ndarray], jnp.ndarray]:
-    """
-    JAX equivalent of the PyTorch compute_forces_virials.
-    Computes forces, virials, stress, and returns the per-graph energies.
+    """Replicate Torch's symmetric deformation trick to obtain stress.
 
-    Args:
-        energy_fn: function returning per-graph energies [n_graphs]
-        positions: [n_nodes, 3]
-        cell: [n_graphs, 3, 3]
-        num_graphs: int
-        batch: [n_nodes] with graph indices
+    Torch back-propagates a symmetric strain tensor against the energy in order to
+    compute virials.  We mimic that procedure in JAX to keep sign conventions and
+    scaling identical, ensuring round-trips through ``import_from_torch`` continue to
+    match reference outputs.
     """
 
-    # Define a scalar-valued loss = sum over graphs to mimic grad_outputs=ones_like(...)
-    def energy_displacement_fn(positions, displacement):
-        # Make the displacement symmetric:
-        symmetric_displacement = 0.5 * (
-            displacement + jnp.swapaxes(displacement, -1, -2)
-        )  # shape: [n_graphs, 3, 3]
+    cell = cell.reshape(-1, 3, 3)
 
-        # Apply symmetric deformation to positions:
-        deformed_positions = positions + jnp.einsum(
-            'be,bec->bc', positions, symmetric_displacement[batch]
-        )
-        cell_reshaped = cell.reshape(-1, 3, 3)  # [n_graphs, 3, 3]
-        cell_reshaped = cell_reshaped + jnp.matmul(
-            cell_reshaped, symmetric_displacement
-        )  # [n_graphs, 3, 3]
+    def deformation_energy(pos, displacement):
+        symmetric = 0.5 * (displacement + jnp.swapaxes(displacement, -1, -2))
+        deformed_pos = pos + jnp.einsum('be,bec->bc', pos, symmetric[batch])
+        deformed_cell = cell + jnp.matmul(cell, symmetric)
         shifts = jnp.einsum(
-            'be,bec->bc',
-            unit_shifts,  # [n_edges, 3]
-            cell_reshaped[batch[edge_index[0]]],  # [n_edges, 3, 3]
-        )  # → [n_edges, 3]
+            'be,bec->bc', unit_shifts, deformed_cell[batch[edge_index[0]]]
+        )
+        return energy_fn(deformed_pos, shifts=shifts)
 
-        return jnp.sum(energy_fn(deformed_positions, shifts=shifts))
+    displacement0 = jnp.zeros((num_graphs, 3, 3), dtype=positions.dtype)
 
-    # Create a zero displacement tensor of shape [num_graphs, 3, 3]
-    displacement = jnp.zeros((num_graphs, 3, 3), dtype=positions.dtype)
+    def scalar_energy(pos, displacement):
+        return jnp.sum(deformation_energy(pos, displacement))
 
-    # Compute total energy (scalar) and gradients wrt both inputs
-    grad_pos, grad_disp = jax.grad(energy_displacement_fn, argnums=(0, 1))(
-        positions, displacement
+    grad_pos, grad_disp = jax.grad(scalar_energy, argnums=(0, 1))(
+        positions, displacement0
     )
 
-    # Forces and virials follow the physics convention
     forces = -grad_pos
     virials = -grad_disp
 
-    # Stress computation
-    volume = jnp.abs(jnp.linalg.det(cell.reshape(-1, 3, 3))).reshape(-1, 1, 1)
-    stress = -virials / volume
+    volume = jnp.abs(jnp.linalg.det(cell)).reshape(-1, 1, 1)
+    stress = virials / volume
     stress = jnp.where(jnp.abs(stress) < 1e10, stress, jnp.zeros_like(stress))
 
     return forces, stress
@@ -100,6 +76,11 @@ def get_outputs(
     Optional[jnp.ndarray],  # forces
     Optional[jnp.ndarray],  # stress
 ]:
+    """Invoke the appropriate autograd routine to obtain forces and stress.
+
+    The signature mirrors the Torch helper so higher-level modules can request the
+    same combination of outputs regardless of backend.
+    """
     positions = data['positions']
     cell = data['cell']
     unit_shifts = data['unit_shifts']
@@ -117,6 +98,7 @@ def get_outputs(
             positions=positions,
         )
     elif compute_stress:
+        # Stress computation also returns forces so we can share the deformation pass.
         forces, stress = compute_forces_and_stress(
             energy_fn=energy_fn,
             positions=positions,

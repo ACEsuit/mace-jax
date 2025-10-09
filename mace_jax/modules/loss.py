@@ -43,24 +43,24 @@ class WeightedEnergyForcesStressLoss:
         loss = 0
 
         if self.energy_weight > 0.0:
-            energy = predictions["energy"]
+            energy = predictions['energy']
             loss += self.energy_weight * mean_squared_error_energy(graph, energy)
 
         if self.forces_weight > 0.0:
-            forces = predictions["forces"]
+            forces = predictions['forces']
             loss += self.forces_weight * mean_squared_error_forces(graph, forces)
 
         if self.stress_weight > 0.0:
-            stress = predictions["stress"]
+            stress = predictions['stress']
             loss += self.stress_weight * mean_squared_error_stress(graph, stress)
 
         return loss  # [n_graphs, ]
 
     def __repr__(self):
         return (
-            f"{self.__class__.__name__}(energy_weight={self.energy_weight:.3f}, "
-            f"forces_weight={self.forces_weight:.3f}, "
-            f"stress_weight={self.stress_weight:.3f})"
+            f'{self.__class__.__name__}(energy_weight={self.energy_weight:.3f}, '
+            f'forces_weight={self.forces_weight:.3f}, '
+            f'stress_weight={self.stress_weight:.3f})'
         )
 
 

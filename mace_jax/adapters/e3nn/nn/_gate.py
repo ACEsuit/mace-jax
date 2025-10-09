@@ -1,147 +1,208 @@
-from typing import Callable, Optional
+"""Flax port of the ``e3nn`` gated non-linearity module."""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from typing import Callable
 
 import e3nn_jax as e3nn
-import haiku as hk
 import jax.numpy as jnp
 from e3nn import o3
 from e3nn_jax import Irreps, IrrepsArray
+from flax import linen as fnn
 
-from mace_jax.haiku.torch import copy_torch_to_jax, register_import
+from mace_jax.adapters.flax.torch import auto_import_from_torch_flax
 
 from ._activation import Activation
 from ._extract import Extract
 
 
-class _Sortcut(hk.Module):
-    """Helper to extract subsets of irreps and manage instructions."""
+class _Sortcut:
+    """Prepare sorted irreps layout and associated extraction instructions."""
 
-    def __init__(self, *irreps_outs: Irreps, name: Optional[str] = None):
-        super().__init__(name=name)
+    def __init__(self, *irreps_outs: Irreps) -> None:
         self.irreps_outs = tuple(Irreps(ir).simplify() for ir in irreps_outs)
         irreps_in = sum(self.irreps_outs, Irreps([]))
 
-        i = 0
+        index = 0
         instructions = []
         for irreps_out in self.irreps_outs:
-            instructions.append(tuple(range(i, i + len(irreps_out))))
-            i += len(irreps_out)
-        assert len(irreps_in) == i, (len(irreps_in), i)
-
-        # Sort input irreps following the e3nn ordering to stay consistent with Torch
-        torch_irreps_in = o3.Irreps(str(irreps_in))
-        torch_sorted = torch_irreps_in.sort()
-        irreps_in = Irreps(str(torch_sorted.irreps))
-        p = torch_sorted.p
-        instructions = [tuple(p[i] for i in x) for x in instructions]
-
-        self.cut = Extract(irreps_in, self.irreps_outs, instructions)
-        self.irreps_in = irreps_in.simplify()
-
-    def __call__(self, x: IrrepsArray) -> tuple[IrrepsArray, ...]:
-        return self.cut(x)  # returns tuple of extracted IrrepsArrays
-
-
-@register_import('e3nn.nn._gate.Gate')
-class Gate(hk.Module):
-    """Gate activation function for scalar/gated irreps.
-
-    Notes
-    -----
-    This Haiku implementation mirrors the PyTorch ``e3nn.nn.Gate`` semantics
-    instead of delegating to :func:`e3nn_jax.gate`. The upstream functional
-    helper expects scalar, gate, and gated chunks to be already contiguous in
-    the canonical e3nn ordering and to share one activation per parity. Torch
-    MACE checkpoints store features—and therefore trained weights—in a
-    different order. When importing those weights we must preserve the original
-    permutation and the per-chunk activation choices encoded in the checkpoint.
-
-    The ``_Sortcut`` and ``Extract`` helpers provide that compatibility layer:
-    they reorder activations to match the Torch layout, slice the requested
-    subsets, and hand them to local ``Activation`` modules which apply the
-    exact functions configured by the model. Replacing this module with
-    :func:`e3nn_jax.gate` would break the weight-import path and change the
-    behaviour of existing models.
-    """
-
-    def __init__(
-        self,
-        irreps_scalars: Irreps,
-        act_scalars: list[Optional[Callable]],
-        irreps_gates: Irreps,
-        act_gates: list[Optional[Callable]],
-        irreps_gated: Irreps,
-        name: Optional[str] = None,
-    ):
-        super().__init__(name=name)
-
-        irreps_scalars = Irreps(irreps_scalars)
-        irreps_gates = Irreps(irreps_gates)
-        irreps_gated = Irreps(irreps_gated)
-
-        if len(irreps_gates) > 0 and irreps_gates.lmax > 0:
-            raise ValueError(f'Gate scalars must be scalars, got {irreps_gates}')
-        if len(irreps_scalars) > 0 and irreps_scalars.lmax > 0:
-            raise ValueError(f'Scalars must be scalars, got {irreps_scalars}')
-        if irreps_gates.num_irreps != irreps_gated.num_irreps:
+            instructions.append(tuple(range(index, index + len(irreps_out))))
+            index += len(irreps_out)
+        if len(irreps_in) != index:
             raise ValueError(
-                f'Mismatch: {irreps_gated.num_irreps} irreps in gated, '
-                f'{irreps_gates.num_irreps} in gates'
+                f'Instruction mismatch: expected {len(irreps_in)} entries, found {index}.'
             )
 
-        # Extract scalars, gates, and gated irreps
-        self.sc = _Sortcut(irreps_scalars, irreps_gates, irreps_gated)
-        self.irreps_scalars, self.irreps_gates, self.irreps_gated = self.sc.irreps_outs
-        self._irreps_in = self.sc.irreps_in
+        torch_irreps_in = o3.Irreps(str(irreps_in))
+        torch_sorted = torch_irreps_in.sort()
+        irreps_in_sorted = Irreps(str(torch_sorted.irreps))
+        permutation = torch_sorted.p
+        instructions = [tuple(permutation[i] for i in ins) for ins in instructions]
 
-        # Activation functions
-        self.act_scalars = Activation(irreps_scalars, act_scalars)
-        self.act_gates = Activation(irreps_gates, act_gates)
+        self.extract = Extract(irreps_in_sorted, self.irreps_outs, instructions)
+        self.irreps_in = irreps_in_sorted.simplify()
 
-        # Determine gate output irreps via elementwise tensor product
-        if self.irreps_gated.dim > 0 and self.act_gates.irreps_out.dim > 0:
-            sample_gated = e3nn.zeros(self.irreps_gated, ())
-            sample_gates = e3nn.zeros(self.act_gates.irreps_out, ())
+    def __call__(self, x: jnp.ndarray | IrrepsArray) -> tuple[jnp.ndarray, ...]:
+        """Return the scalar, gate, and gated views of the input array."""
+        return self.extract(x)
+
+
+def _as_irreps(value) -> Irreps:
+    return value if isinstance(value, Irreps) else Irreps(value)
+
+
+@auto_import_from_torch_flax(allow_missing_mapper=True)
+class Gate(fnn.Module):
+    """Combine scalar activations with gated higher-order features.
+
+    The gate expects its input features to be organised as the concatenation of
+    ``(scalars, gates, gated)`` irreps expressed in cue-style ``ir_mul`` layout.
+    It normalises the scalar and gate channels separately, applies the provided
+    non-linearities, and finally modulates each gated irrep by the
+    corresponding gate via an element-wise tensor product.  The output packs the
+    activated scalars followed by the gated channels so it can flow back into
+    other ``e3nn_jax`` blocks.
+
+    Args:
+        irreps_scalars: Irreps describing the scalar channels that receive
+            direct activations and are forwarded without gating.
+        act_scalars: Sequence of scalar activation functions (or ``None``) that
+            matches ``irreps_scalars`` one-to-one.
+        irreps_gates: Scalar irreps used as multiplicative gates; each entry
+            must be an ``l=0`` irrep.
+        act_gates: Activations applied to the gate channels prior to modulation.
+        irreps_gated: Irreps carrying the features that will be modulated by
+            the gates.  Must contain the same number of entries as
+            ``irreps_gates``.
+        normalize_act: Whether to match the activation variance with the Torch
+            reference via ``normalize2mom``.
+    """
+
+    irreps_scalars: Irreps
+    act_scalars: Sequence[Callable | None]
+    irreps_gates: Irreps
+    act_gates: Sequence[Callable | None]
+    irreps_gated: Irreps
+    normalize_act: bool = True
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        object.__setattr__(self, 'act_scalars', tuple(self.act_scalars))
+        object.__setattr__(self, 'act_gates', tuple(self.act_gates))
+
+    def setup(self) -> None:
+        irreps_scalars = Irreps(self.irreps_scalars).simplify()
+        irreps_gates = Irreps(self.irreps_gates).simplify()
+        irreps_gated = Irreps(self.irreps_gated).simplify()
+
+        max_gate_l = max((mul_ir.ir.l for mul_ir in irreps_gates), default=0)
+        max_scalar_l = max((mul_ir.ir.l for mul_ir in irreps_scalars), default=0)
+
+        if len(irreps_gates) > 0 and max_gate_l > 0:
+            raise ValueError(f'Gate scalars must be scalars, got {irreps_gates}')
+        if len(irreps_scalars) > 0 and max_scalar_l > 0:
+            raise ValueError(f'Scalars must be scalars, got {irreps_scalars}')
+        if len(irreps_gates) != len(irreps_gated):
+            raise ValueError(
+                f'Mismatch: {len(irreps_gated)} irreps in gated, '
+                f'{len(irreps_gates)} in gates'
+            )
+
+        self._irreps_scalars = irreps_scalars
+        self._irreps_gates = irreps_gates
+        self._irreps_gated = irreps_gated
+
+        self._scalar_activation = Activation(
+            self._irreps_scalars,
+            self.act_scalars,
+            normalize_act=self.normalize_act,
+        )
+        self._gate_activation = Activation(
+            self._irreps_gates,
+            self.act_gates,
+            normalize_act=self.normalize_act,
+        )
+
+        self._sortcut = _Sortcut(
+            self._irreps_scalars,
+            self._irreps_gates,
+            self._irreps_gated,
+        )
+
+        self._irreps_in = self._sortcut.irreps_in
+        self._irreps_scalars_out = self._scalar_activation.irreps_out
+        self._irreps_gates_out = self._gate_activation.irreps_out
+
+        irreps_gated_dim = _as_irreps(self._irreps_gated).dim
+        irreps_gates_out_dim = _as_irreps(self._irreps_gates_out).dim
+
+        if irreps_gated_dim > 0 and irreps_gates_out_dim > 0:
+            sample_gated = e3nn.zeros(_as_irreps(self._irreps_gated), ())
+            sample_gates = e3nn.zeros(_as_irreps(self._irreps_gates_out), ())
             self._mul_irreps_out = e3nn.elementwise_tensor_product(
-                sample_gated, sample_gates
+                sample_gated,
+                sample_gates,
             ).irreps
         else:
             self._mul_irreps_out = Irreps([])
 
-        self._irreps_out = self.act_scalars.irreps_out + self._mul_irreps_out
+        self._irreps_out = _as_irreps(self._irreps_scalars_out) + _as_irreps(
+            self._mul_irreps_out
+        )
 
-    def __call__(self, features: IrrepsArray) -> IrrepsArray:
-        scalars, gates, gated = self.sc(features)
+    def __call__(self, features: IrrepsArray | jnp.ndarray) -> IrrepsArray:
+        """Apply scalar activations and gated tensor products to ``features``.
 
-        scalars = self.act_scalars(scalars)
-        if gates.shape[-1] > 0:
-            gates = self.act_gates(gates)
-            gated_ir = e3nn.IrrepsArray(self.irreps_gated, gated)
-            gates_ir = e3nn.IrrepsArray(self.act_gates.irreps_out, gates)
-            gated = e3nn.elementwise_tensor_product(gated_ir, gates_ir).array
-            out = IrrepsArray.from_array(
-                self._irreps_out, jnp.concatenate([scalars, gated], axis=-1)
-            )
+        Args:
+            features: Either an ``IrrepsArray`` with irreps ``irreps_in`` or a
+                raw array whose last dimension equals ``irreps_in.dim``.
+
+        Returns:
+            An ``IrrepsArray`` whose irreps are ``irreps_out`` containing the
+            activated scalars followed by the gated feature blocks.
+        """
+        if isinstance(features, IrrepsArray):
+            array = features.array
         else:
-            out = scalars
-        return out
+            array = features
+            if array.shape[-1] != _as_irreps(self._irreps_in).dim:
+                raise ValueError(
+                    f'Invalid input shape: expected last dim {_as_irreps(self._irreps_in).dim}, '
+                    f'got {array.shape[-1]}'
+                )
+
+        scalars, gates, gated = self._sortcut(array)
+
+        scalars_act = self._scalar_activation(scalars)
+        gates_act = gates
+        if gates.shape[-1] > 0:
+            gates_act = self._gate_activation(gates)
+
+        outputs: list[jnp.ndarray] = []
+        if scalars_act.shape[-1] > 0:
+            outputs.append(scalars_act)
+
+        if gates_act.shape[-1] > 0 and gated.shape[-1] > 0:
+            gated_ir = e3nn.IrrepsArray(_as_irreps(self._irreps_gated), gated)
+            gates_ir = e3nn.IrrepsArray(_as_irreps(self._irreps_gates_out), gates_act)
+            gated_prod = e3nn.elementwise_tensor_product(gated_ir, gates_ir).array
+            if gated_prod.shape[-1] > 0:
+                outputs.append(gated_prod)
+
+        if not outputs:
+            empty = jnp.zeros(array.shape[:-1] + (0,), dtype=array.dtype)
+            return IrrepsArray(_as_irreps(self._irreps_out), empty)
+
+        concatenated = (
+            outputs[0] if len(outputs) == 1 else jnp.concatenate(outputs, axis=-1)
+        )
+        return IrrepsArray(_as_irreps(self._irreps_out), concatenated)
 
     @property
     def irreps_in(self) -> Irreps:
-        return self._irreps_in
+        return _as_irreps(self._irreps_in)
 
     @property
     def irreps_out(self) -> Irreps:
-        return self._irreps_out
-
-    @classmethod
-    def import_from_torch(cls, torch_module, hk_params, scope):
-        hk_params = hk.data_structures.to_mutable_dict(hk_params)
-
-        # Delegate only to mul
-        hk_params = copy_torch_to_jax(
-            torch_module.mul,
-            hk_params,
-            scope=f'{scope}/~/mul',
-        )
-
-        return hk.data_structures.to_immutable_dict(hk_params)
+        return _as_irreps(self._irreps_out)

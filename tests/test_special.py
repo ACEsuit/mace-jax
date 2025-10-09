@@ -3,8 +3,6 @@ import numpy as np
 import pytest
 import torch
 
-torch.serialization.add_safe_globals([slice])
-
 from mace_jax.modules.special import chebyshev_polynomial_t
 
 

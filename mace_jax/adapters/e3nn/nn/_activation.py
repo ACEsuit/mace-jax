@@ -1,25 +1,20 @@
+"""Flax-friendly scalar activation logic mirroring ``e3nn.nn._activation``."""
+
 from __future__ import annotations
 
 from collections.abc import Sequence
 from typing import Callable
 
 import e3nn_jax as e3nn
-import haiku as hk
 import jax.numpy as jnp
 from e3nn_jax import Irreps, IrrepsArray
 
 
-class Activation(hk.Module):
-    """Haiku wrapper around :func:`e3nn_jax.scalar_activation`.
+class Activation:
+    """Apply scalar activations chunk-wise according to an ``Irreps`` layout.
 
-    Parameters
-    ----------
-    irreps_in : Irreps
-        Representation of the input features.
-    acts : list[Optional[Callable]]
-        Activation function per input irreps chunk. ``None`` skips activation.
-    normalize_act : bool, default ``True``
-        Whether to delegate second-moment normalisation to e3nn.
+    This class mirrors the Torch ``e3nn.nn.Activation`` helper but emits plain
+    JAX arrays by default, allowing it to sit inside larger Flax modules.
     """
 
     def __init__(
@@ -30,10 +25,10 @@ class Activation(hk.Module):
         normalize_act: bool = True,
         name: str | None = None,
     ) -> None:
-        super().__init__(name=name)
+        del name  # preserved for backward compatibility
 
         self.irreps_in = Irreps(irreps_in)
-        self._acts = list(acts)
+        self._acts = tuple(acts)
         self._normalize_act = normalize_act
 
         if len(self.irreps_in) != len(self._acts):
@@ -42,7 +37,6 @@ class Activation(hk.Module):
                 f'{len(self._acts)}, ({self.irreps_in}, {self._acts})'
             )
 
-        # Determine output irreps by applying the e3nn activation to a dummy input.
         sample = e3nn.zeros(self.irreps_in, ())
         sample_out = e3nn.scalar_activation(
             sample,
@@ -60,7 +54,7 @@ class Activation(hk.Module):
         features: jnp.ndarray | IrrepsArray,
         axis: int = -1,
     ) -> jnp.ndarray:
-        """Apply the configured activation functions."""
+        """Apply the configured scalar activations to ``features``."""
         if isinstance(features, IrrepsArray):
             if features.irreps != self.irreps_in:
                 raise ValueError(

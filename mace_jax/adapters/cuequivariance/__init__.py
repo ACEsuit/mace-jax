@@ -1,4 +1,4 @@
-"""Cue-equivariant adapters with compatible torch bindings."""
+"""Cue-equivariant adapters for Flax."""
 
 from __future__ import annotations
 

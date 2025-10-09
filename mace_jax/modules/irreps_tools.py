@@ -4,28 +4,22 @@
 # This program is distributed under the MIT License (see MIT.md)
 ###########################################################################################
 
-from typing import Optional, Tuple
+from typing import Optional
 
-import haiku as hk
 import jax.numpy as jnp
 from e3nn_jax import Irreps
 
-from mace_jax.haiku.torch import (
-    auto_import_from_torch,
-    copy_torch_to_jax,
-    register_import,
-)
 from mace_jax.modules.wrapper_ops import CuEquivarianceConfig
 
 
 # Based on mir-group/nequip
 def tp_out_irreps_with_instructions(
     irreps1: Irreps, irreps2: Irreps, target_irreps: Irreps
-) -> Tuple[Irreps, list]:
+) -> tuple[Irreps, list]:
     trainable = True
 
     # Collect possible irreps and their instructions
-    irreps_out_list: list[Tuple[int, Irreps]] = []
+    irreps_out_list: list[tuple[int, Irreps]] = []
     instructions = []
     for i, (mul, ir_in) in enumerate(irreps1):
         for j, (_, ir_edge) in enumerate(irreps2):
@@ -69,54 +63,50 @@ def linear_out_irreps(irreps: Irreps, target_irreps: Irreps) -> Irreps:
     return Irreps(irreps_mid)
 
 
-@register_import('mace.modules.irreps_tools.reshape_irreps')
-@auto_import_from_torch()
-class reshape_irreps(hk.Module):
-    """
-    Haiku module that reshapes a flat tensor according to an Irreps specification.
-    """
+class reshape_irreps:
+    """Reshape a flat tensor according to an Irreps specification."""
 
     def __init__(
         self,
         irreps: Irreps,
-        cueq_config: Optional['CuEquivarianceConfig'] = None,
-        name: Optional[str] = None,
+        cueq_config: Optional[CuEquivarianceConfig] = None,
     ):
-        super().__init__(name=name)
         self.irreps = Irreps(irreps)
         self.cueq_config = cueq_config
-        self.dims = []
-        self.muls = []
-        for mul, ir in self.irreps:
-            d = ir.dim
-            self.dims.append(d)
-            self.muls.append(mul)
+        self._dims = [ir.dim for _, ir in self.irreps]
+        self._muls = [mul for mul, _ in self.irreps]
+        self._total_dim = sum(mul * dim for mul, dim in zip(self._muls, self._dims))
 
     def __call__(self, tensor: jnp.ndarray) -> jnp.ndarray:
+        array = getattr(tensor, 'array', tensor)
+        if array.ndim < 2:
+            raise ValueError(
+                f'Expected tensor with at least 2 dimensions, got shape {array.shape}'
+            )
+        if array.shape[1] != self._total_dim:
+            raise ValueError(
+                f'Last dimension mismatch: expected {self._total_dim}, '
+                f'got {array.shape[1]}'
+            )
+
+        batch = array.shape[0]
         ix = 0
-        out = []
-        batch = tensor.shape[0]
+        fields: list[jnp.ndarray] = []
 
-        for mul, d in zip(self.muls, self.dims):
-            field = tensor[:, ix : ix + mul * d]
-            ix += mul * d
+        for mul, dim in zip(self._muls, self._dims):
+            field = array[:, ix : ix + mul * dim]
+            ix += mul * dim
 
-            if self.cueq_config is not None:
-                if self.cueq_config.layout_str == 'mul_ir':
-                    field = jnp.reshape(field, (batch, mul, d))
-                else:  # "ir_mul"
-                    field = jnp.reshape(field, (batch, d, mul))
+            if self.cueq_config is not None and self.cueq_config.layout_str == 'ir_mul':
+                field = field.reshape(batch, dim, mul)
             else:
-                field = jnp.reshape(field, (batch, mul, d))
+                field = field.reshape(batch, mul, dim)
 
-            out.append(field)
+            fields.append(field)
 
-        if self.cueq_config is not None:
-            if self.cueq_config.layout_str == 'mul_ir':
-                return jnp.concatenate(out, axis=-1)
-            else:  # "ir_mul"
-                return jnp.concatenate(out, axis=-2)
-        return jnp.concatenate(out, axis=-1)
+        if self.cueq_config is not None and self.cueq_config.layout_str == 'ir_mul':
+            return jnp.concatenate(fields, axis=-2)
+        return jnp.concatenate(fields, axis=-1)
 
 
 def mask_head(x: jnp.ndarray, head: int, num_heads: int) -> jnp.ndarray:
