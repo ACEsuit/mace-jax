@@ -1,9 +1,3 @@
-import importlib
-import importlib.util
-import sys
-import types
-from pathlib import Path
-
 import numpy as np
 import torch
 from e3nn import o3
@@ -15,34 +9,7 @@ from mace.modules.irreps_tools import (
     reshape_irreps as TorchReshapeIrreps,
 )
 
-
-def _load_jax_irreps_tools():
-    module_name = 'mace_jax.modules.irreps_tools'
-    try:
-        return importlib.import_module(module_name)
-    except ModuleNotFoundError:
-        pkg_name = 'mace_jax.modules'
-        if pkg_name not in sys.modules:
-            modules_pkg = types.ModuleType(pkg_name)
-            modules_pkg.__path__ = [
-                str(Path(__file__).resolve().parents[1] / 'mace_jax/modules')
-            ]
-            sys.modules[pkg_name] = modules_pkg
-
-        spec = importlib.util.spec_from_file_location(
-            module_name,
-            Path(__file__).resolve().parents[1] / 'mace_jax/modules/irreps_tools.py',
-        )
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[module_name] = module
-        assert spec.loader is not None
-        spec.loader.exec_module(module)
-        return module
-
-
-_jax_irreps_tools = _load_jax_irreps_tools()
-CuEquivarianceConfig = _jax_irreps_tools.CuEquivarianceConfig
-reshape_irreps = _jax_irreps_tools.reshape_irreps
+from mace_jax.modules.irreps_tools import CuEquivarianceConfig, reshape_irreps
 
 
 def _random_flat(batch: int, irreps: Irreps, rng: np.random.Generator) -> np.ndarray:

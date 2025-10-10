@@ -5,10 +5,9 @@ from __future__ import annotations
 import cuequivariance_jax as cuex
 import jax
 import jax.numpy as jnp
+import cuequivariance as cue
 from e3nn_jax import Irreps  # type: ignore
 from flax import linen as fnn
-
-import cuequivariance as cue
 from cuequivariance.group_theory.experimental.mace.symmetric_contractions import (
     symmetric_contraction as cue_mace_symmetric_contraction,
 )
@@ -19,6 +18,15 @@ from mace_jax.adapters.flax.torch import (
 )
 
 from .utility import ir_mul_to_mul_ir
+
+_NATIVE_SC_ERROR = (
+    'Importing parameters from the native Torch SymmetricContraction is not supported; '
+    "run with '--only_cueq=True' to enable the cuequivariance-backed implementation."
+)
+
+
+def _raise_native_sym_contraction_not_supported() -> None:
+    raise NotImplementedError(_NATIVE_SC_ERROR)
 
 
 @auto_import_from_torch_flax(allow_missing_mapper=True)
@@ -208,6 +216,12 @@ def _import_cue_symmetric_contraction(module, variables, scope) -> None:
     existing = target.get('weight')
     dtype = existing.dtype if existing is not None else weight.dtype
     target['weight'] = jnp.asarray(weight, dtype=dtype)
+
+
+@register_import_mapper('mace.modules.symmetric_contraction.SymmetricContraction')
+def _import_native_symmetric_contraction(module, variables, scope) -> None:
+    """Explicitly reject attempts to pull parameters from the native Torch module."""
+    _raise_native_sym_contraction_not_supported()
 
 
 def _validate_features(x: jnp.ndarray, mul: int, feature_dim: int) -> None:

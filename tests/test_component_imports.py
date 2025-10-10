@@ -138,11 +138,13 @@ class TestOutputInterface:
         assert outputs_stress['forces'] is not None
         stress = _np(outputs_stress['stress'])
 
-        def energy_core(pos, shifts=None):
+        def energy_core(pos, shifts=None, cell_override=None):
             new_data = dict(data)
             new_data['positions'] = pos
             if shifts is not None:
                 new_data['shifts'] = shifts
+            if cell_override is not None:
+                new_data['cell'] = cell_override
             return model.apply(variables, new_data, method=model._energy_fn)
 
         forces_direct, stress_direct = compute_forces_and_stress(

@@ -99,36 +99,25 @@ def _apply_module_import(
     mapper = _IMPORT_MAPPERS.get(module_name)
     has_parameters = any(True for _ in module.parameters(recurse=False))
 
-    if not scope:
-        if mapper is not None:
-            # Root-level import requires an explicit scope; defer to fallback.
-            if fallback is not None:
-                fallback(module, variables)
-            elif has_parameters:
-                raise NotImplementedError(
-                    f'No scope available for Torch module {module_name!r}; '
-                    'register a mapper or provide a fallback copier.'
-                )
-        elif has_parameters:
-            if fallback is not None:
-                fallback(module, variables)
-            else:
-                raise NotImplementedError(
-                    f'No Flax import mapper registered for Torch module {module_name!r}'
-                )
-        return
-
     if mapper is not None:
         mapper(module, variables, list(scope))
         return
 
-    if has_parameters:
-        if fallback is not None:
+    if not has_parameters:
+        return
+
+    if fallback is not None:
+        try:
+            target = _resolve_scope(variables, list(scope))
+        except KeyError:
             fallback(module, variables)
-            return
-        raise NotImplementedError(
-            f'No Flax import mapper registered for Torch module {module_name!r}'
-        )
+        else:
+            fallback(module, {'params': target})
+        return
+
+    raise NotImplementedError(
+        f'No Flax import mapper registered for Torch module {module_name!r}'
+    )
 
 
 def auto_import_from_torch_flax(
@@ -160,14 +149,38 @@ def auto_import_from_torch_flax(
     """
 
     def decorator(cls):
+        fallback_fn = fallback or (
+            _copy_direct_parameters if allow_missing_mapper else None
+        )
+
+        def _import_root_parameters(module, variables_mut) -> None:
+            has_parameters = any(True for _ in module.parameters(recurse=False))
+            if not has_parameters:
+                return
+            if fallback_fn is None:
+                raise NotImplementedError(
+                    f'No Flax import mapper registered for Torch module '
+                    f'{_torch_module_name(module)!r}'
+                )
+            fallback_fn(module, variables_mut)
+
         @classmethod
-        def import_from_torch(cls, torch_module, flax_variables):
+        def _import_from_torch_impl(
+            cls,
+            torch_module,
+            flax_variables,
+            *,
+            skip_root: bool = False,
+        ):
             variables_mut = unfreeze(flax_variables)
-            fallback_fn = fallback or (
-                _copy_direct_parameters if allow_missing_mapper else None
-            )
+
+            if skip_root:
+                _import_root_parameters(torch_module, variables_mut)
 
             for scope, module in _iter_module_tree(torch_module):
+                if skip_root and not scope:
+                    continue
+
                 try:
                     _apply_module_import(
                         module,
@@ -183,7 +196,17 @@ def auto_import_from_torch_flax(
 
             return freeze(variables_mut)
 
+        @classmethod
+        def import_from_torch(cls, torch_module, flax_variables):
+            return cls._import_from_torch_impl(
+                torch_module,
+                flax_variables,
+                skip_root=False,
+            )
+
         cls.import_from_torch = import_from_torch
+        cls._import_from_torch_impl = _import_from_torch_impl
+        cls._torch_import_fallback = fallback_fn
         return cls
 
     return decorator
@@ -233,7 +256,10 @@ def register_flax_module(torch_type: str):
         def mapper(module, variables, scope: Sequence[str]):
             target = _resolve_scope(variables, scope)
             wrapped = freeze({'params': target})
-            updated = cls.import_from_torch(module, wrapped)
+            import_impl = getattr(cls, '_import_from_torch_impl', None)
+            if import_impl is None:
+                import_impl = lambda m, v, skip_root=False: cls.import_from_torch(m, v)
+            updated = import_impl(module, wrapped, skip_root=True)
             updated_params = unfreeze(updated).get('params', {})
             target.clear()
             target.update(updated_params)

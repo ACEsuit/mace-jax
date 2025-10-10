@@ -152,7 +152,11 @@ def _import_e3nn_fc(module, variables, scope):
     for key in scope:
         node = node.setdefault(key, {})
     wrapped = freeze({'params': node})
-    updated = FullyConnectedNet.import_from_torch(module, wrapped)
+    import_impl = getattr(FullyConnectedNet, '_import_from_torch_impl', None)
+    if import_impl is None:
+        updated = FullyConnectedNet.import_from_torch(module, wrapped)
+    else:
+        updated = import_impl(module, wrapped, skip_root=True)
     updated_params = unfreeze(updated).get('params', {})
     node.clear()
     node.update(updated_params)

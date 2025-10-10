@@ -302,8 +302,8 @@ class TestModelEquivalenceSmall(ModelEquivalenceTestBase):
 
     @classmethod
     def _customise_args(cls, args):
-        args.only_cueq = False
-        args.enable_cueq = False
+        args.only_cueq = True
+        args.enable_cueq = True
         args.hidden_irreps = '32x0e+32x1o'
         args.radial_MLP = '[32]'
         args.use_agnostic_product = False
