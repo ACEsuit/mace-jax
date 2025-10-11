@@ -25,7 +25,6 @@ from mace.calculators import foundations_models
 from mace.tools.scripts_utils import extract_config_mace_model
 
 from mace_jax.data import utils as data_utils
-from mace_jax.data.neighborhood import get_neighborhood as _orig_get_neighborhood
 from mace_jax.data.utils import Configuration, graph_from_configuration
 from mace_jax.modules import interaction_classes, readout_classes
 from mace_jax.modules.models import MACE, ScaleShiftMACE
@@ -66,26 +65,6 @@ def _load_torch_model_from_foundations(
         if torch_model is None:
             raise
         return torch_model
-
-
-def _patch_get_neighborhood() -> None:
-    if getattr(data_utils, '_legacy_wrapper', False):
-        return
-
-    def _wrapper(*args, **kwargs):
-        result = _orig_get_neighborhood(*args, **kwargs)
-        if len(result) == 4:
-            edge_index, shifts, *_ = result
-            senders, receivers = edge_index
-            return senders, receivers, shifts
-        return result
-
-    data_utils.get_neighborhood = _wrapper  # type: ignore[attr-defined]
-    data_utils._legacy_wrapper = True  # type: ignore[attr-defined]
-
-
-_patch_get_neighborhood()
-
 
 def _as_irreps(value: Any) -> Irreps:
     if isinstance(value, Irreps):

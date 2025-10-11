@@ -1,5 +1,3 @@
-from typing import Optional
-
 import numpy as np
 from matscipy.neighbours import neighbour_list
 
@@ -7,8 +5,8 @@ from matscipy.neighbours import neighbour_list
 def get_neighborhood(
     positions: np.ndarray,  # [num_positions, 3]
     cutoff: float,
-    pbc: Optional[tuple[bool, bool, bool]] = None,
-    cell: Optional[np.ndarray] = None,  # [3, 3]
+    pbc: tuple[bool, bool, bool] | None = None,
+    cell: np.ndarray | None = None,  # [3, 3]
     true_self_interaction=False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     if pbc is None:

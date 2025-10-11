@@ -3,7 +3,7 @@ from collections import defaultdict, namedtuple
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from random import shuffle
-from typing import IO, Optional, Union
+from typing import IO, NamedTuple, Optional, Union
 
 import ase.data
 import ase.io
@@ -32,14 +32,14 @@ DEFAULT_CONFIG_TYPE_WEIGHTS = {DEFAULT_CONFIG_TYPE: 1.0}
 class Configuration:
     atomic_numbers: np.ndarray
     positions: Positions  # Angstrom
-    energy: Optional[float] = None  # eV
-    forces: Optional[Forces] = None  # eV/Angstrom
-    stress: Optional[Stress] = None  # eV/Angstrom^3
-    cell: Optional[Cell] = None
-    pbc: Optional[Pbc] = None
+    energy: float | None = None  # eV
+    forces: Forces | None = None  # eV/Angstrom
+    stress: Stress | None = None  # eV/Angstrom^3
+    cell: Cell | None = None
+    pbc: Pbc | None = None
 
     weight: float = 1.0  # weight of config in loss
-    config_type: Optional[str] = DEFAULT_CONFIG_TYPE  # config_type of config
+    config_type: str | None = DEFAULT_CONFIG_TYPE  # config_type of config
 
 
 Configurations = list[Configuration]
@@ -99,9 +99,9 @@ def config_from_atoms(
     # pressure = None
 
     forces = atoms.arrays.get(forces_key, None)  # eV / Ang
-    atomic_numbers = np.array(
-        [ase.data.atomic_numbers[symbol] for symbol in atoms.symbols]
-    )
+    atomic_numbers = np.array([
+        ase.data.atomic_numbers[symbol] for symbol in atoms.symbols
+    ])
     pbc = tuple(atoms.get_pbc())
     cell = np.array(atoms.get_cell())
     assert np.linalg.det(cell) >= 0.0
@@ -122,7 +122,7 @@ def config_from_atoms(
 
 def test_config_types(
     test_configs: Configurations,
-) -> list[tuple[Optional[str], list[Configuration]]]:
+) -> list[tuple[str | None, list[Configuration]]]:
     """Split test set based on config_type-s"""
     test_by_ct = defaultdict(list)
     for conf in test_configs:
@@ -131,7 +131,7 @@ def test_config_types(
 
 
 def load_from_xyz(
-    file_or_path: Union[str, IO],
+    file_or_path: str | IO,
     config_type_weights: dict = None,
     energy_key: str = 'energy',
     forces_key: str = 'forces',
@@ -291,20 +291,37 @@ def compute_average_E0s_from_species(
 
 
 GraphNodes = namedtuple('Nodes', ['positions', 'forces', 'species'])
-GraphEdges = namedtuple('Edges', ['shifts'])
+
+
+class GraphEdges(NamedTuple):
+    shifts: np.ndarray
+    unit_shifts: np.ndarray | None = None
+
+
 GraphGlobals = namedtuple('Globals', ['cell', 'energy', 'stress', 'weight'])
 
 
 def graph_from_configuration(
     config: Configuration, cutoff: float, z_table: AtomicNumberTable = None
 ) -> jraph.GraphsTuple:
-    senders, receivers, shifts = get_neighborhood(
+    (
+        edge_index,
+        shifts,
+        unit_shifts,
+        neighborhood_cell,
+    ) = get_neighborhood(
         positions=config.positions, cutoff=cutoff, pbc=config.pbc, cell=config.cell
     )
+    senders, receivers = edge_index
+    cell = neighborhood_cell
+
     if z_table is None:
         species = config.atomic_numbers
     else:
-        z_map = z_table.z_to_index_map(max_atomic_number=200)
+        max_atomic_number = (
+            int(np.max(config.atomic_numbers)) if config.atomic_numbers.size else 0
+        )
+        z_map = z_table.z_to_index_map(max_atomic_number=max(200, max_atomic_number))
         species = z_map[config.atomic_numbers]
 
     return jraph.GraphsTuple(
@@ -313,11 +330,11 @@ def graph_from_configuration(
             forces=config.forces,
             species=species,
         ),
-        edges=GraphEdges(shifts=shifts),
+        edges=GraphEdges(shifts=shifts, unit_shifts=unit_shifts),
         globals=jax.tree_util.tree_map(
             lambda x: x[None, ...],
             GraphGlobals(
-                cell=config.cell,
+                cell=cell,
                 energy=config.energy,
                 stress=config.stress,
                 weight=np.asarray(config.weight),
@@ -341,7 +358,7 @@ class GraphDataLoader:
         min_n_edge: int = 1,
         min_n_graph: int = 1,
         shuffle: bool = True,
-        n_mantissa_bits: Optional[int] = None,
+        n_mantissa_bits: int | None = None,
     ):
         self.graphs = graphs
         self.n_node = n_node

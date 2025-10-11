@@ -56,9 +56,7 @@ def reset_gin():
 @pytest.fixture(autouse=True)
 def patch_get_neighborhood(monkeypatch):
     def _wrapper(*args, **kwargs):
-        edge_index, shifts, *_ = neighborhood.get_neighborhood(*args, **kwargs)
-        senders, receivers = edge_index
-        return senders, receivers, shifts
+        return neighborhood.get_neighborhood(*args, **kwargs)
 
     monkeypatch.setattr(data_utils, 'get_neighborhood', _wrapper)
     monkeypatch.setattr(data_pkg, 'get_neighborhood', _wrapper)
