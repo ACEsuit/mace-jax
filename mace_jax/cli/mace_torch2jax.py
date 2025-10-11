@@ -5,12 +5,19 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import replace
+import warnings
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+warnings.filterwarnings(
+    'ignore',
+    message='Environment variable TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD detected.*',
+    category=UserWarning,
+)
+
 import torch
 from e3nn_jax import Irreps
 from flax import serialization
