@@ -246,7 +246,8 @@ def compute_average_E0s(
     A = np.zeros((len_train, len_zs))
     B = np.zeros(len_train)
     for i in range(len_train):
-        B[i] = graphs[i].globals.energy
+        energy = graphs[i].globals.energy
+        B[i] = float(np.asarray(energy).reshape(-1)[0])
         for j, z in enumerate(z_table.zs):
             A[i, j] = np.count_nonzero(graphs[i].nodes.species == z)
     try:
@@ -275,7 +276,8 @@ def compute_average_E0s_from_species(
     A = np.zeros((len_train, num_species))
     B = np.zeros(len_train)
     for i in range(len_train):
-        B[i] = graphs[i].globals.energy
+        energy = graphs[i].globals.energy
+        B[i] = float(np.asarray(energy).reshape(-1)[0])
         for j in range(num_species):
             A[i, j] = np.count_nonzero(graphs[i].nodes.species == j)
     try:

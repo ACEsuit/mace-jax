@@ -9,6 +9,7 @@ import jraph
 import numpy as np
 
 from mace_jax import data, modules, tools
+from mace_jax.modules.blocks import RealAgnosticResidualInteractionBlock
 
 gin.register(jax.nn.silu)
 gin.register(jax.nn.relu)
@@ -92,6 +93,11 @@ def _graph_to_data(
         'ptr': ptr,
         'cell': graph.globals.cell,
     }
+
+    unit_shifts = getattr(graph.edges, 'unit_shifts', None)
+    if unit_shifts is None:
+        unit_shifts = jnp.zeros_like(graph.edges.shifts)
+    data_dict['unit_shifts'] = unit_shifts
 
     # Optional per-node head information (for multi-head outputs).
     if hasattr(graph.nodes, 'head'):
@@ -231,7 +237,20 @@ def model(
     )
     kwargs.setdefault('atomic_energies', atomic_energies)
 
-    mace_module = modules.MACE(output_irreps='0e', **kwargs)
+    num_species_bound = kwargs.pop('num_species', None)
+    if num_species_bound is None:
+        num_elements = len(kwargs['atomic_numbers'])
+    else:
+        num_elements = num_species_bound
+    kwargs.setdefault('num_elements', num_elements)
+
+    kwargs.pop('avg_r_min', None)
+    kwargs.pop('radial_basis', None)
+    kwargs.pop('radial_envelope', None)
+    kwargs.setdefault('interaction_cls', RealAgnosticResidualInteractionBlock)
+    kwargs.setdefault('interaction_cls_first', RealAgnosticResidualInteractionBlock)
+
+    mace_module = modules.MACE(**kwargs)
 
     def apply_fn(
         params,
