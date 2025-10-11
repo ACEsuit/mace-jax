@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import MutableMapping, Sequence
-from typing import Callable
+from collections.abc import Callable, MutableMapping, Sequence
 
 import jax.numpy as jnp
 
