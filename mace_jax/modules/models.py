@@ -83,7 +83,7 @@ class MACE(fnn.Module):
             )
         self._correlation = correlation
 
-        self._atomic_numbers = jnp.asarray(self.atomic_numbers, dtype=jnp.int64)
+        self._atomic_numbers = jnp.asarray(self.atomic_numbers, dtype=jnp.int32)
         self._atomic_energies = jnp.asarray(self.atomic_energies, dtype=default_dtype())
 
         hidden_irreps = (
@@ -281,8 +281,8 @@ class MACE(fnn.Module):
         data: dict[str, jnp.ndarray],
     ) -> jnp.ndarray:
         ctx = prepare_graph(data)
-        num_atoms_arange = jnp.asarray(ctx.num_atoms_arange, dtype=jnp.int64)
-        node_heads = jnp.asarray(ctx.node_heads, dtype=jnp.int64)
+        num_atoms_arange = ctx.num_atoms_arange
+        node_heads = ctx.node_heads
 
         node_e0 = self.atomic_energies_fn(data['node_attrs'])[
             num_atoms_arange, node_heads
@@ -393,8 +393,8 @@ class ScaleShiftMACE(MACE):
         data: dict[str, jnp.ndarray],
     ) -> jnp.ndarray:
         ctx = prepare_graph(data)
-        num_atoms_arange = jnp.asarray(ctx.num_atoms_arange, dtype=jnp.int64)
-        node_heads = jnp.asarray(ctx.node_heads, dtype=jnp.int64)
+        num_atoms_arange = ctx.num_atoms_arange
+        node_heads = ctx.node_heads
 
         node_e0 = self.atomic_energies_fn(data['node_attrs'])[
             num_atoms_arange, node_heads

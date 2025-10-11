@@ -139,7 +139,7 @@ class Linear(fnn.Module):
         output_rep = cuex.equivariant_polynomial(
             self.descriptor,
             [weight_rep, x_rep],
-            math_dtype=jnp.float64,
+            math_dtype=dtype,
             method='naive',
         )
         out_ir_mul = output_rep.array

@@ -3,6 +3,8 @@ from typing import Any, Callable, NamedTuple, Optional
 import jax
 import jax.numpy as jnp
 
+from mace_jax.tools.dtype import default_dtype
+
 
 def compute_forces(
     energy_fn: Callable[[jnp.ndarray], jnp.ndarray],
@@ -172,21 +174,27 @@ class GraphContext(NamedTuple):
 def prepare_graph(
     data: dict[str, jnp.ndarray],
 ) -> GraphContext:
-    if 'head' in data:
-        node_heads = data['head'][data['batch']]
-    else:
-        node_heads = jnp.zeros_like(data['batch'])
+    batch = jnp.asarray(data['batch'], dtype=jnp.int32)
 
-    positions = data['positions']  # no requires_grad
-    cell = data['cell']
-    num_atoms_arange = jnp.arange(positions.shape[0])
+    if 'head' in data:
+        heads = jnp.asarray(data['head'], dtype=jnp.int32)
+        node_heads = heads[batch]
+    else:
+        node_heads = jnp.zeros_like(batch)
+
+    positions = jnp.asarray(data['positions'], dtype=default_dtype())
+    cell = jnp.asarray(data['cell'], dtype=positions.dtype)
+    shifts = jnp.asarray(data['shifts'], dtype=positions.dtype)
+    edge_index = jnp.asarray(data['edge_index'], dtype=jnp.int32)
+
+    num_atoms_arange = jnp.arange(positions.shape[0], dtype=jnp.int32)
     num_graphs = int(data['ptr'].shape[0] - 1)
     displacement = jnp.zeros((num_graphs, 3, 3), dtype=positions.dtype)
 
     vectors, lengths = get_edge_vectors_and_lengths(
-        positions=data['positions'],
-        edge_index=data['edge_index'],
-        shifts=data['shifts'],
+        positions=positions,
+        edge_index=edge_index,
+        shifts=shifts,
     )
     ikw = InteractionKwargs(None, (0, 0))
 

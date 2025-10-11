@@ -10,6 +10,7 @@ import numpy as np
 
 from mace_jax import data, modules, tools
 from mace_jax.modules.blocks import RealAgnosticResidualInteractionBlock
+from mace_jax.tools.dtype import default_dtype
 
 gin.register(jax.nn.silu)
 gin.register(jax.nn.relu)
@@ -59,44 +60,60 @@ def _graph_to_data(
     graph: jraph.GraphsTuple, *, num_species: int
 ) -> dict[str, jnp.ndarray]:
     """Convert a (possibly padded) graph into the dictionary layout expected by MACE."""
+    positions = jnp.asarray(graph.nodes.positions, dtype=default_dtype())
+    shifts = jnp.asarray(graph.edges.shifts, dtype=positions.dtype)
+    cell = jnp.asarray(graph.globals.cell, dtype=positions.dtype)
+
+    species = jnp.asarray(graph.nodes.species, dtype=jnp.int32)
+    senders = jnp.asarray(graph.senders, dtype=jnp.int32)
+    receivers = jnp.asarray(graph.receivers, dtype=jnp.int32)
+
     # Graph-level mask: True for real graphs, False for padding.
-    graph_mask = jraph.get_graph_padding_mask(graph)  # [n_graphs]
+    n_node = jnp.asarray(graph.n_node, dtype=jnp.int32)
+    if jnp.all(n_node > 0):
+        graph_mask = jnp.ones_like(n_node, dtype=bool)
+    else:
+        graph_mask = jraph.get_graph_padding_mask(graph)
     # Per-node mask derived from graph_mask.
     node_mask = jnp.repeat(
-        graph_mask, graph.n_node, total_repeat_length=graph.nodes.positions.shape[0]
+        graph_mask, graph.n_node, total_repeat_length=positions.shape[0]
     )
+    node_mask = node_mask.astype(positions.dtype)
 
     # Build one-hot node attributes (zeroed for padded nodes).
     node_attrs = jax.nn.one_hot(
-        graph.nodes.species.astype(jnp.int32),
+        species,
         num_classes=num_species,
-        dtype=graph.nodes.positions.dtype,
+        dtype=positions.dtype,
     )
     node_attrs = node_attrs * node_mask[:, None]
 
     # Batch indices and pointer array defining graph segment boundaries.
     graph_indices = jnp.arange(graph.n_node.shape[0], dtype=jnp.int32)
     batch = jnp.repeat(
-        graph_indices, graph.n_node, total_repeat_length=graph.nodes.positions.shape[0]
+        graph_indices, graph.n_node, total_repeat_length=positions.shape[0]
     )
+    ptr_counts = graph.n_node.astype(jnp.int32)
     ptr = jnp.concatenate([
         jnp.array([0], dtype=jnp.int32),
-        jnp.cumsum(graph.n_node.astype(jnp.int32)),
+        jnp.cumsum(ptr_counts),
     ])
 
     data_dict: dict[str, jnp.ndarray] = {
-        'positions': graph.nodes.positions,
+        'positions': positions,
         'node_attrs': node_attrs,
-        'edge_index': jnp.stack([graph.senders, graph.receivers], axis=0),
-        'shifts': graph.edges.shifts,
+        'edge_index': jnp.stack([senders, receivers], axis=0),
+        'shifts': shifts,
         'batch': batch,
         'ptr': ptr,
-        'cell': graph.globals.cell,
+        'cell': cell,
     }
 
     unit_shifts = getattr(graph.edges, 'unit_shifts', None)
     if unit_shifts is None:
-        unit_shifts = jnp.zeros_like(graph.edges.shifts)
+        unit_shifts = jnp.zeros(shifts.shape, dtype=positions.dtype)
+    else:
+        unit_shifts = jnp.asarray(unit_shifts, dtype=positions.dtype)
     data_dict['unit_shifts'] = unit_shifts
 
     # Optional per-node head information (for multi-head outputs).
