@@ -41,7 +41,7 @@ def main():
     params = reload(params)
 
     predictor = jax.jit(
-        lambda w, g: tools.predict_energy_forces_stress(lambda *x: model_fn(w, *x), g)
+        lambda w, g: model_fn(w, g, compute_force=True, compute_stress=True)
     )
 
     if checks(predictor, params, train_loader):

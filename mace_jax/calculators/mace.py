@@ -42,9 +42,7 @@ class MACEJAXCalculator(Calculator):
         self.model = model
         self.params = stop_grad(params)
         self.predictor = jax.jit(
-            lambda w, g: tools.predict_energy_forces_stress(
-                lambda *x: self.model(w, *x), g
-            )
+            lambda w, g: self.model(w, g, compute_force=True, compute_stress=True)
         )
 
         self.r_max = r_max

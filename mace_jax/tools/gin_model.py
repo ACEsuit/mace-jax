@@ -1,10 +1,8 @@
 import logging
-from typing import Callable, Dict, List, Optional, Union
+from collections.abc import Callable
 
-import ase.data
 import e3nn_jax as e3nn
 import gin
-import haiku as hk
 import jax
 import jax.numpy as jnp
 import jraph
@@ -17,10 +15,10 @@ gin.register(jax.nn.relu)
 gin.register(jax.nn.gelu)
 gin.register(jnp.abs)
 gin.register(jnp.tanh)
-gin.register("identity")(lambda x: x)
+gin.register('identity')(lambda x: x)
 
-gin.register("std_scaling")(tools.compute_mean_std_atomic_inter_energy)
-gin.register("rms_forces_scaling")(tools.compute_mean_rms_energy_forces)
+gin.register('std_scaling')(tools.compute_mean_std_atomic_inter_energy)
+gin.register('rms_forces_scaling')(tools.compute_mean_rms_energy_forces)
 
 
 @gin.configurable
@@ -55,44 +53,68 @@ def u_envelope(length, max_length, p: int):
     return e3nn.poly_envelope(p - 1, 2, max_length)(length)
 
 
-gin.external_configurable(modules.LinearNodeEmbeddingBlock, "LinearEmbedding")
-
-
 @gin.configurable
-class LinearMassEmbedding(hk.Module):
-    def __init__(self, num_species: int, irreps_out: e3nn.Irreps):
-        super().__init__()
-        self.num_species = num_species
-        self.irreps_out = e3nn.Irreps(irreps_out).filter("0e").regroup()
+def _graph_to_data(
+    graph: jraph.GraphsTuple, *, num_species: int
+) -> dict[str, jnp.ndarray]:
+    """Convert a (possibly padded) graph into the dictionary layout expected by MACE."""
+    # Graph-level mask: True for real graphs, False for padding.
+    graph_mask = jraph.get_graph_padding_mask(graph)  # [n_graphs]
+    # Per-node mask derived from graph_mask.
+    node_mask = jnp.repeat(
+        graph_mask, graph.n_node, total_repeat_length=graph.nodes.positions.shape[0]
+    )
 
-    def __call__(self, node_specie: jnp.ndarray) -> e3nn.IrrepsArray:
-        w = hk.get_parameter(
-            "embeddings",
-            shape=(self.num_species, self.irreps_out.dim),
-            dtype=jnp.float32,
-            init=hk.initializers.RandomNormal(),
-        )
-        atomic_masses = jnp.asarray(ase.data.atomic_masses)[node_specie] / 90.0  # [...]
-        return e3nn.IrrepsArray(
-            self.irreps_out, w[node_specie] * atomic_masses[..., None]
-        )
+    # Build one-hot node attributes (zeroed for padded nodes).
+    node_attrs = jax.nn.one_hot(
+        graph.nodes.species.astype(jnp.int32),
+        num_classes=num_species,
+        dtype=graph.nodes.positions.dtype,
+    )
+    node_attrs = node_attrs * node_mask[:, None]
+
+    # Batch indices and pointer array defining graph segment boundaries.
+    graph_indices = jnp.arange(graph.n_node.shape[0], dtype=jnp.int32)
+    batch = jnp.repeat(
+        graph_indices, graph.n_node, total_repeat_length=graph.nodes.positions.shape[0]
+    )
+    ptr = jnp.concatenate([
+        jnp.array([0], dtype=jnp.int32),
+        jnp.cumsum(graph.n_node.astype(jnp.int32)),
+    ])
+
+    data_dict: dict[str, jnp.ndarray] = {
+        'positions': graph.nodes.positions,
+        'node_attrs': node_attrs,
+        'edge_index': jnp.stack([graph.senders, graph.receivers], axis=0),
+        'shifts': graph.edges.shifts,
+        'batch': batch,
+        'ptr': ptr,
+        'cell': graph.globals.cell,
+    }
+
+    # Optional per-node head information (for multi-head outputs).
+    if hasattr(graph.nodes, 'head'):
+        data_dict['head'] = graph.nodes.head
+
+    return data_dict
 
 
 @gin.configurable
 def model(
     *,
     r_max: float,
-    atomic_energies_dict: Dict[int, float] = None,
-    train_graphs: List[jraph.GraphsTuple] = None,
-    initialize_seed: Optional[int] = None,
+    atomic_energies_dict: dict[int, float] = None,
+    train_graphs: list[jraph.GraphsTuple] = None,
+    initialize_seed: int | None = None,
     scaling: Callable = None,
-    atomic_energies: Union[str, np.ndarray, Dict[int, float]] = None,
-    avg_num_neighbors: float = "average",
+    atomic_energies: str | np.ndarray | dict[int, float] = None,
+    avg_num_neighbors: float = 'average',
     avg_r_min: float = None,
     num_species: int = None,
     num_interactions=3,
-    path_normalization="path",
-    gradient_normalization="path",
+    path_normalization='path',
+    gradient_normalization='path',
     learnable_atomic_energies=False,
     radial_basis: Callable[[jnp.ndarray], jnp.ndarray] = bessel_basis,
     radial_envelope: Callable[[jnp.ndarray], jnp.ndarray] = soft_envelope,
@@ -104,65 +126,65 @@ def model(
         z_table = data.get_atomic_number_table_from_zs(
             z for graph in train_graphs for z in graph.nodes.species
         )
-    logging.info(f"z_table= {z_table}")
+    logging.info(f'z_table= {z_table}')
 
-    if avg_num_neighbors == "average":
+    if avg_num_neighbors == 'average':
         avg_num_neighbors = tools.compute_avg_num_neighbors(train_graphs)
         logging.info(
-            f"Compute the average number of neighbors: {avg_num_neighbors:.3f}"
+            f'Compute the average number of neighbors: {avg_num_neighbors:.3f}'
         )
     else:
-        logging.info(f"Use the average number of neighbors: {avg_num_neighbors:.3f}")
+        logging.info(f'Use the average number of neighbors: {avg_num_neighbors:.3f}')
 
-    if avg_r_min == "average":
+    if avg_r_min == 'average':
         avg_r_min = tools.compute_avg_min_neighbor_distance(train_graphs)
-        logging.info(f"Compute the average min neighbor distance: {avg_r_min:.3f}")
+        logging.info(f'Compute the average min neighbor distance: {avg_r_min:.3f}')
     elif avg_r_min is None:
-        logging.info("Do not normalize the radial basis (avg_r_min=None)")
+        logging.info('Do not normalize the radial basis (avg_r_min=None)')
     else:
-        logging.info(f"Use the average min neighbor distance: {avg_r_min:.3f}")
+        logging.info(f'Use the average min neighbor distance: {avg_r_min:.3f}')
 
     if atomic_energies is None:
         if atomic_energies_dict is None or len(atomic_energies_dict) == 0:
-            atomic_energies = "average"
+            atomic_energies = 'average'
         else:
-            atomic_energies = "isolated_atom"
+            atomic_energies = 'isolated_atom'
 
-    if atomic_energies == "average":
+    if atomic_energies == 'average':
         atomic_energies_dict = data.compute_average_E0s(train_graphs, z_table)
         logging.info(
-            f"Computed average Atomic Energies using least squares: {atomic_energies_dict}"
+            f'Computed average Atomic Energies using least squares: {atomic_energies_dict}'
         )
-        atomic_energies = np.array(
-            [atomic_energies_dict.get(z, 0.0) for z in range(num_species)]
-        )
-    elif atomic_energies == "isolated_atom":
+        atomic_energies = np.array([
+            atomic_energies_dict.get(z, 0.0) for z in range(num_species)
+        ])
+    elif atomic_energies == 'isolated_atom':
         logging.info(
-            f"Using atomic energies from isolated atoms in the dataset: {atomic_energies_dict}"
+            f'Using atomic energies from isolated atoms in the dataset: {atomic_energies_dict}'
         )
-        atomic_energies = np.array(
-            [atomic_energies_dict.get(z, 0.0) for z in range(num_species)]
-        )
-    elif atomic_energies == "zero":
-        logging.info("Not using atomic energies")
+        atomic_energies = np.array([
+            atomic_energies_dict.get(z, 0.0) for z in range(num_species)
+        ])
+    elif atomic_energies == 'zero':
+        logging.info('Not using atomic energies')
         atomic_energies = np.zeros(num_species)
     elif isinstance(atomic_energies, np.ndarray):
         logging.info(
-            f"Use Atomic Energies that are provided: {atomic_energies.tolist()}"
+            f'Use Atomic Energies that are provided: {atomic_energies.tolist()}'
         )
         if atomic_energies.shape != (num_species,):
             logging.error(
-                f"atomic_energies.shape={atomic_energies.shape} != (num_species={num_species},)"
+                f'atomic_energies.shape={atomic_energies.shape} != (num_species={num_species},)'
             )
             raise ValueError
     elif isinstance(atomic_energies, dict):
         atomic_energies_dict = atomic_energies
-        logging.info(f"Use Atomic Energies that are provided: {atomic_energies_dict}")
-        atomic_energies = np.array(
-            [atomic_energies_dict.get(z, 0.0) for z in range(num_species)]
-        )
+        logging.info(f'Use Atomic Energies that are provided: {atomic_energies_dict}')
+        atomic_energies = np.array([
+            atomic_energies_dict.get(z, 0.0) for z in range(num_species)
+        ])
     else:
-        raise ValueError(f"atomic_energies={atomic_energies} is not supported")
+        raise ValueError(f'atomic_energies={atomic_energies} is not supported')
 
     # check that num_species is consistent with the dataset
     if z_table is None:
@@ -170,12 +192,12 @@ def model(
             for graph in train_graphs:
                 if not np.all(graph.nodes.species < num_species):
                     raise ValueError(
-                        f"max(graph.nodes.species)={np.max(graph.nodes.species)} >= num_species={num_species}"
+                        f'max(graph.nodes.species)={np.max(graph.nodes.species)} >= num_species={num_species}'
                     )
     else:
         if max(z_table.zs) >= num_species:
             raise ValueError(
-                f"max(z_table.zs)={max(z_table.zs)} >= num_species={num_species}"
+                f'max(z_table.zs)={max(z_table.zs)} >= num_species={num_species}'
             )
 
     if scaling is None:
@@ -183,7 +205,12 @@ def model(
     else:
         mean, std = scaling(train_graphs, atomic_energies)
         logging.info(
-            f"Scaling with {scaling.__qualname__}: mean={mean:.2f}, std={std:.2f}"
+            f'Scaling with {scaling.__qualname__}: mean={mean:.2f}, std={std:.2f}'
+        )
+
+    if learnable_atomic_energies:
+        raise NotImplementedError(
+            'learnable_atomic_energies is not supported by the Flax-based gin model.'
         )
 
     kwargs.update(
@@ -197,58 +224,63 @@ def model(
             radial_envelope=radial_envelope,
         )
     )
-    logging.info(f"Create MACE with parameters {kwargs}")
+    logging.info(f'Create MACE with parameters {kwargs}')
+    kwargs.setdefault(
+        'atomic_numbers',
+        tuple(z_table.zs) if z_table is not None else tuple(range(num_species)),
+    )
+    kwargs.setdefault('atomic_energies', atomic_energies)
 
-    @hk.without_apply_rng
-    @hk.transform
-    def model_(
-        vectors: jnp.ndarray,  # [n_edges, 3]
-        node_z: jnp.ndarray,  # [n_nodes]
-        senders: jnp.ndarray,  # [n_edges]
-        receivers: jnp.ndarray,  # [n_edges]
-    ) -> jnp.ndarray:
-        e3nn.config("path_normalization", path_normalization)
-        e3nn.config("gradient_normalization", gradient_normalization)
+    mace_module = modules.MACE(output_irreps='0e', **kwargs)
 
-        mace = modules.MACE(output_irreps="0e", **kwargs)
+    def apply_fn(
+        params,
+        graph: jraph.GraphsTuple,
+        *,
+        compute_force: bool = True,
+        compute_stress: bool = False,
+    ) -> dict[str, jnp.ndarray]:
+        """Apply the MACE module to a (possibly padded) graph."""
+        e3nn.config('path_normalization', path_normalization)
+        e3nn.config('gradient_normalization', gradient_normalization)
 
-        if hk.running_init():
-            logging.info(
-                "model: "
-                f"num_features={mace.num_features} "
-                f"hidden_irreps={mace.hidden_irreps} "
-                f"interaction_irreps={mace.interaction_irreps} ",
-            )
-
-        contributions = mace(
-            vectors, node_z, senders, receivers
-        )  # [n_nodes, num_interactions, 0e]
-        contributions = contributions.array[:, :, 0]  # [n_nodes, num_interactions]
-        node_energies = jnp.sum(contributions, axis=1)  # [n_nodes, ]
-
-        node_energies = mean + std * node_energies
-
-        if learnable_atomic_energies:
-            atomic_energies_ = hk.get_parameter(
-                "atomic_energies",
-                shape=(num_species,),
-                init=hk.initializers.Constant(atomic_energies),
-            )
-        else:
-            atomic_energies_ = jnp.asarray(atomic_energies)
-        node_energies += atomic_energies_[node_z]  # [n_nodes, ]
-
-        return node_energies
-
-    if initialize_seed is not None:
-        params = jax.jit(model_.init)(
-            jax.random.PRNGKey(initialize_seed),
-            jnp.zeros((1, 3)),
-            jnp.array([16]),
-            jnp.array([0]),
-            jnp.array([0]),
+        data_dict = _graph_to_data(graph, num_species=num_species)
+        outputs = mace_module.apply(
+            params,
+            data_dict,
+            compute_force=compute_force,
+            compute_stress=compute_stress,
         )
-    else:
-        params = None
 
-    return model_.apply, params, num_interactions
+        # Apply optional rescaling consistent with the historical Haiku version.
+        graph_mask = jraph.get_graph_padding_mask(graph).astype(outputs['energy'].dtype)
+        node_mask = jnp.repeat(graph_mask, graph.n_node)
+
+        num_nodes = graph.n_node.astype(outputs['energy'].dtype)
+        energy = outputs['energy']
+        energy = std * energy + mean * num_nodes
+        energy = energy * graph_mask
+
+        forces = outputs['forces']
+        if forces is not None:
+            forces = std * forces
+            forces = forces * node_mask[:, None]
+
+        stress = outputs['stress']
+        if stress is not None:
+            stress = std * stress
+            stress = stress * graph_mask[:, None, None]
+
+        return {
+            'energy': energy,
+            'forces': forces,
+            'stress': stress,
+        }
+
+    params = None
+    if initialize_seed is not None and train_graphs:
+        example_graph = train_graphs[0]
+        example_data = _graph_to_data(example_graph, num_species=num_species)
+        params = mace_module.init(jax.random.PRNGKey(initialize_seed), example_data)
+
+    return apply_fn, params, num_interactions
