@@ -6,6 +6,7 @@ from typing import Callable, Dict, List, Optional
 
 import gin
 import jax
+from jax import config as jax_config
 import jax.numpy as jnp
 import jraph
 import numpy as np
@@ -26,8 +27,8 @@ def flags(
     seed: int,
     profile: bool = False,
 ):
-    jax.config.update("jax_debug_nans", debug)
-    jax.config.update("jax_debug_infs", debug)
+    jax_config.update("jax_debug_nans", debug)
+    jax_config.update("jax_debug_infs", debug)
     tools.set_default_dtype(dtype)
     tools.set_seeds(seed)
     if profile:

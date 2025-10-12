@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import e3nn_jax as e3nn
 import jax
+from jax import config as jax_config
 import jax.numpy as jnp
 import jraph
 import numpy as np
@@ -20,7 +21,7 @@ def set_seeds(seed: int) -> None:
 
 
 def set_default_dtype(dtype: str) -> None:
-    jax.config.update("jax_enable_x64", dtype == "float64")
+    jax_config.update("jax_enable_x64", dtype == "float64")
 
 
 class _EmptyNode:

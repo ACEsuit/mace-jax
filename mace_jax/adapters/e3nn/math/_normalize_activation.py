@@ -47,11 +47,13 @@ def normalize2mom(
     if key is None:
         key = jax.random.PRNGKey(0)
 
-    cst = float(moment(f, 2, key, dtype=dtype) ** -0.5)
-    if abs(cst - 1.0) < 1e-4:
-        return f
+    @jax.jit
+    def compute_const(prng_key):
+        return moment(f, 2, prng_key, dtype=dtype) ** -0.5
+
+    const = compute_const(key)
 
     def _normalized(x: jnp.ndarray) -> jnp.ndarray:
-        return f(x) * jnp.asarray(cst, dtype=x.dtype)
+        return f(x) * const.astype(x.dtype)
 
     return _normalized

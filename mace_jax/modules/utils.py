@@ -160,6 +160,7 @@ class InteractionKwargs(NamedTuple):
 
 
 class GraphContext(NamedTuple):
+    is_lammps: bool
     num_graphs: int
     num_atoms_arange: jnp.ndarray
     displacement: Optional[jnp.ndarray]
@@ -173,6 +174,11 @@ class GraphContext(NamedTuple):
 
 def prepare_graph(
     data: dict[str, jnp.ndarray],
+    *,
+    compute_virials: bool = False,
+    compute_stress: bool = False,
+    compute_displacement: bool = False,
+    lammps_mliap: bool = False,
 ) -> GraphContext:
     batch = jnp.asarray(data['batch'], dtype=jnp.int32)
 
@@ -181,6 +187,34 @@ def prepare_graph(
         node_heads = heads[batch]
     else:
         node_heads = jnp.zeros_like(batch)
+
+    if lammps_mliap:
+        node_attrs = jnp.asarray(data['node_attrs'])
+        n_real = int(node_attrs.shape[0])
+        n_ghosts = 0
+        vectors = jnp.asarray(data['vectors'], dtype=default_dtype())
+        lengths = jnp.linalg.norm(vectors, axis=-1, keepdims=True)
+        num_graphs = 2  # match torch behaviour: real and ghost graph
+
+        positions = jnp.zeros((n_real, 3), dtype=vectors.dtype)
+        displacement = None
+        cell = jnp.zeros((num_graphs, 3, 3), dtype=vectors.dtype)
+        num_atoms_arange = jnp.arange(n_real, dtype=jnp.int32)
+        node_heads = node_heads[:n_real]
+        ikw = InteractionKwargs(None, (n_real, n_ghosts))
+
+        return GraphContext(
+            is_lammps=True,
+            num_graphs=num_graphs,
+            num_atoms_arange=num_atoms_arange,
+            displacement=displacement,
+            positions=positions,
+            vectors=vectors,
+            lengths=lengths,
+            cell=cell,
+            node_heads=node_heads,
+            interaction_kwargs=ikw,
+        )
 
     positions = jnp.asarray(data['positions'], dtype=default_dtype())
     cell = jnp.asarray(data['cell'], dtype=positions.dtype)
@@ -199,6 +233,7 @@ def prepare_graph(
     ikw = InteractionKwargs(None, (0, 0))
 
     return GraphContext(
+        is_lammps=False,
         num_graphs=num_graphs,
         num_atoms_arange=num_atoms_arange,
         displacement=displacement,
@@ -224,7 +259,15 @@ def add_output_interface(cls=None):
             data: dict[str, jnp.ndarray],
             compute_force: bool = True,
             compute_stress: bool = False,
+            **model_kwargs,
         ) -> dict[str, Optional[jnp.ndarray]]:
+            raw_out = self._energy_fn(
+                data,
+                **model_kwargs,
+            )
+
+            energy_arr = raw_out['energy'] if isinstance(raw_out, dict) else raw_out
+
             def energy_fn(positions, shifts=None):
                 # Replace the positions in `data` with `pos` before recomputing
                 new_data = dict(data)
@@ -233,9 +276,11 @@ def add_output_interface(cls=None):
                 if shifts is not None:
                     new_data['shifts'] = shifts
 
-                return self._energy_fn(
+                out = self._energy_fn(
                     new_data,
+                    **model_kwargs,
                 )
+                return out['energy'] if isinstance(out, dict) else out
 
             total_energy, forces, stress = get_outputs(
                 energy_fn=energy_fn,
@@ -244,11 +289,17 @@ def add_output_interface(cls=None):
                 compute_stress=compute_stress,
             )
 
-            return {
-                'energy': total_energy,
-                'forces': forces,
-                'stress': stress,
-            }
+            result = (
+                dict(raw_out) if isinstance(raw_out, dict) else {'energy': energy_arr}
+            )
+            result.update(
+                {
+                    'energy': total_energy,
+                    'forces': forces,
+                    'stress': stress,
+                }
+            )
+            return result
 
         # Move __call__ to _energy_fn
         setattr(cls, '_energy_fn', getattr(cls, '__call__'))

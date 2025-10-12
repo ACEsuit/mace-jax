@@ -279,11 +279,17 @@ class MACE(fnn.Module):
     def __call__(
         self,
         data: dict[str, jnp.ndarray],
-    ) -> jnp.ndarray:
-        ctx = prepare_graph(data)
+        *,
+        return_dict: bool = False,
+        lammps_mliap: bool = False,
+    ) -> jnp.ndarray | dict[str, jnp.ndarray]:
+        ctx = prepare_graph(
+            data,
+            lammps_mliap=lammps_mliap,
+        )
         num_atoms_arange = ctx.num_atoms_arange
         node_heads = ctx.node_heads
-
+        n_real = int(num_atoms_arange.shape[0])
         node_e0 = self.atomic_energies_fn(data['node_attrs'])[
             num_atoms_arange, node_heads
         ]
@@ -310,6 +316,7 @@ class MACE(fnn.Module):
                 data['edge_index'],
                 self._atomic_numbers,
             )
+            pair_node_energy = pair_node_energy[:n_real]
             pair_energy = scatter_sum(
                 src=pair_node_energy,
                 index=data['batch'],
@@ -336,6 +343,7 @@ class MACE(fnn.Module):
                 e0 += embedding_energy
 
         energies = [e0, pair_energy]
+        node_energies_list = [node_e0, pair_node_energy]
         node_feats_concat: list[jnp.ndarray] = []
 
         for idx, (interaction, product) in enumerate(
@@ -369,10 +377,29 @@ class MACE(fnn.Module):
                 dim_size=ctx.num_graphs,
             )
             energies.append(energy)
+            node_energies_list.append(node_es)
 
         contributions = jnp.stack(energies, axis=-1)
         total_energy = jnp.sum(contributions, axis=-1)
-        return total_energy
+        node_energy = jnp.sum(jnp.stack(node_energies_list, axis=-1), axis=-1)
+
+        if not return_dict:
+            return total_energy
+
+        node_feats_out = (
+            jnp.concatenate(node_feats_concat, axis=-1)
+            if node_feats_concat
+            else node_feats
+        )
+        return {
+            'energy': total_energy,
+            'node_energy': node_energy,
+            'contributions': contributions,
+            'node_feats': node_feats_out,
+            'interaction_energy': total_energy - e0,
+            'displacement': ctx.displacement,
+            'lammps_natoms': ctx.interaction_kwargs.lammps_natoms,
+        }
 
 
 @auto_import_from_torch_flax(allow_missing_mapper=True)
@@ -391,11 +418,17 @@ class ScaleShiftMACE(MACE):
     def __call__(
         self,
         data: dict[str, jnp.ndarray],
-    ) -> jnp.ndarray:
-        ctx = prepare_graph(data)
+        *,
+        return_dict: bool = False,
+        lammps_mliap: bool = False,
+    ) -> jnp.ndarray | dict[str, jnp.ndarray]:
+        ctx = prepare_graph(
+            data,
+            lammps_mliap=lammps_mliap,
+        )
         num_atoms_arange = ctx.num_atoms_arange
         node_heads = ctx.node_heads
-
+        n_real = int(num_atoms_arange.shape[0])
         node_e0 = self.atomic_energies_fn(data['node_attrs'])[
             num_atoms_arange, node_heads
         ]
@@ -422,6 +455,7 @@ class ScaleShiftMACE(MACE):
                 data['edge_index'],
                 self._atomic_numbers,
             )
+            pair_node_energy = pair_node_energy[:n_real]
         else:
             pair_node_energy = jnp.zeros_like(node_e0)
 
@@ -469,6 +503,9 @@ class ScaleShiftMACE(MACE):
                 ]
             )
 
+        node_feats_out = (
+            jnp.concatenate(node_feats_list, axis=-1) if node_feats_list else node_feats
+        )
         node_inter_es = jnp.sum(jnp.stack(node_energies_list, axis=0), axis=0)
         node_inter_es = self.scale_shift(node_inter_es, node_heads)
         inter_e = scatter_sum(
@@ -478,4 +515,22 @@ class ScaleShiftMACE(MACE):
             dim_size=ctx.num_graphs,
         )
 
-        return e0 + inter_e
+        total_energy = e0 + inter_e
+        node_energy = node_e0 + node_inter_es
+
+        if not return_dict:
+            return total_energy
+
+        contributions = jnp.stack(
+            (e0, inter_e),
+            axis=-1,
+        )
+        return {
+            'energy': total_energy,
+            'node_energy': node_energy,
+            'contributions': contributions,
+            'node_feats': node_feats_out,
+            'interaction_energy': inter_e,
+            'displacement': ctx.displacement,
+            'lammps_natoms': ctx.interaction_kwargs.lammps_natoms,
+        }

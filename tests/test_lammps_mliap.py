@@ -1,0 +1,137 @@
+import jax
+import jax.numpy as jnp
+import numpy as np
+import pytest
+from e3nn_jax import Irreps
+
+from mace_jax import modules
+from mace_jax.calculators.lammps_mliap_mace import LAMMPS_MLIAP_MACE
+
+
+class DummyLAMMPSData:
+    def __init__(self, elems, rij, pair_i, pair_j):
+        self.nlocal = len(elems)
+        self.ntotal = len(elems)
+        self.npairs = len(pair_i)
+        self.elems = np.asarray(elems, dtype=np.int64)
+        self.rij = np.asarray(rij, dtype=float)
+        self.pair_i = np.asarray(pair_i, dtype=np.int32)
+        self.pair_j = np.asarray(pair_j, dtype=np.int32)
+        self.eatoms = np.zeros(self.ntotal, dtype=float)
+        self.energy = 0.0
+        self.updated_pair_forces = None
+
+    def update_pair_forces_gpu(self, values):
+        self.updated_pair_forces = np.asarray(values, dtype=float)
+
+
+def _build_test_model():
+    return modules.ScaleShiftMACE(
+        r_max=5.0,
+        num_bessel=2,
+        num_polynomial_cutoff=2,
+        max_ell=1,
+        interaction_cls=modules.interaction_classes[
+            'RealAgnosticResidualInteractionBlock'
+        ],
+        interaction_cls_first=modules.interaction_classes[
+            'RealAgnosticResidualInteractionBlock'
+        ],
+        num_interactions=1,
+        num_elements=1,
+        hidden_irreps=Irreps('1x0e'),
+        MLP_irreps=Irreps('1x0e'),
+        atomic_energies=np.zeros((1,), dtype=np.float64),
+        avg_num_neighbors=1.0,
+        atomic_numbers=(1,),
+        correlation=1,
+        gate=None,
+        pair_repulsion=False,
+        distance_transform='None',
+        atomic_inter_scale=np.asarray(1.0),
+        atomic_inter_shift=np.asarray(0.0),
+    )
+
+
+def _build_lammps_batch(vectors, pair_i, pair_j, natoms):
+    zeros_vec = jnp.zeros_like(vectors)
+    return {
+        'vectors': vectors,
+        'node_attrs': jax.nn.one_hot(
+            jnp.zeros(natoms, dtype=jnp.int32), num_classes=1, dtype=jnp.float64
+        ),
+        'edge_index': jnp.stack((pair_j, pair_i), axis=0),
+        'batch': jnp.zeros(natoms, dtype=jnp.int32),
+        'natoms': jnp.asarray((natoms, 0), dtype=jnp.int32),
+        'ptr': jnp.asarray([0, natoms, natoms], dtype=jnp.int32),
+        'positions': jnp.zeros((natoms, 3), dtype=jnp.float64),
+        'unit_shifts': zeros_vec,
+        'shifts': zeros_vec,
+        'cell': jnp.zeros((2, 3, 3), dtype=jnp.float64),
+    }
+
+
+def test_lammps_mliap_wrapper_matches_direct_model():
+    model = _build_test_model()
+
+    pair_i = jnp.asarray([0, 1], dtype=jnp.int32)
+    pair_j = jnp.asarray([1, 0], dtype=jnp.int32)
+    vectors = jnp.asarray([[0.8, 0.0, 0.0], [-0.8, 0.0, 0.0]], dtype=jnp.float64)
+
+    lammps_batch = _build_lammps_batch(vectors, pair_i, pair_j, natoms=2)
+
+    variables = model.init(
+        jax.random.PRNGKey(0),
+        lammps_batch,
+        return_dict=True,
+        lammps_mliap=True,
+    )
+
+    direct_out = model.apply(
+        variables,
+        lammps_batch,
+        return_dict=True,
+        lammps_mliap=True,
+    )
+
+    def energy_with_vectors(edge_vectors):
+        batch = dict(lammps_batch)
+        batch['vectors'] = edge_vectors
+        out = model.apply(
+            variables,
+            batch,
+            return_dict=True,
+            lammps_mliap=True,
+        )
+        return jnp.sum(out['energy'])
+
+    grad_vectors = jax.grad(energy_with_vectors)(lammps_batch['vectors'])
+    expected_pair_forces = -np.asarray(grad_vectors)
+
+    calculator = LAMMPS_MLIAP_MACE(model, variables)
+
+    dummy_data = DummyLAMMPSData(
+        elems=[0, 0],
+        rij=vectors,
+        pair_i=pair_i,
+        pair_j=pair_j,
+    )
+
+    calculator.compute_forces(dummy_data)
+
+    node_energy = np.asarray(direct_out['node_energy'])
+    total_energy = float(np.asarray(direct_out['energy']).sum())
+
+    np.testing.assert_allclose(
+        dummy_data.eatoms[: dummy_data.nlocal],
+        node_energy[: dummy_data.nlocal],
+        rtol=1e-9,
+        atol=1e-9,
+    )
+    np.testing.assert_allclose(
+        dummy_data.updated_pair_forces,
+        expected_pair_forces,
+        rtol=1e-9,
+        atol=1e-9,
+    )
+    assert dummy_data.energy == pytest.approx(total_energy)
