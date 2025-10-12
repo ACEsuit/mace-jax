@@ -80,7 +80,6 @@ class MACEEdgeForcesWrapper:
                 d,
                 compute_force=False,
                 compute_stress=False,
-                return_dict=True,
                 lammps_mliap=True,
             )
         )
@@ -93,7 +92,6 @@ class MACEEdgeForcesWrapper:
                 batch,
                 compute_force=False,
                 compute_stress=False,
-                return_dict=True,
                 lammps_mliap=True,
             )
             energy = out['energy']

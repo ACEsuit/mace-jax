@@ -280,9 +280,8 @@ class MACE(fnn.Module):
         self,
         data: dict[str, jnp.ndarray],
         *,
-        return_dict: bool = False,
         lammps_mliap: bool = False,
-    ) -> jnp.ndarray | dict[str, jnp.ndarray]:
+    ) -> dict[str, jnp.ndarray]:
         ctx = prepare_graph(
             data,
             lammps_mliap=lammps_mliap,
@@ -382,10 +381,6 @@ class MACE(fnn.Module):
         contributions = jnp.stack(energies, axis=-1)
         total_energy = jnp.sum(contributions, axis=-1)
         node_energy = jnp.sum(jnp.stack(node_energies_list, axis=-1), axis=-1)
-
-        if not return_dict:
-            return total_energy
-
         node_feats_out = (
             jnp.concatenate(node_feats_concat, axis=-1)
             if node_feats_concat
@@ -419,9 +414,8 @@ class ScaleShiftMACE(MACE):
         self,
         data: dict[str, jnp.ndarray],
         *,
-        return_dict: bool = False,
         lammps_mliap: bool = False,
-    ) -> jnp.ndarray | dict[str, jnp.ndarray]:
+    ) -> dict[str, jnp.ndarray]:
         ctx = prepare_graph(
             data,
             lammps_mliap=lammps_mliap,
@@ -517,14 +511,7 @@ class ScaleShiftMACE(MACE):
 
         total_energy = e0 + inter_e
         node_energy = node_e0 + node_inter_es
-
-        if not return_dict:
-            return total_energy
-
-        contributions = jnp.stack(
-            (e0, inter_e),
-            axis=-1,
-        )
+        contributions = jnp.stack((e0, inter_e), axis=-1)
         return {
             'energy': total_energy,
             'node_energy': node_energy,

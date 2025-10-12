@@ -83,14 +83,12 @@ def test_lammps_mliap_wrapper_matches_direct_model():
     variables = model.init(
         jax.random.PRNGKey(0),
         lammps_batch,
-        return_dict=True,
         lammps_mliap=True,
     )
 
     direct_out = model.apply(
         variables,
         lammps_batch,
-        return_dict=True,
         lammps_mliap=True,
     )
 
@@ -100,7 +98,6 @@ def test_lammps_mliap_wrapper_matches_direct_model():
         out = model.apply(
             variables,
             batch,
-            return_dict=True,
             lammps_mliap=True,
         )
         return jnp.sum(out['energy'])
