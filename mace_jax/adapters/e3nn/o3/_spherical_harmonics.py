@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Sequence, Union
+from collections.abc import Sequence
+from typing import Any
 
 import jax.numpy as jnp
 from e3nn_jax import Irreps, spherical_harmonics
@@ -16,7 +17,7 @@ from mace_jax.adapters.flax.torch import auto_import_from_torch_flax
 class SphericalHarmonics(fnn.Module):
     """Evaluate spherical harmonics with cues that mirror the Torch layer API."""
 
-    irreps_out: Union[int, Sequence[int], str, Irreps]
+    irreps_out: int | Sequence[int] | str | Irreps
     normalize: bool
     normalization: str = 'integral'
     irreps_in: Any = None
@@ -39,8 +40,7 @@ class SphericalHarmonics(fnn.Module):
 
         if irreps_in not in (Irreps('1x1o'), Irreps('1x1e')):
             raise ValueError(
-                'irreps_in must be either `1x1o` or `1x1e`; '
-                f'received {irreps_in!s}'
+                f'irreps_in must be either `1x1o` or `1x1e`; received {irreps_in!s}'
             )
         self._irreps_in = irreps_in
 
@@ -55,7 +55,7 @@ class SphericalHarmonics(fnn.Module):
                 )
             ls.extend([ir.l] * mul)
 
-        irreps_out = Irreps([(1, (l, input_parity**l)) for l in ls]).simplify()
+        irreps_out = Irreps([(1, (lv, input_parity**lv)) for lv in ls]).simplify()
         self._ls_list = ls
         self._irreps_out = irreps_out
         self._lmax = max(ls) if ls else 0

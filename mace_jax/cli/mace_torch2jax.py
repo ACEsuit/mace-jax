@@ -4,14 +4,15 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import replace
 import warnings
+from dataclasses import replace
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+
 warnings.filterwarnings(
     'ignore',
     message='Environment variable TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD detected.*',
@@ -65,6 +66,7 @@ def _load_torch_model_from_foundations(
         if torch_model is None:
             raise
         return torch_model
+
 
 def _as_irreps(value: Any) -> Irreps:
     if isinstance(value, Irreps):
@@ -230,9 +232,9 @@ def main():
         if not configurations:
             raise ValueError(f'No configurations found in {args.predict}')
 
-        species_table = data_utils.AtomicNumberTable([
-            int(z) for z in config['atomic_numbers']
-        ])
+        species_table = data_utils.AtomicNumberTable(
+            [int(z) for z in config['atomic_numbers']]
+        )
 
         for idx, configuration in enumerate(configurations):
             species_indices = data_utils.atomic_numbers_to_indices(

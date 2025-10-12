@@ -2,7 +2,7 @@ import logging
 import os
 import time
 from contextlib import contextmanager
-from typing import Any, Dict, Tuple
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -100,8 +100,8 @@ class MACEEdgeForcesWrapper:
         self._grad_edge_forces = jax.jit(jax.grad(energy_sum, argnums=2))
 
     def __call__(
-        self, data: Dict[str, jnp.ndarray]
-    ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        self, data: dict[str, jnp.ndarray]
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         batch = dict(data)
         batch['head'] = jnp.asarray([self.head_idx], dtype=jnp.int32)
 
@@ -185,7 +185,7 @@ class LAMMPS_MLIAP_MACE(MLIAPUnified):
         natoms: int,
         nghosts: int,
         species: jnp.ndarray,
-    ) -> Dict[str, jnp.ndarray]:
+    ) -> dict[str, jnp.ndarray]:
         vectors = jnp.asarray(np.asarray(data.rij), dtype=self.dtype)
         pair_j = jnp.asarray(np.asarray(data.pair_j), dtype=jnp.int32)
         pair_i = jnp.asarray(np.asarray(data.pair_i), dtype=jnp.int32)

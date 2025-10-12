@@ -99,9 +99,9 @@ def config_from_atoms(
     # pressure = None
 
     forces = atoms.arrays.get(forces_key, None)  # eV / Ang
-    atomic_numbers = np.array([
-        ase.data.atomic_numbers[symbol] for symbol in atoms.symbols
-    ])
+    atomic_numbers = np.array(
+        [ase.data.atomic_numbers[symbol] for symbol in atoms.symbols]
+    )
     pbc = tuple(atoms.get_pbc())
     cell = np.array(atoms.get_cell())
     assert np.linalg.det(cell) >= 0.0
