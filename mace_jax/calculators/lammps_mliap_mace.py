@@ -74,18 +74,23 @@ class MACEEdgeForcesWrapper:
         head_name = kwargs.get('head', self.heads[-1])
         self.head_idx = self.heads.index(head_name)
 
-        self._apply = jax.jit(
-            lambda p, d: self.model.apply(
+        def _apply_fn(p, d, lammps_class, lammps_natoms):
+            data = d if lammps_natoms is None else dict(d, natoms=lammps_natoms)
+            return self.model.apply(
                 p,
-                d,
+                data,
                 compute_force=False,
                 compute_stress=False,
                 lammps_mliap=True,
+                lammps_class=lammps_class,
             )
-        )
 
-        def energy_sum(p, d, vectors):
+        self._apply = jax.jit(_apply_fn, static_argnums=(2, 3))
+
+        def energy_sum(p, d, lammps_class, lammps_natoms, vectors):
             batch = dict(d)
+            if lammps_natoms is not None:
+                batch['natoms'] = lammps_natoms
             batch['vectors'] = vectors
             out = self.model.apply(
                 p,
@@ -93,24 +98,41 @@ class MACEEdgeForcesWrapper:
                 compute_force=False,
                 compute_stress=False,
                 lammps_mliap=True,
+                lammps_class=lammps_class,
             )
             energy = out['energy']
             return jnp.sum(energy)
 
-        self._grad_edge_forces = jax.jit(jax.grad(energy_sum, argnums=2))
+        self._grad_edge_forces = jax.jit(
+            jax.grad(energy_sum, argnums=4),
+            static_argnums=(2, 3),
+        )
 
     def __call__(
-        self, data: dict[str, jnp.ndarray]
+        self, data: dict[str, Any]
     ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         batch = dict(data)
+        lammps_class = batch.pop('lammps_class', None)
+        lammps_natoms = batch.pop('natoms', None)
         batch['head'] = jnp.asarray([self.head_idx], dtype=jnp.int32)
 
-        outputs = self._apply(self.params, batch)
+        outputs = self._apply(
+            self.params,
+            batch,
+            lammps_class,
+            lammps_natoms,
+        )
         energy = outputs['energy']
         node_energy = outputs['node_energy']
 
         vectors = batch['vectors']
-        grad_vectors = self._grad_edge_forces(self.params, batch, vectors)
+        grad_vectors = self._grad_edge_forces(
+            self.params,
+            batch,
+            lammps_class,
+            lammps_natoms,
+            vectors,
+        )
         pair_forces = -grad_vectors
 
         return energy, node_energy, pair_forces
@@ -185,7 +207,7 @@ class LAMMPS_MLIAP_MACE(MLIAPUnified):
         natoms: int,
         nghosts: int,
         species: jnp.ndarray,
-    ) -> dict[str, jnp.ndarray]:
+    ) -> dict[str, Any]:
         vectors = jnp.asarray(np.asarray(data.rij), dtype=self.dtype)
         pair_j = jnp.asarray(np.asarray(data.pair_j), dtype=jnp.int32)
         pair_i = jnp.asarray(np.asarray(data.pair_i), dtype=jnp.int32)

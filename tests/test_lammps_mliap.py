@@ -12,9 +12,9 @@ from mace_jax.calculators.lammps_mliap_mace import (
 
 
 class DummyLAMMPSData:
-    def __init__(self, elems, rij, pair_i, pair_j):
-        self.nlocal = len(elems)
-        self.ntotal = len(elems)
+    def __init__(self, elems, rij, pair_i, pair_j, *, nlocal=None, ntotal=None):
+        self.nlocal = len(elems) if nlocal is None else int(nlocal)
+        self.ntotal = len(elems) if ntotal is None else int(ntotal)
         self.npairs = len(pair_i)
         self.elems = np.asarray(elems, dtype=np.int64)
         self.rij = np.asarray(rij, dtype=float)
@@ -23,15 +23,17 @@ class DummyLAMMPSData:
         self.eatoms = np.zeros(self.ntotal, dtype=float)
         self.energy = 0.0
         self.updated_pair_forces = None
+        self.exchange_calls = 0
 
     def update_pair_forces_gpu(self, values):
         self.updated_pair_forces = np.asarray(values, dtype=float)
 
     def forward_exchange(self, src, dst, vec_len):
+        self.exchange_calls += 1
         np.copyto(dst, src)
 
 
-def _build_test_model():
+def _build_test_model(num_interactions: int = 1):
     return modules.ScaleShiftMACE(
         r_max=5.0,
         num_bessel=2,
@@ -43,7 +45,7 @@ def _build_test_model():
         interaction_cls_first=modules.interaction_classes[
             'RealAgnosticResidualInteractionBlock'
         ],
-        num_interactions=1,
+        num_interactions=num_interactions,
         num_elements=1,
         hidden_irreps=Irreps('1x0e'),
         MLP_irreps=Irreps('1x0e'),
@@ -59,7 +61,7 @@ def _build_test_model():
     )
 
 
-def _build_lammps_batch(vectors, pair_i, pair_j, natoms):
+def _build_lammps_batch(vectors, pair_i, pair_j, natoms, *, n_ghosts: int = 0):
     zeros_vec = jnp.zeros_like(vectors)
     return {
         'vectors': vectors,
@@ -68,8 +70,8 @@ def _build_lammps_batch(vectors, pair_i, pair_j, natoms):
         ),
         'edge_index': jnp.stack((pair_j, pair_i), axis=0),
         'batch': jnp.zeros(natoms, dtype=jnp.int32),
-        'natoms': jnp.asarray((natoms, 0), dtype=jnp.int32),
-        'ptr': jnp.asarray([0, natoms, natoms], dtype=jnp.int32),
+        'natoms': (natoms, n_ghosts),
+        'ptr': jnp.asarray([0, natoms, natoms + n_ghosts], dtype=jnp.int32),
         'positions': jnp.zeros((natoms, 3), dtype=jnp.float64),
         'unit_shifts': zeros_vec,
         'shifts': zeros_vec,
@@ -183,3 +185,81 @@ def test_create_lammps_factory_returns_working_wrapper():
         atol=1e-9,
     )
     assert dummy_data.energy == pytest.approx(total_energy)
+
+
+def test_lammps_mliap_wrapper_handles_ghost_atoms():
+    model = _build_test_model()
+
+    pair_i = jnp.asarray([0, 1], dtype=jnp.int32)
+    pair_j = jnp.asarray([1, 0], dtype=jnp.int32)
+    vectors = jnp.asarray([[0.8, 0.0, 0.0], [-0.8, 0.0, 0.0]], dtype=jnp.float64)
+
+    n_real = 2
+    n_ghosts = 1
+    lammps_batch = _build_lammps_batch(
+        vectors, pair_i, pair_j, natoms=n_real, n_ghosts=n_ghosts
+    )
+
+    variables = model.init(
+        jax.random.PRNGKey(0),
+        lammps_batch,
+        lammps_mliap=True,
+    )
+
+    class _ExchangeStub:
+        def forward_exchange(self, src, dst, vec_len):
+            np.copyto(dst, src)
+
+    exchange_stub = _ExchangeStub()
+
+    direct_out = model.apply(
+        variables,
+        lammps_batch,
+        lammps_mliap=True,
+        lammps_class=exchange_stub,
+    )
+
+    def energy_with_vectors(edge_vectors):
+        batch = dict(lammps_batch)
+        batch['vectors'] = edge_vectors
+        out = model.apply(
+            variables,
+            batch,
+            lammps_mliap=True,
+            lammps_class=exchange_stub,
+        )
+        return jnp.sum(out['energy'])
+
+    grad_vectors = jax.grad(energy_with_vectors)(lammps_batch['vectors'])
+    expected_pair_forces = -np.asarray(grad_vectors)
+
+    calculator = LAMMPS_MLIAP_MACE(model, variables)
+
+    dummy_data = DummyLAMMPSData(
+        elems=[0, 0],
+        rij=vectors,
+        pair_i=pair_i,
+        pair_j=pair_j,
+        nlocal=n_real,
+        ntotal=n_real + n_ghosts,
+    )
+
+    calculator.compute_forces(dummy_data)
+
+    node_energy = np.asarray(direct_out['node_energy'])
+    total_energy = float(np.asarray(direct_out['energy']).sum())
+
+    np.testing.assert_allclose(
+        dummy_data.eatoms[: dummy_data.nlocal],
+        node_energy[: dummy_data.nlocal],
+        rtol=1e-9,
+        atol=1e-9,
+    )
+    np.testing.assert_allclose(
+        dummy_data.updated_pair_forces,
+        expected_pair_forces,
+        rtol=1e-9,
+        atol=1e-9,
+    )
+    assert dummy_data.energy == pytest.approx(total_energy)
+    assert dummy_data.ntotal - dummy_data.nlocal == n_ghosts
