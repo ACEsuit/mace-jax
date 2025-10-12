@@ -195,7 +195,11 @@ def main():
         help='Specific foundation variant (e.g., "medium-mpa-0"). See foundations_models for options.',
     )
     parser.add_argument(
-        '--output', required=True, help='Output file for serialized JAX parameters'
+        '--output',
+        help=(
+            "Output file for serialized JAX parameters. Defaults to '<checkpoint>-jax.npz' "
+            "(or '<source>-<model>-jax.npz' for foundation downloads)."
+        ),
     )
     parser.add_argument(
         '--predict',
@@ -210,11 +214,23 @@ def main():
             if isinstance(bundle, dict) and 'model' in bundle
             else bundle
         )
+        default_output = Path(args.torch_model).with_name(
+            Path(args.torch_model).stem + '-jax.npz'
+        )
     else:
         torch_model = _load_torch_model_from_foundations(
             args.foundation, args.model_name
         )
     torch_model.eval()
+
+    if args.output is None:
+        if args.torch_model:
+            output_path = default_output
+        else:
+            model_tag = args.model_name or args.foundation
+            output_path = Path(f'{args.foundation}-{model_tag}-jax.npz')
+    else:
+        output_path = Path(args.output)
 
     config = extract_config_mace_model(torch_model)
     if 'error' in config:
@@ -224,8 +240,8 @@ def main():
     jax_model, variables, template_data = convert_model(torch_model, config)
 
     params_bytes = serialization.to_bytes(variables)
-    Path(args.output).write_bytes(params_bytes)
-    print(f'Serialized JAX parameters written to {args.output}')
+    output_path.write_bytes(params_bytes)
+    print(f'Serialized JAX parameters written to {output_path}')
 
     if args.predict:
         _, configurations = data_utils.load_from_xyz(args.predict)

@@ -26,15 +26,59 @@ python setup.py develop
 
 ## Usage
 
-### Training
+### Command-line tools
 
-To train a MACE model, you can use the `run_train.py` script:
+After installation, the following convenience commands are available:
+
+#### `mace-jax-train`
+
+Runs training driven by gin-config files. Example:
 
 ```sh
-python -m mace_jax.run_train config.gin
+mace-jax-train configs/aspirin_small.gin \
+  -b "mace_jax.tools.gin_functions.flags.seed=0" \
+  --print-config
 ```
 
-An example of configuration file is located in the directory `configs`.
+Use `--dry-run` to validate the configuration without launching training. The operative configuration is saved alongside the run logs.
+
+#### `mace-jax-train-plot`
+
+Produces loss/metric curves from `.metrics` logs generated during training:
+
+```sh
+mace-jax-train-plot --path results --keys rmse_e_per_atom,rmse_f --output-format pdf
+```
+
+The command accepts either a directory (all `.metrics` files are processed) or a single metrics file.
+
+#### `mace-create-lammps-model`
+
+Converts a Torch MACE checkpoint to the JAX MLIAP format:
+
+```sh
+mace-create-lammps-model checkpoints/model.pt --dtype float32 --output exported_model.pkl
+```
+
+Add `--head NAME` when exporting a multi-head model.
+
+#### `mace-torch2jax`
+
+Performs Torch→JAX parameter conversion and (optionally) prediction. To compute energies for the provided test structure:
+
+```sh
+mace-torch2jax checkpoints/model.pt --predict tests/test_data/simple.xyz
+```
+
+If `--output` is omitted the converted parameters are written to `<checkpoint>-jax.npz`.
+
+You can try this with one of the released foundation models (downloaded automatically):
+
+```sh
+mace-torch2jax --foundation mp --model-name small --predict tests/test_data/simple.xyz
+```
+
+All commands can be invoked via `python -m mace_jax.<module>` if preferred.
 
 ### Configuration
 
