@@ -23,7 +23,19 @@ from .blocks import (
     RealAgnosticResidualNonLinearInteractionBlock,
     ScaleShiftBlock,
 )
-from .loss import WeightedEnergyForcesStressLoss, uber_loss
+from .loss import (
+    DipolePolarLoss,
+    DipoleSingleLoss,
+    UniversalLoss,
+    WeightedEnergyForcesDipoleLoss,
+    WeightedEnergyForcesL1L2Loss,
+    WeightedEnergyForcesLoss,
+    WeightedEnergyForcesStressLoss,
+    WeightedEnergyForcesVirialsLoss,
+    WeightedForcesLoss,
+    WeightedHuberEnergyForcesStressLoss,
+    uber_loss,
+)
 from .models import MACE, ScaleShiftMACE
 
 __all__ = [
@@ -40,7 +52,16 @@ __all__ = [
     'NonLinearReadoutBlock',
     'RadialEmbeddingBlock',
     'ScaleShiftBlock',
+    'WeightedEnergyForcesLoss',
     'WeightedEnergyForcesStressLoss',
+    'WeightedEnergyForcesVirialsLoss',
+    'WeightedForcesLoss',
+    'WeightedHuberEnergyForcesStressLoss',
+    'WeightedEnergyForcesDipoleLoss',
+    'WeightedEnergyForcesL1L2Loss',
+    'UniversalLoss',
+    'DipoleSingleLoss',
+    'DipolePolarLoss',
     'uber_loss',
     'MACE',
     'ScaleShiftMACE',

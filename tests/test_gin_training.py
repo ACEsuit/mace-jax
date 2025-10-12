@@ -89,7 +89,18 @@ def patch_mace_module(monkeypatch):
                 if compute_stress
                 else None
             )
-            return {'energy': energy, 'forces': forces, 'stress': stress}
+            virials = jnp.zeros((1, 3, 3), dtype=data['positions'].dtype)
+            dipole = jnp.zeros((1, 3), dtype=data['positions'].dtype)
+            polarizability = jnp.zeros((1, 3, 3), dtype=data['positions'].dtype)
+            outputs = {
+                'energy': energy,
+                'forces': forces,
+                'stress': stress,
+                'virials': virials,
+                'dipole': dipole,
+                'polarizability': polarizability,
+            }
+            return outputs
 
     monkeypatch.setattr(gin_model.modules, 'MACE', _DummyMACE)
     yield
@@ -115,6 +126,10 @@ def patch_tools_train(monkeypatch):
 
 
 def test_gin_training_smoke(tmp_path):
+    _run_gin_training(tmp_path)
+
+
+def _run_gin_training(tmp_path):
     train_loader, valid_loader, test_loader, atomic_energies_dict, r_max = (
         gin_datasets.datasets()
     )
@@ -168,3 +183,24 @@ def test_gin_training_smoke(tmp_path):
     )
 
     assert ema_params is not None
+    return ema_params
+
+
+@pytest.mark.parametrize(
+    'loss_config',
+    [
+        "loss = @mace_jax.modules.loss.WeightedEnergyForcesLoss()",
+        "loss = @mace_jax.modules.loss.WeightedForcesLoss()",
+        "loss = @mace_jax.modules.loss.WeightedHuberEnergyForcesStressLoss()",
+        "loss = @mace_jax.modules.loss.WeightedEnergyForcesL1L2Loss()",
+        "loss = @mace_jax.modules.loss.WeightedEnergyForcesVirialsLoss()",
+        "loss = @mace_jax.modules.loss.WeightedEnergyForcesDipoleLoss()",
+        "loss = @mace_jax.modules.loss.UniversalLoss()",
+        "loss = @mace_jax.modules.loss.DipoleSingleLoss()",
+        "loss = @mace_jax.modules.loss.DipolePolarLoss()",
+    ],
+)
+def test_gin_training_with_alternate_losses(tmp_path, loss_config):
+    gin.parse_config('import mace_jax.modules.loss')
+    gin.parse_config(loss_config)
+    _run_gin_training(tmp_path)
