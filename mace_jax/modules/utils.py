@@ -179,6 +179,7 @@ def prepare_graph(
     compute_stress: bool = False,
     compute_displacement: bool = False,
     lammps_mliap: bool = False,
+    lammps_class: Optional[Any] = None,
 ) -> GraphContext:
     batch = jnp.asarray(data['batch'], dtype=jnp.int32)
 
@@ -191,7 +192,11 @@ def prepare_graph(
     if lammps_mliap:
         node_attrs = jnp.asarray(data['node_attrs'])
         n_real = int(node_attrs.shape[0])
-        n_ghosts = 0
+        natoms = data.get('natoms', (n_real, 0))
+        if isinstance(natoms, tuple):
+            n_ghosts = int(natoms[1]) if len(natoms) > 1 else 0
+        else:
+            n_ghosts = int(natoms) if natoms else 0
         vectors = jnp.asarray(data['vectors'], dtype=default_dtype())
         lengths = jnp.linalg.norm(vectors, axis=-1, keepdims=True)
         num_graphs = 2  # match torch behaviour: real and ghost graph
@@ -201,7 +206,8 @@ def prepare_graph(
         cell = jnp.zeros((num_graphs, 3, 3), dtype=vectors.dtype)
         num_atoms_arange = jnp.arange(n_real, dtype=jnp.int32)
         node_heads = node_heads[:n_real]
-        ikw = InteractionKwargs(None, (n_real, n_ghosts))
+        lammps_cls = lammps_class if lammps_class is not None else data.get('lammps_class')
+        ikw = InteractionKwargs(lammps_cls, (n_real, n_ghosts))
 
         return GraphContext(
             is_lammps=True,

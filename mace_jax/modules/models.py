@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, Callable
+from typing import Any, Callable, Optional, Tuple
 
 import jax.numpy as jnp
 import numpy as np
@@ -14,6 +14,7 @@ from mace_jax.adapters.flax.torch import auto_import_from_torch_flax
 from mace_jax.modules.embeddings import GenericJointEmbedding
 from mace_jax.modules.radial import ZBLBasis
 from mace_jax.tools.dtype import default_dtype
+from mace_jax.tools.lammps_exchange import forward_exchange as lammps_forward_exchange
 from mace_jax.tools.scatter import scatter_sum
 
 from .blocks import (
@@ -27,6 +28,27 @@ from .blocks import (
     ScaleShiftBlock,
 )
 from .utils import add_output_interface, prepare_graph
+
+
+def _apply_lammps_exchange(
+    node_feats: jnp.ndarray,
+    lammps_class: Optional[Any],
+    lammps_natoms: Tuple[int, int],
+) -> jnp.ndarray:
+    """Host exchange helper mirroring the Torch LAMMPS MP behaviour."""
+
+    if lammps_class is None:
+        return node_feats
+
+    n_real = int(lammps_natoms[0])
+    n_ghosts = int(lammps_natoms[1])
+    if n_ghosts <= 0:
+        return node_feats
+
+    pad = jnp.zeros((n_ghosts, node_feats.shape[1]), dtype=node_feats.dtype)
+    padded = jnp.concatenate((node_feats, pad), axis=0)
+    exchanged = lammps_forward_exchange(padded, lammps_class)
+    return exchanged[:n_real]
 
 
 def _as_tuple(value: Sequence[int] | int, repeats: int) -> tuple[int, ...]:
@@ -281,14 +303,21 @@ class MACE(fnn.Module):
         data: dict[str, jnp.ndarray],
         *,
         lammps_mliap: bool = False,
+        lammps_class: Any | None = None,
     ) -> dict[str, jnp.ndarray]:
         ctx = prepare_graph(
             data,
             lammps_mliap=lammps_mliap,
+            lammps_class=data.get('lammps_class', lammps_class),
         )
         num_atoms_arange = ctx.num_atoms_arange
         node_heads = ctx.node_heads
+        interaction_kwargs = ctx.interaction_kwargs
+        lammps_class = interaction_kwargs.lammps_class
+        lammps_natoms = interaction_kwargs.lammps_natoms
         n_real = int(num_atoms_arange.shape[0])
+        if lammps_class is not None:
+            n_real = int(lammps_natoms[0])
         node_e0 = self.atomic_energies_fn(data['node_attrs'])[
             num_atoms_arange, node_heads
         ]
@@ -315,7 +344,8 @@ class MACE(fnn.Module):
                 data['edge_index'],
                 self._atomic_numbers,
             )
-            pair_node_energy = pair_node_energy[:n_real]
+            if lammps_class is not None:
+                pair_node_energy = pair_node_energy[:n_real]
             pair_energy = scatter_sum(
                 src=pair_node_energy,
                 index=data['batch'],
@@ -345,11 +375,22 @@ class MACE(fnn.Module):
         node_energies_list = [node_e0, pair_node_energy]
         node_feats_concat: list[jnp.ndarray] = []
 
+        node_attrs_full = data['node_attrs']
+
         for idx, (interaction, product) in enumerate(
             zip(self.interactions, self.products)
         ):
+            if lammps_class is not None and idx > 0:
+                node_feats = _apply_lammps_exchange(
+                    node_feats, lammps_class, lammps_natoms
+                )
+
+            node_attrs_slice = node_attrs_full
+            if lammps_class is not None and idx > 0:
+                node_attrs_slice = node_attrs_slice[:n_real]
+
             node_feats, sc = interaction(
-                node_attrs=data['node_attrs'],
+                node_attrs=node_attrs_slice,
                 node_feats=node_feats,
                 edge_attrs=edge_attrs,
                 edge_feats=edge_feats,
@@ -360,8 +401,11 @@ class MACE(fnn.Module):
             node_feats = product(
                 node_feats=node_feats,
                 sc=sc,
-                node_attrs=data['node_attrs'],
+                node_attrs=node_attrs_slice,
             )
+            if lammps_class is not None:
+                node_feats = node_feats[:n_real]
+
             node_feats_concat.append(node_feats)
 
         for idx, readout in enumerate(self.readouts):
@@ -415,14 +459,21 @@ class ScaleShiftMACE(MACE):
         data: dict[str, jnp.ndarray],
         *,
         lammps_mliap: bool = False,
+        lammps_class: Optional[Any] = None,
     ) -> dict[str, jnp.ndarray]:
         ctx = prepare_graph(
             data,
             lammps_mliap=lammps_mliap,
+            lammps_class=data.get('lammps_class', lammps_class),
         )
         num_atoms_arange = ctx.num_atoms_arange
         node_heads = ctx.node_heads
+        interaction_kwargs = ctx.interaction_kwargs
+        lammps_class = interaction_kwargs.lammps_class
+        lammps_natoms = interaction_kwargs.lammps_natoms
         n_real = int(num_atoms_arange.shape[0])
+        if lammps_class is not None:
+            n_real = int(lammps_natoms[0])
         node_e0 = self.atomic_energies_fn(data['node_attrs'])[
             num_atoms_arange, node_heads
         ]
@@ -449,7 +500,8 @@ class ScaleShiftMACE(MACE):
                 data['edge_index'],
                 self._atomic_numbers,
             )
-            pair_node_energy = pair_node_energy[:n_real]
+            if lammps_class is not None:
+                pair_node_energy = pair_node_energy[:n_real]
         else:
             pair_node_energy = jnp.zeros_like(node_e0)
 
@@ -470,11 +522,22 @@ class ScaleShiftMACE(MACE):
         node_energies_list = [pair_node_energy]
         node_feats_list: list[jnp.ndarray] = []
 
+        node_attrs_full = data['node_attrs']
+
         for idx, (interaction, product) in enumerate(
             zip(self.interactions, self.products)
         ):
+            if lammps_class is not None and idx > 0:
+                node_feats = _apply_lammps_exchange(
+                    node_feats, lammps_class, lammps_natoms
+                )
+
+            node_attrs_slice = node_attrs_full
+            if lammps_class is not None and idx > 0:
+                node_attrs_slice = node_attrs_slice[:n_real]
+
             node_feats, sc = interaction(
-                node_attrs=data['node_attrs'],
+                node_attrs=node_attrs_slice,
                 node_feats=node_feats,
                 edge_attrs=edge_attrs,
                 edge_feats=edge_feats,
@@ -485,8 +548,11 @@ class ScaleShiftMACE(MACE):
             node_feats = product(
                 node_feats=node_feats,
                 sc=sc,
-                node_attrs=data['node_attrs'],
+                node_attrs=node_attrs_slice,
             )
+            if lammps_class is not None:
+                node_feats = node_feats[:n_real]
+
             node_feats_list.append(node_feats)
 
         for idx, readout in enumerate(self.readouts):

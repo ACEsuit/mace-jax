@@ -5,7 +5,10 @@ import pytest
 from e3nn_jax import Irreps
 
 from mace_jax import modules
-from mace_jax.calculators.lammps_mliap_mace import LAMMPS_MLIAP_MACE
+from mace_jax.calculators.lammps_mliap_mace import (
+    LAMMPS_MLIAP_MACE,
+    create_lammps_mliap_calculator,
+)
 
 
 class DummyLAMMPSData:
@@ -23,6 +26,9 @@ class DummyLAMMPSData:
 
     def update_pair_forces_gpu(self, values):
         self.updated_pair_forces = np.asarray(values, dtype=float)
+
+    def forward_exchange(self, src, dst, vec_len):
+        np.copyto(dst, src)
 
 
 def _build_test_model():
@@ -68,6 +74,7 @@ def _build_lammps_batch(vectors, pair_i, pair_j, natoms):
         'unit_shifts': zeros_vec,
         'shifts': zeros_vec,
         'cell': jnp.zeros((2, 3, 3), dtype=jnp.float64),
+        'lammps_class': None,
     }
 
 
@@ -128,6 +135,50 @@ def test_lammps_mliap_wrapper_matches_direct_model():
     np.testing.assert_allclose(
         dummy_data.updated_pair_forces,
         expected_pair_forces,
+        rtol=1e-9,
+        atol=1e-9,
+    )
+    assert dummy_data.energy == pytest.approx(total_energy)
+
+
+def test_create_lammps_factory_returns_working_wrapper():
+    model = _build_test_model()
+
+    pair_i = jnp.asarray([0, 1], dtype=jnp.int32)
+    pair_j = jnp.asarray([1, 0], dtype=jnp.int32)
+    vectors = jnp.asarray([[0.8, 0.0, 0.0], [-0.8, 0.0, 0.0]], dtype=jnp.float64)
+
+    lammps_batch = _build_lammps_batch(vectors, pair_i, pair_j, natoms=2)
+
+    variables = model.init(
+        jax.random.PRNGKey(0),
+        lammps_batch,
+        lammps_mliap=True,
+    )
+
+    direct_out = model.apply(
+        variables,
+        lammps_batch,
+        lammps_mliap=True,
+    )
+
+    wrapper = create_lammps_mliap_calculator(model, variables)
+
+    dummy_data = DummyLAMMPSData(
+        elems=[0, 0],
+        rij=vectors,
+        pair_i=pair_i,
+        pair_j=pair_j,
+    )
+
+    wrapper.compute_forces(dummy_data)
+
+    node_energy = np.asarray(direct_out['node_energy'])
+    total_energy = float(np.asarray(direct_out['energy']).sum())
+
+    np.testing.assert_allclose(
+        dummy_data.eatoms[: dummy_data.nlocal],
+        node_energy[: dummy_data.nlocal],
         rtol=1e-9,
         atol=1e-9,
     )

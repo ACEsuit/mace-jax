@@ -210,6 +210,7 @@ class LAMMPS_MLIAP_MACE(MLIAPUnified):
             'unit_shifts': zeros_vec,
             'shifts': zeros_vec,
             'cell': cell,
+            'lammps_class': data,
         }
 
     def _update_lammps_data(
