@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Callable
 
 import jax.numpy as jnp
 import numpy as np
@@ -32,23 +32,22 @@ from .utils import add_output_interface, prepare_graph
 
 def _apply_lammps_exchange(
     node_feats: jnp.ndarray,
-    lammps_class: Optional[Any],
-    lammps_natoms: Tuple[int, int],
+    lammps_class: Any | None,
+    lammps_natoms: tuple[int, int],
 ) -> jnp.ndarray:
     """Host exchange helper mirroring the Torch LAMMPS MP behaviour."""
 
     if lammps_class is None:
         return node_feats
 
-    n_real = int(lammps_natoms[0])
-    n_ghosts = int(lammps_natoms[1])
-    if n_ghosts <= 0:
+    n_pad = int(lammps_natoms[1])
+    if n_pad <= 0:
         return node_feats
 
-    pad = jnp.zeros((n_ghosts, node_feats.shape[1]), dtype=node_feats.dtype)
+    pad = jnp.zeros((n_pad, node_feats.shape[1]), dtype=node_feats.dtype)
     padded = jnp.concatenate((node_feats, pad), axis=0)
     exchanged = lammps_forward_exchange(padded, lammps_class)
-    return exchanged[:n_real]
+    return exchanged
 
 
 def _as_tuple(value: Sequence[int] | int, repeats: int) -> tuple[int, ...]:
@@ -396,8 +395,11 @@ class MACE(fnn.Module):
                 edge_feats=edge_feats,
                 edge_index=data['edge_index'],
                 cutoff=cutoff,
+                n_real=n_real if lammps_class is not None else None,
                 first_layer=(idx == 0),
             )
+            if lammps_class is not None and idx == 0:
+                node_attrs_slice = node_attrs_slice[:n_real]
             node_feats = product(
                 node_feats=node_feats,
                 sc=sc,
@@ -459,7 +461,7 @@ class ScaleShiftMACE(MACE):
         data: dict[str, jnp.ndarray],
         *,
         lammps_mliap: bool = False,
-        lammps_class: Optional[Any] = None,
+        lammps_class: Any | None = None,
     ) -> dict[str, jnp.ndarray]:
         ctx = prepare_graph(
             data,
@@ -543,8 +545,11 @@ class ScaleShiftMACE(MACE):
                 edge_feats=edge_feats,
                 edge_index=data['edge_index'],
                 cutoff=cutoff,
+                n_real=n_real if lammps_class is not None else None,
                 first_layer=(idx == 0),
             )
+            if lammps_class is not None and idx == 0:
+                node_attrs_slice = node_attrs_slice[:n_real]
             node_feats = product(
                 node_feats=node_feats,
                 sc=sc,
