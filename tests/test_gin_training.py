@@ -189,15 +189,15 @@ def _run_gin_training(tmp_path):
 @pytest.mark.parametrize(
     'loss_config',
     [
-        "loss = @mace_jax.modules.loss.WeightedEnergyForcesLoss()",
-        "loss = @mace_jax.modules.loss.WeightedForcesLoss()",
-        "loss = @mace_jax.modules.loss.WeightedHuberEnergyForcesStressLoss()",
-        "loss = @mace_jax.modules.loss.WeightedEnergyForcesL1L2Loss()",
-        "loss = @mace_jax.modules.loss.WeightedEnergyForcesVirialsLoss()",
-        "loss = @mace_jax.modules.loss.WeightedEnergyForcesDipoleLoss()",
-        "loss = @mace_jax.modules.loss.UniversalLoss()",
-        "loss = @mace_jax.modules.loss.DipoleSingleLoss()",
-        "loss = @mace_jax.modules.loss.DipolePolarLoss()",
+        'loss = @mace_jax.modules.loss.WeightedEnergyForcesLoss()',
+        'loss = @mace_jax.modules.loss.WeightedForcesLoss()',
+        'loss = @mace_jax.modules.loss.WeightedHuberEnergyForcesStressLoss()',
+        'loss = @mace_jax.modules.loss.WeightedEnergyForcesL1L2Loss()',
+        'loss = @mace_jax.modules.loss.WeightedEnergyForcesVirialsLoss()',
+        'loss = @mace_jax.modules.loss.WeightedEnergyForcesDipoleLoss()',
+        'loss = @mace_jax.modules.loss.UniversalLoss()',
+        'loss = @mace_jax.modules.loss.DipoleSingleLoss()',
+        'loss = @mace_jax.modules.loss.DipolePolarLoss()',
     ],
 )
 def test_gin_training_with_alternate_losses(tmp_path, loss_config):
