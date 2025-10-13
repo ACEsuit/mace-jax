@@ -7,29 +7,15 @@
 
 import collections
 import itertools
-import os
 from collections.abc import Iterator
-from typing import List, Union
+from typing import Union
 
+import cuequivariance as cue
 import jax.numpy as jnp
 import numpy as np
 import torch
 from e3nn import o3
 from e3nn_jax import Irrep, Irreps
-
-try:
-    import cuequivariance as cue
-
-    CUET_AVAILABLE = True
-except ImportError:
-    CUET_AVAILABLE = False
-
-USE_CUEQ_CG = os.environ.get('MACE_USE_CUEQ_CG', '0').lower() in (
-    '1',
-    'true',
-    'yes',
-    'y',
-)
 
 _TP = collections.namedtuple('_TP', 'op, args')
 _INPUT = collections.namedtuple('_INPUT', 'tensor, start, stop')
@@ -62,7 +48,7 @@ def wigner_3j(l3: int, l1: int, l2: int, dtype=None) -> jnp.ndarray:
 
 
 def _wigner_nj(
-    irrepss: List[Irreps],
+    irrepss: list[Irreps],
     normalization: str = 'component',
     filter_ir_mid=None,
     dtype=None,
@@ -149,29 +135,23 @@ def U_matrix_real(
     irreps_out = Irreps(irreps_out)
     irrepss = [Irreps(irreps_in)] * correlation
 
-    if use_cueq_cg is None:
-        use_cueq_cg = USE_CUEQ_CG
     if correlation == 4 and not use_cueq_cg:
         filter_ir_mid = [(i, 1 if i % 2 == 0 else -1) for i in range(12)]
-    if use_cueq_cg and CUET_AVAILABLE:
+    if use_cueq_cg:
         return compute_U_cueq(
             irreps_in, irreps_out=irreps_out, correlation=correlation, dtype=dtype
         )
 
     try:
         wigners = _wigner_nj(irrepss, normalization, filter_ir_mid, dtype=dtype)
-    except NotImplementedError as e:
-        if CUET_AVAILABLE:
-            return compute_U_cueq(
-                irreps_in,
-                irreps_out=irreps_out,
-                correlation=correlation,
-                use_nonsymmetric_product=use_nonsymmetric_product,
-                dtype=dtype,
-            )
-        raise NotImplementedError(
-            'The requested Clebsch-Gordan coefficients are not implemented, please install cuequivariance; pip install cuequivariance'
-        ) from e
+    except NotImplementedError:
+        return compute_U_cueq(
+            irreps_in,
+            irreps_out=irreps_out,
+            correlation=correlation,
+            use_nonsymmetric_product=use_nonsymmetric_product,
+            dtype=dtype,
+        )
 
     out = []
     stack = []
@@ -207,101 +187,91 @@ def U_matrix_real(
     return out
 
 
-if CUET_AVAILABLE:
-
-    def compute_U_cueq(
-        irreps_in, irreps_out, correlation=2, use_nonsymmetric_product=False, dtype=None
-    ):
-        U = []
-        irreps_in = cue.Irreps(O3_e3nn, str(irreps_in))
-        irreps_out = cue.Irreps(O3_e3nn, str(irreps_out))
-        for _, ir in irreps_out:
-            try:
-                U_matrix_full_symm = cue.reduced_symmetric_tensor_product_basis(
-                    irreps_in,
-                    correlation,
-                    keep_ir=ir,
-                    layout=cue.ir_mul,
-                )
-                U_matrix_full_symm = U_matrix_full_symm.array
-                if use_nonsymmetric_product:
-                    try:
-                        U_matrix_full_antisymmetric = (
-                            cue.reduced_antisymmetric_tensor_product_basis(
-                                irreps_in,
-                                correlation,
-                                keep_ir=ir,
-                                layout=cue.ir_mul,
-                            ).array
-                        )
-                        U_matrix_full = jnp.concatenate(
-                            (U_matrix_full_symm, U_matrix_full_antisymmetric), axis=-1
-                        )
-                    except ValueError:
-                        continue
-                else:
-                    U_matrix_full = U_matrix_full_symm
-
-            except ValueError:
-                if ir.dim == 1:
-                    out_shape = (*([irreps_in.dim] * correlation), 1)
-                else:
-                    out_shape = (ir.dim, *([irreps_in.dim] * correlation), 1)
-                return [jnp.zeros(out_shape, dtype=dtype)]
-            if U_matrix_full.shape[-1] == 0:
-                if ir.dim == 1:
-                    out_shape = (*([irreps_in.dim] * correlation), 1)
-                else:
-                    out_shape = (ir.dim, *([irreps_in.dim] * correlation), 1)
-                return [jnp.zeros(out_shape, dtype=dtype)]
-
-            ir_str = str(ir)
-            U.append(ir_str)
-            U_matrix_full = jnp.array(
-                U_matrix_full.reshape(*([irreps_in.dim] * correlation), ir.dim, -1),
-                dtype=dtype,
+def compute_U_cueq(
+    irreps_in, irreps_out, correlation=2, use_nonsymmetric_product=False, dtype=None
+):
+    U = []
+    irreps_in = cue.Irreps(O3_e3nn, str(irreps_in))
+    irreps_out = cue.Irreps(O3_e3nn, str(irreps_out))
+    for _, ir in irreps_out:
+        try:
+            U_matrix_full_symm = cue.reduced_symmetric_tensor_product_basis(
+                irreps_in,
+                correlation,
+                keep_ir=ir,
+                layout=cue.ir_mul,
             )
-            U_matrix_full = jnp.moveaxis(U_matrix_full, -2, 0)
+            U_matrix_full_symm = U_matrix_full_symm.array
+            if use_nonsymmetric_product:
+                try:
+                    U_matrix_full_antisymmetric = (
+                        cue.reduced_antisymmetric_tensor_product_basis(
+                            irreps_in,
+                            correlation,
+                            keep_ir=ir,
+                            layout=cue.ir_mul,
+                        ).array
+                    )
+                    U_matrix_full = jnp.concatenate(
+                        (U_matrix_full_symm, U_matrix_full_antisymmetric), axis=-1
+                    )
+                except ValueError:
+                    continue
+            else:
+                U_matrix_full = U_matrix_full_symm
+
+        except ValueError:
             if ir.dim == 1:
-                U_matrix_full = U_matrix_full[0]
-            U.append(U_matrix_full)
-        return U
+                out_shape = (*([irreps_in.dim] * correlation), 1)
+            else:
+                out_shape = (ir.dim, *([irreps_in.dim] * correlation), 1)
+            return [jnp.zeros(out_shape, dtype=dtype)]
+        if U_matrix_full.shape[-1] == 0:
+            if ir.dim == 1:
+                out_shape = (*([irreps_in.dim] * correlation), 1)
+            else:
+                out_shape = (ir.dim, *([irreps_in.dim] * correlation), 1)
+            return [jnp.zeros(out_shape, dtype=dtype)]
 
-    class O3_e3nn(cue.O3):
-        def __mul__(  # pylint: disable=no-self-argument
-            rep1: 'O3_e3nn', rep2: 'O3_e3nn'
-        ) -> Iterator['O3_e3nn']:
-            return [O3_e3nn(l=ir.l, p=ir.p) for ir in cue.O3.__mul__(rep1, rep2)]
+        ir_str = str(ir)
+        U.append(ir_str)
+        U_matrix_full = jnp.array(
+            U_matrix_full.reshape(*([irreps_in.dim] * correlation), ir.dim, -1),
+            dtype=dtype,
+        )
+        U_matrix_full = jnp.moveaxis(U_matrix_full, -2, 0)
+        if ir.dim == 1:
+            U_matrix_full = U_matrix_full[0]
+        U.append(U_matrix_full)
+    return U
 
-        @classmethod
-        def clebsch_gordan(
-            cls, rep1: 'O3_e3nn', rep2: 'O3_e3nn', rep3: 'O3_e3nn'
-        ) -> np.ndarray:
-            rep1, rep2, rep3 = cls._from(rep1), cls._from(rep2), cls._from(rep3)
 
-            if rep1.p * rep2.p == rep3.p:
-                return o3.wigner_3j(rep1.l, rep2.l, rep3.l).numpy()[None] * np.sqrt(
-                    rep3.dim
-                )
-            return np.zeros((0, rep1.dim, rep2.dim, rep3.dim))
+class O3_e3nn(cue.O3):
+    def __mul__(  # pylint: disable=no-self-argument
+        rep1: 'O3_e3nn', rep2: 'O3_e3nn'
+    ) -> Iterator['O3_e3nn']:
+        return [O3_e3nn(l=ir.l, p=ir.p) for ir in cue.O3.__mul__(rep1, rep2)]
 
-        def __lt__(  # pylint: disable=no-self-argument
-            rep1: 'O3_e3nn', rep2: 'O3_e3nn'
-        ) -> bool:
-            rep2 = rep1._from(rep2)
-            return (rep1.l, rep1.p) < (rep2.l, rep2.p)
+    @classmethod
+    def clebsch_gordan(
+        cls, rep1: 'O3_e3nn', rep2: 'O3_e3nn', rep3: 'O3_e3nn'
+    ) -> np.ndarray:
+        rep1, rep2, rep3 = cls._from(rep1), cls._from(rep2), cls._from(rep3)
 
-        @classmethod
-        def iterator(cls) -> Iterator['O3_e3nn']:
-            for l in itertools.count(0):
-                yield O3_e3nn(l=l, p=1 * (-1) ** l)
-                yield O3_e3nn(l=l, p=-1 * (-1) ** l)
+        if rep1.p * rep2.p == rep3.p:
+            return o3.wigner_3j(rep1.l, rep2.l, rep3.l).numpy()[None] * np.sqrt(
+                rep3.dim
+            )
+        return np.zeros((0, rep1.dim, rep2.dim, rep3.dim))
 
-else:
+    def __lt__(  # pylint: disable=no-self-argument
+        rep1: 'O3_e3nn', rep2: 'O3_e3nn'
+    ) -> bool:
+        rep2 = rep1._from(rep2)
+        return (rep1.l, rep1.p) < (rep2.l, rep2.p)
 
-    class O3_e3nn:
-        pass
-
-    print(
-        'cuequivariance is not available. Cuequivariance acceleration will be disabled.'
-    )
+    @classmethod
+    def iterator(cls) -> Iterator['O3_e3nn']:
+        for l in itertools.count(0):
+            yield O3_e3nn(l=l, p=1 * (-1) ** l)
+            yield O3_e3nn(l=l, p=-1 * (-1) ** l)
