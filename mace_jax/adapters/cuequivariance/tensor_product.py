@@ -11,6 +11,7 @@ from flax.core import freeze, unfreeze
 
 import cuequivariance as cue
 from mace_jax.adapters.flax.torch import auto_import_from_torch_flax
+from mace_jax.tools.cg import O3_e3nn
 
 from .utility import collapse_ir_mul_segments, ir_mul_to_mul_ir, mul_ir_to_ir_mul
 
@@ -118,9 +119,9 @@ class TensorProduct(fnn.Module):
         self.irreps_in2_o3 = Irreps(self.irreps_in2)
         self.irreps_out_o3 = Irreps(self.irreps_out)
 
-        self.irreps_in1_cue = cue.Irreps(cue.O3, self.irreps_in1_o3)
-        self.irreps_in2_cue = cue.Irreps(cue.O3, self.irreps_in2_o3)
-        self.irreps_out_cue = cue.Irreps(cue.O3, self.irreps_out_o3)
+        self.irreps_in1_cue = cue.Irreps(O3_e3nn, self.irreps_in1_o3)
+        self.irreps_in2_cue = cue.Irreps(O3_e3nn, self.irreps_in2_o3)
+        self.irreps_out_cue = cue.Irreps(O3_e3nn, self.irreps_out_o3)
 
         descriptor = cue.descriptors.channelwise_tensor_product(
             self.irreps_in1_cue, self.irreps_in2_cue, self.irreps_out_cue
