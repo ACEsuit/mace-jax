@@ -10,6 +10,7 @@ from cuequivariance_torch.operations.tp_channel_wise import (
 from e3nn import o3
 from e3nn.o3 import TensorProduct as TensorProductTorch
 from e3nn_jax import Irreps
+from mace.modules.irreps_tools import tp_out_irreps_with_instructions
 
 from mace_jax.adapters.cuequivariance.tensor_product import (
     TensorProduct as TensorProductJAX,
@@ -32,15 +33,14 @@ class TestTensorProductImport:
         irreps_in1 = o3.Irreps('1x0e + 1x1o')
         irreps_in2 = o3.Irreps('1x0e')
         irreps_out = o3.Irreps('1x0e + 1x1o')
-        instructions = [
-            (0, 0, 0, 'uvu', True),
-            (1, 0, 1, 'uvu', True),
-        ]
+        target_irreps, instructions = tp_out_irreps_with_instructions(
+            irreps_in1, irreps_in2, irreps_out
+        )
 
         torch_module = TensorProductTorch(
             irreps_in1,
             irreps_in2,
-            irreps_out,
+            target_irreps,
             instructions,
             shared_weights=shared_weights,
             internal_weights=internal_weights,
@@ -50,7 +50,7 @@ class TestTensorProductImport:
             torch_module=torch_module,
             irreps_in1=str(irreps_in1),
             irreps_in2=str(irreps_in2),
-            irreps_out=str(irreps_out),
+            irreps_out=str(target_irreps),
             shared_weights=shared_weights,
             internal_weights=internal_weights,
             instructions=instructions,
@@ -92,6 +92,42 @@ class TestTensorProductImport:
             shared_weights=shared_weights,
             internal_weights=internal_weights,
             backend='cue',
+        )
+
+    @pytest.mark.parametrize(
+        'shared_weights, internal_weights',
+        [
+            pytest.param(True, True, id='shared_internal'),
+            pytest.param(True, False, id='shared_external'),
+            pytest.param(False, False, id='unshared_external'),
+        ],
+    )
+    def test_e3nn_tensor_product_forward_high_l(self, shared_weights, internal_weights):
+        irreps_in1 = o3.Irreps('3x1e')
+        irreps_in2 = o3.Irreps('1x0e + 1x1e + 1x2e')
+        irreps_out = o3.Irreps('3x0e + 6x1e + 3x2e')
+        target_irreps, instructions = tp_out_irreps_with_instructions(
+            irreps_in1, irreps_in2, irreps_out
+        )
+
+        torch_module = TensorProductTorch(
+            irreps_in1,
+            irreps_in2,
+            target_irreps,
+            instructions,
+            shared_weights=shared_weights,
+            internal_weights=internal_weights,
+        )
+
+        self._assert_forward_matches(
+            torch_module=torch_module,
+            irreps_in1=str(irreps_in1),
+            irreps_in2=str(irreps_in2),
+            irreps_out=str(target_irreps),
+            shared_weights=shared_weights,
+            internal_weights=internal_weights,
+            instructions=instructions,
+            backend='e3nn',
         )
 
     def _assert_forward_matches(
