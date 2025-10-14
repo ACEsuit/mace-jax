@@ -6,10 +6,10 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import e3nn_jax as e3nn
 import jax
-from jax import config as jax_config
 import jax.numpy as jnp
 import jraph
 import numpy as np
+from jax import config as jax_config
 
 
 def count_parameters(parameters) -> int:
@@ -21,7 +21,7 @@ def set_seeds(seed: int) -> None:
 
 
 def set_default_dtype(dtype: str) -> None:
-    jax_config.update("jax_enable_x64", dtype == "float64")
+    jax_config.update('jax_enable_x64', dtype == 'float64')
 
 
 class _EmptyNode:
@@ -67,7 +67,7 @@ def flatten_dict(xs, keep_empty_nodes=False, is_leaf=None, sep=None):
     Returns:
       The flattened dictionary.
     """
-    assert isinstance(xs, dict), "expected (frozen)dict"
+    assert isinstance(xs, dict), 'expected (frozen)dict'
 
     def _key(path):
         if sep is None:
@@ -116,7 +116,7 @@ def unflatten_dict(xs, sep=None):
     Returns:
       The nested dictionary.
     """
-    assert isinstance(xs, dict), "input is not a dict"
+    assert isinstance(xs, dict), 'input is not a dict'
     result = {}
     for path, value in xs.items():
         if sep is not None:
@@ -249,7 +249,7 @@ def get_edge_vectors(
     if cell is not None:
         num_edges = receivers.shape[0]
         shifts = jnp.einsum(
-            "ei,eij->ej",
+            'ei,eij->ej',
             shifts,  # [n_edges, 3]
             jnp.repeat(
                 cell,  # [n_graph, 3, 3]
@@ -321,10 +321,10 @@ def setup_logger(
     for handler in logger.handlers:
         logger.removeHandler(handler)
 
-    fmt = "%(asctime)s.%(msecs)03d %(levelname)s: %(message)s"
+    fmt = '%(asctime)s.%(msecs)03d %(levelname)s: %(message)s'
     if name is not None:
-        fmt = f"{name} {fmt}"
-    formatter = logging.Formatter(fmt, datefmt="%Y-%m-%d %H:%M:%S")
+        fmt = f'{name} {fmt}'
+    formatter = logging.Formatter(fmt, datefmt='%Y-%m-%d %H:%M:%S')
 
     ch = logging.StreamHandler(stream=sys.stdout)
     ch.setFormatter(formatter)
@@ -357,8 +357,8 @@ class MetricsLogger:
         self.path = os.path.join(self.directory, self.filename)
 
     def log(self, d: Dict[str, Any]) -> None:
-        logging.debug(f"Saving info: {self.path}")
+        logging.debug(f'Saving info: {self.path}')
         os.makedirs(name=self.directory, exist_ok=True)
-        with open(self.path, mode="a", encoding="utf-8") as f:
+        with open(self.path, mode='a', encoding='utf-8') as f:
             f.write(json.dumps(d, cls=UniversalEncoder))
-            f.write("\n")
+            f.write('\n')

@@ -2,10 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
-import numpy as np
-
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 try:  # pragma: no cover - optional runtime dependency
     from lammps.mliap import jax as _lammps_mliap_jax
@@ -35,7 +34,11 @@ def forward_exchange(
     """Exchange features across domains via the LAMMPS communicator."""
 
     pair_handle = getattr(lammps_class, '_mace_jax_pair_handle', None)
-    if _HAS_LAMMPS_JAX and _ffi_forward_exchange is not None and pair_handle is not None:
+    if (
+        _HAS_LAMMPS_JAX
+        and _ffi_forward_exchange is not None
+        and pair_handle is not None
+    ):
         return _ffi_forward_exchange(node_feats, pair_handle)
 
     if not hasattr(lammps_class, 'forward_exchange'):

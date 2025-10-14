@@ -44,6 +44,58 @@ def parse_args(
         action='store_true',
         help='Print the operative gin config before training starts.',
     )
+    parser.add_argument(
+        '--torch-checkpoint',
+        help=(
+            'Path to a Torch checkpoint to import via gin '
+            '(binds mace_jax.tools.gin_model.model.torch_checkpoint).'
+        ),
+    )
+    parser.add_argument(
+        '--torch-head',
+        help=(
+            'Optional head name to select from the Torch checkpoint '
+            '(binds mace_jax.tools.gin_model.model.torch_head).'
+        ),
+    )
+    parser.add_argument(
+        '--torch-param-dtype',
+        choices=['float32', 'float64'],
+        help=(
+            'Desired dtype for imported Torch parameters '
+            '(binds mace_jax.tools.gin_model.model.torch_param_dtype).'
+        ),
+    )
+    parser.add_argument(
+        '--train-path',
+        help=(
+            'Override gin training dataset path '
+            '(binds mace_jax.tools.gin_datasets.datasets.train_path).'
+        ),
+    )
+    parser.add_argument(
+        '--valid-path',
+        help=(
+            'Override gin validation dataset path '
+            '(binds mace_jax.tools.gin_datasets.datasets.valid_path).'
+        ),
+    )
+    parser.add_argument(
+        '--test-path',
+        help=(
+            'Override gin test dataset path '
+            '(binds mace_jax.tools.gin_datasets.datasets.test_path).'
+        ),
+    )
+    parser.add_argument(
+        '--r-max',
+        type=float,
+        help=(
+            'Override cutoff radius used by both dataset preparation and model '
+            '(binds mace_jax.tools.gin_datasets.datasets.r_max and '
+            'mace_jax.tools.gin_model.model.r_max).'
+        ),
+    )
 
     args, remaining = parser.parse_known_args(argv)
     return args, remaining
@@ -59,6 +111,43 @@ def configure_gin(args: argparse.Namespace, remaining: list[str]) -> None:
             'No gin configuration supplied. '
             'Provide at least one config file or binding.'
         )
+
+
+def apply_cli_overrides(args: argparse.Namespace) -> None:
+    """Bind gin parameters based on CLI overrides."""
+    if args.torch_checkpoint:
+        gin.bind_parameter(
+            'mace_jax.tools.gin_model.model.torch_checkpoint',
+            str(Path(args.torch_checkpoint)),
+        )
+    if args.torch_head:
+        gin.bind_parameter(
+            'mace_jax.tools.gin_model.model.torch_head',
+            args.torch_head,
+        )
+    if args.torch_param_dtype:
+        gin.bind_parameter(
+            'mace_jax.tools.gin_model.model.torch_param_dtype',
+            args.torch_param_dtype,
+        )
+    if args.train_path:
+        gin.bind_parameter(
+            'mace_jax.tools.gin_datasets.datasets.train_path',
+            str(Path(args.train_path)),
+        )
+    if args.valid_path is not None:
+        gin.bind_parameter(
+            'mace_jax.tools.gin_datasets.datasets.valid_path',
+            None if args.valid_path == 'None' else str(Path(args.valid_path)),
+        )
+    if args.test_path is not None:
+        gin.bind_parameter(
+            'mace_jax.tools.gin_datasets.datasets.test_path',
+            None if args.test_path == 'None' else str(Path(args.test_path)),
+        )
+    if args.r_max is not None:
+        gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.r_max', args.r_max)
+        gin.bind_parameter('mace_jax.tools.gin_model.model.r_max', args.r_max)
 
 
 def run_training(dry_run: bool = False) -> None:
@@ -131,6 +220,7 @@ def run_training(dry_run: bool = False) -> None:
 def main(argv: Sequence[str] | None = None) -> None:
     args, remaining = parse_args(argv)
     configure_gin(args, remaining)
+    apply_cli_overrides(args)
 
     if args.print_config:
         logging.info('Operative gin config:\n%s', gin.config_str())

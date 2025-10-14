@@ -9,6 +9,10 @@ from mace_jax.cli import mace_jax_train_plot as train_plot
 @pytest.mark.slow
 def test_run_train_cli_dry_run(tmp_path, monkeypatch):
     results_dir = tmp_path / 'results'
+    torch_ckpt = tmp_path / 'dummy.pt'
+    torch_ckpt.write_text('checkpoint', encoding='utf-8')
+    train_xyz = Path(__file__).resolve().parent / 'test_data' / 'simple.xyz'
+
     args = [
         '--dry-run',
         '-b',
@@ -19,12 +23,28 @@ def test_run_train_cli_dry_run(tmp_path, monkeypatch):
         'mace_jax.tools.gin_functions.flags.seed=0',
         '-b',
         f"mace_jax.tools.gin_functions.logs.directory='{results_dir}'",
+        '--torch-checkpoint',
+        str(torch_ckpt),
+        '--torch-head',
+        'Surface',
+        '--torch-param-dtype',
+        'float32',
+        '--train-path',
+        str(train_xyz),
+        '--valid-path',
+        'None',
+        '--r-max',
+        '3.5',
     ]
 
     train_cli.main(args)
 
     gin_files = list(Path(results_dir).glob('*.gin'))
     assert gin_files, 'Expected operative gin config to be written during dry run.'
+    operative = gin_files[0].read_text(encoding='utf-8')
+    assert 'mace_jax.tools.gin_model.model.torch_checkpoint' in operative
+    assert 'dummy.pt' in operative
+    assert 'mace_jax.tools.gin_datasets.datasets.train_path' in operative
 
 
 def test_plot_train_cli_generates_output(tmp_path):

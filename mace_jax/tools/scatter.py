@@ -1,4 +1,5 @@
 from typing import Optional
+
 import jax.numpy as jnp
 
 
@@ -26,7 +27,7 @@ def _broadcast(src: jnp.ndarray, other: jnp.ndarray, dim: int) -> jnp.ndarray:
         else:
             # PyTorch would raise here if dimension mismatch
             raise ValueError(
-                f"Incompatible shapes for broadcasting: {src.shape} vs {other.shape}"
+                f'Incompatible shapes for broadcasting: {src.shape} vs {other.shape}'
             )
 
     # Use jnp.broadcast_to with the adjusted shape
@@ -39,9 +40,9 @@ def scatter_sum(
     dim: int = -1,
     out: Optional[jnp.ndarray] = None,
     dim_size: Optional[int] = None,
-    reduce: str = "sum",
+    reduce: str = 'sum',
 ) -> jnp.ndarray:
-    assert reduce == "sum"
+    assert reduce == 'sum'
     index = _broadcast(index, src, dim)
 
     if dim < 0:
@@ -58,7 +59,7 @@ def scatter_sum(
         out = jnp.zeros(size, dtype=src.dtype)
 
     # Build indices for scatter
-    idx_grids = jnp.meshgrid(*[jnp.arange(s) for s in src.shape], indexing="ij")
+    idx_grids = jnp.meshgrid(*[jnp.arange(s) for s in src.shape], indexing='ij')
     idx_grids[dim] = index  # replace the dimension with scatter indices
     scatter_indices = tuple(idx_grids)
 

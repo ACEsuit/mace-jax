@@ -31,7 +31,7 @@ def train(
     num_updates = 0
     ema_params = params
 
-    logging.info("Started training")
+    logging.info('Started training')
 
     @partial(jax.pmap, in_axes=(None, 0), out_axes=0)
     # @partial(jax.vmap, in_axes=(None, 0), out_axes=0)
@@ -85,7 +85,7 @@ def train(
         # Train one interval
         p_bar = tqdm.tqdm(
             interval_loader(),
-            desc=f"Train interval {interval}",
+            desc=f'Train interval {interval}',
             total=steps_per_interval,
             disable=not progress_bar,
         )
@@ -96,17 +96,17 @@ def train(
                 params, optimizer_state, ema_params, num_updates, graph
             )
             loss = float(loss)
-            p_bar.set_postfix({"loss": f"{loss:7.3f}"})
+            p_bar.set_postfix({'loss': f'{loss:7.3f}'})
 
             if last_cache_size != update_fn._cache_size():
                 last_cache_size = update_fn._cache_size()
 
-                logging.info("Compiled function `update_fn` for args:")
-                logging.info(f"- n_node={graph.n_node} total={graph.n_node.sum()}")
-                logging.info(f"- n_edge={graph.n_edge} total={graph.n_edge.sum()}")
-                logging.info(f"Outout: loss= {loss:.3f}")
+                logging.info('Compiled function `update_fn` for args:')
+                logging.info(f'- n_node={graph.n_node} total={graph.n_node.sum()}')
+                logging.info(f'- n_edge={graph.n_edge} total={graph.n_edge.sum()}')
+                logging.info(f'Outout: loss= {loss:.3f}')
                 logging.info(
-                    f"Compilation time: {time.time() - start_time:.3f}s, cache size: {last_cache_size}"
+                    f'Compilation time: {time.time() - start_time:.3f}s, cache size: {last_cache_size}'
                 )
 
 
@@ -115,7 +115,7 @@ def evaluate(
     params: Any,
     loss_fn: Any,
     data_loader: data.GraphDataLoader,
-    name: str = "Evaluation",
+    name: str = 'Evaluation',
     progress_bar: bool = True,
 ) -> Tuple[float, Dict[str, Any]]:
     r"""Evaluate the predictor on the given data loader.
@@ -141,7 +141,7 @@ def evaluate(
     delta_stress_list = []
     stress_list = []
 
-    if hasattr(predictor, "_cache_size"):
+    if hasattr(predictor, '_cache_size'):
         last_cache_size = predictor._cache_size()
     else:
         last_cache_size = None
@@ -158,19 +158,19 @@ def evaluate(
     for ref_graph in p_bar:
         output = predictor(params, ref_graph)
         pred_graph = ref_graph._replace(
-            nodes=ref_graph.nodes._replace(forces=output["forces"]),
+            nodes=ref_graph.nodes._replace(forces=output['forces']),
             globals=ref_graph.globals._replace(
-                energy=output["energy"], stress=output["stress"]
+                energy=output['energy'], stress=output['stress']
             ),
         )
 
         if last_cache_size is not None and last_cache_size != predictor._cache_size():
             last_cache_size = predictor._cache_size()
 
-            logging.info("Compiled function `predictor` for args:")
-            logging.info(f"- n_node={ref_graph.n_node} total={ref_graph.n_node.sum()}")
-            logging.info(f"- n_edge={ref_graph.n_edge} total={ref_graph.n_edge.sum()}")
-            logging.info(f"cache size: {last_cache_size}")
+            logging.info('Compiled function `predictor` for args:')
+            logging.info(f'- n_node={ref_graph.n_node} total={ref_graph.n_node.sum()}')
+            logging.info(f'- n_edge={ref_graph.n_edge} total={ref_graph.n_edge.sum()}')
+            logging.info(f'cache size: {last_cache_size}')
 
         ref_graph = jraph.unpad_with_graphs(ref_graph)
         pred_graph = jraph.unpad_with_graphs(pred_graph)
@@ -187,7 +187,7 @@ def evaluate(
         )
         total_loss += float(loss)
         num_graphs += len(ref_graph.n_edge)
-        p_bar.set_postfix({"n": num_graphs})
+        p_bar.set_postfix({'n': num_graphs})
 
         if ref_graph.globals.energy is not None:
             delta_es_list.append(ref_graph.globals.energy - pred_graph.globals.energy)
@@ -210,33 +210,33 @@ def evaluate(
             stress_list.append(ref_graph.globals.stress)
 
     if num_graphs == 0:
-        logging.warning(f"No graphs in data_loader ! Returning 0.0 for {name}")
+        logging.warning(f'No graphs in data_loader ! Returning 0.0 for {name}')
         return 0.0, {}
 
     avg_loss = total_loss / num_graphs
 
     aux = {
-        "loss": avg_loss,
-        "time": time.time() - start_time,
-        "mae_e": None,
-        "rel_mae_e": None,
-        "mae_e_per_atom": None,
-        "rel_mae_e_per_atom": None,
-        "rmse_e": None,
-        "rel_rmse_e": None,
-        "rmse_e_per_atom": None,
-        "rel_rmse_e_per_atom": None,
-        "q95_e": None,
-        "mae_f": None,
-        "rel_mae_f": None,
-        "rmse_f": None,
-        "rel_rmse_f": None,
-        "q95_f": None,
-        "mae_s": None,
-        "rel_mae_s": None,
-        "rmse_s": None,
-        "rel_rmse_s": None,
-        "q95_s": None,
+        'loss': avg_loss,
+        'time': time.time() - start_time,
+        'mae_e': None,
+        'rel_mae_e': None,
+        'mae_e_per_atom': None,
+        'rel_mae_e_per_atom': None,
+        'rmse_e': None,
+        'rel_rmse_e': None,
+        'rmse_e_per_atom': None,
+        'rel_rmse_e_per_atom': None,
+        'q95_e': None,
+        'mae_f': None,
+        'rel_mae_f': None,
+        'rmse_f': None,
+        'rel_rmse_f': None,
+        'q95_f': None,
+        'mae_s': None,
+        'rel_mae_s': None,
+        'rmse_s': None,
+        'rel_rmse_s': None,
+        'q95_s': None,
     }
 
     if len(delta_es_list) > 0:
@@ -247,21 +247,21 @@ def evaluate(
         aux.update(
             {
                 # Mean absolute error
-                "mae_e": tools.compute_mae(delta_es),
-                "rel_mae_e": tools.compute_rel_mae(delta_es, es),
-                "mae_e_per_atom": tools.compute_mae(delta_es_per_atom),
-                "rel_mae_e_per_atom": tools.compute_rel_mae(
+                'mae_e': tools.compute_mae(delta_es),
+                'rel_mae_e': tools.compute_rel_mae(delta_es, es),
+                'mae_e_per_atom': tools.compute_mae(delta_es_per_atom),
+                'rel_mae_e_per_atom': tools.compute_rel_mae(
                     delta_es_per_atom, es_per_atom
                 ),
                 # Root-mean-square error
-                "rmse_e": tools.compute_rmse(delta_es),
-                "rel_rmse_e": tools.compute_rel_rmse(delta_es, es),
-                "rmse_e_per_atom": tools.compute_rmse(delta_es_per_atom),
-                "rel_rmse_e_per_atom": tools.compute_rel_rmse(
+                'rmse_e': tools.compute_rmse(delta_es),
+                'rel_rmse_e': tools.compute_rel_rmse(delta_es, es),
+                'rmse_e_per_atom': tools.compute_rmse(delta_es_per_atom),
+                'rel_rmse_e_per_atom': tools.compute_rel_rmse(
                     delta_es_per_atom, es_per_atom
                 ),
                 # Q_95
-                "q95_e": tools.compute_q95(delta_es),
+                'q95_e': tools.compute_q95(delta_es),
             }
         )
     if len(delta_fs_list) > 0:
@@ -270,13 +270,13 @@ def evaluate(
         aux.update(
             {
                 # Mean absolute error
-                "mae_f": tools.compute_mae(delta_fs),
-                "rel_mae_f": tools.compute_rel_mae(delta_fs, fs),
+                'mae_f': tools.compute_mae(delta_fs),
+                'rel_mae_f': tools.compute_rel_mae(delta_fs, fs),
                 # Root-mean-square error
-                "rmse_f": tools.compute_rmse(delta_fs),
-                "rel_rmse_f": tools.compute_rel_rmse(delta_fs, fs),
+                'rmse_f': tools.compute_rmse(delta_fs),
+                'rel_rmse_f': tools.compute_rel_rmse(delta_fs, fs),
                 # Q_95
-                "q95_f": tools.compute_q95(delta_fs),
+                'q95_f': tools.compute_q95(delta_fs),
             }
         )
     if len(delta_stress_list) > 0:
@@ -285,13 +285,13 @@ def evaluate(
         aux.update(
             {
                 # Mean absolute error
-                "mae_s": tools.compute_mae(delta_stress),
-                "rel_mae_s": tools.compute_rel_mae(delta_stress, stress),
+                'mae_s': tools.compute_mae(delta_stress),
+                'rel_mae_s': tools.compute_rel_mae(delta_stress, stress),
                 # Root-mean-square error
-                "rmse_s": tools.compute_rmse(delta_stress),
-                "rel_rmse_s": tools.compute_rel_rmse(delta_stress, stress),
+                'rmse_s': tools.compute_rmse(delta_stress),
+                'rel_rmse_s': tools.compute_rel_rmse(delta_stress, stress),
                 # Q_95
-                "q95_s": tools.compute_q95(delta_stress),
+                'q95_s': tools.compute_q95(delta_stress),
             }
         )
 

@@ -21,8 +21,8 @@ def datasets(
     test_path: str = None,
     test_num: int = None,
     seed: int = 1234,
-    energy_key: str = "energy",
-    forces_key: str = "forces",
+    energy_key: str = 'energy',
+    forces_key: str = 'forces',
     n_node: int = 1,
     n_edge: int = 1,
     n_graph: int = 1,
@@ -71,18 +71,18 @@ def datasets(
         train_configs = all_train_configs
     elif valid_fraction is not None:
         logging.info(
-            f"Using random {100 * valid_fraction}% of training set for validation"
+            f'Using random {100 * valid_fraction}% of training set for validation'
         )
         train_configs, valid_configs = data.random_train_valid_split(
             all_train_configs, int(len(all_train_configs) * valid_fraction), seed
         )
     elif valid_num is not None:
-        logging.info(f"Using random {valid_num} configurations for validation")
+        logging.info(f'Using random {valid_num} configurations for validation')
         train_configs, valid_configs = data.random_train_valid_split(
             all_train_configs, valid_num, seed
         )
     else:
-        logging.info("No validation set")
+        logging.info('No validation set')
         train_configs = all_train_configs
         valid_configs = []
     del all_train_configs
@@ -105,10 +105,10 @@ def datasets(
         test_configs = []
 
     logging.info(
-        f"Total number of configurations: "
-        f"train={len(train_configs)}, "
-        f"valid={len(valid_configs)}, "
-        f"test={len(test_configs)}"
+        f'Total number of configurations: '
+        f'train={len(train_configs)}, '
+        f'valid={len(valid_configs)}, '
+        f'test={len(test_configs)}'
     )
 
     train_loader = data.GraphDataLoader(

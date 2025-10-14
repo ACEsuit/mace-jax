@@ -19,8 +19,8 @@ def predict_energy_forces_stress(
     """
 
     warnings.warn(
-        "predict_energy_forces_stress now expects a model that operates on "
-        "GraphsTuple inputs and returns a dict with energy/forces/stress.",
+        'predict_energy_forces_stress now expects a model that operates on '
+        'GraphsTuple inputs and returns a dict with energy/forces/stress.',
         DeprecationWarning,
         stacklevel=2,
     )

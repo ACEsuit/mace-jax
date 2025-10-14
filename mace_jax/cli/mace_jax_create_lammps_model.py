@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import argparse
-import pickle
 import os
+import pickle
 from pathlib import Path
 from typing import Any
 

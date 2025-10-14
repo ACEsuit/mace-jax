@@ -1,5 +1,4 @@
 import jax
-
 import jax.numpy as jnp
 
 
@@ -9,7 +8,7 @@ def dummyfy(func):
         s = sum(
             x.flatten()[0]
             for x in jax.tree_util.tree_leaves((args, kwargs))
-            if hasattr(x, "flatten")
+            if hasattr(x, 'flatten')
         )
 
         # Create dummy outputs with the same shape and dtype as the original outputs

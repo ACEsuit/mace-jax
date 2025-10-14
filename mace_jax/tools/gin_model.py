@@ -1,5 +1,6 @@
 import logging
 from collections.abc import Callable
+from pathlib import Path
 
 import e3nn_jax as e3nn
 import gin
@@ -94,10 +95,12 @@ def _graph_to_data(
         graph_indices, graph.n_node, total_repeat_length=positions.shape[0]
     )
     ptr_counts = graph.n_node.astype(jnp.int32)
-    ptr = jnp.concatenate([
-        jnp.array([0], dtype=jnp.int32),
-        jnp.cumsum(ptr_counts),
-    ])
+    ptr = jnp.concatenate(
+        [
+            jnp.array([0], dtype=jnp.int32),
+            jnp.cumsum(ptr_counts),
+        ]
+    )
 
     data_dict: dict[str, jnp.ndarray] = {
         'positions': positions,
@@ -141,8 +144,104 @@ def model(
     learnable_atomic_energies=False,
     radial_basis: Callable[[jnp.ndarray], jnp.ndarray] = bessel_basis,
     radial_envelope: Callable[[jnp.ndarray], jnp.ndarray] = soft_envelope,
+    torch_checkpoint: str | None = None,
+    torch_head: str | None = None,
+    torch_param_dtype: str | None = None,
     **kwargs,
 ):
+    if torch_checkpoint is not None:
+        import torch
+        from mace.tools.scripts_utils import extract_config_mace_model
+
+        from mace_jax.cli import mace_torch2jax
+
+        checkpoint_path = Path(torch_checkpoint)
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(
+                f"Torch checkpoint '{checkpoint_path}' does not exist."
+            )
+
+        logging.info('Loading Torch foundation model from %s', checkpoint_path)
+        bundle = torch.load(checkpoint_path, map_location='cpu')
+        torch_model = (
+            bundle['model']
+            if isinstance(bundle, dict) and 'model' in bundle
+            else bundle
+        )
+        torch_model.eval()
+
+        if torch_head is not None:
+            heads = getattr(torch_model, 'heads', None)
+            if not heads:
+                raise ValueError(
+                    f'Torch model has no heads attribute; cannot select head {torch_head!r}'
+                )
+            if torch_head not in heads:
+                raise ValueError(
+                    f'Head {torch_head!r} not found in Torch model heads {heads!r}'
+                )
+            logging.info(
+                'Selected Torch head %s from Torch model heads %s', torch_head, heads
+            )
+
+        config = extract_config_mace_model(torch_model)
+        if 'error' in config:
+            raise RuntimeError(
+                f'Failed to extract Torch configuration: {config["error"]}'
+            )
+        config['torch_model_class'] = torch_model.__class__.__name__
+
+        logging.info('Converting Torch model to JAX representation')
+        jax_module, params, _ = mace_torch2jax.convert_model(torch_model, config)
+
+        if torch_param_dtype is not None:
+            if torch_param_dtype not in {'float64', 'float32'}:
+                raise ValueError(
+                    f'Unsupported torch_param_dtype={torch_param_dtype!r}; expected float64 or float32'
+                )
+            target_dtype = (
+                jnp.float64 if torch_param_dtype == 'float64' else jnp.float32
+            )
+            params = jax.tree_util.tree_map(
+                lambda x: x.astype(target_dtype) if isinstance(x, jnp.ndarray) else x,
+                params,
+            )
+
+        torch_atomic_numbers = tuple(int(z) for z in config['atomic_numbers'])
+        num_species_local = len(torch_atomic_numbers)
+        torch_num_interactions = int(config.get('num_interactions', num_interactions))
+
+        logging.info(
+            'Loaded Torch foundation with %s atomic species and %s interaction blocks',
+            num_species_local,
+            torch_num_interactions,
+        )
+
+        def apply_fn(
+            parameters,
+            graph: jraph.GraphsTuple,
+            *,
+            compute_force: bool = True,
+            compute_stress: bool = False,
+        ) -> dict[str, jnp.ndarray]:
+            data_dict = _graph_to_data(graph, num_species=num_species_local)
+            if torch_head is not None:
+                head_names = config.get('heads') or []
+                if torch_head not in head_names:
+                    raise ValueError(
+                        f'Head {torch_head!r} not present in Torch configuration heads {head_names!r}'
+                    )
+                head_index = head_names.index(torch_head)
+                data_dict['head'] = jnp.asarray([head_index], dtype=jnp.int32)
+            return jax_module.apply(
+                parameters,
+                data_dict,
+                compute_force=compute_force,
+                compute_stress=compute_stress,
+            )
+
+        return apply_fn, params, torch_num_interactions
+
     if train_graphs is None:
         z_table = None
     else:
@@ -178,16 +277,16 @@ def model(
         logging.info(
             f'Computed average Atomic Energies using least squares: {atomic_energies_dict}'
         )
-        atomic_energies = np.array([
-            atomic_energies_dict.get(z, 0.0) for z in range(num_species)
-        ])
+        atomic_energies = np.array(
+            [atomic_energies_dict.get(z, 0.0) for z in range(num_species)]
+        )
     elif atomic_energies == 'isolated_atom':
         logging.info(
             f'Using atomic energies from isolated atoms in the dataset: {atomic_energies_dict}'
         )
-        atomic_energies = np.array([
-            atomic_energies_dict.get(z, 0.0) for z in range(num_species)
-        ])
+        atomic_energies = np.array(
+            [atomic_energies_dict.get(z, 0.0) for z in range(num_species)]
+        )
     elif atomic_energies == 'zero':
         logging.info('Not using atomic energies')
         atomic_energies = np.zeros(num_species)
@@ -203,9 +302,9 @@ def model(
     elif isinstance(atomic_energies, dict):
         atomic_energies_dict = atomic_energies
         logging.info(f'Use Atomic Energies that are provided: {atomic_energies_dict}')
-        atomic_energies = np.array([
-            atomic_energies_dict.get(z, 0.0) for z in range(num_species)
-        ])
+        atomic_energies = np.array(
+            [atomic_energies_dict.get(z, 0.0) for z in range(num_species)]
+        )
     else:
         raise ValueError(f'atomic_energies={atomic_energies} is not supported')
 

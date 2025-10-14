@@ -8,6 +8,7 @@ import pytest
 
 import mace_jax.data as data_pkg
 import mace_jax.data.utils as data_utils
+from mace_jax.data.utils import Configuration, graph_from_configuration
 from mace_jax.data import neighborhood
 from mace_jax.tools import gin_datasets, gin_functions, gin_model
 
@@ -184,6 +185,87 @@ def _run_gin_training(tmp_path):
 
     assert ema_params is not None
     return ema_params
+
+
+def test_gin_model_torch_checkpoint(monkeypatch, tmp_path):
+    import numpy as np
+    import torch
+    import mace.tools.scripts_utils as scripts_utils
+    import mace_jax.cli.mace_torch2jax as torch2jax_mod
+
+    ckpt = tmp_path / 'dummy.pt'
+    ckpt.write_bytes(b'checkpoint')
+
+    class _DummyTorchModel:
+        heads = ['Default', 'Surface']
+
+        def eval(self):
+            return self
+
+    dummy_params = {'param': jnp.array(1.0)}
+
+    class _DummyModule:
+        def apply(
+            self,
+            params,
+            data,
+            *,
+            compute_force: bool = True,
+            compute_stress: bool = False,
+        ):
+            assert compute_force
+            assert not compute_stress
+            assert 'head' in data and data['head'].shape == (1,)
+            energy = jnp.asarray([42.0], dtype=jnp.float64)
+            forces = jnp.zeros((data['positions'].shape[0], 3), dtype=jnp.float64)
+            return {'energy': energy, 'forces': forces, 'stress': None}
+
+    def _fake_load(path, map_location=None):
+        assert Path(path) == ckpt
+        assert map_location == 'cpu'
+        return {'model': _DummyTorchModel()}
+
+    def _fake_extract(model):
+        assert isinstance(model, _DummyTorchModel)
+        return {
+            'atomic_numbers': [1],
+            'num_interactions': 3,
+            'heads': ['Default', 'Surface'],
+        }
+
+    def _fake_convert(model, config):
+        assert config['heads'] == ['Default', 'Surface']
+        return _DummyModule(), dummy_params, None
+
+    monkeypatch.setattr(torch, 'load', _fake_load)
+    monkeypatch.setattr(torch2jax_mod, 'convert_model', _fake_convert)
+    monkeypatch.setattr(scripts_utils, 'extract_config_mace_model', _fake_extract)
+
+    apply_fn, params, num_interactions = gin_model.model(
+        r_max=2.0,
+        torch_checkpoint=str(ckpt),
+        torch_head='Surface',
+        torch_param_dtype='float64',
+    )
+
+    assert num_interactions == 3
+    assert params == dummy_params
+
+    configuration = Configuration(
+        atomic_numbers=np.array([1], dtype=int),
+        positions=np.zeros((1, 3)),
+        energy=np.array(0.0),
+        forces=np.zeros((1, 3)),
+        stress=np.zeros((3, 3)),
+        cell=np.eye(3),
+        pbc=(False, False, False),
+    )
+    graph = graph_from_configuration(configuration, cutoff=2.0)
+    outputs = apply_fn(params, graph, compute_force=True, compute_stress=False)
+    np.testing.assert_allclose(np.asarray(outputs['energy']), np.array([42.0]))
+    np.testing.assert_allclose(
+        np.asarray(outputs['forces']), np.zeros((graph.nodes.positions.shape[0], 3))
+    )
 
 
 @pytest.mark.parametrize(
