@@ -404,6 +404,7 @@ def test_prepare_batch_uses_lammps_geometry_metadata():
         np.asarray(batch['cell']),
         expected_cell,
     )
+    assert batch['vectors'].device.platform == calculator.device.platform
 
 
 def test_lammps_mliap_wrapper_periodic_image_example():
@@ -499,3 +500,23 @@ def test_lammps_mliap_wrapper_periodic_image_example():
         atol=1e-9,
     )
     assert dummy_data.energy == pytest.approx(total_energy)
+
+
+def test_lammps_calculator_respects_force_cpu(monkeypatch):
+    monkeypatch.setenv('MACE_FORCE_CPU', 'true')
+    model = _build_test_model()
+
+    pair_i = jnp.asarray([0], dtype=jnp.int32)
+    pair_j = jnp.asarray([0], dtype=jnp.int32)
+    vectors = jnp.asarray([[0.5, 0.0, 0.0]], dtype=jnp.float64)
+
+    lammps_batch = _build_lammps_batch(vectors, pair_i, pair_j, natoms=1)
+
+    variables = model.init(
+        jax.random.PRNGKey(0),
+        lammps_batch,
+        lammps_mliap=True,
+    )
+
+    calculator = LAMMPS_MLIAP_MACE(model, variables)
+    assert calculator.device.platform == 'cpu'

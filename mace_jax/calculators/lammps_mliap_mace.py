@@ -2,12 +2,17 @@ import logging
 import os
 import time
 from contextlib import contextmanager
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 from ase.data import chemical_symbols
+
+if TYPE_CHECKING:
+    from jaxlib.xla_extension import Device
+else:  # pragma: no cover - runtime annotation helper
+    Device = Any
 
 try:
     from lammps.mliap.mliap_unified_abc import MLIAPUnified
@@ -155,23 +160,57 @@ class LAMMPS_MLIAP_MACE(MLIAPUnified):
         self.nparams = 1
         self.dtype = jnp.asarray(self.model.r_max).dtype
 
-        self.device = 'cpu'
+        self.device = self._select_device()
         self.initialized = False
         self.step = 0
 
     def _initialize_device(self, data: Any) -> None:
         using_kokkos = 'kokkos' in data.__class__.__module__.lower()
 
-        if using_kokkos and not self.config.force_cpu:
-            # Kokkos tensors implement the array interface, detect device type if possible
-            elems = np.asarray(data.elems)
-            if elems.dtype != np.int64 and not self.config.allow_cpu:
-                raise ValueError(
-                    'GPU requested but data appears to be on CPU. '
-                    'Set MACE_ALLOW_CPU=true to force CPU computation.'
-                )
+        device = self._select_device(using_kokkos=using_kokkos)
+        if (
+            using_kokkos
+            and device.platform == 'cpu'
+            and not (self.config.allow_cpu or self.config.force_cpu)
+        ):
+            raise ValueError(
+                'GPU requested but data appears to be on CPU. '
+                'Set MACE_ALLOW_CPU=true to allow CPU computation.'
+            )
+
+        self.device = device
         self.initialized = True
-        logging.info('MACE model initialized on device: %s', self.device)
+        logging.info(
+            'MACE model initialized on device: %s (platform=%s)',
+            self.device,
+            self.device.platform,
+        )
+
+    def _select_device(self, *, using_kokkos: bool = False) -> Device:
+        devices = jax.devices()
+        cpu_devices = [d for d in devices if d.platform == 'cpu']
+        gpu_devices = [d for d in devices if d.platform in {'gpu', 'cuda', 'rocm'}]
+
+        if self.config.force_cpu:
+            if not cpu_devices:
+                raise RuntimeError(
+                    'MACE_FORCE_CPU is set but no CPU devices are available to JAX.'
+                )
+            return cpu_devices[0]
+
+        if gpu_devices:
+            return gpu_devices[0]
+
+        if cpu_devices:
+            if using_kokkos and not self.config.allow_cpu:
+                raise ValueError(
+                    'LAMMPS/Kokkos is requesting GPU execution, '
+                    'but no GPU devices are visible to JAX. '
+                    'Set MACE_ALLOW_CPU=true to enable CPU fallback.'
+                )
+            return cpu_devices[0]
+
+        raise RuntimeError('No compatible JAX devices are available.')
 
     def compute_forces(self, data: Any) -> None:
         natoms = int(data.nlocal)
@@ -214,6 +253,9 @@ class LAMMPS_MLIAP_MACE(MLIAPUnified):
 
         batch = jnp.zeros(natoms, dtype=jnp.int32)
         ptr = jnp.asarray([0, natoms, natoms + nghosts], dtype=jnp.int32)
+
+        if self.device is None:
+            self.device = self._select_device()
 
         raw_positions = getattr(data, 'positions', None)
         if raw_positions is None:
@@ -275,7 +317,7 @@ class LAMMPS_MLIAP_MACE(MLIAPUnified):
             species, num_classes=self.num_species, dtype=self.dtype
         )
 
-        return {
+        batch_dict: dict[str, Any] = {
             'vectors': vectors,
             'node_attrs': node_attrs,
             'edge_index': jnp.stack((pair_j, pair_i), axis=0),
@@ -287,6 +329,12 @@ class LAMMPS_MLIAP_MACE(MLIAPUnified):
             'shifts': shifts,
             'cell': cell,
             'lammps_class': data,
+        }
+        return {
+            key: jax.device_put(value, self.device)
+            if isinstance(value, jnp.ndarray)
+            else value
+            for key, value in batch_dict.items()
         }
 
     def _update_lammps_data(

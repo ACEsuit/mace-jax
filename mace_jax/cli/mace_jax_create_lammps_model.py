@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import pickle
+import os
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,12 @@ def parse_args() -> argparse.Namespace:
         '--output',
         help='Destination file for the exported model. Defaults to <model_path>-jax-lammps.pkl',
     )
+    parser.add_argument(
+        '--device',
+        default='auto',
+        choices=['auto', 'cpu', 'gpu'],
+        help='Preferred device for instantiating the wrapper (controls MACE_FORCE_CPU / MACE_ALLOW_CPU).',
+    )
     return parser.parse_args()
 
 
@@ -49,6 +56,13 @@ def load_torch_model(path: Path) -> Any:
 
 def main() -> None:
     args = parse_args()
+    if args.device == 'cpu':
+        os.environ['MACE_FORCE_CPU'] = 'true'
+        os.environ['MACE_ALLOW_CPU'] = 'true'
+    elif args.device == 'gpu':
+        os.environ['MACE_FORCE_CPU'] = 'false'
+        os.environ['MACE_ALLOW_CPU'] = 'false'
+
     torch_model = load_torch_model(Path(args.model_path))
 
     config = extract_config_mace_model(torch_model)
@@ -94,6 +108,11 @@ def main() -> None:
     print(
         '  wrapper = create_lammps_mliap_calculator(jax_model, variables, head=artifact["head"])'
     )
+    if args.device != 'auto':
+        print(
+            f'  # Device preference used during export: {args.device!r} '
+            '(set via --device flag controlling MACE_FORCE_CPU/MACE_ALLOW_CPU)'
+        )
     _ = lammps_wrapper  # silence unused warning
 
 
