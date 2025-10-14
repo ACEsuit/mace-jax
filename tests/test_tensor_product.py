@@ -29,105 +29,92 @@ class TestTensorProductImport:
             pytest.param(False, False, id='unshared_external'),
         ],
     )
-    def test_e3nn_tensor_product_forward(self, shared_weights, internal_weights):
-        irreps_in1 = o3.Irreps('1x0e + 1x1o')
-        irreps_in2 = o3.Irreps('1x0e')
-        irreps_out = o3.Irreps('1x0e + 1x1o')
-        target_irreps, instructions = tp_out_irreps_with_instructions(
-            irreps_in1, irreps_in2, irreps_out
-        )
+    @pytest.mark.parametrize(
+        'backend, irreps_in1, irreps_in2, irreps_out',
+        [
+            pytest.param(
+                'e3nn',
+                '1x0e + 1x1o',
+                '1x0e',
+                '1x0e + 1x1o',
+                id='e3nn_low_l',
+            ),
+            pytest.param(
+                'e3nn',
+                '3x1e',
+                '1x0e + 1x1e + 1x2e',
+                '3x0e + 6x1e + 3x2e',
+                id='e3nn_high_l',
+            ),
+            pytest.param(
+                'cue',
+                '1x0e + 1x1o',
+                '1x0e',
+                '1x0e + 1x1o',
+                id='cue_low_l',
+            ),
+        ],
+    )
+    def test_tensor_product_forward(
+        self,
+        backend,
+        irreps_in1,
+        irreps_in2,
+        irreps_out,
+        shared_weights,
+        internal_weights,
+    ):
+        if backend == 'e3nn':
+            irreps_in1_obj = o3.Irreps(irreps_in1)
+            irreps_in2_obj = o3.Irreps(irreps_in2)
+            irreps_out_obj = o3.Irreps(irreps_out)
+            target_irreps, instructions = tp_out_irreps_with_instructions(
+                irreps_in1_obj, irreps_in2_obj, irreps_out_obj
+            )
 
-        torch_module = TensorProductTorch(
-            irreps_in1,
-            irreps_in2,
-            target_irreps,
-            instructions,
-            shared_weights=shared_weights,
-            internal_weights=internal_weights,
-        )
+            torch_module = TensorProductTorch(
+                irreps_in1_obj,
+                irreps_in2_obj,
+                target_irreps,
+                instructions,
+                shared_weights=shared_weights,
+                internal_weights=internal_weights,
+            )
+
+            irreps_in1_str = str(irreps_in1_obj)
+            irreps_in2_str = str(irreps_in2_obj)
+            irreps_out_str = str(target_irreps)
+        elif backend == 'cue':
+            cue_irreps_in1 = cue.Irreps(cue.O3, irreps_in1)
+            cue_irreps_in2 = cue.Irreps(cue.O3, irreps_in2)
+            cue_irreps_out = cue.Irreps(cue.O3, irreps_out)
+
+            torch_module = CueTensorProductTorch(
+                cue_irreps_in1,
+                cue_irreps_in2,
+                [entry.ir for entry in cue_irreps_out],
+                shared_weights=shared_weights,
+                internal_weights=internal_weights,
+                method='naive',
+                layout=cue.mul_ir,
+            )
+
+            irreps_in1_str = irreps_in1
+            irreps_in2_str = irreps_in2
+            irreps_out_str = irreps_out
+            instructions = None
+        else:
+            raise ValueError(f'Unknown backend: {backend}')
 
         self._assert_forward_matches(
             torch_module=torch_module,
-            irreps_in1=str(irreps_in1),
-            irreps_in2=str(irreps_in2),
-            irreps_out=str(target_irreps),
+            irreps_in1=irreps_in1_str,
+            irreps_in2=irreps_in2_str,
+            irreps_out=irreps_out_str,
             shared_weights=shared_weights,
             internal_weights=internal_weights,
             instructions=instructions,
-            backend='e3nn',
-        )
-
-    @pytest.mark.parametrize(
-        'shared_weights, internal_weights',
-        [
-            pytest.param(True, True, id='shared_internal'),
-            pytest.param(True, False, id='shared_external'),
-            pytest.param(False, False, id='unshared_external'),
-        ],
-    )
-    def test_cue_tensor_product_forward(self, shared_weights, internal_weights):
-        irreps_in1 = '1x0e + 1x1o'
-        irreps_in2 = '1x0e'
-        irreps_out = '1x0e + 1x1o'
-
-        cue_irreps_in1 = cue.Irreps(cue.O3, irreps_in1)
-        cue_irreps_in2 = cue.Irreps(cue.O3, irreps_in2)
-        cue_irreps_out = cue.Irreps(cue.O3, irreps_out)
-
-        torch_module = CueTensorProductTorch(
-            cue_irreps_in1,
-            cue_irreps_in2,
-            [entry.ir for entry in cue_irreps_out],
-            shared_weights=shared_weights,
-            internal_weights=internal_weights,
-            method='naive',
-            layout=cue.mul_ir,
-        )
-
-        self._assert_forward_matches(
-            torch_module=torch_module,
-            irreps_in1=irreps_in1,
-            irreps_in2=irreps_in2,
-            irreps_out=irreps_out,
-            shared_weights=shared_weights,
-            internal_weights=internal_weights,
-            backend='cue',
-        )
-
-    @pytest.mark.parametrize(
-        'shared_weights, internal_weights',
-        [
-            pytest.param(True, True, id='shared_internal'),
-            pytest.param(True, False, id='shared_external'),
-            pytest.param(False, False, id='unshared_external'),
-        ],
-    )
-    def test_e3nn_tensor_product_forward_high_l(self, shared_weights, internal_weights):
-        irreps_in1 = o3.Irreps('3x1e')
-        irreps_in2 = o3.Irreps('1x0e + 1x1e + 1x2e')
-        irreps_out = o3.Irreps('3x0e + 6x1e + 3x2e')
-        target_irreps, instructions = tp_out_irreps_with_instructions(
-            irreps_in1, irreps_in2, irreps_out
-        )
-
-        torch_module = TensorProductTorch(
-            irreps_in1,
-            irreps_in2,
-            target_irreps,
-            instructions,
-            shared_weights=shared_weights,
-            internal_weights=internal_weights,
-        )
-
-        self._assert_forward_matches(
-            torch_module=torch_module,
-            irreps_in1=str(irreps_in1),
-            irreps_in2=str(irreps_in2),
-            irreps_out=str(target_irreps),
-            shared_weights=shared_weights,
-            internal_weights=internal_weights,
-            instructions=instructions,
-            backend='e3nn',
+            backend=backend,
         )
 
     def _assert_forward_matches(
