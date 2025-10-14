@@ -214,8 +214,62 @@ class LAMMPS_MLIAP_MACE(MLIAPUnified):
 
         batch = jnp.zeros(natoms, dtype=jnp.int32)
         ptr = jnp.asarray([0, natoms, natoms + nghosts], dtype=jnp.int32)
-        zeros_vec = jnp.zeros_like(vectors)
-        cell = jnp.zeros((2, 3, 3), dtype=self.dtype)
+
+        raw_positions = getattr(data, 'positions', None)
+        if raw_positions is None:
+            raw_positions = getattr(data, 'x', None)
+        if raw_positions is not None:
+            positions_arr = np.asarray(raw_positions, dtype=float)
+            if positions_arr.ndim != 2 or positions_arr.shape[1] != 3:
+                raise ValueError('LAMMPS data.positions must have shape (N, 3)')
+            if positions_arr.shape[0] < natoms:
+                raise ValueError(
+                    f'LAMMPS positions only provided for {positions_arr.shape[0]} atoms, '
+                    f'but nlocal={natoms}'
+                )
+            positions = jnp.asarray(positions_arr[:natoms], dtype=self.dtype)
+        else:
+            positions = jnp.zeros((natoms, 3), dtype=self.dtype)
+
+        raw_cell = getattr(data, 'cell', None)
+        if raw_cell is not None:
+            cell_arr = np.asarray(raw_cell, dtype=float)
+            if cell_arr.ndim == 2 and cell_arr.shape == (3, 3):
+                cell = jnp.asarray(np.stack((cell_arr, cell_arr)), dtype=self.dtype)
+            elif cell_arr.ndim == 3 and cell_arr.shape[-2:] == (3, 3):
+                if cell_arr.shape[0] == 1:
+                    cell = jnp.asarray(np.repeat(cell_arr, 2, axis=0), dtype=self.dtype)
+                elif cell_arr.shape[0] == 2:
+                    cell = jnp.asarray(cell_arr, dtype=self.dtype)
+                else:
+                    cell = jnp.asarray(cell_arr[:2], dtype=self.dtype)
+            else:
+                raise ValueError('LAMMPS cell must be of shape (3,3) or (2,3,3)')
+        else:
+            cell = jnp.zeros((2, 3, 3), dtype=self.dtype)
+
+        raw_unit_shifts = getattr(data, 'unit_shifts', None)
+        if raw_unit_shifts is not None:
+            unit_shifts_arr = np.asarray(raw_unit_shifts, dtype=float)
+            if unit_shifts_arr.shape != vectors.shape:
+                raise ValueError(
+                    'LAMMPS unit_shifts must match the shape of rij vectors'
+                )
+            unit_shifts = jnp.asarray(unit_shifts_arr, dtype=self.dtype)
+        else:
+            unit_shifts = jnp.zeros_like(vectors)
+
+        raw_shifts = getattr(data, 'shifts', None)
+        if raw_shifts is not None:
+            shifts_arr = np.asarray(raw_shifts, dtype=float)
+            if shifts_arr.shape != vectors.shape:
+                raise ValueError('LAMMPS shifts must match the shape of rij vectors')
+            shifts = jnp.asarray(shifts_arr, dtype=self.dtype)
+        else:
+            if raw_unit_shifts is not None and raw_cell is not None:
+                shifts = unit_shifts @ cell[0]
+            else:
+                shifts = jnp.zeros_like(vectors)
 
         node_attrs = jax.nn.one_hot(
             species, num_classes=self.num_species, dtype=self.dtype
@@ -228,9 +282,9 @@ class LAMMPS_MLIAP_MACE(MLIAPUnified):
             'batch': batch,
             'natoms': (natoms, nghosts),
             'ptr': ptr,
-            'positions': jnp.zeros((natoms, 3), dtype=self.dtype),
-            'unit_shifts': zeros_vec,
-            'shifts': zeros_vec,
+            'positions': positions,
+            'unit_shifts': unit_shifts,
+            'shifts': shifts,
             'cell': cell,
             'lammps_class': data,
         }
