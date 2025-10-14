@@ -42,6 +42,26 @@ mace-jax-train configs/aspirin_small.gin \
 
 Use `--dry-run` to validate the configuration without launching training. The operative configuration is saved alongside the run logs.
 
+Additional convenience flags let you adjust common gin settings directly from the CLI:
+
+- `--torch-checkpoint PATH`: import parameters from a Torch checkpoint (converted on the fly via `mace-torch2jax` utilities).
+- `--torch-head NAME`: select a specific head from the imported Torch model.
+- `--torch-param-dtype {float32,float64}`: override the dtype used for imported parameters.
+- `--train-path/--valid-path/--test-path`: point datasets to new files without editing the gin config.
+- `--r-max VALUE`: synchronise the cutoff used in both dataset construction and model definition.
+
+For instance, fine-tuning a Torch foundation model against a new dataset can be done with:
+
+```sh
+mace-jax-train configs/finetune.gin \
+  --torch-checkpoint checkpoints/foundation.pt \
+  --torch-head Surface \
+  --train-path data/surface.xyz \
+  --valid-path None \
+  --r-max 4.5 \
+  --print-config
+```
+
 #### `mace-jax-train-plot`
 
 Produces loss/metric curves from `.metrics` logs generated during training:
