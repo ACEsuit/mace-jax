@@ -520,3 +520,41 @@ def test_lammps_calculator_respects_force_cpu(monkeypatch):
 
     calculator = LAMMPS_MLIAP_MACE(model, variables)
     assert calculator.device.platform == 'cpu'
+
+
+def test_compute_forces_registers_jax_ffi_handles(monkeypatch):
+    model = _build_test_model()
+    pair_i = jnp.asarray([0, 1], dtype=jnp.int32)
+    pair_j = jnp.asarray([1, 0], dtype=jnp.int32)
+    vectors = jnp.asarray([[0.5, 0.0, 0.0], [-0.5, 0.0, 0.0]], dtype=jnp.float64)
+
+    lammps_batch = _build_lammps_batch(vectors, pair_i, pair_j, natoms=2)
+    variables = model.init(
+        jax.random.PRNGKey(0),
+        lammps_batch,
+        lammps_mliap=True,
+    )
+    calculator = LAMMPS_MLIAP_MACE(model, variables)
+
+    class _FFIDummy(DummyLAMMPSData):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.register_calls = 0
+            self._pair_handle_value = 123
+
+        def register_jax_ffi_exchange(self):
+            self.register_calls += 1
+
+        def get_pair_handle(self):
+            return self._pair_handle_value
+
+    dummy_data = _FFIDummy(
+        elems=[0, 0],
+        rij=vectors,
+        pair_i=pair_i,
+        pair_j=pair_j,
+    )
+
+    calculator.compute_forces(dummy_data)
+    assert dummy_data.register_calls == 1
+    assert getattr(dummy_data, '_mace_jax_pair_handle') == 123

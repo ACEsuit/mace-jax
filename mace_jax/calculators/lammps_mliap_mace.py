@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 import jax
+import jax.dlpack as jdlpack
 import jax.numpy as jnp
 import numpy as np
 from ase.data import chemical_symbols
@@ -219,6 +220,18 @@ class LAMMPS_MLIAP_MACE(MLIAPUnified):
         npairs = int(data.npairs)
         species = jnp.asarray(np.asarray(data.elems), dtype=jnp.int64)
 
+        if hasattr(data, 'register_jax_ffi_exchange') and not getattr(
+            data, '_mace_jax_ffi_registered', False
+        ):
+            data.register_jax_ffi_exchange()
+            setattr(data, '_mace_jax_ffi_registered', True)
+        if hasattr(data, 'get_pair_handle'):
+            try:
+                pair_handle = data.get_pair_handle()
+            except TypeError:  # pragma: no cover - defensive for legacy bindings
+                pair_handle = data.get_pair_handle()
+            setattr(data, '_mace_jax_pair_handle', pair_handle)
+
         if not self.initialized:
             self._initialize_device(data)
 
@@ -349,7 +362,27 @@ class LAMMPS_MLIAP_MACE(MLIAPUnified):
         per_atom = np.array(atom_energies[:natoms])
         np.copyto(eatoms[:natoms], per_atom)
         data.energy = float(per_atom.sum())
-        data.update_pair_forces_gpu(np.array(pair_forces, dtype=np.float64))
+        pair_forces_arr = jnp.asarray(pair_forces)
+        if self.device.platform in {'cuda', 'gpu'}:
+            try:
+                import cupy as cp  # type: ignore[import-untyped]
+
+                dlpack = jdlpack.to_dlpack(pair_forces_arr)
+                cupy_forces = cp.fromDlpack(dlpack)
+                if cupy_forces.dtype != cp.float64:
+                    cupy_forces = cupy_forces.astype(cp.float64, copy=False)
+                data.update_pair_forces_gpu(cupy_forces)
+                return
+            except ImportError:  # pragma: no cover - optional dependency
+                logging.warning(
+                    'CuPy not available on CUDA platform; falling back to host transfer.'
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                logging.warning(
+                    'Failed to share pair forces via DLPack (%s); falling back to host transfer.',
+                    exc,
+                )
+        data.update_pair_forces_gpu(np.array(pair_forces_arr, dtype=np.float64))
 
     def _manage_profiling(self) -> None:
         if not self.config.debug_profile:

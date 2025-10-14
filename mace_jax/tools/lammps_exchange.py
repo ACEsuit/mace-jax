@@ -7,6 +7,15 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
+try:  # pragma: no cover - optional runtime dependency
+    from lammps.mliap import jax as _lammps_mliap_jax
+except ImportError:  # pragma: no cover - optional runtime dependency
+    _HAS_LAMMPS_JAX = False
+    _ffi_forward_exchange = None
+else:
+    _HAS_LAMMPS_JAX = True
+    _ffi_forward_exchange = getattr(_lammps_mliap_jax, 'forward_exchange', None)
+
 
 def _forward_exchange_numpy(arr: np.ndarray, lammps_class: Any) -> np.ndarray:
     if not hasattr(lammps_class, 'forward_exchange'):
@@ -24,6 +33,10 @@ def forward_exchange(
     lammps_class: Any,
 ) -> jnp.ndarray:
     """Exchange features across domains via the LAMMPS communicator."""
+
+    pair_handle = getattr(lammps_class, '_mace_jax_pair_handle', None)
+    if _HAS_LAMMPS_JAX and _ffi_forward_exchange is not None and pair_handle is not None:
+        return _ffi_forward_exchange(node_feats, pair_handle)
 
     if not hasattr(lammps_class, 'forward_exchange'):
         raise AttributeError(

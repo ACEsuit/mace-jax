@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from mace_jax.modules import utils as models_utils
-from mace_jax.tools.lammps_exchange import forward_exchange
+from mace_jax.tools import lammps_exchange
 
 
 class _DummyLAMMPS:
@@ -25,7 +25,7 @@ def test_forward_exchange_requires_lammps_interface():
         pass
 
     with pytest.raises(AttributeError):
-        _ = forward_exchange(feats, _Noop())
+        _ = lammps_exchange.forward_exchange(feats, _Noop())
 
 
 def test_apply_lammps_exchange_forwards_to_lammps():
@@ -34,7 +34,7 @@ def test_apply_lammps_exchange_forwards_to_lammps():
 
     @jax.jit
     def _wrapped(x):
-        return forward_exchange(x, dummy)
+        return lammps_exchange.forward_exchange(x, dummy)
 
     result = _wrapped(feats)
     expected = np.asarray([[3.0, 4.0], [1.0, 2.0]])
@@ -59,3 +59,27 @@ def test_prepare_graph_carries_lammps_metadata():
     assert ctx.is_lammps
     assert ctx.interaction_kwargs.lammps_class is dummy
     assert ctx.interaction_kwargs.lammps_natoms == (2, 1)
+
+
+def test_forward_exchange_prefers_ffi_when_available(monkeypatch):
+    feats = jnp.array([[1.0, 0.0], [0.0, 1.0]], dtype=jnp.float32)
+
+    class _PairHandleStub:
+        pass
+
+    lammps_stub = _PairHandleStub()
+    lammps_stub._mace_jax_pair_handle = 42
+
+    monkeypatch.setattr(lammps_exchange, '_HAS_LAMMPS_JAX', True)
+
+    calls: dict[str, tuple] = {}
+
+    def _fake_forward(x, handle):
+        calls['args'] = (np.asarray(x), handle)
+        return x + 1.0
+
+    monkeypatch.setattr(lammps_exchange, '_ffi_forward_exchange', _fake_forward)
+
+    out = lammps_exchange.forward_exchange(feats, lammps_stub)
+    np.testing.assert_allclose(np.asarray(out), np.asarray(feats + 1.0))
+    assert calls['args'][1] == 42
