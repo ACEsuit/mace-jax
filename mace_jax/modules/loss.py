@@ -26,7 +26,7 @@ def _num_atoms(graph: jraph.GraphsTuple) -> jnp.ndarray:
 
 
 def _graph_attribute(
-    graph: jraph.GraphsTuple, name: str, default: float, dtype: Optional[jnp.dtype] = None
+    graph: jraph.GraphsTuple, name: str, default: float, dtype: jnp.dtype | None = None
 ) -> jnp.ndarray:
     value = getattr(graph.globals, name, None)
     if value is None:
@@ -35,13 +35,18 @@ def _graph_attribute(
             base = jnp.asarray(base)
             return jnp.full_like(base, default, dtype=base.dtype)
         shape = graph.n_node.shape
-        dtype = dtype or jnp.result_type(jnp.asarray(default, dtype=jnp.float32), jnp.float32)
+        dtype = dtype or jnp.result_type(
+            jnp.asarray(default, dtype=jnp.float32), jnp.float32
+        )
         return jnp.full(shape, default, dtype=dtype)
     return jnp.asarray(value)
 
 
 def _graph_tensor(
-    graph: jraph.GraphsTuple, name: str, default_shape: tuple[int, ...], dtype: jnp.dtype
+    graph: jraph.GraphsTuple,
+    name: str,
+    default_shape: tuple[int, ...],
+    dtype: jnp.dtype,
 ) -> jnp.ndarray:
     value = getattr(graph.globals, name, None)
     if value is None:
@@ -50,7 +55,9 @@ def _graph_tensor(
     return jnp.asarray(value)
 
 
-def _broadcast_to_nodes(graph: jraph.GraphsTuple, per_graph_values: jnp.ndarray) -> jnp.ndarray:
+def _broadcast_to_nodes(
+    graph: jraph.GraphsTuple, per_graph_values: jnp.ndarray
+) -> jnp.ndarray:
     per_graph_values = jnp.asarray(per_graph_values)
     total_nodes = graph.nodes.positions.shape[0]
     graph_indices = jnp.repeat(
@@ -387,7 +394,9 @@ class WeightedHuberEnergyForcesStressLoss:
             energy_weight = _graph_attribute(
                 graph, 'energy_weight', 1.0, dtype=huber.dtype
             )
-            loss += self.energy_weight * weight * energy_weight * huber * _graph_mask(graph)
+            loss += (
+                self.energy_weight * weight * energy_weight * huber * _graph_mask(graph)
+            )
 
         if self.forces_weight != 0.0 and 'forces' in predictions:
             loss += self.forces_weight * conditional_huber_forces(
@@ -468,7 +477,8 @@ class UniversalLoss:
             )
             per_node_weight = _broadcast_to_nodes(
                 graph,
-                _graph_attribute(graph, 'weight', 1.0, dtype=jnp.float32) * forces_weight,
+                _graph_attribute(graph, 'weight', 1.0, dtype=jnp.float32)
+                * forces_weight,
             )
             scaled_ref = graph.nodes.forces * per_node_weight[:, None]
             scaled_pred = predictions['forces'] * per_node_weight[:, None]
@@ -576,8 +586,11 @@ class DipolePolarLoss:
             )
 
         if self.polarizability_weight != 0.0 and 'polarizability' in predictions:
-            loss += self.polarizability_weight * weighted_mean_squared_error_polarizability(
-                graph, predictions['polarizability']
+            loss += (
+                self.polarizability_weight
+                * weighted_mean_squared_error_polarizability(
+                    graph, predictions['polarizability']
+                )
             )
 
         return loss

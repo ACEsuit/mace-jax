@@ -1,4 +1,5 @@
-from typing import Any, Callable, NamedTuple, Optional
+from collections.abc import Callable
+from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -36,7 +37,7 @@ def compute_forces_and_stress(
     edge_index: jnp.ndarray,  # [2, n_edges]
     batch: jnp.ndarray,  # [n_nodes] with graph indices
     num_graphs: int,
-) -> tuple[jnp.ndarray, Optional[jnp.ndarray], Optional[jnp.ndarray], jnp.ndarray]:
+) -> tuple[jnp.ndarray, jnp.ndarray | None, jnp.ndarray | None, jnp.ndarray]:
     """
     JAX equivalent of the PyTorch compute_forces_virials.
     Computes forces, virials, stress, and returns the per-graph energies.
@@ -98,9 +99,9 @@ def get_outputs(
     compute_force: bool = True,
     compute_stress: bool = False,
 ) -> tuple[
-    Optional[jnp.ndarray],  # energy
-    Optional[jnp.ndarray],  # forces
-    Optional[jnp.ndarray],  # stress
+    jnp.ndarray | None,  # energy
+    jnp.ndarray | None,  # forces
+    jnp.ndarray | None,  # stress
 ]:
     positions = data['positions']
     cell = data['cell']
@@ -155,7 +156,7 @@ def get_edge_vectors_and_lengths(
 
 
 class InteractionKwargs(NamedTuple):
-    lammps_class: Optional[Any]
+    lammps_class: Any | None
     lammps_natoms: tuple[int, int]
 
 
@@ -163,7 +164,7 @@ class GraphContext(NamedTuple):
     is_lammps: bool
     num_graphs: int
     num_atoms_arange: jnp.ndarray
-    displacement: Optional[jnp.ndarray]
+    displacement: jnp.ndarray | None
     positions: jnp.ndarray
     vectors: jnp.ndarray
     lengths: jnp.ndarray
@@ -179,7 +180,7 @@ def prepare_graph(
     compute_stress: bool = False,
     compute_displacement: bool = False,
     lammps_mliap: bool = False,
-    lammps_class: Optional[Any] = None,
+    lammps_class: Any | None = None,
 ) -> GraphContext:
     batch = jnp.asarray(data['batch'], dtype=jnp.int32)
 
@@ -206,7 +207,9 @@ def prepare_graph(
         cell = jnp.zeros((num_graphs, 3, 3), dtype=vectors.dtype)
         num_atoms_arange = jnp.arange(n_real, dtype=jnp.int32)
         node_heads = node_heads[:n_real]
-        lammps_cls = lammps_class if lammps_class is not None else data.get('lammps_class')
+        lammps_cls = (
+            lammps_class if lammps_class is not None else data.get('lammps_class')
+        )
         ikw = InteractionKwargs(lammps_cls, (n_real, n_ghosts))
 
         return GraphContext(
@@ -266,7 +269,7 @@ def add_output_interface(cls=None):
             compute_force: bool = True,
             compute_stress: bool = False,
             **model_kwargs,
-        ) -> dict[str, Optional[jnp.ndarray]]:
+        ) -> dict[str, jnp.ndarray | None]:
             raw_out = self._energy_fn(
                 data,
                 **model_kwargs,
@@ -298,13 +301,11 @@ def add_output_interface(cls=None):
             result = (
                 dict(raw_out) if isinstance(raw_out, dict) else {'energy': energy_arr}
             )
-            result.update(
-                {
-                    'energy': total_energy,
-                    'forces': forces,
-                    'stress': stress,
-                }
-            )
+            result.update({
+                'energy': total_energy,
+                'forces': forces,
+                'stress': stress,
+            })
             return result
 
         # Move __call__ to _energy_fn

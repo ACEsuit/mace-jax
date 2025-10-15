@@ -251,19 +251,15 @@ class TensorProduct(fnn.Module):
         )
         weight_rep = cuex.RepArray(self.weight_irreps, weight_tensor, cue.ir_mul)
 
-        descriptor_out_irreps = Irreps(self.descriptor_out_irreps_str)
-
-        [out_ir_mul] = cuex.segmented_polynomial(
-            self.descriptor.polynomial,
-            [weight_rep.array, x1_rep.array, x2_rep.array],
-            [jax.ShapeDtypeStruct((*x1.shape[:-1], descriptor_out_irreps.dim), dtype)],
-            method='naive',
+        output_rep = cuex.equivariant_polynomial(
+            self.descriptor,
+            [weight_rep, x1_rep, x2_rep],
             math_dtype=dtype,
+            method='naive',
         )
-
         out_ir_mul = collapse_ir_mul_segments(
-            out_ir_mul,
-            descriptor_out_irreps,
+            output_rep.array,
+            Irreps(self.descriptor_out_irreps_str),
             irreps_out,
             self.output_segment_shapes,
         )

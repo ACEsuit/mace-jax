@@ -16,7 +16,7 @@ class Extract:
         irreps_outs: Sequence[Irreps],
         instructions: Sequence[tuple[int, ...]],
         squeeze_out: bool = False,
-        name: Optional[str] = None,
+        name: str | None = None,
     ):
         del name  # kept for backward-compatible signature
         self.irreps_in = Irreps(irreps_in)
@@ -47,8 +47,8 @@ class Extract:
             self._slices_out.append(tuple(slices))
 
     def __call__(
-        self, x: Union[jnp.ndarray, IrrepsArray]
-    ) -> Union[jnp.ndarray, tuple[jnp.ndarray, ...]]:
+        self, x: jnp.ndarray | IrrepsArray
+    ) -> jnp.ndarray | tuple[jnp.ndarray, ...]:
         """Return the slices specified by the instruction set."""
         array = x.array if isinstance(x, IrrepsArray) else x
 

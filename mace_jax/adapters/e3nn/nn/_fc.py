@@ -1,7 +1,7 @@
 """Fully connected network layers compatible with ``e3nn`` Torch modules."""
 
-from collections.abc import Sequence
-from typing import Callable, Optional
+from collections.abc import Callable, Sequence
+from typing import Optional
 
 import jax
 import jax.numpy as jnp
@@ -23,7 +23,7 @@ class Layer(fnn.Module):
 
     h_in: int
     h_out: int
-    act: Optional[Callable]
+    act: Callable | None
     var_in: float
     var_out: float
 
@@ -34,6 +34,17 @@ class Layer(fnn.Module):
         )
         return f'{self.__class__.__name__}({self.h_in}->{self.h_out}, act={act_name})'
 
+    def setup(self) -> None:
+        self._use_activation = self.act is not None
+        if self._use_activation:
+            normalized = normalize2mom(self.act)  # compute reference constant
+            const = getattr(normalized, '_normalize2mom_const', 1.0)
+            self._act_fn = self.act
+            self._act_scale_init = jnp.asarray(const)
+        else:
+            self._act_fn = None
+            self._act_scale_init = 1.0
+
     @fnn.compact
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
         def init(rng):
@@ -41,10 +52,18 @@ class Layer(fnn.Module):
 
         weight = self.param('weight', init)
 
-        if self.act is not None:
+        if self._use_activation:
             scaled = weight / jnp.sqrt(self.h_in * self.var_in)
             y = x @ scaled
-            y = self.act(y)
+            act_scale = self.param(
+                'act_scale',
+                lambda rng: jnp.asarray(
+                    self._act_scale_init,
+                    dtype=weight.dtype,
+                ),
+            )
+            act_scale = jnp.asarray(act_scale, dtype=y.dtype)
+            y = self._act_fn(y) * act_scale
             y = y * jnp.sqrt(self.var_out)
             return y
 
@@ -75,7 +94,7 @@ class FullyConnectedNet(fnn.Module):
     """
 
     hs: Sequence[int]
-    act: Optional[Callable] = None
+    act: Callable | None = None
     variance_in: float = 1.0
     variance_out: float = 1.0
     out_act: bool = False
@@ -83,10 +102,6 @@ class FullyConnectedNet(fnn.Module):
     def setup(self) -> None:
         if len(self.hs) < 2:
             raise ValueError('hs must contain at least input and output dimensions.')
-
-        act = self.act
-        if act is not None:
-            act = normalize2mom(act)
 
         var_in = self.variance_in
         layers = []
@@ -96,9 +111,9 @@ class FullyConnectedNet(fnn.Module):
             is_last = idx == num_layers - 1
             var_out = self.variance_out if is_last else 1.0
             if is_last:
-                activation = act if self.out_act else None
+                activation = self.act if self.out_act else None
             else:
-                activation = act
+                activation = self.act
             layer = Layer(
                 h_in=h_in,
                 h_out=h_out,
@@ -140,6 +155,10 @@ def _import_e3nn_fc_layer(module, variables, scope):
     elif 'kernel' in target:
         reshaped = weight.reshape(target['kernel'].shape)
         target['kernel'] = reshaped.astype(target['kernel'].dtype, copy=False)
+    if getattr(module, 'act', None) is not None and 'act_scale' in target:
+        const = getattr(module.act, 'cst', None)
+        if const is not None:
+            target['act_scale'] = jnp.asarray(const, dtype=target['act_scale'].dtype)
     if hasattr(module, 'bias') and module.bias is not None:
         bias = jnp.asarray(module.bias.detach().cpu().numpy())
         if 'bias' in target:

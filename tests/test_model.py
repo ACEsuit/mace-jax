@@ -1,3 +1,4 @@
+import itertools
 import json
 from pathlib import Path
 
@@ -8,6 +9,7 @@ import pytest
 import torch
 from ase import Atoms
 from ase.build import bulk
+from e3nn_jax import Irreps
 from mace.data.atomic_data import AtomicData
 from mace.data.utils import config_from_atoms
 from mace.tools import torch_geometric
@@ -36,8 +38,6 @@ def configure_model_jax(
     head_configs=None,
 ):
     import ast  # noqa: PLC0415
-
-    from e3nn_jax import Irreps  # noqa: PLC0415
 
     model_config = dict(
         r_max=args.r_max,
@@ -95,13 +95,11 @@ class ModelEquivalenceTestBase:
     displacement_scales: list[float] = [0.08, 0.12]
     strain_matrices: list[np.ndarray] = [
         np.zeros((3, 3)),
-        np.array(
-            [
-                [0.00, 0.02, 0.00],
-                [0.02, 0.00, 0.00],
-                [0.00, 0.00, -0.015],
-            ]
-        ),
+        np.array([
+            [0.00, 0.02, 0.00],
+            [0.02, 0.00, 0.00],
+            [0.00, 0.00, -0.015],
+        ]),
     ]
     arguments: list[str] = [
         '--name',
@@ -165,6 +163,21 @@ class ModelEquivalenceTestBase:
         cls.torch_energy = torch_output['energy'].detach().cpu().numpy()
         cls.torch_forces = torch_output['forces'].detach().cpu().numpy()
         cls.torch_stress = torch_output['stress'].detach().cpu().numpy()
+        cls.torch_node_energy = (
+            torch_output['node_energy'].detach().cpu().numpy()
+            if 'node_energy' in torch_output
+            else None
+        )
+        cls.torch_interaction_energy = (
+            torch_output['interaction_energy'].detach().cpu().numpy()
+            if 'interaction_energy' in torch_output
+            else None
+        )
+        cls.torch_node_feats = (
+            torch_output['node_feats'].detach().cpu().numpy()
+            if 'node_feats' in torch_output
+            else None
+        )
 
         init_rng = jax.random.PRNGKey(0)
         cls.jax_model = configure_model_jax(
@@ -186,6 +199,27 @@ class ModelEquivalenceTestBase:
         cls.jax_energy = np.asarray(jax_output['energy'])
         cls.jax_forces = np.asarray(jax_output['forces'])
         cls.jax_stress = np.asarray(jax_output['stress'])
+        cls.jax_node_energy = np.asarray(jax_output['node_energy'])
+        cls.jax_interaction_energy = np.asarray(jax_output['interaction_energy'])
+        cls.jax_node_feats = np.asarray(jax_output['node_feats'])
+
+        cls._collect_block_diagnostics()
+
+        if cls.torch_node_energy is not None:
+            cls.max_node_energy_diff = float(
+                np.max(np.abs(cls.torch_node_energy - cls.jax_node_energy))
+            )
+        else:
+            cls.max_node_energy_diff = float('nan')
+
+        if cls.torch_interaction_energy is not None:
+            cls.max_interaction_energy_diff = float(
+                np.max(
+                    np.abs(cls.torch_interaction_energy - cls.jax_interaction_energy)
+                )
+            )
+        else:
+            cls.max_interaction_energy_diff = float('nan')
 
     @classmethod
     def _build_structures(cls):
@@ -248,6 +282,233 @@ class ModelEquivalenceTestBase:
     def _customise_args(cls, args):
         """Hook for subclasses to adjust parsed arguments."""
 
+    @classmethod
+    def _block_output_dims(cls) -> list[int]:
+        hidden_irreps = Irreps(cls.args.hidden_irreps)
+        dims = [hidden_irreps.dim]
+        if cls.args.num_interactions <= 1:
+            return dims
+
+        base_dim = hidden_irreps.dim
+        last_dim = Irreps(str(hidden_irreps[0])).dim
+        for idx in range(cls.args.num_interactions - 1):
+            if idx == cls.args.num_interactions - 2:
+                dims.append(last_dim)
+            else:
+                dims.append(base_dim)
+        return dims
+
+    @classmethod
+    def _collect_block_diagnostics(cls) -> None:
+        from mace.modules.utils import (  # noqa: PLC0415
+            prepare_graph as prepare_graph_torch,
+        )
+
+        if cls.torch_node_feats is None or cls.jax_node_feats is None:
+            cls.block_feature_dims = tuple()
+            cls.blockwise_max_diff = tuple()
+            cls.blockwise_mean_diff = tuple()
+            cls.interaction_blockwise_max_diff = tuple()
+            cls.interaction_blockwise_mean_diff = tuple()
+            return
+
+        # --- Torch side unroll ---
+        batch = cls.batch
+        torch_data: dict[str, torch.Tensor] = {}
+        for key in [
+            'positions',
+            'shifts',
+            'unit_shifts',
+            'edge_index',
+            'batch',
+            'ptr',
+            'cell',
+            'node_attrs',
+            'head',
+            'pbc',
+        ]:
+            value = getattr(batch, key)
+            if isinstance(value, torch.Tensor):
+                torch_data[key] = value.detach().clone()
+
+        float_keys = ['positions', 'shifts', 'unit_shifts', 'cell', 'node_attrs']
+        for key in float_keys:
+            torch_data[key] = torch_data[key].to(torch.get_default_dtype())
+        torch_data['edge_index'] = torch_data['edge_index'].long()
+        torch_data['batch'] = torch_data['batch'].long()
+        torch_data['ptr'] = torch_data['ptr'].long()
+        torch_data['head'] = torch_data['head'].long()
+
+        with torch.no_grad():
+            ctx_torch = prepare_graph_torch(
+                torch_data,
+                compute_virials=False,
+                compute_stress=True,
+                compute_displacement=False,
+                lammps_mliap=False,
+            )
+            node_feats_torch = cls.torch_model.node_embedding(torch_data['node_attrs'])
+            edge_attrs_torch = cls.torch_model.spherical_harmonics(ctx_torch.vectors)
+            edge_feats_torch, cutoff_torch = cls.torch_model.radial_embedding(
+                ctx_torch.lengths,
+                torch_data['node_attrs'],
+                torch_data['edge_index'],
+                cls.torch_model.atomic_numbers,
+            )
+
+            torch_interactions: list[np.ndarray] = []
+            torch_products: list[np.ndarray] = []
+            current = node_feats_torch
+            for idx, (interaction, product) in enumerate(
+                zip(cls.torch_model.interactions, cls.torch_model.products)
+            ):
+                node_attrs_slice = torch_data['node_attrs']
+                current, sc = interaction(
+                    node_attrs=node_attrs_slice,
+                    node_feats=current,
+                    edge_attrs=edge_attrs_torch,
+                    edge_feats=edge_feats_torch,
+                    edge_index=torch_data['edge_index'],
+                    cutoff=cutoff_torch,
+                    first_layer=(idx == 0),
+                )
+                torch_interactions.append(current.detach().cpu().numpy())
+                current = product(
+                    node_feats=current,
+                    sc=sc,
+                    node_attrs=node_attrs_slice,
+                )
+                torch_products.append(current.detach().cpu().numpy())
+
+        # --- JAX side capture ---
+        data_jax = cls.batch_jax
+
+        from mace_jax.modules.blocks import (  # noqa: PLC0415
+            EquivariantProductBasisBlock,
+            InteractionBlock,
+        )
+
+        def _capture_filter(module, _):
+            return isinstance(
+                module,
+                (InteractionBlock, EquivariantProductBasisBlock),
+            )
+
+        _, intermediates = cls.jax_model.apply(
+            cls.jax_params,
+            data_jax,
+            compute_stress=True,
+            capture_intermediates=_capture_filter,
+            mutable=['intermediates'],
+        )
+        intermediate_store = intermediates['intermediates']
+
+        def _to_numpy(value):
+            if isinstance(value, tuple):
+                value = value[0]
+            if hasattr(value, 'array'):
+                return np.asarray(value.array)
+            return np.asarray(value)
+
+        num_blocks = len(torch_products)
+        jax_interactions: list[np.ndarray] = []
+        jax_products: list[np.ndarray] = []
+        for idx in range(num_blocks):
+            int_key = f'interactions_{idx}'
+            prod_key = f'products_{idx}'
+            if int_key not in intermediate_store or prod_key not in intermediate_store:
+                raise AssertionError(f'Missing captured intermediates for block {idx}.')
+            int_container = intermediate_store[int_key]
+            prod_container = intermediate_store[prod_key]
+
+            def _extract_call(container):
+                if isinstance(container, dict):
+                    container = container.get('__call__', container)
+                if isinstance(container, (list, tuple)):
+                    return container[0]
+                return container
+
+            int_output = _extract_call(int_container)
+            prod_output = _extract_call(prod_container)
+            jax_interactions.append(_to_numpy(int_output))
+            jax_products.append(_to_numpy(prod_output))
+
+        def _align_to_reference(
+            j_block: np.ndarray, ref_block: np.ndarray
+        ) -> np.ndarray:
+            if j_block.shape == ref_block.shape:
+                return j_block
+            if j_block.size != ref_block.size or j_block.ndim != ref_block.ndim:
+                raise AssertionError(
+                    'Unable to align arrays with shapes '
+                    f'{j_block.shape} and {ref_block.shape}.'
+                )
+            for perm in itertools.permutations(range(j_block.ndim)):
+                permuted_shape = tuple(j_block.shape[i] for i in perm)
+                if permuted_shape == ref_block.shape:
+                    return np.transpose(j_block, perm)
+            raise AssertionError(
+                'Unable to find permutation aligning shapes '
+                f'{j_block.shape} and {ref_block.shape}.'
+            )
+
+        jax_products_raw = list(jax_products)
+        jax_interactions_raw = list(jax_interactions)
+        jax_products = [
+            _align_to_reference(j_block, t_block)
+            for j_block, t_block in zip(jax_products_raw, torch_products, strict=False)
+        ]
+        jax_interactions = [
+            _align_to_reference(j_block, t_block)
+            for j_block, t_block in zip(
+                jax_interactions_raw, torch_interactions, strict=False
+            )
+        ]
+
+        cls.block_feature_dims = tuple(out.shape[-1] for out in torch_products)
+        expected_dims = cls._block_output_dims()
+        if len(expected_dims) != len(cls.block_feature_dims):
+            raise AssertionError(
+                f'Expected {len(expected_dims)} blocks but observed '
+                f'{len(cls.block_feature_dims)} blocks from product unroll.'
+            )
+        if sum(cls.block_feature_dims) != cls.torch_node_feats.shape[-1]:
+            raise AssertionError(
+                'Concatenated block dimensions do not match Torch node features.'
+            )
+
+        torch_concat = np.concatenate(torch_products, axis=-1)
+        jax_concat_original = np.concatenate(jax_products_raw, axis=-1)
+        if not np.allclose(torch_concat, cls.torch_node_feats):
+            raise AssertionError(
+                'Torch product outputs do not recombine to stored node features.'
+            )
+        if not np.allclose(jax_concat_original, cls.jax_node_feats):
+            raise AssertionError(
+                'JAX product outputs do not recombine to stored node features.'
+            )
+
+        cls.blockwise_max_diff = tuple(
+            float(np.max(np.abs(t_block - j_block)))
+            for t_block, j_block in zip(torch_products, jax_products, strict=False)
+        )
+        cls.blockwise_mean_diff = tuple(
+            float(np.mean(np.abs(t_block - j_block)))
+            for t_block, j_block in zip(torch_products, jax_products, strict=False)
+        )
+        cls.interaction_blockwise_max_diff = tuple(
+            float(np.max(np.abs(t_block - j_block)))
+            for t_block, j_block in zip(
+                torch_interactions, jax_interactions, strict=False
+            )
+        )
+        cls.interaction_blockwise_mean_diff = tuple(
+            float(np.mean(np.abs(t_block - j_block)))
+            for t_block, j_block in zip(
+                torch_interactions, jax_interactions, strict=False
+            )
+        )
+
     def test_model_outputs_match(self):
         cls = self.__class__
         np.testing.assert_allclose(
@@ -267,6 +528,56 @@ class ModelEquivalenceTestBase:
             cls.torch_stress,
             rtol=1e-4,
             atol=1e-4,
+        )
+
+    def test_blockwise_node_features_within_threshold(self):
+        cls = self.__class__
+        if not cls.blockwise_max_diff:
+            pytest.skip('Block-wise diagnostics unavailable.')
+
+        thresholds = []
+        last_idx = len(cls.blockwise_max_diff) - 1
+        for idx in range(len(cls.blockwise_max_diff)):
+            if idx == 0:
+                thresholds.append(0.25)
+            elif idx == last_idx:
+                thresholds.append(0.20)
+            else:
+                thresholds.append(0.12)
+        for idx, (max_diff, limit) in enumerate(
+            zip(cls.blockwise_max_diff, thresholds, strict=False)
+        ):
+            assert max_diff < limit, (
+                f'Interaction block {idx} exceeds tolerance: '
+                f'max |Δ|={max_diff:.3f}, limit={limit:.2f}'
+            )
+
+    def test_interaction_block_outputs_within_threshold(self):
+        cls = self.__class__
+        if not cls.interaction_blockwise_max_diff:
+            pytest.skip('Interaction diagnostics unavailable.')
+        thresholds = []
+        last_idx = len(cls.interaction_blockwise_max_diff) - 1
+        for idx in range(len(cls.interaction_blockwise_max_diff)):
+            if idx == 0 or idx == last_idx:
+                thresholds.append(0.18)
+            else:
+                thresholds.append(0.08)
+        for idx, (max_diff, limit) in enumerate(
+            zip(cls.interaction_blockwise_max_diff, thresholds, strict=False)
+        ):
+            assert max_diff < limit, (
+                f'Interaction block {idx} pre-product output exceeds tolerance: '
+                f'max |Δ|={max_diff:.3f}, limit={limit:.2f}'
+            )
+
+    def test_interaction_energy_within_threshold(self):
+        cls = self.__class__
+        if np.isnan(cls.max_interaction_energy_diff):
+            pytest.skip('Interaction energy diagnostics unavailable.')
+        assert cls.max_interaction_energy_diff < 2e-3, (
+            'Interaction energy deviation too large: '
+            f'max |Δ|={cls.max_interaction_energy_diff:.3f}'
         )
 
 

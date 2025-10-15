@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-from functools import cache, lru_cache
-from typing import TYPE_CHECKING
-
 import cuequivariance_jax as cuex
 import jax
 import jax.numpy as jnp
-from e3nn import o3
-from e3nn_jax import Irreps  # type: ignore
+import numpy as np
+from e3nn_jax import Irreps
 from flax import linen as fnn
 
 import cuequivariance as cue
@@ -21,233 +18,9 @@ from mace_jax.adapters.flax.torch import (
     auto_import_from_torch_flax,
     register_import_mapper,
 )
+from mace_jax.tools.dtype import default_dtype
 
 from .utility import ir_mul_to_mul_ir
-
-if TYPE_CHECKING:
-    import cuequivariance_torch as cuet
-    import torch
-
-
-def _torch_modules():
-    import torch  # noqa: PLC0415
-    import torch.nn.functional as F  # noqa: PLC0415
-
-    return torch, F
-
-
-def _cue_torch_module():
-    import cuequivariance_torch as cuet  # noqa: PLC0415
-
-    return cuet
-
-
-def _native_weight_blocks(module: torch.nn.Module) -> list[torch.Tensor]:
-    """Collect native MACE weight tensors reshaped to (elements, dim, mul)."""
-    blocks: list[torch.Tensor] = []
-    mul: int | None = None
-
-    for contraction in getattr(module, 'contractions', []):
-        weight_max = contraction.weights_max
-        if mul is None:
-            mul = int(weight_max.shape[2])
-        blocks.append(weight_max.reshape(weight_max.shape[0], -1, mul))
-
-        for weight in contraction.weights:
-            if mul is None:
-                mul = int(weight.shape[2])
-            blocks.append(weight.reshape(weight.shape[0], -1, mul))
-
-    return blocks
-
-
-def _extract_native_weights(module: torch.nn.Module) -> torch.Tensor:
-    """Stack native weights into (num_elements, native_dim, mul)."""
-    torch, _ = _torch_modules()
-    blocks = _native_weight_blocks(module)
-    if not blocks:
-        return torch.zeros((0, 0, 1), dtype=torch.get_default_dtype())
-
-    return torch.cat(blocks, dim=1)
-
-
-def _set_mul_one(irreps: o3.Irreps) -> o3.Irreps:
-    """Return irreps with multiplicity one for each irrep."""
-    return o3.Irreps([(1, ir.ir) for ir in irreps])
-
-
-@cache
-def _native_to_cue_transform(
-    module_cls: type,
-    irreps_in_str: str,
-    irreps_out_str: str,
-    correlation: int,
-    use_reduced_cg: bool,
-) -> torch.Tensor:
-    """Return the basis transform mapping native weights to cue ordering.
-
-    The native MACE module and the cue implementation both determine their
-    weight layouts dynamically: zeroed Clebsch–Gordan paths are dropped, reduced
-    CG bases shrink dimensions, and the product bases are stacked in different
-    orders depending on the correlation.  Re-deriving the exact permutation by
-    hand would require re-implementing that logic and would be brittle against
-    upstream changes.  Instead we instantiate tiny ``mul = 1`` helper modules
-    and *probe* each implementation once to observe its canonical basis.  The
-    resulting linear map is cached per (irreps, correlation, reduced-CG) tuple,
-    so subsequent imports reuse the transform without any further probing.
-    """
-    torch, F = _torch_modules()
-    dtype = torch.float64
-    device = torch.device('cpu')
-
-    irreps_in = o3.Irreps(irreps_in_str)
-    irreps_out = o3.Irreps(irreps_out_str)
-    base_in = _set_mul_one(irreps_in)
-    base_out = _set_mul_one(irreps_out)
-
-    native_base = module_cls(
-        irreps_in=base_in,
-        irreps_out=base_out,
-        correlation=correlation,
-        num_elements=1,
-        use_reduced_cg=use_reduced_cg,
-    ).to(device=device, dtype=dtype)
-    native_base.eval()
-
-    cue_irreps_in = cue.Irreps(cue.O3, base_in)
-    cue_irreps_out = cue.Irreps(cue.O3, base_out)
-    cue_module = (
-        _cue_torch_module()
-        .SymmetricContraction(
-            cue_irreps_in,
-            cue_irreps_out,
-            contraction_degree=correlation,
-            num_elements=1,
-            layout_in=cue.ir_mul,
-            layout_out=cue.mul_ir,
-            original_mace=False,
-            dtype=dtype,
-            math_dtype=dtype,
-        )
-        .to(device=device)
-    )
-    cue_module.eval()
-
-    native_weights = _extract_native_weights(native_base)
-    native_dim = native_weights.shape[1]
-    cue_dim = cue_module.weight.shape[1]
-
-    if native_dim == 0 or cue_dim == 0:
-        return torch.zeros((cue_dim, native_dim), dtype=dtype, device=device)
-
-    feature_dim = base_in.dim
-    output_dim = base_out.dim
-    target_dim = max(native_dim, cue_dim)
-    batch = max(1, (target_dim + output_dim - 1) // output_dim)
-
-    generator = torch.Generator(device=device).manual_seed(0)
-    features_native = torch.randn(
-        batch,
-        1,
-        feature_dim,
-        generator=generator,
-        dtype=dtype,
-        device=device,
-    )
-    features_ir_mul = features_native.transpose(1, 2).reshape(batch, -1)
-    indices = torch.zeros(batch, dtype=torch.long, device=device)
-    selector = F.one_hot(indices, num_classes=1).to(dtype=dtype)
-
-    basis_columns: list[torch.Tensor] = []
-    with torch.no_grad():
-        cue_module.weight.zero_()
-        for basis_idx in range(cue_dim):
-            cue_module.weight.zero_()
-            cue_module.weight[0, basis_idx, 0] = 1.0
-            column = cue_module(features_ir_mul, indices).reshape(-1)
-            basis_columns.append(column)
-    coeffs = torch.stack(basis_columns, dim=1)
-
-    params: list[torch.Tensor] = []
-    for contraction in native_base.contractions:
-        params.append(contraction.weights_max)
-        params.extend(contraction.weights)
-
-    native_columns: list[torch.Tensor] = []
-    with torch.no_grad():
-        saved = [param.detach().clone() for param in params]
-        for param in params:
-            param.zero_()
-
-        for param in params:
-            num_params = param.shape[1]
-            num_feats = param.shape[2]
-            for idx_param in range(num_params):
-                for idx_feat in range(num_feats):
-                    param.zero_()
-                    param[0, idx_param, idx_feat] = 1.0
-                    column = native_base(features_native, selector).reshape(-1)
-                    native_columns.append(column)
-            param.zero_()
-
-        for param, data in zip(params, saved):
-            param.copy_(data)
-
-    native_matrix = torch.stack(native_columns, dim=1)
-    transform = torch.linalg.lstsq(coeffs, native_matrix).solution
-    return transform.detach()
-
-
-def _map_native_weights_to_cue(
-    module: torch.nn.Module,
-    *,
-    dtype: torch.dtype,
-    target_dim: int,
-) -> torch.Tensor:
-    """Convert native MACE weights into cue ordering for all elements.
-
-    This lifts the cached single-element transform produced by
-    :func:`_native_to_cue_transform` to the full multiplicity of the imported
-    module.  Because the expensive probing happens only on cache misses, the
-    typical import path reduces to a reshape followed by a matrix multiply.
-    Degenerate cases (e.g. empty bases) fall back to the identity transform so
-    that shape checks remain straightforward.
-    """
-    torch, _ = _torch_modules()
-    if not getattr(module, 'contractions', None):
-        return torch.zeros((0, 0, 1), dtype=dtype)
-
-    irreps_in = str(module.irreps_in)
-    irreps_out = str(module.irreps_out)
-    correlation = int(module.contractions[0].correlation)
-    use_reduced_cg = bool(getattr(module, 'use_reduced_cg', False))
-
-    native_weights = _extract_native_weights(module).to(dtype=dtype)
-    native_dim = native_weights.shape[1]
-    if native_weights.numel() == 0:
-        return torch.zeros((native_weights.shape[0], target_dim, 1), dtype=dtype)
-
-    try:
-        transform = _native_to_cue_transform(
-            module.__class__,
-            irreps_in,
-            irreps_out,
-            correlation,
-            use_reduced_cg,
-        ).to(dtype=dtype)
-    except Exception:
-        if target_dim != native_dim:
-            raise
-        transform = torch.eye(native_dim, dtype=dtype)
-
-    if transform.shape[0] != target_dim or transform.shape[1] != native_dim:
-        raise ValueError(
-            'Cached transform shape mismatch: '
-            f'expected ({target_dim}, {native_dim}), got {tuple(transform.shape)}.'
-        )
-
-    cue_weights = torch.einsum('ab,zbc->zac', transform, native_weights)
-    return cue_weights
 
 
 @auto_import_from_torch_flax(allow_missing_mapper=True)
@@ -427,43 +200,8 @@ class SymmetricContraction(fnn.Module):
         return jnp.concatenate(segments, axis=-1)
 
 
-@register_import_mapper(
-    'cuequivariance_torch.operations.symmetric_contraction.SymmetricContraction'
-)
-def _import_cue_symmetric_contraction(module, variables, scope) -> None:
-    """Import mapper that transfers Torch symmetric-contraction weights."""
-    target = _resolve_scope(variables, scope)
-    weight = module.weight.detach().cpu().numpy()
-    existing = target.get('weight')
-    dtype = existing.dtype if existing is not None else weight.dtype
-    target['weight'] = jnp.asarray(weight, dtype=dtype)
-
-
-@register_import_mapper('mace.modules.symmetric_contraction.SymmetricContraction')
-def _import_native_symmetric_contraction(module, variables, scope) -> None:
-    """Import mapper that mirrors the native Torch module weight layout."""
-    target = _resolve_scope(variables, scope)
-    existing = target.get('weight')
-    if existing is None:
-        raise KeyError(
-            'Target variables missing SymmetricContraction weight parameter.'
-        )
-    torch_dtype = module.contractions[0].weights_max.dtype
-    cue_weights = _map_native_weights_to_cue(
-        module,
-        dtype=torch_dtype,
-        target_dim=existing.shape[1],
-    )
-
-    if cue_weights.shape != existing.shape:
-        raise ValueError(
-            'Converted symmetric contraction weights have unexpected shape '
-            f'{tuple(cue_weights.shape)}; expected {tuple(existing.shape)}.'
-        )
-
-    cue_weights_cpu = cue_weights.detach().cpu()
-    module.weight = cue_weights_cpu.to(torch_dtype)
-    target['weight'] = jnp.asarray(cue_weights_cpu.numpy(), dtype=existing.dtype)
+## Utilities
+## ----------------------------------------------------------------------------
 
 
 def _validate_features(x: jnp.ndarray, mul: int, feature_dim: int) -> None:
@@ -497,3 +235,143 @@ def _select_weights(
         return mix @ weight_flat
 
     raise ValueError('indices must be rank-1 (element ids) or rank-2 (mixing matrix)')
+
+
+## Import functions
+## ----------------------------------------------------------------------------
+
+
+@register_import_mapper(
+    'cuequivariance_torch.operations.symmetric_contraction.SymmetricContraction'
+)
+def _import_cue_symmetric_contraction(module, variables, scope) -> None:
+    """Import mapper that transfers Torch symmetric-contraction weights."""
+    target = _resolve_scope(variables, scope)
+    weight = module.weight.detach().cpu().numpy()
+    existing = target.get('weight')
+    dtype = existing.dtype if existing is not None else weight.dtype
+    target['weight'] = jnp.asarray(weight, dtype=dtype)
+
+
+@register_import_mapper('mace.modules.symmetric_contraction.SymmetricContraction')
+def _import_native_symmetric_contraction(module, variables, scope) -> None:
+    """Import mapper that mirrors the native Torch module weight layout."""
+    target = _resolve_scope(variables, scope)
+    weight = target.get('weight')
+    converted = _convert_native_weights(
+        module,
+        target_template=jnp.asarray(weight, dtype=default_dtype()),
+    )
+    target['weight'] = jnp.asarray(converted, dtype=weight.dtype)
+
+
+## Import helpers
+## ----------------------------------------------------------------------------
+
+
+def _convert_native_weights(
+    torch_module,
+    *,
+    target_template: jnp.ndarray,
+) -> jnp.ndarray:
+    from mace.tools.cg_cueq_tools import (  # noqa: PLC0415
+        symmetric_contraction_proj as mace_symmetric_contraction_proj,
+    )
+
+    irreps_in = Irreps(str(torch_module.irreps_in))
+    irreps_out = Irreps(str(torch_module.irreps_out))
+    correlation = int(torch_module.contractions[0].correlation)
+    num_elements = int(torch_module.contractions[0].weights_max.shape[0])
+
+    mul = irreps_in[0].mul
+    feature_dim = sum(term.ir.dim for term in irreps_in)
+    if mul == 0 or feature_dim == 0:
+        return target_template
+
+    weight_shape = target_template.shape
+    _, basis_dim, mul_dim = weight_shape
+    if basis_dim == 0 or mul_dim == 0:
+        return target_template
+
+    native_weight = _gather_native_reduced_weights(
+        torch_module,
+        correlation=correlation,
+        mul_dim=mul_dim,
+        num_elements=num_elements,
+    )
+
+    cue_irreps_in = cue.Irreps(cue.O3, str(irreps_in))
+    cue_irreps_out = cue.Irreps(cue.O3, str(irreps_out))
+    _, projection = mace_symmetric_contraction_proj(
+        cue_irreps_in,
+        cue_irreps_out,
+        tuple(range(1, correlation + 1)),
+    )
+    projection = np.asarray(projection, dtype=native_weight.dtype)
+
+    canonical_dim = projection.shape[1]
+    if basis_dim != canonical_dim:
+        raise NotImplementedError(
+            'Native SymmetricContraction import currently only supports use_reduced_cg=True.'
+        )
+
+    if native_weight.shape[1] != projection.shape[0]:
+        raise ValueError(
+            'Native SymmetricContraction weight dimension does not match projection.'
+        )
+
+    # Emulate the torch-side accelerated implementation
+    # (tmp/cuEquivariance/.../operations/symmetric_contraction.py:148-171) which
+    # deterministically converts original MACE weights via w_native @ projection.
+    converted = np.einsum('zau,ab->zbu', native_weight, projection, optimize=True)
+    return jnp.asarray(converted, dtype=target_template.dtype)
+
+
+def _gather_native_reduced_weights(
+    torch_module,
+    *,
+    correlation: int,
+    mul_dim: int,
+    num_elements: int,
+) -> np.ndarray:
+    """Stack native-use weights in the order expected by the cue projection."""
+
+    base_array = torch_module.contractions[0].weights_max.detach().cpu().numpy()
+    dtype = np.asarray(base_array).dtype
+
+    if correlation <= 0:
+        return np.zeros((num_elements, 0, mul_dim), dtype=dtype)
+
+    native_blocks: list[np.ndarray] = []
+    for contraction in torch_module.contractions:
+        degree_blocks: list[np.ndarray] = []
+
+        for degree in range(correlation, 0, -1):
+            if degree == correlation:
+                weight_param = contraction.weights_max
+                zeroed = bool(getattr(contraction, 'weights_max_zeroed', False))
+            else:
+                idx = correlation - degree - 1
+                weight_param = contraction.weights[idx]
+                zeroed = bool(getattr(contraction, f'weights_{idx}_zeroed', False))
+
+            array = np.asarray(weight_param.detach().cpu().numpy(), dtype=dtype)
+            if zeroed:
+                array = np.zeros_like(array)
+
+            if array.shape[1] == 0:
+                continue
+            degree_blocks.append(array)
+
+        if degree_blocks:
+            native_blocks.append(np.concatenate(degree_blocks, axis=1))
+
+    if native_blocks:
+        stacked = np.concatenate(native_blocks, axis=1)
+    else:
+        stacked = np.zeros((num_elements, 0, mul_dim), dtype=dtype)
+
+    if stacked.shape[0] != num_elements or stacked.shape[2] != mul_dim:
+        raise ValueError('Native SymmetricContraction weights shape mismatch.')
+
+    return stacked

@@ -57,8 +57,8 @@ class Linear:
         irreps_out: Irreps,
         shared_weights: bool = True,
         internal_weights: bool = True,
-        cueq_config: Optional[CuEquivarianceConfig] = None,
-        name: Optional[str] = None,
+        cueq_config: CuEquivarianceConfig | None = None,
+        name: str | None = None,
     ):
         if cueq_config is not None:
             if getattr(cueq_config, 'conv_fusion', False):
@@ -76,11 +76,18 @@ class Linear:
                     f'received {group_value!r}.'
                 )
 
+        layout = (
+            getattr(cueq_config, 'layout', 'mul_ir')
+            if cueq_config is not None
+            else 'mul_ir'
+        )
+
         return CueLinear(
             irreps_in,
             irreps_out,
             shared_weights=shared_weights,
             internal_weights=internal_weights,
+            layout=layout,
             name=name,
         )
 
@@ -97,7 +104,7 @@ class TensorProduct:
         shared_weights: bool = False,
         internal_weights: bool = False,
         cueq_config=None,
-        name: Optional[str] = None,
+        name: str | None = None,
     ):
         if cueq_config is not None:
             if getattr(cueq_config, 'conv_fusion', False):
@@ -132,8 +139,8 @@ def FullyConnectedTensorProduct(
     irreps_out: Irreps,
     shared_weights: bool = True,
     internal_weights: bool = True,
-    cueq_config: Optional[CuEquivarianceConfig] = None,
-    name: Optional[str] = None,
+    cueq_config: CuEquivarianceConfig | None = None,
+    name: str | None = None,
 ):
     """
     Wrapper around o3.FullyConnectedTensorProduct (JAX version).
@@ -170,10 +177,10 @@ def SymmetricContractionWrapper(
     irreps_in: Irreps,
     irreps_out: Irreps,
     correlation: int,
-    num_elements: Optional[int] = None,
+    num_elements: int | None = None,
     cueq_config: Optional['CuEquivarianceConfig'] = None,
-    use_reduced_cg: bool = False,
-    name: Optional[str] = None,
+    use_reduced_cg: bool = True,
+    name: str | None = None,
 ):
     """
     JAX implementation of SymmetricContraction powered by cuequivariance-jax.
@@ -221,7 +228,7 @@ class TransposeIrrepsLayoutWrapper:
         irreps: Irreps,
         source: str,
         target: str,
-        cueq_config: Optional[CuEquivarianceConfig] = None,
+        cueq_config: CuEquivarianceConfig | None = None,
     ):
         if cueq_config is None or not cueq_config.enabled:
             return None

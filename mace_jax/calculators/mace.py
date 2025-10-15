@@ -1,4 +1,4 @@
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import jax
 import jraph
@@ -35,7 +35,7 @@ class MACEJAXCalculator(Calculator):
         energy_units_to_eV: float = 1.0,
         length_units_to_A: float = 1.0,
         default_dtype='float64',
-        atomic_numbers: Optional[list[int]] = None,
+        atomic_numbers: list[int] | None = None,
         **kwargs,
     ):
         Calculator.__init__(self, **kwargs)

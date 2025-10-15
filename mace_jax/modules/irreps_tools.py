@@ -4,8 +4,6 @@
 # This program is distributed under the MIT License (see MIT.md)
 ###########################################################################################
 
-from typing import Optional
-
 import jax.numpy as jnp
 from e3nn_jax import Irreps
 
@@ -69,7 +67,7 @@ class reshape_irreps:
     def __init__(
         self,
         irreps: Irreps,
-        cueq_config: Optional[CuEquivarianceConfig] = None,
+        cueq_config: CuEquivarianceConfig | None = None,
     ):
         self.irreps = Irreps(irreps)
         self.cueq_config = cueq_config

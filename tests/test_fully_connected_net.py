@@ -1,6 +1,8 @@
 import jax
 import jax.numpy as jnp
+import jax.nn as jnn
 import numpy as np
+import pytest
 import torch
 from e3nn.nn import FullyConnectedNet as FullyConnectedNetTorch
 
@@ -10,15 +12,24 @@ from mace_jax.adapters.e3nn.nn._fc import FullyConnectedNet as FullyConnectedNet
 class TestFullyConnectedNet:
     """Compare the Flax FullyConnectedNet with the e3nn reference implementation."""
 
-    def test_forward_matches_e3nn(self):
+    @pytest.mark.parametrize(
+        ('torch_act', 'jax_act', 'out_act'),
+        [
+            (None, None, False),
+            (torch.tanh, jnp.tanh, False),
+            (torch.tanh, jnp.tanh, True),
+            (torch.nn.SiLU(), jnn.silu, False),
+            (torch.nn.SiLU(), jnn.silu, True),
+        ],
+    )
+    def test_forward_matches_e3nn(self, torch_act, jax_act, out_act):
         hs = [6, 5, 4]
         variance_in = 1
         variance_out = 1
-        out_act = False
 
         torch_net = FullyConnectedNetTorch(
             hs=hs,
-            act=None,
+            act=torch_act,
             variance_in=variance_in,
             variance_out=variance_out,
             out_act=out_act,
@@ -34,7 +45,7 @@ class TestFullyConnectedNet:
 
         flax_net = FullyConnectedNetJAX(
             hs=hs,
-            act=None,
+            act=jax_act,
             variance_in=variance_in,
             variance_out=variance_out,
             out_act=out_act,

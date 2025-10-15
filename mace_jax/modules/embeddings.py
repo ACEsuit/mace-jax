@@ -13,8 +13,8 @@ class GenericJointEmbedding(fnn.Module):
     """Flax version of the generic joint embedding fusion block."""
 
     base_dim: int
-    embedding_specs: Optional[dict[str, Any]]
-    out_dim: Optional[int] = None
+    embedding_specs: dict[str, Any] | None
+    out_dim: int | None = None
 
     def setup(self) -> None:
         if self.embedding_specs is None:

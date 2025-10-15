@@ -1,6 +1,6 @@
 import abc
-from collections.abc import Sequence
-from typing import Callable, Optional, Union
+from collections.abc import Callable, Sequence
+from typing import Optional, Union
 
 import flax.linen as fnn
 import jax
@@ -43,7 +43,7 @@ class LinearNodeEmbeddingBlock(fnn.Module):
 
     irreps_in: Irreps
     irreps_out: Irreps
-    cueq_config: Optional[CuEquivarianceConfig] = None
+    cueq_config: CuEquivarianceConfig | None = None
 
     def setup(self) -> None:
         self.linear = Linear(
@@ -70,7 +70,7 @@ class LinearReadoutBlock(fnn.Module):
 
     irreps_in: Irreps
     irrep_out: Irreps = Irreps('0e')
-    cueq_config: Optional[CuEquivarianceConfig] = None
+    cueq_config: CuEquivarianceConfig | None = None
 
     def setup(self) -> None:
         self.linear = Linear(
@@ -83,7 +83,7 @@ class LinearReadoutBlock(fnn.Module):
     def __call__(
         self,
         x: jnp.ndarray,
-        heads: Optional[jnp.ndarray] = None,
+        heads: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
         del heads  # maintained for Torch parity
         return self.linear(x)
@@ -102,10 +102,10 @@ class NonLinearReadoutBlock(fnn.Module):
 
     irreps_in: Irreps
     MLP_irreps: Irreps
-    gate: Optional[Callable]
+    gate: Callable | None
     irrep_out: Irreps = Irreps('0e')
     num_heads: int = 1
-    cueq_config: Optional[CuEquivarianceConfig] = None
+    cueq_config: CuEquivarianceConfig | None = None
 
     def setup(self) -> None:
         self.hidden_irreps = self.MLP_irreps
@@ -130,7 +130,7 @@ class NonLinearReadoutBlock(fnn.Module):
     def __call__(
         self,
         x: IrrepsArray,
-        heads: Optional[jnp.ndarray] = None,
+        heads: jnp.ndarray | None = None,
     ) -> IrrepsArray:
         x = self.non_linearity(self.linear_1(x))
         if self.num_heads > 1 and heads is not None:
@@ -145,10 +145,10 @@ class NonLinearBiasReadoutBlock(fnn.Module):
 
     irreps_in: Irreps
     MLP_irreps: Irreps
-    gate: Optional[Callable]
+    gate: Callable | None
     irrep_out: Irreps = Irreps('0e')
     num_heads: int = 1
-    cueq_config: Optional[CuEquivarianceConfig] = None
+    cueq_config: CuEquivarianceConfig | None = None
 
     def setup(self) -> None:
         self.hidden_irreps = self.MLP_irreps
@@ -184,7 +184,7 @@ class NonLinearBiasReadoutBlock(fnn.Module):
     def __call__(
         self,
         x: IrrepsArray,
-        heads: Optional[jnp.ndarray] = None,
+        heads: jnp.ndarray | None = None,
     ) -> IrrepsArray:
         x = self.non_linearity_1(self.linear_1(x))
         x = self.non_linearity_2(self.linear_mid(x))
@@ -200,7 +200,7 @@ class LinearDipoleReadoutBlock(fnn.Module):
 
     irreps_in: Irreps
     dipole_only: bool = False
-    cueq_config: Optional[CuEquivarianceConfig] = None
+    cueq_config: CuEquivarianceConfig | None = None
 
     def setup(self) -> None:
         if self.dipole_only:
@@ -228,7 +228,7 @@ class NonLinearDipoleReadoutBlock(fnn.Module):
     MLP_irreps: Irreps
     gate: Callable
     dipole_only: bool = False
-    cueq_config: Optional[CuEquivarianceConfig] = None
+    cueq_config: CuEquivarianceConfig | None = None
 
     def setup(self) -> None:
         self.hidden_irreps = self.MLP_irreps
@@ -237,20 +237,16 @@ class NonLinearDipoleReadoutBlock(fnn.Module):
         else:
             self.irreps_out = Irreps('1x0e + 1x1o')
 
-        irreps_scalars = Irreps(
-            [
-                (mul, ir)
-                for mul, ir in self.hidden_irreps
-                if ir.l == 0 and ir in self.irreps_out
-            ]
-        )
-        irreps_gated = Irreps(
-            [
-                (mul, ir)
-                for mul, ir in self.hidden_irreps
-                if ir.l > 0 and ir in self.irreps_out
-            ]
-        )
+        irreps_scalars = Irreps([
+            (mul, ir)
+            for mul, ir in self.hidden_irreps
+            if ir.l == 0 and ir in self.irreps_out
+        ])
+        irreps_gated = Irreps([
+            (mul, ir)
+            for mul, ir in self.hidden_irreps
+            if ir.l > 0 and ir in self.irreps_out
+        ])
         irreps_gates = Irreps([(mul, Irreps('0e')[0][1]) for mul, _ in irreps_gated])
 
         self.equivariant_nonlin = nn.Gate(
@@ -287,7 +283,7 @@ class LinearDipolePolarReadoutBlock(fnn.Module):
 
     irreps_in: Irreps
     use_polarizability: bool = True
-    cueq_config: Optional[CuEquivarianceConfig] = None
+    cueq_config: CuEquivarianceConfig | None = None
 
     def setup(self) -> None:
         if not self.use_polarizability:
@@ -315,7 +311,7 @@ class NonLinearDipolePolarReadoutBlock(fnn.Module):
     MLP_irreps: Irreps
     gate: Callable
     use_polarizability: bool = True
-    cueq_config: Optional[CuEquivarianceConfig] = None
+    cueq_config: CuEquivarianceConfig | None = None
 
     def setup(self) -> None:
         self.hidden_irreps = self.MLP_irreps
@@ -325,20 +321,16 @@ class NonLinearDipolePolarReadoutBlock(fnn.Module):
             )
         self.irreps_out = Irreps('2x0e + 1x1o + 1x2e')
 
-        irreps_scalars = Irreps(
-            [
-                (mul, ir)
-                for mul, ir in self.hidden_irreps
-                if ir.l == 0 and ir in self.irreps_out
-            ]
-        )
-        irreps_gated = Irreps(
-            [
-                (mul, ir)
-                for mul, ir in self.hidden_irreps
-                if ir.l > 0 and ir in self.irreps_out
-            ]
-        )
+        irreps_scalars = Irreps([
+            (mul, ir)
+            for mul, ir in self.hidden_irreps
+            if ir.l == 0 and ir in self.irreps_out
+        ])
+        irreps_gated = Irreps([
+            (mul, ir)
+            for mul, ir in self.hidden_irreps
+            if ir.l > 0 and ir in self.irreps_out
+        ])
         irreps_gates = Irreps([(mul, '0e') for mul, _ in irreps_gated])
 
         self.equivariant_nonlin = nn.Gate(
@@ -373,7 +365,7 @@ class NonLinearDipolePolarReadoutBlock(fnn.Module):
 class AtomicEnergiesBlock(fnn.Module):
     """Block that returns atomic energies from one-hot element vectors."""
 
-    atomic_energies_init: Union[np.ndarray, jnp.ndarray]
+    atomic_energies_init: np.ndarray | jnp.ndarray
 
     @fnn.compact
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
@@ -462,10 +454,10 @@ class EquivariantProductBasisBlock(fnn.Module):
     target_irreps: Irreps
     correlation: int
     use_sc: bool = True
-    num_elements: Optional[int] = None
+    num_elements: int | None = None
     use_agnostic_product: bool = False
-    use_reduced_cg: Optional[bool] = None
-    cueq_config: Optional[CuEquivarianceConfig] = None
+    use_reduced_cg: bool | None = None
+    cueq_config: CuEquivarianceConfig | None = None
 
     def setup(self) -> None:
         num_elements = self.num_elements
@@ -494,7 +486,7 @@ class EquivariantProductBasisBlock(fnn.Module):
     def __call__(
         self,
         node_feats: jnp.ndarray,
-        sc: Optional[jnp.ndarray],
+        sc: jnp.ndarray | None,
         node_attrs: jnp.ndarray,
     ) -> jnp.ndarray:
         if self.use_agnostic_product:
@@ -510,9 +502,10 @@ class EquivariantProductBasisBlock(fnn.Module):
             if getattr(self.cueq_config, 'layout_str', None) == 'mul_ir':
                 use_cueq_mul_ir = True
 
+        if use_cueq_mul_ir:
+            node_feats = jnp.transpose(node_feats, (0, 2, 1))
+
         if use_cueq:
-            if use_cueq_mul_ir:
-                node_feats = jnp.transpose(node_feats, (0, 2, 1))
             index_attrs = jnp.nonzero(node_attrs, size=node_attrs.shape[0])[1]
             node_attrs = jax.nn.one_hot(
                 index_attrs,
@@ -538,9 +531,9 @@ class InteractionBlock(fnn.Module, metaclass=abc.ABCMeta):
     target_irreps: Irreps
     hidden_irreps: Irreps
     avg_num_neighbors: float
-    edge_irreps: Optional[Irreps] = None
-    radial_MLP: Optional[Sequence[int]] = None
-    cueq_config: Optional[CuEquivarianceConfig] = None
+    edge_irreps: Irreps | None = None
+    radial_MLP: Sequence[int] | None = None
+    cueq_config: CuEquivarianceConfig | None = None
 
     def setup(self) -> None:
         object.__setattr__(self, 'node_attrs_irreps', Irreps(self.node_attrs_irreps))
@@ -575,7 +568,7 @@ class InteractionBlock(fnn.Module, metaclass=abc.ABCMeta):
     def truncate_ghosts(
         self,
         tensor: jnp.ndarray,
-        n_real: Optional[int] = None,
+        n_real: int | None = None,
     ) -> jnp.ndarray:
         return tensor[:n_real] if n_real is not None else tensor
 
@@ -661,8 +654,8 @@ class RealAgnosticInteractionBlock(InteractionBlock):
         edge_attrs: jnp.ndarray,
         edge_feats: jnp.ndarray,
         edge_index: jnp.ndarray,
-        cutoff: Optional[jnp.ndarray] = None,
-        n_real: Optional[int] = None,
+        cutoff: jnp.ndarray | None = None,
+        n_real: int | None = None,
         first_layer: bool = False,
     ) -> tuple[jnp.ndarray, None]:
         # First linear projection
@@ -762,8 +755,8 @@ class RealAgnosticResidualInteractionBlock(InteractionBlock):
         edge_attrs: jnp.ndarray,
         edge_feats: jnp.ndarray,
         edge_index: jnp.ndarray,
-        cutoff: Optional[jnp.ndarray] = None,
-        n_real: Optional[int] = None,
+        cutoff: jnp.ndarray | None = None,
+        n_real: int | None = None,
         first_layer: bool = False,
     ) -> tuple[jnp.ndarray, jnp.ndarray]:
         # Skip connection
@@ -878,8 +871,8 @@ class RealAgnosticDensityInteractionBlock(InteractionBlock):
         edge_attrs: jnp.ndarray,
         edge_feats: jnp.ndarray,
         edge_index: jnp.ndarray,
-        cutoff: Optional[jnp.ndarray] = None,
-        n_real: Optional[int] = None,
+        cutoff: jnp.ndarray | None = None,
+        n_real: int | None = None,
         first_layer: bool = False,
     ) -> tuple[jnp.ndarray, None]:
         receiver = edge_index[1]
@@ -1002,8 +995,8 @@ class RealAgnosticDensityResidualInteractionBlock(InteractionBlock):
         edge_attrs: jnp.ndarray,
         edge_feats: jnp.ndarray,
         edge_index: jnp.ndarray,
-        cutoff: Optional[jnp.ndarray] = None,
-        n_real: Optional[int] = None,
+        cutoff: jnp.ndarray | None = None,
+        n_real: int | None = None,
         first_layer: bool = False,
     ) -> tuple[jnp.ndarray, jnp.ndarray]:
         receiver = edge_index[1]
@@ -1136,8 +1129,8 @@ class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
         edge_attrs: jnp.ndarray,
         edge_feats: jnp.ndarray,
         edge_index: jnp.ndarray,
-        cutoff: Optional[jnp.ndarray] = None,
-        n_real: Optional[int] = None,
+        cutoff: jnp.ndarray | None = None,
+        n_real: int | None = None,
         first_layer: bool = False,
     ) -> tuple[jnp.ndarray, jnp.ndarray]:
         sender = edge_index[0]
@@ -1184,9 +1177,9 @@ class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
 class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
     def _setup(self) -> None:
         # Compute scalar irreps
-        node_scalar_irreps = Irreps(
-            [(self.node_feats_irreps.count(Irrep(0, 1)), (0, 1))]
-        )
+        node_scalar_irreps = Irreps([
+            (self.node_feats_irreps.count(Irrep(0, 1)), (0, 1))
+        ])
 
         # Source/target embeddings
         self.source_embedding = Linear(
@@ -1325,8 +1318,8 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
         edge_attrs: jnp.ndarray,
         edge_feats: jnp.ndarray,
         edge_index: jnp.ndarray,
-        cutoff: Optional[jnp.ndarray] = None,
-        n_real: Optional[int] = None,
+        cutoff: jnp.ndarray | None = None,
+        n_real: int | None = None,
         first_layer: bool = False,
     ) -> tuple[jnp.ndarray, jnp.ndarray]:
         num_nodes = node_feats.shape[0]
@@ -1413,21 +1406,24 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
 @register_flax_module('mace.modules.blocks.ScaleShiftBlock')
 @auto_import_from_torch_flax(allow_missing_mapper=True)
 class ScaleShiftBlock(fnn.Module):
-    scale: Union[float, jnp.ndarray]
-    shift: Union[float, jnp.ndarray]
+    scale: float | jnp.ndarray
+    shift: float | jnp.ndarray
 
-    def setup(self) -> None:
-        self.scale_array = jnp.asarray(self.scale, dtype=default_dtype())
-        self.shift_array = jnp.asarray(self.shift, dtype=default_dtype())
-
+    @fnn.compact
     def __call__(self, x: jnp.ndarray, head: jnp.ndarray) -> jnp.ndarray:
-        scale_h = jnp.atleast_1d(self.scale_array)[head]
-        shift_h = jnp.atleast_1d(self.shift_array)[head]
+        scale_init = jnp.asarray(self.scale, dtype=default_dtype())
+        shift_init = jnp.asarray(self.shift, dtype=default_dtype())
+
+        scale = self.param('scale', lambda rng: scale_init)
+        shift = self.param('shift', lambda rng: shift_init)
+
+        scale_h = jnp.atleast_1d(scale)[head]
+        shift_h = jnp.atleast_1d(shift)[head]
         return scale_h * x + shift_h
 
     def __repr__(self) -> str:
-        scale_vals = jnp.atleast_1d(self.scale_array)
-        shift_vals = jnp.atleast_1d(self.shift_array)
+        scale_vals = jnp.atleast_1d(jnp.asarray(self.scale))
+        shift_vals = jnp.atleast_1d(jnp.asarray(self.shift))
         formatted_scale = ', '.join(f'{float(val):.4f}' for val in scale_vals)
         formatted_shift = ', '.join(f'{float(val):.4f}' for val in shift_vals)
         return f'{self.__class__.__name__}(scale={formatted_scale}, shift={formatted_shift})'

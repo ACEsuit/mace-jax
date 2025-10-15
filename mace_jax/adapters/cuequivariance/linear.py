@@ -29,6 +29,7 @@ class Linear(fnn.Module):
     irreps_out: Irreps
     shared_weights: bool | None = None
     internal_weights: bool | None = None
+    layout: object = 'mul_ir'
 
     def setup(self) -> None:
         """Resolve configuration flags and construct the cue descriptor."""
@@ -45,6 +46,7 @@ class Linear(fnn.Module):
         self.irreps_out_o3 = Irreps(self.irreps_out)
         self.irreps_in_cue = cue.Irreps(cue.O3, self.irreps_in_o3)
         self.irreps_out_cue = cue.Irreps(cue.O3, self.irreps_out_o3)
+        self._api_layout, self._layout_str = self._resolve_layout(self.layout)
 
         descriptor = cue.descriptors.linear(
             self.irreps_in_cue,
@@ -53,6 +55,29 @@ class Linear(fnn.Module):
         self.descriptor = descriptor
         self.weight_irreps = descriptor.inputs[0].irreps
         self.weight_numel = descriptor.polynomial.operands[0].size
+        self._weight_layout = descriptor.inputs[0].layout
+        self._descriptor_input_layout = descriptor.inputs[1].layout
+        self._descriptor_output_layout = descriptor.outputs[0].layout
+
+    @staticmethod
+    def _resolve_layout(layout_obj: object) -> tuple[cue.IrrepsLayout, str]:
+        """Return the cue layout object and a readable identifier."""
+        if isinstance(layout_obj, str):
+            if layout_obj not in {'mul_ir', 'ir_mul'}:
+                raise ValueError(
+                    f"Linear received unsupported layout string '{layout_obj}'."
+                )
+            return getattr(cue, layout_obj), layout_obj
+
+        if layout_obj == cue.mul_ir:
+            return layout_obj, 'mul_ir'
+        if layout_obj == cue.ir_mul:
+            return layout_obj, 'ir_mul'
+
+        raise ValueError(
+            'Linear received an unknown layout object; expected cue.mul_ir or '
+            'cue.ir_mul.'
+        )
 
     def _weight_param(self) -> jnp.ndarray:
         """Initialise or fetch the internal weight parameter."""
@@ -70,12 +95,29 @@ class Linear(fnn.Module):
         return jnp.asarray(x), False
 
     def _as_rep(self, array: jnp.ndarray) -> cuex.RepArray:
-        """Convert a mul_ir array to a cue RepArray with cached metadata."""
-        ir_mul = mul_ir_to_ir_mul(array, Irreps(self.irreps_in_o3))
+        """Convert the public array to the descriptor layout."""
+        if self._api_layout == self._descriptor_input_layout:
+            payload = array
+        elif (
+            self._api_layout == cue.mul_ir
+            and self._descriptor_input_layout == cue.ir_mul
+        ):
+            payload = mul_ir_to_ir_mul(array, Irreps(self.irreps_in_o3))
+        elif (
+            self._api_layout == cue.ir_mul
+            and self._descriptor_input_layout == cue.mul_ir
+        ):
+            payload = ir_mul_to_mul_ir(array, Irreps(self.irreps_in_o3))
+        else:
+            raise ValueError(
+                'Linear does not support conversion from '
+                f'{self._api_layout!r} to {self._descriptor_input_layout!r}.'
+            )
+
         return cuex.RepArray(
             self.irreps_in_cue,
-            jnp.asarray(ir_mul),
-            cue.ir_mul,
+            jnp.asarray(payload),
+            self._descriptor_input_layout,
         )
 
     def _resolve_weight_operand(
@@ -93,7 +135,7 @@ class Linear(fnn.Module):
             return cuex.RepArray(
                 self.weight_irreps,
                 self._weight_param().astype(dtype),
-                cue.ir_mul,
+                self._weight_layout,
             )
 
         if self._shared_weights:
@@ -117,7 +159,7 @@ class Linear(fnn.Module):
                 raise ValueError(
                     'Weights must have rank 1 or 2 when shared external weights are used'
                 )
-            return cuex.RepArray(self.weight_irreps, array, cue.ir_mul)
+            return cuex.RepArray(self.weight_irreps, array, self._weight_layout)
 
         # Unshared external weights are passed directly through the descriptor;
         # cue expects them as part of the evaluation input, so we return None.
@@ -142,9 +184,25 @@ class Linear(fnn.Module):
             math_dtype=dtype,
             method='naive',
         )
-        out_ir_mul = output_rep.array
+        raw_output = output_rep.array
         irreps_out = Irreps(self.irreps_out_o3)
-        out_mul_ir = ir_mul_to_mul_ir(out_ir_mul, irreps_out)
+        if self._descriptor_output_layout == self._api_layout:
+            out_mul_ir = raw_output
+        elif (
+            self._descriptor_output_layout == cue.ir_mul
+            and self._api_layout == cue.mul_ir
+        ):
+            out_mul_ir = ir_mul_to_mul_ir(raw_output, irreps_out)
+        elif (
+            self._descriptor_output_layout == cue.mul_ir
+            and self._api_layout == cue.ir_mul
+        ):
+            out_mul_ir = mul_ir_to_ir_mul(raw_output, irreps_out)
+        else:
+            raise ValueError(
+                'Linear does not support conversion from '
+                f'{self._descriptor_output_layout!r} to {self._api_layout!r}.'
+            )
 
         if had_irreps:
             return IrrepsArray(irreps_out, out_mul_ir)

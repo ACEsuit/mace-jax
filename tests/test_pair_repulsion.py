@@ -99,7 +99,7 @@ def test_pair_repulsion_raises_close_contact_energy():
 
 def test_distance_transform_changes_radial_embedding():
     """Agnesi distance transform should alter radial embeddings on a real aspirin graph."""
-    from mace_jax.modules.blocks import RadialEmbeddingBlock
+    from mace_jax.modules.blocks import RadialEmbeddingBlock  # noqa: PLC0415
 
     dataset_path = (
         Path(__file__).resolve().parents[1] / 'data' / 'rmd17_aspirin_train.xyz'

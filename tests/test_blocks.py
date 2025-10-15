@@ -254,6 +254,13 @@ class TestEquivariantProductBasisBlock:
     """Compare EquivariantProductBasisBlock in Haiku (JAX) vs PyTorch."""
 
     @pytest.mark.parametrize(
+        'cue_config_kwargs',
+        [
+            dict(enabled=True, optimize_symmetric=True),
+            dict(enabled=False, optimize_symmetric=False),
+        ],
+    )
+    @pytest.mark.parametrize(
         'node_feats_irreps,target_irreps,correlation,use_sc,num_elements',
         [
             # Simple scalar contraction
@@ -266,7 +273,13 @@ class TestEquivariantProductBasisBlock:
         ],
     )
     def test_forward_match(
-        self, node_feats_irreps, target_irreps, correlation, use_sc, num_elements
+        self,
+        node_feats_irreps,
+        target_irreps,
+        correlation,
+        use_sc,
+        num_elements,
+        cue_config_kwargs,
     ):
         """Check forward pass matches between JAX and Torch."""
 
@@ -299,10 +312,7 @@ class TestEquivariantProductBasisBlock:
         attrs_torch = torch.tensor(attrs_np, dtype=torch.float32)
 
         # --- Torch model ---
-        cue_config_torch = CuEquivarianceConfigTorch(
-            enabled=True,
-            optimize_symmetric=True,
-        )
+        cue_config_torch = CuEquivarianceConfigTorch(**cue_config_kwargs)
 
         torch_model = EquivariantProductBasisBlockTorch(
             node_feats_irreps=str(node_feats_irreps),
@@ -310,6 +320,7 @@ class TestEquivariantProductBasisBlock:
             correlation=correlation,
             use_sc=use_sc,
             num_elements=num_elements,
+            use_reduced_cg=True,
             cueq_config=cue_config_torch,
         ).float()
 
@@ -323,10 +334,8 @@ class TestEquivariantProductBasisBlock:
             correlation=correlation,
             use_sc=use_sc,
             num_elements=num_elements,
-            cueq_config=CuEquivarianceConfigJAX(
-                enabled=True,
-                optimize_symmetric=True,
-            ),
+            use_reduced_cg=True,
+            cueq_config=CuEquivarianceConfigJAX(**cue_config_kwargs),
         )
         module, variables = init_from_torch(
             module,

@@ -58,23 +58,33 @@ def register_import_mapper(torch_type: str) -> Callable[[Callable], Callable]:
 
 
 def _copy_direct_parameters(torch_module, variables: MutableMapping) -> None:
-    """Best-effort copy that matches direct Torch parameters to Flax leaves.
+    """Best-effort copy that matches direct tensors to Flax leaves.
 
     The fallback iterates over the non-recursive parameters of ``torch_module``
-    and replaces any entries with the same name under ``variables['params']``.
-    It performs updates in place so callers can reuse the partially mutated
-    variable tree when combining multiple transfers.
+    (and their registered buffers) and replaces any entries with the same name
+    under ``variables['params']``.  It performs updates in place so callers can
+    reuse the partially mutated variable tree when combining multiple transfers.
     """
 
     params = variables.setdefault('params', {})
     if not params:
         return
 
+    def _maybe_assign(name: str, tensor) -> None:
+        if name not in params:
+            return
+        target = params[name]
+        array = jnp.asarray(tensor.detach().cpu().numpy())
+        if hasattr(target, 'dtype'):
+            array = array.astype(target.dtype)
+        params[name] = array
+
     for name, param in torch_module.named_parameters(recurse=False):
+        _maybe_assign(name, param)
+
+    for name, buf in torch_module.named_buffers(recurse=False):
         if name in params:
-            params[name] = jnp.asarray(
-                param.detach().cpu().numpy(), dtype=params[name].dtype
-            )
+            _maybe_assign(name, buf)
 
 
 def _iter_module_tree(module, path: tuple[str, ...] = ()):
@@ -231,8 +241,22 @@ def _resolve_scope(variables: MutableMapping, scope: Sequence[str]):
         the template module during ``init``).
     """
     node = variables.setdefault('params', {})
-    for key in scope:
-        node = node[key]
+    i = 0
+    while i < len(scope):
+        key = scope[i]
+        if key in node:
+            node = node[key]
+            i += 1
+            continue
+
+        if i + 1 < len(scope) and scope[i + 1].isdigit():
+            combined = f'{key}_{scope[i + 1]}'
+            if combined in node:
+                node = node[combined]
+                i += 2
+                continue
+
+        raise KeyError(f'Scope {".".join(scope)} not found in Flax variables tree')
     return node
 
 
