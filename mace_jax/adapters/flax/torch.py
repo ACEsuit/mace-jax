@@ -244,10 +244,6 @@ def _resolve_scope(variables: MutableMapping, scope: Sequence[str]):
     i = 0
     while i < len(scope):
         key = scope[i]
-        if key in node:
-            node = node[key]
-            i += 1
-            continue
 
         if i + 1 < len(scope) and scope[i + 1].isdigit():
             combined = f'{key}_{scope[i + 1]}'
@@ -255,6 +251,11 @@ def _resolve_scope(variables: MutableMapping, scope: Sequence[str]):
                 node = node[combined]
                 i += 2
                 continue
+
+        if key in node:
+            node = node[key]
+            i += 1
+            continue
 
         raise KeyError(f'Scope {".".join(scope)} not found in Flax variables tree')
     return node
