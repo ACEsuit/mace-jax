@@ -18,6 +18,7 @@ from mace.tools.multihead_tools import AtomicNumberTable, prepare_default_head
 from mace.tools.torch_geometric.batch import Batch
 
 from mace_jax import modules
+from mace_jax.tools.import_from_torch import import_from_torch
 
 
 def _load_statistics(path: Path) -> dict:
@@ -186,7 +187,8 @@ class ModelEquivalenceTestBase:
             z_table=cls.statistics['atomic_numbers'],
         )
         cls.jax_params = cls.jax_model.init(init_rng, cls.batch_jax)
-        cls.jax_params = modules.ScaleShiftMACE.import_from_torch(
+        cls.jax_params = import_from_torch(
+            cls.jax_model,
             cls.torch_model,
             cls.jax_params,
         )

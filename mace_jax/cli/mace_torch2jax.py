@@ -30,6 +30,7 @@ from mace_jax.data.utils import Configuration, graph_from_configuration
 from mace_jax.modules import interaction_classes, readout_classes
 from mace_jax.modules.models import MACE, ScaleShiftMACE
 from mace_jax.tools.gin_model import _graph_to_data  # type: ignore[attr-defined]
+from mace_jax.tools.import_from_torch import import_from_torch
 
 
 def _load_torch_model_from_foundations(
@@ -170,22 +171,9 @@ def _build_jax_model(config: dict[str, Any]):
 
 def convert_model(torch_model, config: dict[str, Any]):
     jax_model = _build_jax_model(config)
-    torch_use_reduced_cg = getattr(torch_model, 'use_reduced_cg', None)
-    jax_use_reduced_cg = getattr(jax_model, 'use_reduced_cg', None)
-    if (
-        torch_use_reduced_cg is not None
-        and jax_use_reduced_cg is not None
-        and bool(torch_use_reduced_cg) != bool(jax_use_reduced_cg)
-    ):
-        raise ValueError(
-            'Torch model was built with use_reduced_cg='
-            f'{torch_use_reduced_cg!r} but the target MACE-JAX module '
-            f'uses {jax_use_reduced_cg!r}. Please construct the JAX model '
-            'with matching settings before importing parameters.'
-        )
     template_data = _prepare_template_data(config)
     variables = jax_model.init(jax.random.PRNGKey(0), template_data)
-    variables = jax_model.import_from_torch(torch_model, variables)
+    variables = import_from_torch(jax_model, torch_model, variables)
     return jax_model, variables, template_data
 
 
