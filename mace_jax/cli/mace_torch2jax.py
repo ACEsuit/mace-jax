@@ -170,6 +170,19 @@ def _build_jax_model(config: dict[str, Any]):
 
 def convert_model(torch_model, config: dict[str, Any]):
     jax_model = _build_jax_model(config)
+    torch_use_reduced_cg = getattr(torch_model, 'use_reduced_cg', None)
+    jax_use_reduced_cg = getattr(jax_model, 'use_reduced_cg', None)
+    if (
+        torch_use_reduced_cg is not None
+        and jax_use_reduced_cg is not None
+        and bool(torch_use_reduced_cg) != bool(jax_use_reduced_cg)
+    ):
+        raise ValueError(
+            'Torch model was built with use_reduced_cg='
+            f'{torch_use_reduced_cg!r} but the target MACE-JAX module '
+            f'uses {jax_use_reduced_cg!r}. Please construct the JAX model '
+            'with matching settings before importing parameters.'
+        )
     template_data = _prepare_template_data(config)
     variables = jax_model.init(jax.random.PRNGKey(0), template_data)
     variables = jax_model.import_from_torch(torch_model, variables)
