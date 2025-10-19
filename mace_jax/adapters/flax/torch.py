@@ -77,6 +77,12 @@ def _copy_direct_parameters(torch_module, variables: MutableMapping) -> None:
         array = jnp.asarray(tensor.detach().cpu().numpy())
         if hasattr(target, 'dtype'):
             array = array.astype(target.dtype)
+        target_shape = getattr(target, 'shape', None)
+        if target_shape is not None and target_shape != array.shape:
+            if not target_shape and array.size == 1:
+                array = array.reshape(())
+            else:
+                array = array.reshape(target_shape)
         params[name] = array
 
     for name, param in torch_module.named_parameters(recurse=False):
@@ -107,12 +113,14 @@ def _apply_module_import(
     module_name = _torch_module_name(module)
     mapper = _IMPORT_MAPPERS.get(module_name)
     has_parameters = any(True for _ in module.parameters(recurse=False))
+    has_buffers = any(True for _ in module.buffers(recurse=False))
+    has_state = has_parameters or has_buffers
 
     if mapper is not None:
         mapper(module, variables, list(scope))
         return
 
-    if not has_parameters:
+    if not has_state:
         return
 
     if fallback is not None:
@@ -164,7 +172,8 @@ def auto_import_from_torch_flax(
 
         def _import_root_parameters(module, variables_mut) -> None:
             has_parameters = any(True for _ in module.parameters(recurse=False))
-            if not has_parameters:
+            has_buffers = any(True for _ in module.buffers(recurse=False))
+            if not (has_parameters or has_buffers):
                 return
             if fallback_fn is None:
                 raise NotImplementedError(
