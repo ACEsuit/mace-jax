@@ -493,26 +493,20 @@ class EquivariantProductBasisBlock(fnn.Module):
             node_attrs = jnp.ones((node_feats.shape[0], 1), dtype=node_feats.dtype)
 
         use_cueq = False
-        use_cueq_mul_ir = False
+        layout_str = getattr(self.cueq_config, 'layout_str', 'mul_ir')
         if self.cueq_config is not None:
             if self.cueq_config.enabled and (
                 self.cueq_config.optimize_all or self.cueq_config.optimize_symmetric
             ):
                 use_cueq = True
-            if getattr(self.cueq_config, 'layout_str', None) == 'mul_ir':
-                use_cueq_mul_ir = True
-
-        if use_cueq_mul_ir:
-            node_feats = jnp.transpose(node_feats, (0, 2, 1))
 
         if use_cueq:
-            index_attrs = jnp.nonzero(node_attrs, size=node_attrs.shape[0])[1]
-            node_attrs = jax.nn.one_hot(
-                index_attrs,
-                self.symmetric_contractions.num_elements,
-                dtype=node_feats.dtype,
-            )
-            node_feats = self.symmetric_contractions(node_feats, node_attrs)
+            index_attrs = jnp.argmax(node_attrs, axis=1).astype(jnp.int32)
+            features = node_feats
+            if layout_str == 'mul_ir':
+                features = jnp.transpose(features, (0, 2, 1))
+            features = features.reshape(features.shape[0], -1)
+            node_feats = self.symmetric_contractions(features, index_attrs)
         else:
             node_feats = self.symmetric_contractions(node_feats, node_attrs)
 

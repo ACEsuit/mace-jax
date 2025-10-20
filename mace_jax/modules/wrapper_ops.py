@@ -147,7 +147,9 @@ def FullyConnectedTensorProduct(
     When CuEquivariance acceleration is requested, this raises since a JAX binding
     is not yet available; otherwise defaults to the e3nn_jax implementation.
     """
-    if cueq_config is not None:
+    use_cue = cueq_config is not None and getattr(cueq_config, 'enabled', False)
+
+    if cueq_config is not None and use_cue:
         if getattr(cueq_config, 'conv_fusion', False):
             raise NotImplementedError(
                 'conv_fusion is not supported by the cuequivariance tensor product backend.'
@@ -186,7 +188,9 @@ def SymmetricContractionWrapper(
     JAX implementation of SymmetricContraction powered by cuequivariance-jax.
     """
 
-    if cueq_config is not None:
+    use_cue = cueq_config is not None and getattr(cueq_config, 'enabled', False)
+
+    if cueq_config is not None and use_cue:
         if getattr(cueq_config, 'conv_fusion', False):
             raise NotImplementedError(
                 'conv_fusion is not supported by the cuequivariance tensor product backend.'
@@ -206,8 +210,11 @@ def SymmetricContractionWrapper(
             )
 
     input_layout = 'mul_ir'
-    if cueq_config is not None and cueq_config.layout_str == 'mul_ir':
-        input_layout = 'ir_mul'
+    if use_cue:
+        if cueq_config.layout_str == 'mul_ir':
+            input_layout = 'ir_mul'
+        elif cueq_config.layout_str == 'ir_mul':
+            input_layout = 'mul_ir'
 
     return CueSymmetricContraction(
         irreps_in=irreps_in,
