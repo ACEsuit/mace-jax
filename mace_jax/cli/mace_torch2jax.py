@@ -25,6 +25,7 @@ from flax import serialization
 from mace.calculators import foundations_models
 from mace.tools.scripts_utils import extract_config_mace_model
 
+from mace_jax.adapters.flax.torch import resolve_gate_callable
 from mace_jax.data import utils as data_utils
 from mace_jax.data.utils import Configuration, graph_from_configuration
 from mace_jax.modules import interaction_classes, readout_classes
@@ -148,6 +149,7 @@ def _build_jax_model(config: dict[str, Any]):
         use_last_readout_only=config.get('use_last_readout_only', False),
         use_embedding_readout=config.get('use_embedding_readout', False),
         readout_cls=_readout(config.get('readout_cls', None)),
+        gate=resolve_gate_callable(config.get('gate', None)),
     )
 
     if config.get('radial_MLP') is not None:

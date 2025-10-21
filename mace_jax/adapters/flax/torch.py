@@ -6,6 +6,7 @@ import re
 from collections.abc import Callable, MutableMapping, Sequence
 
 import jax.numpy as jnp
+import jax.nn as jnn
 
 from flax.core import freeze, unfreeze
 from mace_jax.adapters.e3nn.math._normalize_activation import (
@@ -453,3 +454,36 @@ def _import_e3nn_linear(module, variables, scope: Sequence[str]) -> None:
             module.bias.detach().cpu().numpy(),
             dtype=target['bias'].dtype,
         )
+_GATE_MAP: dict[str, Callable | None] = {
+    'silu': jnn.silu,
+    'silu6': jnn.silu,
+    'swish': jnn.silu,
+    'relu': jnn.relu,
+    'tanh': jnn.tanh,
+    'sigmoid': jnn.sigmoid,
+    'softplus': jnn.softplus,
+    'softsign': jnn.soft_sign,
+    'gelu': jnn.gelu,
+    'abs': jnp.abs,
+    'none': None,
+}
+
+
+def resolve_gate_callable(gate: Callable | str | None) -> Callable | None:
+    """Return a JAX-compatible activation for Torch gates when available."""
+
+    if gate is None:
+        return None
+
+    if isinstance(gate, str):
+        return _GATE_MAP.get(gate.lower(), None)
+
+    name = getattr(gate, '__name__', None)
+    if name is None:
+        cls = getattr(gate, '__class__', None)
+        name = getattr(cls, '__name__', None)
+
+    if not name:
+        return None
+
+    return _GATE_MAP.get(name.lower(), None)
