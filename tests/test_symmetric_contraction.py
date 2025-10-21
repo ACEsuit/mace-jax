@@ -316,4 +316,4 @@ class TestSymmetricContractionImport:
                 torch_module(torch_inputs, torch_attrs).cpu().numpy().reshape(batch, -1)
             )
 
-        np.testing.assert_allclose(jax_output_np, torch_output, rtol=5e-4, atol=5e-3)
+        np.testing.assert_allclose(jax_output_np, torch_output, rtol=1e-5, atol=1e-4)

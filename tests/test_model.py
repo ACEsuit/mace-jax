@@ -518,20 +518,20 @@ class ModelEquivalenceTestBase:
         np.testing.assert_allclose(
             cls.jax_energy,
             cls.torch_energy,
-            rtol=1e-2,
-            atol=1e-2,
+            rtol=5e-5,
+            atol=5e-5,
         )
         np.testing.assert_allclose(
             cls.jax_forces,
             cls.torch_forces,
-            rtol=3e-4,
-            atol=3e-4,
+            rtol=2e-5,
+            atol=2e-5,
         )
         np.testing.assert_allclose(
             cls.jax_stress,
             cls.torch_stress,
-            rtol=1e-4,
-            atol=1e-4,
+            rtol=1e-6,
+            atol=1e-6,
         )
 
     def test_blockwise_node_features_within_threshold(self):
@@ -543,11 +543,11 @@ class ModelEquivalenceTestBase:
         last_idx = len(cls.blockwise_max_diff) - 1
         for idx in range(len(cls.blockwise_max_diff)):
             if idx == 0:
-                thresholds.append(0.25)
+                thresholds.append(0.05)
             elif idx == last_idx:
-                thresholds.append(0.20)
+                thresholds.append(0.04)
             else:
-                thresholds.append(0.12)
+                thresholds.append(0.02)
         for idx, (max_diff, limit) in enumerate(
             zip(cls.blockwise_max_diff, thresholds, strict=False)
         ):
@@ -564,9 +564,9 @@ class ModelEquivalenceTestBase:
         last_idx = len(cls.interaction_blockwise_max_diff) - 1
         for idx in range(len(cls.interaction_blockwise_max_diff)):
             if idx == 0 or idx == last_idx:
-                thresholds.append(0.18)
+                thresholds.append(0.03)
             else:
-                thresholds.append(0.08)
+                thresholds.append(0.015)
         for idx, (max_diff, limit) in enumerate(
             zip(cls.interaction_blockwise_max_diff, thresholds, strict=False)
         ):
@@ -579,7 +579,7 @@ class ModelEquivalenceTestBase:
         cls = self.__class__
         if np.isnan(cls.max_interaction_energy_diff):
             pytest.skip('Interaction energy diagnostics unavailable.')
-        assert cls.max_interaction_energy_diff < 2e-3, (
+        assert cls.max_interaction_energy_diff < 5e-4, (
             'Interaction energy deviation too large: '
             f'max |Δ|={cls.max_interaction_energy_diff:.3f}'
         )

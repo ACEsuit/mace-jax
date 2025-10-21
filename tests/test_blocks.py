@@ -245,8 +245,8 @@ class TestNonLinearReadoutBlock:
         np.testing.assert_allclose(
             _to_numpy(out_jax),
             out_torch.detach().cpu().numpy(),
-            rtol=5e-4,
-            atol=5e-3,
+            rtol=1e-7,
+            atol=1e-7,
         )
 
 
@@ -471,9 +471,9 @@ class TestRealAgnosticBlocks:
         if multi_output == 1:
             torch_arr = torch_out[0].detach().cpu().numpy()
             jax_arr = _to_numpy(jax_out[0])
-            np.testing.assert_allclose(torch_arr, jax_arr, rtol=0.01, atol=0.001)
+            np.testing.assert_allclose(torch_arr, jax_arr, rtol=1e-3, atol=1e-4)
         else:
             for i in range(multi_output):
                 torch_arr = torch_out[i].detach().cpu().numpy()
                 jax_arr = _to_numpy(jax_out[i])
-                np.testing.assert_allclose(torch_arr, jax_arr, rtol=0.01, atol=0.001)
+                np.testing.assert_allclose(torch_arr, jax_arr, rtol=1e-3, atol=1e-4)

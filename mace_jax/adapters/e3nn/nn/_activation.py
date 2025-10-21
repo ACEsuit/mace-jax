@@ -8,6 +8,8 @@ import e3nn_jax as e3nn
 import jax.numpy as jnp
 from e3nn_jax import Irreps, IrrepsArray
 
+from mace_jax.adapters.e3nn.math import normalize2mom
+
 
 class Activation:
     """Apply scalar activations chunk-wise according to an ``Irreps`` layout.
@@ -27,8 +29,12 @@ class Activation:
         del name  # preserved for backward compatibility
 
         self.irreps_in = Irreps(irreps_in)
+
+        if normalize_act:
+            acts = [normalize2mom(act) if act is not None else None for act in acts]
+
         self._acts = tuple(acts)
-        self._normalize_act = normalize_act
+        self._normalize_act = False
 
         if len(self.irreps_in) != len(self._acts):
             raise ValueError(

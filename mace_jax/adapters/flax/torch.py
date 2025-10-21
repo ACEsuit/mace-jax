@@ -8,6 +8,9 @@ from collections.abc import Callable, MutableMapping, Sequence
 import jax.numpy as jnp
 
 from flax.core import freeze, unfreeze
+from mace_jax.adapters.e3nn.math._normalize_activation import (
+    register_normalize2mom_const,
+)
 
 _IMPORT_MAPPERS: dict[str, Callable] = {}
 
@@ -416,7 +419,11 @@ def _import_e3nn_activation(module, variables, scope: Sequence[str]) -> None:
 
 @register_import_mapper('e3nn.math._normalize_activation.normalize2mom')
 def _import_e3nn_normalize2mom(module, variables, scope: Sequence[str]) -> None:
-    """No-op mapper for normalisation helpers with no parameters."""
+    """Register activation moments so JAX wrappers reuse Torch estimates."""
+    const = getattr(module, 'cst', None)
+    if const is not None:
+        source = getattr(module, 'f', module)
+        register_normalize2mom_const(source, float(const))
     return variables
 
 
