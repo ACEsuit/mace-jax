@@ -261,8 +261,6 @@ class TestSymmetricContractionImport:
     def test_forward_matches_native_high_correlation(self):
         """Expected to fail until native high-order import is harmonised."""
 
-        pytest.skip('Native symmetric contraction import assumes use_reduced_cg=True.')
-
         irreps_in = Irreps('2x0e + 2x1o + 2x2e')
         irreps_out = Irreps('2x0e + 2x1o')
         correlation = 2

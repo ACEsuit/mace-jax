@@ -20,12 +20,17 @@ weights that is expected during the conversion.
 
 from __future__ import annotations
 
+from functools import cache
+
 import cuequivariance_jax as cuex
 import jax
 import jax.numpy as jnp
 import numpy as np
+import torch
+from e3nn import o3
 from e3nn_jax import Irreps
 from flax import linen as fnn
+from flax.core import freeze, unfreeze
 
 import cuequivariance as cue
 from cuequivariance.group_theory.experimental.mace.symmetric_contractions import (
@@ -449,7 +454,30 @@ def _convert_native_weights(
     *,
     target_template: jnp.ndarray,
 ) -> jnp.ndarray:
-    """Convert native MACE weights into the layout expected by the JAX module."""
+    """Convert native MACE weights into the layout expected by the JAX module.
+
+    Parameters
+    ----------
+    torch_module:
+        Instance of the native PyTorch symmetric contraction module whose
+        parameters are being imported.
+    target_template:
+        Array matching the desired output shape and dtype.  Only its metadata is
+        used; the values are ignored.
+
+    Returns
+    -------
+    jnp.ndarray
+        Weight tensor expressed in the basis required by the JAX module.
+
+    Notes
+    -----
+    If the torch module uses the reduced CG basis we simply apply the square
+    projection that aligns the native ordering with the cue descriptor.  For
+    full CG weights we first compute a cached linear transform that remaps the
+    native ordering to the canonical cue ordering before optionally reducing the
+    tensor to the projected basis.
+    """
     from mace.tools.cg_cueq_tools import (  # noqa: PLC0415
         symmetric_contraction_proj as mace_symmetric_contraction_proj,
     )
@@ -478,28 +506,58 @@ def _convert_native_weights(
 
     cue_irreps_in = cue.Irreps(cue.O3, str(irreps_in))
     cue_irreps_out = cue.Irreps(cue.O3, str(irreps_out))
-    _, projection = mace_symmetric_contraction_proj(
+    degrees = tuple(range(1, correlation + 1))
+    _, reduced_projection = mace_symmetric_contraction_proj(
         cue_irreps_in,
         cue_irreps_out,
-        tuple(range(1, correlation + 1)),
+        degrees,
     )
-    projection = np.asarray(projection, dtype=native_weight.dtype)
+    reduced_projection = np.asarray(reduced_projection, dtype=native_weight.dtype)
 
-    canonical_dim = projection.shape[1]
-    if basis_dim != canonical_dim:
-        raise NotImplementedError(
-            'Native SymmetricContraction import currently only supports use_reduced_cg=True.'
-        )
+    _, descriptor_projection = cue_mace_symmetric_contraction(
+        cue_irreps_in,
+        cue_irreps_out,
+        degrees,
+    )
+    descriptor_projection = np.asarray(descriptor_projection, dtype=native_weight.dtype)
 
-    if native_weight.shape[1] != projection.shape[0]:
+    reduced_dim = reduced_projection.shape[1]
+    full_dim = descriptor_projection.shape[0]
+    native_dim = native_weight.shape[1]
+
+    if basis_dim == reduced_dim:
+        if native_dim == reduced_dim:
+            converted = np.einsum(
+                'zau,ab->zbu', native_weight, reduced_projection, optimize=True
+            )
+        elif native_dim == full_dim:
+            converted = np.einsum(
+                'zau,ab->zbu', native_weight, descriptor_projection, optimize=True
+            )
+        else:
+            raise ValueError(
+                'Native SymmetricContraction weight shape mismatch during import.'
+            )
+    elif basis_dim == full_dim:
+        if native_dim == full_dim:
+            transform = _compute_full_cg_transform(irreps_in, irreps_out, correlation)
+            transform = np.asarray(transform, dtype=native_weight.dtype)
+            converted = np.einsum(
+                'ab,zbu->zau', transform, native_weight, optimize=True
+            )
+        elif native_dim == reduced_dim:
+            lift = np.linalg.pinv(descriptor_projection, rcond=1e-12).astype(
+                native_weight.dtype, copy=False
+            )
+            converted = np.einsum('zau,ab->zbu', native_weight, lift, optimize=True)
+        else:
+            raise ValueError(
+                'Native SymmetricContraction weight shape mismatch during import.'
+            )
+    else:
         raise ValueError(
-            'Native SymmetricContraction weight dimension does not match projection.'
+            'Native SymmetricContraction weight shape mismatch during import.'
         )
-
-    # Emulate the torch-side accelerated implementation
-    # (tmp/cuEquivariance/.../operations/symmetric_contraction.py:148-171) which
-    # deterministically converts original MACE weights via w_native @ projection.
-    converted = np.einsum('zau,ab->zbu', native_weight, projection, optimize=True)
     return jnp.asarray(converted, dtype=target_template.dtype)
 
 
@@ -557,3 +615,215 @@ def _gather_native_reduced_weights(
         raise ValueError('Native SymmetricContraction weights shape mismatch.')
 
     return stacked
+
+
+def _compute_full_cg_transform(
+    irreps_in: Irreps,
+    irreps_out: Irreps,
+    correlation: int,
+) -> np.ndarray:
+    """Return the native → canonical transform for the requested full CG setup.
+
+    This is a convenience wrapper over the cached implementation that accepts
+    :mod:`e3nn` irreps objects instead of their string representation.
+    """
+    base_in = Irreps(str(irreps_in)).set_mul(1)
+    base_out = Irreps(str(irreps_out)).set_mul(1)
+    return _cached_full_cg_transform(str(base_in), str(base_out), int(correlation))
+
+
+@cache
+def _cached_full_cg_transform(
+    irreps_in_str: str,
+    irreps_out_str: str,
+    correlation: int,
+) -> np.ndarray:
+    """Compute the native → canonical transform for full CG weights.
+
+    This function is decorated with :func:`functools.cache`, so the expensive
+    linear-algebra work is only performed the first time a specific combination
+    of irreps and correlation order is requested.
+    """
+    from mace.modules.wrapper_ops import (  # noqa: PLC0415
+        SymmetricContractionWrapper as TorchSymmetricContraction,
+    )
+
+    irreps_in_o3 = o3.Irreps(irreps_in_str)
+    irreps_out_o3 = o3.Irreps(irreps_out_str)
+
+    torch_module = (
+        TorchSymmetricContraction(
+            irreps_in=irreps_in_o3,
+            irreps_out=irreps_out_o3,
+            correlation=correlation,
+            num_elements=1,
+            use_reduced_cg=False,
+        )
+        .float()
+        .eval()
+    )
+
+    jax_module = SymmetricContraction(
+        irreps_in=Irreps(irreps_in_str),
+        irreps_out=Irreps(irreps_out_str),
+        correlation=correlation,
+        num_elements=1,
+        use_reduced_cg=False,
+    )
+
+    mul = o3.Irreps(irreps_in_str)[0].mul
+    feature_dim = sum(term.ir.dim for term in Irreps(irreps_in_str))
+
+    native_dim = _gather_native_reduced_weights(
+        torch_module,
+        correlation=correlation,
+        mul_dim=mul,
+        num_elements=1,
+    ).shape[1]
+
+    params = jax_module.init(
+        jax.random.PRNGKey(0),
+        jnp.zeros((1, mul, feature_dim)),
+        jnp.zeros((1,), dtype=jnp.int32),
+    )
+    params_zero = _with_zero_weights(params)
+    canonical_dim = int(np.asarray(params_zero['params']['weight']).shape[1])
+
+    batch = max(canonical_dim, native_dim)
+    rng = np.random.default_rng(0)
+    inputs_np = rng.standard_normal((batch, mul, feature_dim)).astype(np.float32)
+
+    inputs_jax = jnp.asarray(inputs_np)
+    indices_jax = jnp.zeros((batch,), dtype=jnp.int32)
+
+    canonical_matrix = _canonical_design_matrix(
+        jax_module,
+        params_zero,
+        inputs_jax,
+        indices_jax,
+    )
+    native_matrix = _native_design_matrix(
+        torch_module,
+        correlation=correlation,
+        basis_dim=native_dim,
+        inputs_np=inputs_np,
+    )
+
+    transform = np.linalg.lstsq(canonical_matrix, native_matrix, rcond=1e-12)[0]
+    return transform.astype(np.float64)
+
+
+def _with_zero_weights(params: dict) -> dict:
+    """Return a params pytree with all learnable weights zeroed."""
+    params_mutable = unfreeze(params)
+    params_mutable['params']['weight'] = jnp.zeros_like(
+        params_mutable['params']['weight']
+    )
+    return freeze(params_mutable)
+
+
+def _canonical_design_matrix(
+    module: SymmetricContraction,
+    params_zero: dict,
+    inputs: jnp.ndarray,
+    indices: jnp.ndarray,
+) -> np.ndarray:
+    """Evaluate the JAX module on the canonical cue basis vectors.
+
+    The returned matrix contains one column per canonical basis element and is
+    therefore the linear map from canonical weights to model outputs.  This is
+    later paired with the native design matrix to recover the reordering
+    transform via a least-squares solve.
+
+    Returns
+    -------
+    np.ndarray
+        Array with shape ``(output_dim, canonical_dim)`` capturing the response
+        of the module to each canonical basis excitation.
+    """
+    weight_shape = np.asarray(params_zero['params']['weight']).shape
+    canonical_dim = weight_shape[1]
+
+    outputs: list[np.ndarray] = []
+    for idx in range(canonical_dim):
+        weight = np.zeros(weight_shape, dtype=np.float32)
+        weight[0, idx, 0] = 1.0
+
+        params_idx = unfreeze(params_zero)
+        params_idx['params']['weight'] = jnp.asarray(weight)
+        params_idx_frozen = freeze(params_idx)
+
+        out = module.apply(params_idx_frozen, inputs, indices)
+        outputs.append(np.asarray(out).reshape(-1))
+
+    return np.stack(outputs, axis=1)
+
+
+def _native_design_matrix(
+    torch_module,
+    *,
+    correlation: int,
+    basis_dim: int,
+    inputs_np: np.ndarray,
+) -> np.ndarray:
+    """Evaluate the native module on its basis vectors using a shared batch.
+
+    Each column of the returned matrix corresponds to the native module output
+    when a single flattened basis vector is activated.  Pairing this matrix
+    with :func:`_canonical_design_matrix` allows us to infer the change of
+    basis between the two representations.
+
+    Returns
+    -------
+    np.ndarray
+        Array with shape ``(output_dim, basis_dim)`` whose columns capture the
+        native module response for each basis vector.
+    """
+    torch_inputs = torch.tensor(inputs_np, dtype=torch.float32)
+    num_elements = torch_module.contractions[0].weights_max.shape[0]
+    torch_attrs = torch.ones((inputs_np.shape[0], num_elements), dtype=torch.float32)
+
+    outputs: list[np.ndarray] = []
+    for idx in range(basis_dim):
+        basis = np.zeros(basis_dim, dtype=np.float32)
+        basis[idx] = 1.0
+        _assign_native_basis(torch_module, basis_vector=basis, correlation=correlation)
+        with torch.no_grad():
+            out = torch_module(torch_inputs, torch_attrs).cpu().numpy().reshape(-1)
+        outputs.append(out)
+
+    return np.stack(outputs, axis=1)
+
+
+def _assign_native_basis(
+    torch_module,
+    *,
+    basis_vector: np.ndarray,
+    correlation: int,
+) -> None:
+    """Populate ``torch_module`` with the provided flattened native basis vector.
+
+    The helper walks through the per-degree tensors stored inside the torch
+    module, slicing the flattened vector into the appropriate blocks and
+    writing them back into the ``weights_max``/``weights`` attributes.  A
+    :class:`ValueError` is raised if the basis vector length does not match the
+    expected native parameter size.
+    """
+    offset = 0
+    with torch.no_grad():
+        for contraction in torch_module.contractions:
+            for degree in range(correlation, 0, -1):
+                if degree == correlation:
+                    target = contraction.weights_max
+                else:
+                    idx = correlation - degree - 1
+                    target = contraction.weights[idx]
+
+                width = target.shape[1]
+                slice_vals = basis_vector[offset : offset + width]
+                target.zero_()
+                target[0, :width, 0] = torch.tensor(slice_vals, dtype=target.dtype)
+                offset += width
+
+    if offset != basis_vector.size:
+        raise ValueError('Basis vector length mismatch while scattering weights.')

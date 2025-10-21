@@ -96,11 +96,13 @@ class ModelEquivalenceTestBase:
     displacement_scales: list[float] = [0.08, 0.12]
     strain_matrices: list[np.ndarray] = [
         np.zeros((3, 3)),
-        np.array([
-            [0.00, 0.02, 0.00],
-            [0.02, 0.00, 0.00],
-            [0.00, 0.00, -0.015],
-        ]),
+        np.array(
+            [
+                [0.00, 0.02, 0.00],
+                [0.02, 0.00, 0.00],
+                [0.00, 0.00, -0.015],
+            ]
+        ),
     ]
     arguments: list[str] = [
         '--name',
@@ -621,6 +623,15 @@ class TestModelEquivalenceSmall(ModelEquivalenceTestBase):
         args.radial_MLP = '[32]'
         args.use_agnostic_product = False
         args.gate = 'silu'
+
+
+class TestModelEquivalenceSmallFullCG(TestModelEquivalenceSmall):
+    """Smoke-test full Clebsch–Gordan parameters on a tiny configuration."""
+
+    @classmethod
+    def _customise_args(cls, args):
+        super()._customise_args(args)
+        args.use_reduced_cg = False
 
 
 @pytest.mark.slow
