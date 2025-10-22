@@ -6,7 +6,6 @@ from collections.abc import Callable, Sequence
 
 import e3nn_jax as e3nn
 import jax.numpy as jnp
-from e3nn import o3
 from e3nn_jax import Irreps, IrrepsArray
 from flax import linen as fnn
 
@@ -14,6 +13,31 @@ from mace_jax.adapters.flax.torch import auto_import_from_torch_flax
 
 from ._activation import Activation
 from ._extract import Extract
+
+
+def _sort_irreps_like_torch(irreps: Irreps) -> tuple[Irreps, tuple[int, ...]]:
+    """Match the legacy Torch ``e3nn`` irreps ordering used by the gated block.
+
+    ``e3nn`` in PyTorch sorts representations by increasing ``l`` but places odd
+    parity irreps before even ones when ``l`` matches. ``e3nn_jax`` keeps the even
+    parity first, so a direct call to :meth:`Irreps.sort` would generate a
+    permutation that disagrees with the Torch module.
+    """
+
+    irreps = Irreps(irreps)
+    indexed_irreps = list(enumerate(irreps))
+
+    ordered = sorted(
+        indexed_irreps,
+        key=lambda item: (item[1].ir.l, item[1].ir.p == 1, item[0]),
+    )
+
+    sorted_irreps = Irreps([mul_ir for _, mul_ir in ordered])
+    permutation = [0] * len(ordered)
+    for new_idx, (orig_idx, _) in enumerate(ordered):
+        permutation[orig_idx] = new_idx
+
+    return sorted_irreps, tuple(permutation)
 
 
 class _Sortcut:
@@ -33,10 +57,7 @@ class _Sortcut:
                 f'Instruction mismatch: expected {len(irreps_in)} entries, found {index}.'
             )
 
-        torch_irreps_in = o3.Irreps(str(irreps_in))
-        torch_sorted = torch_irreps_in.sort()
-        irreps_in_sorted = Irreps(str(torch_sorted.irreps))
-        permutation = torch_sorted.p
+        irreps_in_sorted, permutation = _sort_irreps_like_torch(irreps_in)
         instructions = [tuple(permutation[i] for i in ins) for ins in instructions]
 
         self.extract = Extract(irreps_in_sorted, self.irreps_outs, instructions)

@@ -1,7 +1,6 @@
 """Utilities for slicing arrays according to ``e3nn`` irreps layouts."""
 
 from collections.abc import Sequence
-from typing import Optional, Union
 
 import jax.numpy as jnp
 from e3nn_jax import Irreps, IrrepsArray
