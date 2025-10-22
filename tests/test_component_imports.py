@@ -169,3 +169,38 @@ class TestOutputInterface:
             atol=1e-6,
             rtol=1e-6,
         )
+
+    def test_jitted_apply_handles_optional_outputs(self):
+        model = _HookeModel(stiffness=1.5)
+        data = self._graph()
+        variables = model.init(jax.random.PRNGKey(0), data)
+
+        compiled_apply = jax.jit(model.apply)
+
+        energy_only = compiled_apply(
+            variables,
+            data,
+            compute_force=False,
+            compute_stress=False,
+        )
+        assert 'forces_mask' in energy_only
+        assert 'stress_mask' in energy_only
+        assert not bool(np.asarray(energy_only['forces_mask']))
+        assert not bool(np.asarray(energy_only['stress_mask']))
+        assert energy_only['forces'].shape == data['positions'].shape
+
+        full_outputs = compiled_apply(
+            variables,
+            data,
+            compute_force=True,
+            compute_stress=True,
+        )
+        assert bool(np.asarray(full_outputs['forces_mask']))
+        assert bool(np.asarray(full_outputs['stress_mask']))
+        expected_forces = -model.stiffness * data['positions']
+        np.testing.assert_allclose(
+            _np(full_outputs['forces']),
+            _np(expected_forces),
+            atol=1e-6,
+            rtol=1e-6,
+        )

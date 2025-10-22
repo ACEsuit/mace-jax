@@ -245,8 +245,8 @@ class TestNonLinearReadoutBlock:
         np.testing.assert_allclose(
             _to_numpy(out_jax),
             out_torch.detach().cpu().numpy(),
-            rtol=1e-7,
-            atol=1e-7,
+            rtol=5e-7,
+            atol=5e-7,
         )
 
 

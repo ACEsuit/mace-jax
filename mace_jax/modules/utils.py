@@ -3,6 +3,8 @@ from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
+from jax import lax
+from jax.errors import TracerBoolConversionError
 
 from mace_jax.tools.dtype import default_dtype
 
@@ -99,9 +101,11 @@ def get_outputs(
     compute_force: bool = True,
     compute_stress: bool = False,
 ) -> tuple[
-    jnp.ndarray | None,  # energy
+    jnp.ndarray,  # energy
     jnp.ndarray | None,  # forces
     jnp.ndarray | None,  # stress
+    bool | jnp.ndarray,  # force mask
+    bool | jnp.ndarray,  # stress mask
 ]:
     positions = data['positions']
     cell = data['cell']
@@ -111,16 +115,62 @@ def get_outputs(
     num_graphs = int(jnp.size(data['ptr']) - 1)
 
     total_energy = energy_fn(positions)
-    forces = None
-    stress = None
 
-    if compute_force and not compute_stress:
-        forces = compute_forces(
+    try:
+        compute_force_flag = bool(compute_force)
+        compute_stress_flag = bool(compute_stress)
+    except TracerBoolConversionError:
+        compute_force_flag = None
+        compute_stress_flag = None
+    else:
+        forces = None
+        stress = None
+        force_mask = False
+        stress_mask = False
+
+        if compute_force_flag and not compute_stress_flag:
+            forces = compute_forces(
+                energy_fn=energy_fn,
+                positions=positions,
+            )
+            force_mask = True
+        elif compute_stress_flag:
+            forces, stress = compute_forces_and_stress(
+                energy_fn=energy_fn,
+                positions=positions,
+                cell=cell,
+                unit_shifts=unit_shifts,
+                edge_index=edge_index,
+                batch=batch,
+                num_graphs=num_graphs,
+            )
+            force_mask = True
+            stress_mask = True
+
+        return total_energy, forces, stress, force_mask, stress_mask
+
+    if compute_force_flag is None or compute_stress_flag is None:
+        compute_force_flag = compute_force
+        compute_stress_flag = compute_stress
+
+    force_mask = jnp.asarray(compute_force, dtype=bool)
+    stress_mask = jnp.asarray(compute_stress, dtype=bool)
+
+    zero_forces = jnp.zeros_like(positions)
+    zero_stress = jnp.zeros((num_graphs, 3, 3), dtype=positions.dtype)
+
+    true_scalar = jnp.asarray(True, dtype=bool)
+    false_scalar = jnp.asarray(False, dtype=bool)
+
+    def _compute_forces_only(_):
+        forces_val = compute_forces(
             energy_fn=energy_fn,
             positions=positions,
         )
-    elif compute_stress:
-        forces, stress = compute_forces_and_stress(
+        return forces_val, zero_stress, true_scalar, false_scalar
+
+    def _compute_stress(_):
+        forces_val, stress_val = compute_forces_and_stress(
             energy_fn=energy_fn,
             positions=positions,
             cell=cell,
@@ -129,8 +179,24 @@ def get_outputs(
             batch=batch,
             num_graphs=num_graphs,
         )
+        return forces_val, stress_val, true_scalar, true_scalar
 
-    return total_energy, forces, stress
+    def _skip_forces(_):
+        return zero_forces, zero_stress, false_scalar, false_scalar
+
+    forces, stress, has_force, has_stress = lax.cond(
+        stress_mask,
+        _compute_stress,
+        lambda _: lax.cond(
+            force_mask,
+            _compute_forces_only,
+            _skip_forces,
+            operand=None,
+        ),
+        operand=None,
+    )
+
+    return total_energy, forces, stress, has_force, has_stress
 
 
 def get_edge_vectors_and_lengths(
@@ -291,7 +357,7 @@ def add_output_interface(cls=None):
                 )
                 return out['energy'] if isinstance(out, dict) else out
 
-            total_energy, forces, stress = get_outputs(
+            total_energy, forces, stress, has_force, has_stress = get_outputs(
                 energy_fn=energy_fn,
                 data=data,
                 compute_force=compute_force,
@@ -301,11 +367,23 @@ def add_output_interface(cls=None):
             result = (
                 dict(raw_out) if isinstance(raw_out, dict) else {'energy': energy_arr}
             )
-            result.update({
-                'energy': total_energy,
-                'forces': forces,
-                'stress': stress,
-            })
+            try:
+                force_flag = bool(has_force)
+                stress_flag = bool(has_stress)
+            except TracerBoolConversionError:
+                result.update({
+                    'energy': total_energy,
+                    'forces': forces,
+                    'stress': stress,
+                    'forces_mask': has_force,
+                    'stress_mask': has_stress,
+                })
+            else:
+                result.update({
+                    'energy': total_energy,
+                    'forces': forces if force_flag else None,
+                    'stress': stress if stress_flag else None,
+                })
             return result
 
         # Move __call__ to _energy_fn
