@@ -16,21 +16,21 @@ def get_torch_device(
     *,
     prefer_gpu: bool = True,
     prefer_mps: bool = True,
-) -> Any:
+) -> str:
     """Return the preferred Torch device, defaulting to GPU when available."""
 
     if torch is None:  # pragma: no cover - torch optional dependency
         raise RuntimeError('PyTorch is not installed in this environment.')
 
     if prefer_gpu and torch.cuda.is_available():
-        return torch.device('cuda')
+        return 'cuda'
 
     if prefer_gpu and prefer_mps:
         mps = getattr(torch.backends, 'mps', None)
         if mps is not None and getattr(mps, 'is_available', lambda: False)():
-            return torch.device('mps')
+            return 'mps'
 
-    return torch.device('cpu')
+    return 'cpu'
 
 
 def configure_torch_runtime(
@@ -49,7 +49,6 @@ def configure_torch_runtime(
     torch_device = torch.device(device)
 
     if torch_device.type == 'cuda':
-        torch.cuda.set_device(torch_device)
         if deterministic:
             torch.backends.cudnn.benchmark = False
             torch.backends.cudnn.deterministic = True
