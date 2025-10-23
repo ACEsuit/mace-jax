@@ -1,4 +1,10 @@
 from .amsgrad import scale_by_amsgrad
+from .device import (
+    configure_torch_runtime,
+    get_torch_device,
+    runtime_device_summary,
+    select_jax_device,
+)
 from .dummyfy import dummyfy
 from .predictors import predict_energy_forces_stress
 from .train import evaluate, train
@@ -53,4 +59,8 @@ __all__ = [
     'evaluate',
     'train',
     'dummyfy',
+    'configure_torch_runtime',
+    'get_torch_device',
+    'runtime_device_summary',
+    'select_jax_device',
 ]
