@@ -7,6 +7,7 @@ from collections.abc import Callable, Sequence
 import e3nn_jax as e3nn
 import jax.numpy as jnp
 from e3nn_jax import Irreps, IrrepsArray
+from e3nn_jax._src.activation import parity_function
 
 from mace_jax.adapters.e3nn.math import normalize2mom
 
@@ -42,13 +43,49 @@ class Activation:
                 f'{len(self._acts)}, ({self.irreps_in}, {self._acts})'
             )
 
-        sample = e3nn.zeros(self.irreps_in, ())
-        sample_out = e3nn.scalar_activation(
-            sample,
-            acts=self._acts,
-            normalize_act=self._normalize_act,
-        )
-        self.irreps_out = sample_out.irreps
+        self.irreps_out = self._infer_irreps_out()
+
+    def _infer_irreps_out(self) -> Irreps:
+        """Determine the output irreps without tracing through e3nn.
+
+        The original implementation staged a scalar activation call that
+        executed eagerly at construction time. When ``Activation`` is created
+        while JIT tracing (e.g. inside ``flax.linen.Module.setup`` during
+        ``jax.jit``) that call attempts to convert a traced scalar to bool,
+        causing a ``TracerBoolConversionError``. We instead mirror the logic
+        from :func:`e3nn_jax.scalar_activation` to compute the outgoing irrep
+        metadata purely symbolically.
+
+        Returns
+        -------
+        Irreps
+            Output irreps after applying the configured scalar activations.
+        """
+        result: list[tuple[int, tuple[int, int]]] = []
+        for (mul, ir), act in zip(self.irreps_in, self._acts):
+            l_in, p_in = ir.l, ir.p
+            if act is None:
+                result.append((mul, (l_in, p_in)))
+                continue
+
+            if l_in != 0:
+                raise ValueError(
+                    'Activation: cannot apply an activation function to a non-scalar input. '
+                    f'{self.irreps_in} {self._acts}'
+                )
+
+            if p_in == -1:
+                p_out = parity_function(act)
+                if p_out == 0:
+                    raise ValueError(
+                        'Activation: the parity is violated! The input scalar is odd but the '
+                        'activation is neither even nor odd.'
+                    )
+            else:
+                p_out = p_in
+
+            result.append((mul, (0, p_out)))
+        return Irreps(result)
 
     def __repr__(self) -> str:
         acts_str = ''.join('x' if act is not None else ' ' for act in self._acts)

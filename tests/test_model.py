@@ -634,6 +634,53 @@ class TestModelEquivalenceSmallFullCG(TestModelEquivalenceSmall):
         args.use_reduced_cg = False
 
 
+class TestModelEquivalenceSmallJitted(TestModelEquivalenceSmall):
+    """Exercise the small configuration under jitted apply to reproduce the regression."""
+
+    @classmethod
+    def _customise_args(cls, args):
+        # Keep the test lightweight while ensuring a non-linear readout is used.
+        super()._customise_args(args)
+        args.num_interactions = 2
+        args.num_channels = 16
+        args.hidden_irreps = '16x0e+16x1o'
+        args.MLP_irreps = '8x0e'
+        args.radial_MLP = '[16]'
+        args.correlation = 2
+
+    def test_jitted_apply_matches_eager(self):
+        """Ensure the jitted apply produces identical outputs to eager mode."""
+        jitted = jax.jit(self.jax_model.apply)
+        traced = jitted(self.jax_params, self.batch_jax, compute_stress=False)
+        eager = self.jax_model.apply(
+            self.jax_params,
+            self.batch_jax,
+            compute_stress=False,
+        )
+        for key, eager_value in eager.items():
+            traced_value = traced[key]
+            if eager_value is None or traced_value is None:
+                # Optional outputs (e.g. stress without compute_stress) return
+                # zero arrays rather than ``None`` after JIT, so verify the data
+                # is numerically zero in either representation.
+                array = traced_value if eager_value is None else eager_value
+                np.testing.assert_allclose(
+                    np.asarray(array),
+                    0.0,
+                    rtol=1e-6,
+                    atol=1e-6,
+                    err_msg=f'Expected zero-valued array for optional output {key!r}',
+                )
+                continue
+            np.testing.assert_allclose(
+                np.asarray(traced_value),
+                np.asarray(eager_value),
+                rtol=1e-6,
+                atol=1e-6,
+                err_msg=f'JIT output mismatch for key {key!r}',
+            )
+
+
 @pytest.mark.slow
 class TestModelEquivalenceLarge(ModelEquivalenceTestBase):
     """Full-size model equivalence aligned with the Torch integration test."""
