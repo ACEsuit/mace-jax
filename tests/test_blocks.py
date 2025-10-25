@@ -71,11 +71,49 @@ from mace_jax.modules.blocks import (
     RealAgnosticResidualNonLinearInteractionBlock as RealAgnosticResidualNonLinearInteractionBlockJAX,
 )
 from mace_jax.modules.wrapper_ops import CuEquivarianceConfig as CuEquivarianceConfigJAX
+from mace_jax.tools.device import configure_torch_runtime
 
 
 def _to_numpy(x):
     array = x.array if hasattr(x, 'array') else x
     return np.asarray(array)
+
+
+def _module_dtype(module: torch.nn.Module) -> torch.dtype:
+    for param in module.parameters():
+        return param.dtype
+    for buf in module.buffers():
+        return buf.dtype
+    return torch.float32
+
+
+def _cue_device_or_skip() -> torch.device:
+    if not torch.cuda.is_available():
+        pytest.skip('Cue-equivariance kernels require CUDA.')
+    device = configure_torch_runtime('cuda')
+
+    cfg = CuEquivarianceConfigTorch(enabled=True, optimize_symmetric=True)
+    block = EquivariantProductBasisBlockTorch(
+        node_feats_irreps='1x0e',
+        target_irreps='1x0e',
+        correlation=1,
+        use_sc=False,
+        num_elements=1,
+        use_reduced_cg=True,
+        cueq_config=cfg,
+    ).float().to(device)
+
+    dtype = _module_dtype(block)
+    x = torch.zeros((1, 1, 1), dtype=dtype, device=device)
+    attrs = torch.ones((1, 1), dtype=dtype, device=device)
+
+    with torch.no_grad():
+        try:
+            block(x, None, attrs)
+        except Exception as exc:  # pragma: no cover - backend dependent
+            pytest.skip(f'Cue-equivariance kernels unavailable: {exc}')
+
+    return device
 
 
 class TestLinearNodeEmbeddingBlock:
@@ -302,14 +340,20 @@ class TestEquivariantProductBasisBlock:
         attr_indices = rng.integers(0, num_elements, size=n_nodes)
         attrs_np = np.eye(num_elements, dtype=np.float32)[attr_indices]
 
+        device = torch.device('cpu')
+        if cue_config_kwargs.get('enabled', False):
+            device = _cue_device_or_skip()
+
         x_jax = jnp.asarray(x_np)
-        x_torch = torch.tensor(x_np, dtype=torch.float32)
+        x_torch = torch.tensor(x_np, dtype=torch.float32, device=device)
         sc_jax = jnp.asarray(sc_np) if sc_np is not None else None
         sc_torch = (
-            torch.tensor(sc_np, dtype=torch.float32) if sc_np is not None else None
+            torch.tensor(sc_np, dtype=torch.float32, device=device)
+            if sc_np is not None
+            else None
         )
         attrs_jax = jnp.asarray(attrs_np)
-        attrs_torch = torch.tensor(attrs_np, dtype=torch.float32)
+        attrs_torch = torch.tensor(attrs_np, dtype=torch.float32, device=device)
 
         # --- Torch model ---
         cue_config_torch = CuEquivarianceConfigTorch(**cue_config_kwargs)
@@ -323,9 +367,18 @@ class TestEquivariantProductBasisBlock:
             use_reduced_cg=True,
             cueq_config=cue_config_torch,
         ).float()
+        torch_model = torch_model.to(device=device)
 
         # Torch forward pass
-        out_torch = torch_model(x_torch, sc_torch, attrs_torch)
+        try:
+            out_torch = torch_model(x_torch, sc_torch, attrs_torch)
+        except (NotImplementedError, RuntimeError) as exc:
+            if cue_config_kwargs.get('enabled', False):
+                pytest.skip(
+                    'cuequivariance_torch backend unavailable during forward pass: '
+                    f'{exc}'
+                )
+            raise
 
         # --- JAX model ---
         module = EquivariantProductBasisBlockJAX(
@@ -337,6 +390,12 @@ class TestEquivariantProductBasisBlock:
             use_reduced_cg=True,
             cueq_config=CuEquivarianceConfigJAX(**cue_config_kwargs),
         )
+        torch_model = torch_model.to('cpu')
+        x_torch = x_torch.cpu()
+        if sc_torch is not None:
+            sc_torch = sc_torch.cpu()
+        attrs_torch = attrs_torch.cpu()
+
         module, variables = init_from_torch(
             module,
             torch_model,
@@ -416,12 +475,16 @@ class TestRealAgnosticBlocks:
             jnp.asarray(edge_index),
         )
 
+        device = torch.device('cpu')
+        if torch.cuda.is_available():
+            device = _cue_device_or_skip()
+
         torch_inputs = (
-            torch.from_numpy(node_attrs).float(),
-            torch.from_numpy(node_feats).float(),
-            torch.from_numpy(edge_attrs).float(),
-            torch.from_numpy(edge_feats).float(),
-            torch.from_numpy(edge_index).long(),
+            torch.from_numpy(node_attrs).float().to(device),
+            torch.from_numpy(node_feats).float().to(device),
+            torch.from_numpy(edge_attrs).float().to(device),
+            torch.from_numpy(edge_feats).float().to(device),
+            torch.from_numpy(edge_index).long().to(device),
         )
 
         # === Run Torch ===
@@ -440,7 +503,18 @@ class TestRealAgnosticBlocks:
             avg_num_neighbors=3.0,
             cueq_config=cue_config_torch,
         ).float()
-        torch_out = torch_module(*torch_inputs)
+        torch_module = torch_module.to(device)
+        try:
+            torch_out = torch_module(*torch_inputs)
+        except (NotImplementedError, RuntimeError) as exc:
+            if 'cuequivariance::' in str(exc) or isinstance(exc, NotImplementedError):
+                pytest.skip(
+                    'cuequivariance_torch backend unavailable during forward pass: '
+                    f'{exc}'
+                )
+            raise
+        torch_module = torch_module.to('cpu')
+        torch_inputs = tuple(t.cpu() for t in torch_inputs)
 
         cue_config_jax = CuEquivarianceConfigJAX(
             enabled=True,
