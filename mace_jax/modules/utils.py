@@ -9,6 +9,16 @@ from jax.errors import TracerBoolConversionError
 from mace_jax.tools.dtype import default_dtype
 
 
+class Outputs(NamedTuple):
+    """Container describing energy, forces, stress, and their availability masks."""
+
+    energy: jnp.ndarray
+    forces: jnp.ndarray | None
+    stress: jnp.ndarray | None
+    force_mask: bool | jnp.ndarray
+    stress_mask: bool | jnp.ndarray
+
+
 def compute_forces(
     energy_fn: Callable[[jnp.ndarray], jnp.ndarray],
     positions: jnp.ndarray,
@@ -39,10 +49,10 @@ def compute_forces_and_stress(
     edge_index: jnp.ndarray,  # [2, n_edges]
     batch: jnp.ndarray,  # [n_nodes] with graph indices
     num_graphs: int,
-) -> tuple[jnp.ndarray, jnp.ndarray | None, jnp.ndarray | None, jnp.ndarray]:
+) -> tuple[jnp.ndarray, jnp.ndarray]:
     """
     JAX equivalent of the PyTorch compute_forces_virials.
-    Computes forces, virials, stress, and returns the per-graph energies.
+    Computes forces and stress tensors using a symmetric displacement scheme.
 
     Args:
         energy_fn: function returning per-graph energies [n_graphs]
@@ -73,15 +83,18 @@ def compute_forces_and_stress(
             cell_reshaped[batch[edge_index[0]]],  # [n_edges, 3, 3]
         )  # → [n_edges, 3]
 
-        return jnp.sum(energy_fn(deformed_positions, shifts=shifts))
+        per_graph_energy = energy_fn(deformed_positions, shifts=shifts)
+        return jnp.sum(per_graph_energy), per_graph_energy
 
     # Create a zero displacement tensor of shape [num_graphs, 3, 3]
     displacement = jnp.zeros((num_graphs, 3, 3), dtype=positions.dtype)
 
     # Compute total energy (scalar) and gradients wrt both inputs
-    grad_pos, grad_disp = jax.grad(energy_displacement_fn, argnums=(0, 1))(
-        positions, displacement
-    )
+    (_, _), (grad_pos, grad_disp) = jax.value_and_grad(
+        energy_displacement_fn,
+        argnums=(0, 1),
+        has_aux=True,
+    )(positions, displacement)
 
     # Forces and virials follow the physics convention
     forces = -grad_pos
@@ -100,131 +113,36 @@ def get_outputs(
     data: dict[str, jnp.ndarray],
     compute_force: bool = True,
     compute_stress: bool = False,
-) -> tuple[
-    jnp.ndarray,  # energy
-    jnp.ndarray | None,  # forces
-    jnp.ndarray | None,  # stress
-    bool | jnp.ndarray,  # force mask
-    bool | jnp.ndarray,  # stress mask
-]:
-    positions = data['positions']
-    cell = data['cell']
-    unit_shifts = data['unit_shifts']
-    edge_index = data['edge_index']
-    batch = data['batch']
-    num_graphs = int(jnp.size(data['ptr']) - 1)
-
-    total_energy = energy_fn(positions)
-
-    try:
-        compute_force_flag = bool(compute_force)
-        compute_stress_flag = bool(compute_stress)
-    except TracerBoolConversionError:
-        compute_force_flag = None
-        compute_stress_flag = None
-    else:
-        forces = None
-        stress = None
-        force_mask = False
-        stress_mask = False
-
-        if compute_force_flag and not compute_stress_flag:
-            forces = compute_forces(
-                energy_fn=energy_fn,
-                positions=positions,
-            )
-            force_mask = True
-        elif compute_stress_flag:
-            forces, stress = compute_forces_and_stress(
-                energy_fn=energy_fn,
-                positions=positions,
-                cell=cell,
-                unit_shifts=unit_shifts,
-                edge_index=edge_index,
-                batch=batch,
-                num_graphs=num_graphs,
-            )
-            force_mask = True
-            stress_mask = True
-
-        return total_energy, forces, stress, force_mask, stress_mask
-
-    if compute_force_flag is None or compute_stress_flag is None:
-        compute_force_flag = compute_force
-        compute_stress_flag = compute_stress
-
-    force_mask = jnp.asarray(compute_force, dtype=bool)
-    stress_mask = jnp.asarray(compute_stress, dtype=bool)
-
-    zero_forces = jnp.zeros_like(positions)
-    zero_stress = jnp.zeros((num_graphs, 3, 3), dtype=positions.dtype)
-
-    true_scalar = jnp.asarray(True, dtype=bool)
-    false_scalar = jnp.asarray(False, dtype=bool)
-
-    def _compute_forces_only(_):
-        forces_val = compute_forces(
-            energy_fn=energy_fn,
-            positions=positions,
-        )
-        return forces_val, zero_stress, true_scalar, false_scalar
-
-    def _compute_stress(_):
-        forces_val, stress_val = compute_forces_and_stress(
-            energy_fn=energy_fn,
-            positions=positions,
-            cell=cell,
-            unit_shifts=unit_shifts,
-            edge_index=edge_index,
-            batch=batch,
-            num_graphs=num_graphs,
-        )
-        return forces_val, stress_val, true_scalar, true_scalar
-
-    def _skip_forces(_):
-        return zero_forces, zero_stress, false_scalar, false_scalar
-
-    forces, stress, has_force, has_stress = lax.cond(
-        stress_mask,
-        _compute_stress,
-        lambda _: lax.cond(
-            force_mask,
-            _compute_forces_only,
-            _skip_forces,
-            operand=None,
-        ),
-        operand=None,
-    )
-
-    return total_energy, forces, stress, has_force, has_stress
-
-
-def get_outputs_opt(
-    energy_fn,
-    data: dict[str, jnp.ndarray],
-    compute_force: bool = True,
-    compute_stress: bool = False,
-) -> tuple[
-    jnp.ndarray,  # energy
-    jnp.ndarray | None,  # forces
-    jnp.ndarray | None,  # stress
-    bool | jnp.ndarray,  # force mask
-    bool | jnp.ndarray,  # stress mask
-]:
+) -> Outputs:
     """
-    Optimized version of get_outputs that computes energy and forces in a single pass.
-    
-    This function uses jax.value_and_grad() to compute both the energy and its gradient
-    (forces) simultaneously.
-    
+    Evaluate per-graph energies together with optional forces and stress tensors.
+
+    The function works with both plain Python booleans and traced JAX booleans.
+    When `compute_force` / `compute_stress` are Python `bool`s we only execute
+    the strictly necessary derivative computation and return `None` for any
+    disabled quantity. When the flags are traced (for example, inside a JIT
+    compiled control flow) the same logic is reproduced with `lax.cond`; in that
+    case the function always returns arrays but accompanies them with boolean
+    masks so callers can tell which entries are meaningful.
+
     Args:
-        energy_fn: Function that takes positions and returns energy
-        data: Dictionary containing positions, cell, unit_shifts, edge_index, batch, ptr
-        compute_force: Whether to compute forces
-        compute_stress: Whether to compute stress
-        
+        energy_fn: Callable that accepts positions (and optional shifts) and
+            returns per-graph energies with shape `[n_graphs]`.
+        data: Graph batch containing at least `positions`, `cell`, `unit_shifts`,
+            `edge_index`, `batch`, and `ptr`.
+        compute_force: Whether to return forces. May be a Python bool or a JAX
+            boolean scalar.
+        compute_stress: Whether to return stresses. As above, can be Python or
+            traced.
+
     Returns:
-        Tuple of (energy, forces, stress, force_mask, stress_mask)
+        An `Outputs` tuple where:
+            * `energy` is a `[n_graphs]` array of per-graph energies.
+            * `forces` is `[n_nodes, 3]` or `None` depending on the flags.
+            * `stress` is `[n_graphs, 3, 3]` or `None` depending on the flags.
+            * `force_mask` / `stress_mask` indicate availability; when the input
+              flags were traced these masks are JAX booleans aligned with the
+              returned arrays.
     """
     positions = data['positions']
     cell = data['cell']
@@ -233,59 +151,124 @@ def get_outputs_opt(
     batch = data['batch']
     num_graphs = int(jnp.size(data['ptr']) - 1)
 
-    # Determine if we need to compute stress (forces are always computed efficiently)
-    if compute_stress:
-        # For stress computation, use displacement approach
-        def energy_displacement_fn(positions, displacement):
-            symmetric_displacement = 0.5 * (
-                displacement + jnp.swapaxes(displacement, -1, -2)
-            )
-            deformed_positions = positions + jnp.einsum(
-                'be,bec->bc', positions, symmetric_displacement[batch]
-            )
-            cell_reshaped = cell.reshape(-1, 3, 3)
-            cell_reshaped = cell_reshaped + jnp.matmul(
-                cell_reshaped, symmetric_displacement
-            )
-            shifts = jnp.einsum(
-                'be,bec->bc',
-                unit_shifts,
-                cell_reshaped[batch[edge_index[0]]],
-            )
-            return jnp.sum(energy_fn(deformed_positions, shifts=shifts))
-        
-        displacement = jnp.zeros((num_graphs, 3, 3), dtype=positions.dtype)
-        
-        # Compute energy, forces, and stress in a single pass
-        total_energy, grads = jax.value_and_grad(
-            energy_displacement_fn, argnums=(0, 1)
+    displacement = jnp.zeros((num_graphs, 3, 3), dtype=positions.dtype)
+
+    # Helper closures
+    def energy_displacement_fn(pos, disp):
+        """Return total energy and per-graph energies for a symmetric displacement."""
+        symmetric_displacement = 0.5 * (disp + jnp.swapaxes(disp, -1, -2))
+        deformed_positions = pos + jnp.einsum(
+            'be,bec->bc', pos, symmetric_displacement[batch]
+        )
+        cell_reshaped = cell.reshape(-1, 3, 3)
+        cell_reshaped = cell_reshaped + jnp.matmul(
+            cell_reshaped, symmetric_displacement
+        )
+        shifts = jnp.einsum(
+            'be,bec->bc',
+            unit_shifts,
+            cell_reshaped[batch[edge_index[0]]],
+        )
+        per_graph_energy = energy_fn(deformed_positions, shifts=shifts)
+        return jnp.sum(per_graph_energy), per_graph_energy
+
+    def energy_sum_fn(pos):
+        """Return (total energy, per-graph energy) for the un-deformed geometry."""
+        per_graph_energy = energy_fn(pos)
+        return jnp.sum(per_graph_energy), per_graph_energy
+
+    def _ensure_energy(value: jnp.ndarray) -> jnp.ndarray:
+        return jnp.atleast_1d(jnp.asarray(value))
+
+    def _compute_stress_raw() -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        """Gradient-based computation of (energy, forces, stress) for stress path."""
+        (_, per_graph_energy), (grad_pos, grad_disp) = jax.value_and_grad(
+            energy_displacement_fn,
+            argnums=(0, 1),
+            has_aux=True,
         )(positions, displacement)
-        grad_pos, grad_disp = grads
-        
+
         forces = -grad_pos
         virials = -grad_disp
         volume = jnp.abs(jnp.linalg.det(cell.reshape(-1, 3, 3))).reshape(-1, 1, 1)
         stress = -virials / volume
-        stress = jnp.where(jnp.abs(stress) < 1e10, stress, jnp.zeros_like(stress))
-        
-        return total_energy, forces, stress, compute_force, compute_stress
-    
-    elif compute_force:
-        # Compute energy and forces in a single pass
-        total_energy, grad_pos = jax.value_and_grad(
-            lambda pos: jnp.sum(energy_fn(pos))
+        stress = jnp.where(
+            jnp.abs(stress) < 1e10,
+            stress,
+            jnp.zeros_like(stress),
+        )
+        total_energy = _ensure_energy(per_graph_energy)
+        return total_energy, forces, stress
+
+    def _compute_force_raw() -> tuple[jnp.ndarray, jnp.ndarray]:
+        """Gradient-based computation of (energy, forces) for the force-only path."""
+        (_, per_graph_energy), grad_pos = jax.value_and_grad(
+            energy_sum_fn,
+            has_aux=True,
         )(positions)
         forces = -grad_pos
-        stress = None
-        
-        return total_energy, forces, stress, compute_force, compute_stress
-    
-    else:
-        total_energy = energy_fn(positions)
-        forces = None
-        stress = None
-        
-        return total_energy, forces, stress, compute_force, compute_stress
+        total_energy = _ensure_energy(per_graph_energy)
+        return total_energy, forces
+
+    def _compute_energy_raw() -> jnp.ndarray:
+        """Energy-only evaluation used when no derivatives are requested."""
+        return _ensure_energy(energy_fn(positions))
+
+    def _coerce_flag(flag):
+        """Return `(flag_value, is_traced)` for Python bools and traced JAX values."""
+        try:
+            return bool(flag), False
+        except TracerBoolConversionError:
+            return flag, True
+
+    force_flag, force_traced = _coerce_flag(compute_force)
+    stress_flag, stress_traced = _coerce_flag(compute_stress)
+
+    if not (force_traced or stress_traced):
+        if stress_flag:
+            total_energy, forces, stress = _compute_stress_raw()
+            return Outputs(total_energy, forces, stress, True, True)
+        if force_flag:
+            total_energy, forces = _compute_force_raw()
+            return Outputs(total_energy, forces, None, True, False)
+        total_energy = _compute_energy_raw()
+        return Outputs(total_energy, None, None, False, False)
+
+    compute_force_mask = jnp.asarray(compute_force, dtype=bool)
+    compute_stress_mask = jnp.asarray(compute_stress, dtype=bool)
+
+    zero_forces = jnp.zeros_like(positions)
+    zero_stress = jnp.zeros((num_graphs, 3, 3), dtype=positions.dtype)
+    true_scalar = jnp.asarray(True, dtype=bool)
+    false_scalar = jnp.asarray(False, dtype=bool)
+
+    def _stress_branch(_):
+        total_energy, forces, stress = _compute_stress_raw()
+        return Outputs(total_energy, forces, stress, true_scalar, true_scalar)
+
+    def _force_branch(_):
+        total_energy, forces = _compute_force_raw()
+        return Outputs(total_energy, forces, zero_stress, true_scalar, false_scalar)
+
+    def _energy_only_branch(_):
+        total_energy = _compute_energy_raw()
+        return Outputs(
+            total_energy, zero_forces, zero_stress, false_scalar, false_scalar
+        )
+
+    # lazily route traced flags through the right derivative path so only the
+    # requested branch is evaluated when inside a JIT-compiled context
+    return lax.cond(
+        compute_stress_mask,
+        _stress_branch,
+        lambda _: lax.cond(
+            compute_force_mask,
+            _force_branch,
+            _energy_only_branch,
+            operand=None,
+        ),
+        operand=None,
+    )
 
 
 def get_edge_vectors_and_lengths(
