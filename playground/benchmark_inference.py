@@ -20,6 +20,7 @@ from mace.tools.scripts_utils import extract_config_mace_model
 from mace.tools.torch_geometric.batch import Batch
 
 from mace_jax.cli.mace_torch2jax import convert_model
+from mace_jax.modules.wrapper_ops import CuEquivarianceConfig
 from mace_jax.tools.device import configure_torch_runtime, get_torch_device
 
 
@@ -223,6 +224,11 @@ def main() -> None:
         action='store_true',
         help='Skip stress computation in the benchmark.',
     )
+    parser.add_argument(
+        '--cue-conv-fusion',
+        action='store_true',
+        help='Enable cuequivariance conv fusion in the converted JAX model.',
+    )
     args = parser.parse_args()
 
     compute_force = not args.disable_forces
@@ -239,7 +245,23 @@ def main() -> None:
     atoms = build_example_atoms(args.symbol, args.repeat)
     batch_torch, batch_jax, config = prepare_batches(torch_model, atoms, torch_device)
 
-    jax_model, variables, _ = convert_model(torch_model, config)
+    cue_config: CuEquivarianceConfig | None = None
+    if args.cue_conv_fusion:
+        # Leave ``enabled`` false so only the tensor-product path switches to cue
+        # for conv fusion while symmetric contractions remain on pure JAX, matching
+        # the behaviour of the Torch wrapper.
+        cue_config = CuEquivarianceConfig(
+            enabled=False,
+            optimize_channelwise=True,
+            conv_fusion=True,
+            layout='mul_ir',
+        )
+
+    jax_model, variables, _ = convert_model(
+        torch_model,
+        config,
+        cueq_config=cue_config,
+    )
 
     torch_stats, torch_outputs = run_torch_inference(
         torch_model,

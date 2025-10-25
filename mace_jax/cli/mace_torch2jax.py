@@ -13,6 +13,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from mace_jax.modules.wrapper_ops import CuEquivarianceConfig
+
 warnings.filterwarnings(
     'ignore',
     message='Environment variable TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD detected.*',
@@ -123,7 +125,25 @@ def _prepare_template_data(config: dict[str, Any]) -> dict[str, jnp.ndarray]:
     return data
 
 
-def _build_jax_model(config: dict[str, Any]):
+def _build_jax_model(
+    config: dict[str, Any],
+    *,
+    cueq_config: CuEquivarianceConfig | None = None,
+):
+    cue_config_obj: CuEquivarianceConfig | None = None
+    if cueq_config is not None:
+        cue_config_obj = cueq_config
+    elif config.get('cue_conv_fusion'):
+        # Mirror the torch wrapper behaviour: allow conv_fusion without enabling
+        # the full cue acceleration stack so symmetric contraction stays on the
+        # pure-JAX implementation. The tensor product layer will only switch to
+        # cue when conv_fusion=True but other ops keep the default backend.
+        cue_config_obj = CuEquivarianceConfig(
+            enabled=False,
+            optimize_channelwise=True,
+            conv_fusion=bool(config['cue_conv_fusion']),
+            layout='mul_ir',
+        )
     common_kwargs = dict(
         r_max=config['r_max'],
         num_bessel=config['num_bessel'],
@@ -150,6 +170,7 @@ def _build_jax_model(config: dict[str, Any]):
         use_embedding_readout=config.get('use_embedding_readout', False),
         readout_cls=_readout(config.get('readout_cls', None)),
         gate=resolve_gate_callable(config.get('gate', None)),
+        cueq_config=cue_config_obj,
     )
 
     if config.get('radial_MLP') is not None:
@@ -171,8 +192,19 @@ def _build_jax_model(config: dict[str, Any]):
     return MACE(**common_kwargs)
 
 
-def convert_model(torch_model, config: dict[str, Any]):
-    jax_model = _build_jax_model(config)
+def convert_model(
+    torch_model,
+    config: dict[str, Any],
+    *,
+    cueq_config: CuEquivarianceConfig | None = None,
+):
+    try:
+        jax_model = _build_jax_model(config, cueq_config=cueq_config)
+    except TypeError as exc:
+        if 'cueq_config' in str(exc):
+            jax_model = _build_jax_model(config)
+        else:
+            raise
     template_data = _prepare_template_data(config)
     variables = jax_model.init(jax.random.PRNGKey(0), template_data)
     variables = import_from_torch(jax_model, torch_model, variables)

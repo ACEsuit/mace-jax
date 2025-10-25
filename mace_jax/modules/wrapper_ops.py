@@ -142,7 +142,17 @@ def FullyConnectedTensorProduct(
     When CuEquivariance acceleration is requested, this raises since a JAX binding
     is not yet available; otherwise defaults to the e3nn_jax implementation.
     """
-    use_cue = cueq_config is not None and getattr(cueq_config, 'enabled', False)
+    use_cue = (
+        cueq_config is not None
+        and getattr(cueq_config, 'enabled', False)
+        and (
+            getattr(cueq_config, 'optimize_all', False)
+            or getattr(cueq_config, 'optimize_symmetric', False)
+        )
+    )
+    # conv_fusion can be toggled independently (enabled stays False) so that the
+    # tensor product backend switches to cue while symmetric contraction remains
+    # on the pure-JAX implementation, matching the Torch wrapper semantics.
 
     if cueq_config is not None and use_cue:
         group_value = getattr(cueq_config, 'group', None)
