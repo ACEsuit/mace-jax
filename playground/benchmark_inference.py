@@ -119,21 +119,30 @@ def run_torch_inference(
     *,
     repeats: int,
     warmup: int,
+    compute_force: bool,
+    compute_stress: bool,
 ) -> tuple[BenchmarkResult, dict[str, torch.Tensor]]:
-    with torch.no_grad():
-        for _ in range(warmup):
-            model(batch, compute_force=False, compute_stress=False)
-            if device.type == 'cuda':
-                torch.cuda.synchronize(device)
+    grad_ctx = torch.enable_grad if (compute_force or compute_stress) else torch.no_grad
 
-        timings: list[float] = []
-        outputs: dict[str, torch.Tensor] | None = None
-        for _ in range(repeats):
-            start = time.perf_counter()
-            outputs = model(batch, compute_force=False, compute_stress=False)
-            if device.type == 'cuda':
-                torch.cuda.synchronize(device)
-            timings.append(time.perf_counter() - start)
+    for _ in range(warmup):
+        with grad_ctx():
+            model(batch, compute_force=compute_force, compute_stress=compute_stress)
+        if device.type == 'cuda':
+            torch.cuda.synchronize(device)
+
+    timings: list[float] = []
+    outputs: dict[str, torch.Tensor] | None = None
+    for _ in range(repeats):
+        start = time.perf_counter()
+        with grad_ctx():
+            outputs = model(
+                batch,
+                compute_force=compute_force,
+                compute_stress=compute_stress,
+            )
+        if device.type == 'cuda':
+            torch.cuda.synchronize(device)
+        timings.append(time.perf_counter() - start)
 
     assert outputs is not None
     arr = np.array(timings)
@@ -150,9 +159,16 @@ def run_jax_inference(
     *,
     repeats: int,
     warmup: int,
+    compute_force: bool,
+    compute_stress: bool,
 ) -> tuple[BenchmarkResult, dict[str, Any]]:
     apply_fn = jax.jit(
-        lambda params, data: jax_model.apply(params, data, compute_stress=False)
+        lambda params, data: jax_model.apply(
+            params,
+            data,
+            compute_force=compute_force,
+            compute_stress=compute_stress,
+        )
     )
 
     for _ in range(warmup):
@@ -197,11 +213,25 @@ def main() -> None:
     parser.add_argument(
         '--warmup', type=int, default=3, help='Number of warmup runs before timing.'
     )
+    parser.add_argument(
+        '--disable-forces',
+        action='store_true',
+        help='Skip force computation in the benchmark.',
+    )
+    parser.add_argument(
+        '--disable-stress',
+        action='store_true',
+        help='Skip stress computation in the benchmark.',
+    )
     args = parser.parse_args()
+
+    compute_force = not args.disable_forces
+    compute_stress = not args.disable_stress
 
     torch_device = configure_torch_runtime(get_torch_device(), deterministic=False)
     print(f'Torch device: {torch_device}')
     print(f'JAX devices: {[f"{dev.platform}:{dev.id}" for dev in jax.devices()]}')
+    print(f'Computing forces: {compute_force} | stresses: {compute_stress}')
 
     torch_model = load_foundation_model(args.foundation, args.variant, device='cpu')
     torch_model = torch_model.to(torch_device)
@@ -217,6 +247,8 @@ def main() -> None:
         torch_device,
         repeats=args.repeats,
         warmup=args.warmup,
+        compute_force=compute_force,
+        compute_stress=compute_stress,
     )
     print('Torch inference (per call):')
     print(
@@ -229,6 +261,8 @@ def main() -> None:
         batch_jax,
         repeats=args.repeats,
         warmup=args.warmup,
+        compute_force=compute_force,
+        compute_stress=compute_stress,
     )
     print('JAX (jitted) inference (per call):')
     print(
@@ -238,6 +272,36 @@ def main() -> None:
     torch_energy = torch_outputs['energy'].detach().cpu().numpy()[0]
     jax_energy = float(np.asarray(jax_outputs['energy'])[0])
     print(f'Energy difference |Torch - JAX|: {abs(torch_energy - jax_energy):.6e} eV')
+
+    if compute_force:
+        torch_forces = torch_outputs.get('forces')
+        jax_forces = jax_outputs.get('forces')
+        if torch_forces is not None and jax_forces is not None:
+            torch_forces_np = torch_forces.detach().cpu().numpy()
+            jax_forces_np = np.asarray(jax_forces)
+            diff = torch_forces_np - jax_forces_np
+            print('Force difference:')
+            print(
+                f'  max |ΔF| = {np.abs(diff).max():.6e} eV/Å  '
+                f'RMSE = {np.sqrt(np.mean(diff**2)):.6e} eV/Å'
+            )
+        else:
+            print('Force outputs unavailable for comparison.')
+
+    if compute_stress:
+        torch_stress = torch_outputs.get('stress')
+        jax_stress = jax_outputs.get('stress')
+        if torch_stress is not None and jax_stress is not None:
+            torch_stress_np = torch_stress.detach().cpu().numpy()
+            jax_stress_np = np.asarray(jax_stress)
+            diff = torch_stress_np - jax_stress_np
+            print('Stress difference:')
+            print(
+                f'  max |Δσ| = {np.abs(diff).max():.6e} eV/Å³  '
+                f'RMSE = {np.sqrt(np.mean(diff**2)):.6e} eV/Å³'
+            )
+        else:
+            print('Stress outputs unavailable for comparison.')
 
 
 if __name__ == '__main__':
