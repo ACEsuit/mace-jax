@@ -78,3 +78,10 @@ addopts = "-m 'not slow'"
 markers = [
     "slow: marks tests that require extended runtime",
 ]
+filterwarnings = [
+    "ignore:Creating NamedTuple classes using keyword arguments is deprecated.*:DeprecationWarning",
+    "ignore:`use_fallback` is deprecated.*:DeprecationWarning:cuequivariance",
+    "ignore:The TorchScript type system doesn't support instance-level annotations.*:UserWarning:torch",
+    "ignore:No artists with labels found to put in legend.*:UserWarning:matplotlib",
+]
+testpaths = ["tests"]

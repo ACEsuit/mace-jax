@@ -190,7 +190,9 @@ def plot_run(
     if not linear:
         loss_ax.set_xscale('log')
         loss_ax.set_yscale('log')
-    loss_ax.legend()
+    handles, labels = loss_ax.get_legend_handles_labels()
+    if handles:
+        loss_ax.legend()
 
     metric_ax = axes[1]
     for idx, key in enumerate(keys):
@@ -220,7 +222,9 @@ def plot_run(
                 )
 
     metric_ax.set_xlabel('Interval')
-    metric_ax.legend()
+    handles, labels = metric_ax.get_legend_handles_labels()
+    if handles:
+        metric_ax.legend()
     if not linear:
         metric_ax.set_xscale('log')
         metric_ax.set_yscale('log')
