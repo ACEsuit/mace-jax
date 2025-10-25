@@ -199,6 +199,95 @@ def get_outputs(
     return total_energy, forces, stress, has_force, has_stress
 
 
+def get_outputs_opt(
+    energy_fn,
+    data: dict[str, jnp.ndarray],
+    compute_force: bool = True,
+    compute_stress: bool = False,
+) -> tuple[
+    jnp.ndarray,  # energy
+    jnp.ndarray | None,  # forces
+    jnp.ndarray | None,  # stress
+    bool | jnp.ndarray,  # force mask
+    bool | jnp.ndarray,  # stress mask
+]:
+    """
+    Optimized version of get_outputs that computes energy and forces in a single pass.
+    
+    This function uses jax.value_and_grad() to compute both the energy and its gradient
+    (forces) simultaneously.
+    
+    Args:
+        energy_fn: Function that takes positions and returns energy
+        data: Dictionary containing positions, cell, unit_shifts, edge_index, batch, ptr
+        compute_force: Whether to compute forces
+        compute_stress: Whether to compute stress
+        
+    Returns:
+        Tuple of (energy, forces, stress, force_mask, stress_mask)
+    """
+    positions = data['positions']
+    cell = data['cell']
+    unit_shifts = data['unit_shifts']
+    edge_index = data['edge_index']
+    batch = data['batch']
+    num_graphs = int(jnp.size(data['ptr']) - 1)
+
+    # Determine if we need to compute stress (forces are always computed efficiently)
+    if compute_stress:
+        # For stress computation, use displacement approach
+        def energy_displacement_fn(positions, displacement):
+            symmetric_displacement = 0.5 * (
+                displacement + jnp.swapaxes(displacement, -1, -2)
+            )
+            deformed_positions = positions + jnp.einsum(
+                'be,bec->bc', positions, symmetric_displacement[batch]
+            )
+            cell_reshaped = cell.reshape(-1, 3, 3)
+            cell_reshaped = cell_reshaped + jnp.matmul(
+                cell_reshaped, symmetric_displacement
+            )
+            shifts = jnp.einsum(
+                'be,bec->bc',
+                unit_shifts,
+                cell_reshaped[batch[edge_index[0]]],
+            )
+            return jnp.sum(energy_fn(deformed_positions, shifts=shifts))
+        
+        displacement = jnp.zeros((num_graphs, 3, 3), dtype=positions.dtype)
+        
+        # Compute energy, forces, and stress in a single pass
+        total_energy, grads = jax.value_and_grad(
+            energy_displacement_fn, argnums=(0, 1)
+        )(positions, displacement)
+        grad_pos, grad_disp = grads
+        
+        forces = -grad_pos
+        virials = -grad_disp
+        volume = jnp.abs(jnp.linalg.det(cell.reshape(-1, 3, 3))).reshape(-1, 1, 1)
+        stress = -virials / volume
+        stress = jnp.where(jnp.abs(stress) < 1e10, stress, jnp.zeros_like(stress))
+        
+        return total_energy, forces, stress, compute_force, compute_stress
+    
+    elif compute_force:
+        # Compute energy and forces in a single pass
+        total_energy, grad_pos = jax.value_and_grad(
+            lambda pos: jnp.sum(energy_fn(pos))
+        )(positions)
+        forces = -grad_pos
+        stress = None
+        
+        return total_energy, forces, stress, compute_force, compute_stress
+    
+    else:
+        total_energy = energy_fn(positions)
+        forces = None
+        stress = None
+        
+        return total_energy, forces, stress, compute_force, compute_stress
+
+
 def get_edge_vectors_and_lengths(
     positions: jnp.ndarray,  # [n_nodes, 3]
     edge_index: jnp.ndarray,  # [2, n_edges]
