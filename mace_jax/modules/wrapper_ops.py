@@ -61,10 +61,6 @@ class Linear:
         name: str | None = None,
     ):
         if cueq_config is not None:
-            if getattr(cueq_config, 'conv_fusion', False):
-                raise NotImplementedError(
-                    'conv_fusion is not supported by the cuequivariance backend.'
-                )
             group_value = getattr(cueq_config, 'group', None)
             if isinstance(group_value, str):
                 group_name = group_value
@@ -106,11 +102,9 @@ class TensorProduct:
         cueq_config=None,
         name: str | None = None,
     ):
+        conv_fusion = False
         if cueq_config is not None:
-            if getattr(cueq_config, 'conv_fusion', False):
-                raise NotImplementedError(
-                    'conv_fusion is not supported by the cuequivariance tensor product backend.'
-                )
+            conv_fusion = bool(getattr(cueq_config, 'conv_fusion', False))
             group_value = getattr(cueq_config, 'group', None)
             if isinstance(group_value, str):
                 group_name = group_value
@@ -129,6 +123,7 @@ class TensorProduct:
             instructions=instructions,
             shared_weights=shared_weights,
             internal_weights=internal_weights,
+            conv_fusion=conv_fusion,
             name=name,
         )
 
@@ -150,10 +145,6 @@ def FullyConnectedTensorProduct(
     use_cue = cueq_config is not None and getattr(cueq_config, 'enabled', False)
 
     if cueq_config is not None and use_cue:
-        if getattr(cueq_config, 'conv_fusion', False):
-            raise NotImplementedError(
-                'conv_fusion is not supported by the cuequivariance tensor product backend.'
-            )
         group_value = getattr(cueq_config, 'group', None)
         if isinstance(group_value, str):
             group_name = group_value
@@ -191,10 +182,6 @@ def SymmetricContractionWrapper(
     use_cue = cueq_config is not None and getattr(cueq_config, 'enabled', False)
 
     if cueq_config is not None and use_cue:
-        if getattr(cueq_config, 'conv_fusion', False):
-            raise NotImplementedError(
-                'conv_fusion is not supported by the cuequivariance tensor product backend.'
-            )
         group_value = getattr(cueq_config, 'group', None)
         if isinstance(group_value, str):
             group_name = group_value

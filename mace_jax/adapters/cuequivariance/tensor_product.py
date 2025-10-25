@@ -12,6 +12,7 @@ from flax.core import freeze, unfreeze
 import cuequivariance as cue
 from mace_jax.adapters.flax.torch import auto_import_from_torch_flax
 from mace_jax.tools.cg import O3_e3nn
+from mace_jax.tools.scatter import scatter_sum
 
 from .utility import collapse_ir_mul_segments, ir_mul_to_mul_ir, mul_ir_to_ir_mul
 
@@ -99,6 +100,7 @@ class TensorProduct(fnn.Module):
     shared_weights: bool = False
     internal_weights: bool = False
     instructions: list[tuple[int, int, int, str, bool, float]] | None = None
+    conv_fusion: bool = False
 
     def setup(self) -> None:
         """Initialise cue descriptors and validate the instruction template.
@@ -149,6 +151,26 @@ class TensorProduct(fnn.Module):
                     'matching those returned by e3nn; received '
                     f'{self.instructions!r}'
                 )
+
+        object.__setattr__(self, '_conv_fusion', bool(self.conv_fusion))
+        object.__setattr__(self, '_conv_method', 'naive')
+
+        conv_polynomial = None
+        if self._conv_fusion:
+            try:
+                conv_descriptor = (
+                    cue.descriptors.channelwise_tensor_product(
+                        self.irreps_in1_cue,
+                        self.irreps_in2_cue,
+                        self.irreps_out_cue,
+                    )
+                    .flatten_coefficient_modes()
+                    .squeeze_modes()
+                )
+                conv_polynomial = conv_descriptor.polynomial
+            except ValueError:
+                conv_polynomial = None
+        object.__setattr__(self, '_conv_polynomial', conv_polynomial)
 
     def _weight_param(self) -> jnp.ndarray:
         """Create the shared/internal weight parameter."""
@@ -218,6 +240,7 @@ class TensorProduct(fnn.Module):
         x1: jnp.ndarray,
         x2: jnp.ndarray,
         weights: jnp.ndarray | None = None,
+        edge_index: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
         """Evaluate the tensor product on two mul_ir inputs.
 
@@ -237,18 +260,82 @@ class TensorProduct(fnn.Module):
         Raises:
             ValueError: On weight shape mismatches or invalid sharing policy.
         """
-        batch_size = x1.shape[0]
         dtype = x1.dtype
 
+        if not self._conv_fusion:
+            batch_size = x1.shape[0]
+            weight_tensor = self._resolve_weight_tensor(
+                weights, dtype=dtype, batch_size=batch_size
+            )
+            out = self._channelwise_apply(
+                x1,
+                x2,
+                weight_tensor,
+                dtype=dtype,
+            )
+            object.__setattr__(self, '_conv_method', 'naive')
+            return out
+
+        if edge_index is None:
+            raise ValueError('TensorProduct conv_fusion requires edge_index')
+        edge_index = jnp.asarray(edge_index)
+        if edge_index.ndim != 2 or edge_index.shape[0] != 2:
+            raise ValueError(
+                'edge_index must have shape (2, num_edges); '
+                f'received {edge_index.shape}'
+            )
+
+        sender = jnp.asarray(edge_index[0])
+        receiver = jnp.asarray(edge_index[1])
+        num_nodes = x1.shape[0]
+        edge_batch = sender.shape[0]
+
+        edge_x1 = x1[sender]
+        weight_tensor = self._resolve_weight_tensor(
+            weights, dtype=dtype, batch_size=edge_batch
+        )
+
+        fused_out: jnp.ndarray | None = None
+        if self._conv_polynomial is not None:
+            try:
+                fused_out = self._conv_fused_apply(
+                    node_feats=x1,
+                    edge_attrs=x2,
+                    weights=weight_tensor,
+                    sender=sender,
+                    receiver=receiver,
+                    num_nodes=num_nodes,
+                    dtype=dtype,
+                )
+            except (RuntimeError, ValueError, NotImplementedError):
+                fused_out = None
+
+        if fused_out is not None:
+            object.__setattr__(self, '_conv_method', 'uniform_1d')
+            return fused_out
+
+        per_edge = self._channelwise_apply(
+            edge_x1,
+            x2,
+            weight_tensor,
+            dtype=dtype,
+        )
+        aggregated = scatter_sum(per_edge, receiver, dim_size=num_nodes)
+        object.__setattr__(self, '_conv_method', 'naive')
+        return aggregated
+
+    def _channelwise_apply(
+        self,
+        x1: jnp.ndarray,
+        x2: jnp.ndarray,
+        weight_tensor: jnp.ndarray,
+        *,
+        dtype: jnp.dtype,
+    ) -> jnp.ndarray:
         irreps_in1 = Irreps(self.irreps_in1_o3)
         irreps_in2 = Irreps(self.irreps_in2_o3)
-        irreps_out = Irreps(self.irreps_out_o3)
-
         x1_rep = self._as_rep(x1, irreps_in1, self.irreps_in1_cue)
         x2_rep = self._as_rep(x2, irreps_in2, self.irreps_in2_cue)
-        weight_tensor = self._resolve_weight_tensor(
-            weights, dtype=dtype, batch_size=batch_size
-        )
         weight_rep = cuex.RepArray(self.weight_irreps, weight_tensor, cue.ir_mul)
 
         output_rep = cuex.equivariant_polynomial(
@@ -260,11 +347,57 @@ class TensorProduct(fnn.Module):
         out_ir_mul = collapse_ir_mul_segments(
             output_rep.array,
             Irreps(self.descriptor_out_irreps_str),
+            Irreps(self.irreps_out_o3),
+            self.output_segment_shapes,
+        )
+        return ir_mul_to_mul_ir(out_ir_mul, Irreps(self.irreps_out_o3))
+
+    def _conv_fused_apply(
+        self,
+        *,
+        node_feats: jnp.ndarray,
+        edge_attrs: jnp.ndarray,
+        weights: jnp.ndarray,
+        sender: jnp.ndarray,
+        receiver: jnp.ndarray,
+        num_nodes: int,
+        dtype: jnp.dtype,
+    ) -> jnp.ndarray | None:
+        if self._conv_polynomial is None:
+            return None
+
+        irreps_in1 = Irreps(self.irreps_in1_o3)
+        irreps_in2 = Irreps(self.irreps_in2_o3)
+        irreps_out = Irreps(self.irreps_out_o3)
+
+        node_ir_mul = mul_ir_to_ir_mul(node_feats, irreps_in1)
+        edge_ir_mul = mul_ir_to_ir_mul(edge_attrs, irreps_in2)
+
+        outputs_shape_dtype = [
+            jax.ShapeDtypeStruct((num_nodes, self.descriptor_out_dim), dtype)
+        ]
+        indices = [
+            None,
+            (sender,),
+            None,
+            (receiver,),
+        ]
+        math_dtype = jnp.dtype(dtype).name
+        [out_ir_mul] = cuex.segmented_polynomial(
+            self._conv_polynomial,
+            [weights, node_ir_mul, edge_ir_mul],
+            outputs_shape_dtype,
+            indices=indices,
+            method='uniform_1d',
+            math_dtype=math_dtype,
+        )
+        out_ir_mul = collapse_ir_mul_segments(
+            out_ir_mul,
+            Irreps(self.descriptor_out_irreps_str),
             irreps_out,
             self.output_segment_shapes,
         )
-        out_mul_ir = ir_mul_to_mul_ir(out_ir_mul, irreps_out)
-        return out_mul_ir
+        return ir_mul_to_mul_ir(out_ir_mul, irreps_out)
 
 
 def _tensor_product_import_from_torch(cls, torch_module, flax_variables):
