@@ -376,6 +376,8 @@ class AtomicEnergiesBlock(fnn.Module):
             lambda rng: init_values,
         )
 
+        # Prevent atomic reference energies from receiving gradients during training.
+        atomic_energies = jax.lax.stop_gradient(atomic_energies)
         energies = jnp.atleast_2d(atomic_energies)
         return jnp.matmul(x, energies.T)
 
