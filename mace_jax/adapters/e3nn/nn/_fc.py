@@ -62,7 +62,8 @@ class Layer(fnn.Module):
                     dtype=weight.dtype,
                 ),
             )
-            act_scale = jnp.asarray(act_scale, dtype=y.dtype)
+            # Torch stores this constant as a buffer; prevent training-time updates.
+            act_scale = jax.lax.stop_gradient(jnp.asarray(act_scale, dtype=y.dtype))
             y = self._act_fn(y) * act_scale
             y = y * jnp.sqrt(self.var_out)
             return y

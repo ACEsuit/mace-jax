@@ -1413,6 +1413,10 @@ class ScaleShiftBlock(fnn.Module):
         scale = self.param('scale', lambda rng: scale_init)
         shift = self.param('shift', lambda rng: shift_init)
 
+        # Match Torch behaviour (buffers) by keeping scale/shift constants during training.
+        scale = jax.lax.stop_gradient(scale)
+        shift = jax.lax.stop_gradient(shift)
+
         scale_h = jnp.atleast_1d(scale)[head]
         shift_h = jnp.atleast_1d(shift)[head]
         return scale_h * x + shift_h
