@@ -1,5 +1,8 @@
 import os
 from contextlib import ExitStack
+import os
+
+os.environ.setdefault('JAX_PLATFORM_NAME', 'cpu')
 
 import jax
 import jax.numpy as jnp
