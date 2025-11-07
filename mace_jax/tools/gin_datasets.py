@@ -103,6 +103,43 @@ def _maybe_apply_pseudolabels(
         _apply_predictions_to_config(cfg, output)
 
 
+def _load_configs_from_path(
+    path: str,
+    *,
+    config_type_weights: Dict,
+    energy_key: str,
+    forces_key: str,
+    prefactor_stress: float,
+    remap_stress: np.ndarray | None,
+    head_name: str,
+    num_configs: int | None,
+    extract_atomic_energies: bool,
+    allow_unlabeled: bool,
+):
+    loader_kwargs = dict(
+        config_type_weights=config_type_weights,
+        energy_key=energy_key,
+        forces_key=forces_key,
+        prefactor_stress=prefactor_stress,
+        remap_stress=remap_stress,
+        head_name=head_name,
+        num_configs=num_configs,
+    )
+    lower_path = path.lower()
+    if lower_path.endswith(('.h5', '.hdf5')):
+        return data.load_from_hdf5(
+            path,
+            no_data_ok=allow_unlabeled,
+            **loader_kwargs,
+        )
+    return data.load_from_xyz(
+        file_or_path=path,
+        extract_atomic_energies=extract_atomic_energies,
+        no_data_ok=allow_unlabeled,
+        **loader_kwargs,
+    )
+
+
 @gin.configurable
 def datasets(
     *,
@@ -179,17 +216,17 @@ def datasets(
 
             head_all_train: list[data.Configuration] = []
             for head_train_path in head_train_paths:
-                head_atomic, head_chunk = data.load_from_xyz(
-                    file_or_path=head_train_path,
+                head_atomic, head_chunk = _load_configs_from_path(
+                    head_train_path,
                     config_type_weights=head_ct_weights,
                     energy_key=energy_key,
                     forces_key=forces_key,
-                    extract_atomic_energies=True,
-                    num_configs=head_train_num,
                     prefactor_stress=prefactor_stress,
                     remap_stress=remap_stress,
                     head_name=head_name,
-                    no_data_ok=allow_unlabeled,
+                    num_configs=head_train_num,
+                    extract_atomic_energies=True,
+                    allow_unlabeled=allow_unlabeled,
                 )
                 _merge_atomic_energies(atomic_energies_dict, head_atomic)
                 head_all_train.extend(head_chunk)
@@ -201,16 +238,17 @@ def datasets(
                 )
 
             if head_valid_path is not None:
-                _, head_valid = data.load_from_xyz(
-                    file_or_path=head_valid_path,
+                _, head_valid = _load_configs_from_path(
+                    head_valid_path,
                     config_type_weights=head_ct_weights,
                     energy_key=energy_key,
                     forces_key=forces_key,
-                    extract_atomic_energies=False,
                     prefactor_stress=prefactor_stress,
                     remap_stress=remap_stress,
                     head_name=head_name,
-                    no_data_ok=allow_unlabeled,
+                    num_configs=None,
+                    extract_atomic_energies=False,
+                    allow_unlabeled=allow_unlabeled,
                 )
                 head_train = head_all_train
                 logging.info(
@@ -246,17 +284,17 @@ def datasets(
                 head_valid = []
 
             if head_test_path is not None:
-                _, head_test = data.load_from_xyz(
-                    file_or_path=head_test_path,
+                _, head_test = _load_configs_from_path(
+                    head_test_path,
                     config_type_weights=head_ct_weights,
                     energy_key=energy_key,
                     forces_key=forces_key,
-                    extract_atomic_energies=False,
-                    num_configs=head_test_num,
                     prefactor_stress=prefactor_stress,
                     remap_stress=remap_stress,
                     head_name=head_name,
-                    no_data_ok=allow_unlabeled,
+                    num_configs=head_test_num,
+                    extract_atomic_energies=False,
+                    allow_unlabeled=allow_unlabeled,
                 )
                 logging.info(
                     "Loaded %s test configurations for head '%s' from '%s'",
@@ -273,17 +311,17 @@ def datasets(
             )
             replay_configs: list[data.Configuration] = []
             for replay_path in replay_paths:
-                _, replay_chunk = data.load_from_xyz(
-                    file_or_path=replay_path,
+                _, replay_chunk = _load_configs_from_path(
+                    replay_path,
                     config_type_weights=head_ct_weights,
                     energy_key=energy_key,
                     forces_key=forces_key,
-                    extract_atomic_energies=False,
-                    num_configs=head_cfg.get('replay_num', None),
                     prefactor_stress=prefactor_stress,
                     remap_stress=remap_stress,
                     head_name=head_name,
-                    no_data_ok=replay_allow_unlabeled,
+                    num_configs=head_cfg.get('replay_num', None),
+                    extract_atomic_energies=False,
+                    allow_unlabeled=replay_allow_unlabeled,
                 )
                 replay_configs.extend(replay_chunk)
                 logging.info(
@@ -312,31 +350,34 @@ def datasets(
             valid_configs.extend(head_valid)
             test_configs.extend(head_test)
     else:
-        atomic_energies_dict, all_train_configs = data.load_from_xyz(
-            file_or_path=train_path,
+        atomic_energies_dict, all_train_configs = _load_configs_from_path(
+            train_path,
             config_type_weights=config_type_weights,
             energy_key=energy_key,
             forces_key=forces_key,
-            extract_atomic_energies=True,
-            num_configs=train_num,
             prefactor_stress=prefactor_stress,
             remap_stress=remap_stress,
             head_name=head_names[0],
+            num_configs=train_num,
+            extract_atomic_energies=True,
+            allow_unlabeled=False,
         )
         logging.info(
             f"Loaded {len(all_train_configs)} training configurations from '{train_path}'"
         )
 
         if valid_path is not None:
-            _, valid_configs = data.load_from_xyz(
-                file_or_path=valid_path,
+            _, valid_configs = _load_configs_from_path(
+                valid_path,
                 config_type_weights=config_type_weights,
                 energy_key=energy_key,
                 forces_key=forces_key,
-                extract_atomic_energies=False,
                 prefactor_stress=prefactor_stress,
                 remap_stress=remap_stress,
                 head_name=head_names[0],
+                num_configs=None,
+                extract_atomic_energies=False,
+                allow_unlabeled=False,
             )
             logging.info(
                 f"Loaded {len(valid_configs)} validation configurations from '{valid_path}'"
@@ -361,16 +402,17 @@ def datasets(
         del all_train_configs
 
         if test_path is not None:
-            _, test_configs = data.load_from_xyz(
-                file_or_path=test_path,
+            _, test_configs = _load_configs_from_path(
+                test_path,
                 config_type_weights=config_type_weights,
                 energy_key=energy_key,
                 forces_key=forces_key,
-                extract_atomic_energies=False,
-                num_configs=test_num,
                 prefactor_stress=prefactor_stress,
                 remap_stress=remap_stress,
                 head_name=head_names[0],
+                num_configs=test_num,
+                extract_atomic_energies=False,
+                allow_unlabeled=False,
             )
             logging.info(
                 f"Loaded {len(test_configs)} test configurations from '{test_path}'"

@@ -7,6 +7,7 @@ from typing import IO, NamedTuple, Optional, Union
 
 import ase.data
 import ase.io
+import h5py
 import jax
 import jax.numpy as jnp
 import jraph
@@ -199,6 +200,110 @@ def load_from_xyz(
         for atoms in atoms_list
     ]
     return atomic_energies_dict, configs
+
+
+def _unpack_hdf5_value(value):
+    if isinstance(value, bytes):
+        value = value.decode('utf-8')
+    if isinstance(value, str) and value == 'None':
+        return None
+    return value
+
+
+def _load_hdf5_properties(group, key):
+    if key not in group:
+        return None
+    return _unpack_hdf5_value(group[key][()])
+
+
+def load_from_hdf5(
+    file_path: str,
+    config_type_weights: dict = None,
+    energy_key: str = 'energy',
+    forces_key: str = 'forces',
+    stress_key: str = 'stress',
+    prefactor_stress: float = 1.0,
+    remap_stress: np.ndarray = None,
+    head_name: str | None = None,
+    num_configs: int | None = None,
+    no_data_ok: bool = False,
+) -> tuple[dict[int, float], Configurations]:
+    if config_type_weights is None:
+        config_type_weights = DEFAULT_CONFIG_TYPE_WEIGHTS
+
+    configs: list[Configuration] = []
+
+    with h5py.File(file_path, 'r') as handle:
+        batch_names = sorted(
+            (name for name in handle.keys() if name.startswith('config_batch_')),
+            key=lambda name: int(name.rsplit('_', 1)[-1]),
+        )
+        for batch_name in batch_names:
+            batch = handle[batch_name]
+            config_names = sorted(
+                batch.keys(), key=lambda name: int(name.rsplit('_', 1)[-1])
+            )
+            for config_name in config_names:
+                subgroup = batch[config_name]
+                atomic_numbers = np.asarray(subgroup['atomic_numbers'][()], dtype=int)
+                positions = np.asarray(subgroup['positions'][()], dtype=float)
+
+                props = subgroup['properties']
+                energy = _load_hdf5_properties(props, energy_key)
+                if energy is not None:
+                    energy = float(np.asarray(energy).reshape(-1)[0])
+
+                forces = _load_hdf5_properties(props, forces_key)
+                if forces is not None:
+                    forces = np.asarray(forces, dtype=float).reshape(-1, 3)
+
+                stress = _load_hdf5_properties(props, stress_key)
+                if stress is not None:
+                    stress = np.asarray(stress, dtype=float).reshape(3, 3)
+                    stress = prefactor_stress * stress
+                    if remap_stress is not None:
+                        remap = np.asarray(remap_stress)
+                        stress = stress.flatten()[remap].reshape(3, 3)
+
+                if not no_data_ok and energy is None and forces is None and stress is None:
+                    continue
+
+                cell = np.asarray(subgroup['cell'][()], dtype=float)
+                pbc = tuple(bool(x) for x in subgroup['pbc'][()])
+                config_type = _unpack_hdf5_value(subgroup['config_type'][()])
+                stored_weight = _unpack_hdf5_value(subgroup['weight'][()])
+                if stored_weight is not None:
+                    weight = float(stored_weight)
+                else:
+                    weight = config_type_weights.get(config_type, 1.0)
+
+                head_value = head_name
+                if head_value is None and 'head' in subgroup:
+                    head_value = _unpack_hdf5_value(subgroup['head'][()])
+                if head_value is None:
+                    head_value = 'Default'
+
+                configs.append(
+                    Configuration(
+                        atomic_numbers=atomic_numbers,
+                        positions=positions,
+                        energy=energy,
+                        forces=forces,
+                        stress=stress,
+                        cell=cell,
+                        pbc=pbc,
+                        weight=weight,
+                        config_type=config_type,
+                        head=head_value,
+                    )
+                )
+
+                if num_configs is not None and len(configs) >= num_configs:
+                    break
+            if num_configs is not None and len(configs) >= num_configs:
+                break
+
+    return {}, configs
 
 
 class AtomicNumberTable:
