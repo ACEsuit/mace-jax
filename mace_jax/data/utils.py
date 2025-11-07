@@ -40,6 +40,7 @@ class Configuration:
 
     weight: float = 1.0  # weight of config in loss
     config_type: str | None = DEFAULT_CONFIG_TYPE  # config_type of config
+    head: str = 'Default'
 
 
 Configurations = list[Configuration]
@@ -69,6 +70,7 @@ def config_from_atoms(
     config_type_weights: dict[str, float] = None,
     prefactor_stress: float = 1.0,
     remap_stress: np.ndarray = None,
+    head_name: str | None = None,
 ) -> Configuration:
     """Convert ase.Atoms to Configuration"""
     if config_type_weights is None:
@@ -107,6 +109,7 @@ def config_from_atoms(
     assert np.linalg.det(cell) >= 0.0
     config_type = atoms.info.get('config_type', 'Default')
     weight = config_type_weights.get(config_type, 1.0)
+    head = head_name if head_name is not None else atoms.info.get('head', 'Default')
     return Configuration(
         atomic_numbers=atomic_numbers,
         positions=atoms.get_positions(),
@@ -117,6 +120,7 @@ def config_from_atoms(
         config_type=config_type,
         pbc=pbc,
         cell=cell,
+        head=head,
     )
 
 
@@ -140,6 +144,8 @@ def load_from_xyz(
     num_configs: int = None,
     prefactor_stress: float = 1.0,
     remap_stress: np.ndarray = None,
+    head_name: str | None = None,
+    no_data_ok: bool = False,
 ) -> tuple[dict[int, float], Configurations]:
     if num_configs is None:
         atoms_list = ase.io.read(file_or_path, format='extxyz', index=':')
@@ -188,6 +194,7 @@ def load_from_xyz(
             config_type_weights,
             prefactor_stress,
             remap_stress,
+            head_name=head_name,
         )
         for atoms in atoms_list
     ]
@@ -298,11 +305,19 @@ class GraphEdges(NamedTuple):
     unit_shifts: np.ndarray | None = None
 
 
-GraphGlobals = namedtuple('Globals', ['cell', 'energy', 'stress', 'weight'])
+class GraphGlobals(NamedTuple):
+    cell: np.ndarray
+    energy: np.ndarray | None
+    stress: np.ndarray | None
+    weight: np.ndarray
+    head: np.ndarray | None = None
 
 
 def graph_from_configuration(
-    config: Configuration, cutoff: float, z_table: AtomicNumberTable = None
+    config: Configuration,
+    cutoff: float,
+    z_table: AtomicNumberTable = None,
+    head_to_index: dict[str, int] | None = None,
 ) -> jraph.GraphsTuple:
     (
         edge_index,
@@ -324,6 +339,17 @@ def graph_from_configuration(
         z_map = z_table.z_to_index_map(max_atomic_number=max(200, max_atomic_number))
         species = z_map[config.atomic_numbers]
 
+    if head_to_index is None:
+        head_index = 0
+    else:
+        if config.head not in head_to_index:
+            raise KeyError(
+                f"Unknown head '{config.head}'. Available heads: {tuple(head_to_index)}"
+            )
+        head_index = head_to_index[config.head]
+
+    head_array = np.asarray(head_index, dtype=np.int32)
+
     return jraph.GraphsTuple(
         nodes=GraphNodes(
             positions=config.positions,
@@ -338,6 +364,7 @@ def graph_from_configuration(
                 energy=config.energy,
                 stress=config.stress,
                 weight=np.asarray(config.weight),
+                head=head_array,
             ),
         ),
         receivers=receivers,
@@ -359,6 +386,7 @@ class GraphDataLoader:
         min_n_graph: int = 1,
         shuffle: bool = True,
         n_mantissa_bits: int | None = None,
+        heads: Sequence[str] | None = None,
     ):
         self.graphs = graphs
         self.n_node = n_node
@@ -370,6 +398,7 @@ class GraphDataLoader:
         self.shuffle = shuffle
         self.n_mantissa_bits = n_mantissa_bits
         self._length = None
+        self.heads = tuple(heads) if heads is not None else None
 
         keep_graphs = [
             graph
@@ -443,6 +472,7 @@ class GraphDataLoader:
             min_n_graph=self.min_n_graph,
             shuffle=self.shuffle,
             n_mantissa_bits=self.n_mantissa_bits,
+            heads=self.heads,
         )
 
     def replace_graphs(self, graphs: list[jraph.GraphsTuple]):
@@ -456,6 +486,7 @@ class GraphDataLoader:
             min_n_graph=self.min_n_graph,
             shuffle=self.shuffle,
             n_mantissa_bits=self.n_mantissa_bits,
+            heads=self.heads,
         )
 
 

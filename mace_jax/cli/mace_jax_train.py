@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 from collections.abc import Sequence
@@ -96,6 +97,22 @@ def parse_args(
             'mace_jax.tools.gin_model.model.r_max).'
         ),
     )
+    parser.add_argument(
+        '--heads',
+        nargs='+',
+        help=(
+            'Names of the heads to expose to the model/dataloader '
+            '(binds mace_jax.tools.gin_datasets.datasets.heads and '
+            'mace_jax.tools.gin_model.model.heads).'
+        ),
+    )
+    parser.add_argument(
+        '--head-config',
+        help=(
+            'Path to a JSON (or YAML if PyYAML is installed) file describing per-head '
+            'dataset overrides (binds mace_jax.tools.gin_datasets.datasets.head_configs).'
+        ),
+    )
 
     args, remaining = parser.parse_known_args(argv)
     return args, remaining
@@ -148,6 +165,51 @@ def apply_cli_overrides(args: argparse.Namespace) -> None:
     if args.r_max is not None:
         gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.r_max', args.r_max)
         gin.bind_parameter('mace_jax.tools.gin_model.model.r_max', args.r_max)
+
+    head_configs_data = None
+    if getattr(args, 'head_config', None):
+        head_configs_data = _load_head_configs(Path(args.head_config))
+        gin.bind_parameter(
+            'mace_jax.tools.gin_datasets.datasets.head_configs', head_configs_data
+        )
+
+    heads_list = None
+    if getattr(args, 'heads', None):
+        heads_list = list(args.heads)
+    elif head_configs_data:
+        heads_list = list(head_configs_data.keys())
+
+    if heads_list:
+        gin.bind_parameter(
+            'mace_jax.tools.gin_datasets.datasets.heads', tuple(heads_list)
+        )
+        gin.bind_parameter('mace_jax.tools.gin_model.model.heads', tuple(heads_list))
+
+
+def _load_head_configs(path: Path) -> dict[str, dict]:
+    raw_text = path.read_text(encoding='utf-8')
+    try:
+        data = json.loads(raw_text)
+    except json.JSONDecodeError:
+        try:
+            import yaml  # type: ignore
+        except ImportError as exc:  # pragma: no cover - only triggered without PyYAML
+            raise ValueError(
+                f'Failed to parse head config {path}. Install PyYAML to use YAML files.'
+            ) from exc
+        data = yaml.safe_load(raw_text)
+
+    if not isinstance(data, dict):
+        raise ValueError(f'Head configuration file {path} must define a dict.')
+
+    normalized: dict[str, dict] = {}
+    for head_name, cfg in data.items():
+        if not isinstance(cfg, dict):
+            raise ValueError(
+                f'Head configuration for {head_name!r} must be a mapping, got {type(cfg)}.'
+            )
+        normalized[str(head_name)] = cfg
+    return normalized
 
 
 def run_training(dry_run: bool = False) -> None:

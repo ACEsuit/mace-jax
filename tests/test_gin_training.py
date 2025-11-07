@@ -1,10 +1,13 @@
+import shutil
 from pathlib import Path
 
 import gin
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
 import pytest
+from ase import io as ase_io
 
 import mace_jax.data as data_pkg
 import mace_jax.data.utils as data_utils
@@ -185,6 +188,91 @@ def _run_gin_training(tmp_path):
 
     assert ema_params is not None
     return ema_params
+
+
+def test_multihead_training(tmp_path):
+    simple_xyz = Path(__file__).resolve().parent / 'test_data' / 'simple.xyz'
+    head_default = tmp_path / 'head_default.xyz'
+    head_surface = tmp_path / 'head_surface.xyz'
+    shutil.copy(simple_xyz, head_default)
+    shutil.copy(simple_xyz, head_surface)
+
+    head_cfgs = {
+        'Default': {'train_path': str(head_default)},
+        'Surface': {'train_path': str(head_surface)},
+    }
+    gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.head_configs', head_cfgs)
+    gin.bind_parameter(
+        'mace_jax.tools.gin_datasets.datasets.heads', ['Default', 'Surface']
+    )
+    gin.bind_parameter('mace_jax.tools.gin_model.model.heads', ['Default', 'Surface'])
+
+    ema_params = _run_gin_training(tmp_path)
+    assert ema_params is not None
+
+
+def test_head_replay_paths_and_weights(tmp_path):
+    simple_xyz = Path(__file__).resolve().parent / 'test_data' / 'simple.xyz'
+    replay_xyz = tmp_path / 'replay.xyz'
+    shutil.copy(simple_xyz, replay_xyz)
+    n_base = len(ase_io.read(simple_xyz, ':'))
+
+    head_cfgs = {
+        'Default': {
+            'train_path': str(simple_xyz),
+            'replay_paths': [str(replay_xyz)],
+            'replay_weight': 0.25,
+        }
+    }
+    gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.head_configs', head_cfgs)
+    gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.heads', ['Default'])
+    train_loader, _, _, _, _ = gin_datasets.datasets()
+
+    assert len(train_loader.graphs) == 2 * n_base
+    replay_weight = float(train_loader.graphs[-1].globals.weight[0])
+    assert np.isclose(replay_weight, 0.25)
+
+
+def test_head_pseudolabel_replay(monkeypatch, tmp_path):
+    simple_xyz = Path(__file__).resolve().parent / 'test_data' / 'simple.xyz'
+    unlabeled_xyz = tmp_path / 'unlabeled.xyz'
+    atoms = ase_io.read(simple_xyz, ':')
+    for at in atoms:
+        at.info.pop('energy', None)
+    ase_io.write(unlabeled_xyz, atoms)
+
+    def fake_loader(*_, **__):
+        def _predict(graph):
+            n_atoms = int(graph.n_node[0])
+            return {
+                'energy': np.asarray([99.0]),
+                'forces': np.ones((n_atoms, 3)),
+                'stress': np.zeros((1, 3, 3)),
+            }
+
+        return _predict
+
+    monkeypatch.setattr(
+        gin_datasets, '_load_pseudolabel_predictor', fake_loader, raising=True
+    )
+
+    head_cfgs = {
+        'Default': {
+            'train_path': str(simple_xyz),
+            'replay_paths': [str(unlabeled_xyz)],
+            'replay_allow_unlabeled': True,
+            'pseudolabel_checkpoint': 'dummy.pt',
+            'pseudolabel_targets': 'replay',
+        }
+    }
+    gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.head_configs', head_cfgs)
+    gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.heads', ['Default'])
+
+    train_loader, _, _, _, _ = gin_datasets.datasets()
+    replay_graph = train_loader.graphs[-1]
+    assert np.isclose(float(replay_graph.globals.energy[0]), 99.0)
+    forces = np.asarray(replay_graph.nodes.forces)
+    assert forces.shape[1] == 3 and np.allclose(forces, 1.0)
 
 
 def test_gin_model_torch_checkpoint(monkeypatch, tmp_path):

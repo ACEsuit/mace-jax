@@ -13,9 +13,23 @@ from e3nn_jax import Irreps
 from mace.data.atomic_data import AtomicData
 from mace.data.utils import config_from_atoms
 from mace.tools import torch_geometric
-from mace.tools.model_script_utils import configure_model as configure_model_torch
-from mace.tools.multihead_tools import AtomicNumberTable, prepare_default_head
-from mace.tools.torch_geometric.batch import Batch
+
+_TORCH_MODEL_IMPORT_ERROR = None
+try:  # pragma: no cover - may fail when Torch cue ops unavailable
+    from mace.tools.model_script_utils import configure_model as configure_model_torch
+    from mace.tools.multihead_tools import AtomicNumberTable, prepare_default_head
+    from mace.tools.torch_geometric.batch import Batch
+except Exception as exc:  # pragma: no cover
+    configure_model_torch = None
+    AtomicNumberTable = None
+    prepare_default_head = None
+    Batch = None
+    _TORCH_MODEL_IMPORT_ERROR = exc
+
+pytestmark = pytest.mark.skipif(
+    _TORCH_MODEL_IMPORT_ERROR is not None,
+    reason=f'Unable to import Torch cuequivariance components: {_TORCH_MODEL_IMPORT_ERROR}',
+)
 
 from mace_jax import modules
 from mace_jax.tools.import_from_torch import import_from_torch
@@ -91,7 +105,7 @@ def _batch_to_jax(batch: Batch) -> dict:
 
 class ModelEquivalenceTestBase:
     stats_path = Path(__file__).parent / 'test_model_statistics.json'
-    statistics = _load_statistics(stats_path)
+    statistics = None
     structure_repeats: list[tuple[int, int, int]] = [(2, 2, 1), (2, 2, 2)]
     displacement_scales: list[float] = [0.08, 0.12]
     strain_matrices: list[np.ndarray] = [
@@ -134,6 +148,12 @@ class ModelEquivalenceTestBase:
 
     @classmethod
     def setup_class(cls):
+        if _TORCH_MODEL_IMPORT_ERROR is not None:
+            pytest.skip(
+                f'Torch model helpers unavailable: {_TORCH_MODEL_IMPORT_ERROR}'
+            )
+        if cls.statistics is None:
+            cls.statistics = _load_statistics(cls.stats_path)
         cls.structures = cls._build_structures()
         atomic_data_list = []
         for atoms in cls.structures:
@@ -319,7 +339,7 @@ class ModelEquivalenceTestBase:
         # --- Torch side unroll ---
         batch = cls.batch
         torch_data: dict[str, torch.Tensor] = {}
-        for key in [
+        key_list = [
             'positions',
             'shifts',
             'unit_shifts',
@@ -329,8 +349,10 @@ class ModelEquivalenceTestBase:
             'cell',
             'node_attrs',
             'head',
-            'pbc',
-        ]:
+        ]
+        if hasattr(batch, 'pbc'):
+            key_list.append('pbc')
+        for key in key_list:
             value = getattr(batch, key)
             if isinstance(value, torch.Tensor):
                 torch_data[key] = value.detach().clone()

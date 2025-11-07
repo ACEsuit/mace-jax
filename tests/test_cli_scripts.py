@@ -1,9 +1,11 @@
+import json
 from pathlib import Path
 
 import pytest
 
 from mace_jax.cli import mace_jax_train as train_cli
 from mace_jax.cli import mace_jax_train_plot as train_plot
+import gin
 
 
 @pytest.mark.slow
@@ -72,3 +74,38 @@ def test_plot_train_cli_generates_output(tmp_path):
 
     output_plot = tmp_path / 'example.png'
     assert output_plot.exists(), 'Expected plot file to be generated.'
+
+
+def test_cli_head_overrides_bindings(tmp_path):
+    gin.clear_config()
+    head_cfg_path = tmp_path / 'heads.json'
+    head_cfg = {
+        'Default': {'train_path': 'a.xyz'},
+        'Surface': {'train_path': 'b.xyz'},
+    }
+    head_cfg_path.write_text(json.dumps(head_cfg), encoding='utf-8')
+
+    args, _ = train_cli.parse_args(
+        [
+            '--heads',
+            'Default',
+            'Surface',
+            '--head-config',
+            str(head_cfg_path),
+        ]
+    )
+    train_cli.apply_cli_overrides(args)
+
+    assert gin.query_parameter('mace_jax.tools.gin_model.model.heads') == (
+        'Default',
+        'Surface',
+    )
+    assert gin.query_parameter('mace_jax.tools.gin_datasets.datasets.heads') == (
+        'Default',
+        'Surface',
+    )
+    assert gin.query_parameter('mace_jax.tools.gin_datasets.datasets.head_configs') == {
+        'Default': {'train_path': 'a.xyz'},
+        'Surface': {'train_path': 'b.xyz'},
+    }
+    gin.clear_config()

@@ -119,9 +119,10 @@ def _graph_to_data(
         unit_shifts = jnp.asarray(unit_shifts, dtype=positions.dtype)
     data_dict['unit_shifts'] = unit_shifts
 
-    # Optional per-node head information (for multi-head outputs).
-    if hasattr(graph.nodes, 'head'):
-        data_dict['head'] = graph.nodes.head
+    # Optional per-graph head information (for multi-head outputs).
+    head_attr = getattr(graph.globals, 'head', None)
+    if head_attr is not None:
+        data_dict['head'] = jnp.asarray(head_attr, dtype=jnp.int32).reshape(-1)
 
     return data_dict
 
