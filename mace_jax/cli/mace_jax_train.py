@@ -13,107 +13,14 @@ import jax
 import mace_jax
 from mace_jax import tools
 from mace_jax.tools import gin_datasets, gin_functions, gin_model
+from mace_jax.tools.arg_parser import build_cli_arg_parser
+from mace_jax.tools.train import SWAConfig
 
 
 def parse_args(
     argv: Sequence[str] | None = None,
 ) -> tuple[argparse.Namespace, list[str]]:
-    parser = argparse.ArgumentParser(
-        description='Train a MACE-JAX model using gin-config files.',
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    parser.add_argument(
-        'configs',
-        nargs='*',
-        help='gin-config files to load (evaluated in order).',
-    )
-    parser.add_argument(
-        '-b',
-        '--binding',
-        action='append',
-        default=[],
-        metavar='KEY=VALUE',
-        help='Additional gin binding applied after the config files.',
-    )
-    parser.add_argument(
-        '--dry-run',
-        action='store_true',
-        help='Parse the configuration and exit without launching training.',
-    )
-    parser.add_argument(
-        '--print-config',
-        action='store_true',
-        help='Print the operative gin config before training starts.',
-    )
-    parser.add_argument(
-        '--torch-checkpoint',
-        help=(
-            'Path to a Torch checkpoint to import via gin '
-            '(binds mace_jax.tools.gin_model.model.torch_checkpoint).'
-        ),
-    )
-    parser.add_argument(
-        '--torch-head',
-        help=(
-            'Optional head name to select from the Torch checkpoint '
-            '(binds mace_jax.tools.gin_model.model.torch_head).'
-        ),
-    )
-    parser.add_argument(
-        '--torch-param-dtype',
-        choices=['float32', 'float64'],
-        help=(
-            'Desired dtype for imported Torch parameters '
-            '(binds mace_jax.tools.gin_model.model.torch_param_dtype).'
-        ),
-    )
-    parser.add_argument(
-        '--train-path',
-        help=(
-            'Override gin training dataset path '
-            '(binds mace_jax.tools.gin_datasets.datasets.train_path).'
-        ),
-    )
-    parser.add_argument(
-        '--valid-path',
-        help=(
-            'Override gin validation dataset path '
-            '(binds mace_jax.tools.gin_datasets.datasets.valid_path).'
-        ),
-    )
-    parser.add_argument(
-        '--test-path',
-        help=(
-            'Override gin test dataset path '
-            '(binds mace_jax.tools.gin_datasets.datasets.test_path).'
-        ),
-    )
-    parser.add_argument(
-        '--r-max',
-        type=float,
-        help=(
-            'Override cutoff radius used by both dataset preparation and model '
-            '(binds mace_jax.tools.gin_datasets.datasets.r_max and '
-            'mace_jax.tools.gin_model.model.r_max).'
-        ),
-    )
-    parser.add_argument(
-        '--heads',
-        nargs='+',
-        help=(
-            'Names of the heads to expose to the model/dataloader '
-            '(binds mace_jax.tools.gin_datasets.datasets.heads and '
-            'mace_jax.tools.gin_model.model.heads).'
-        ),
-    )
-    parser.add_argument(
-        '--head-config',
-        help=(
-            'Path to a JSON (or YAML if PyYAML is installed) file describing per-head '
-            'dataset overrides (binds mace_jax.tools.gin_datasets.datasets.head_configs).'
-        ),
-    )
-
+    parser = build_cli_arg_parser()
     args, remaining = parser.parse_known_args(argv)
     return args, remaining
 
@@ -132,6 +39,11 @@ def configure_gin(args: argparse.Namespace, remaining: list[str]) -> None:
 
 def apply_cli_overrides(args: argparse.Namespace) -> None:
     """Bind gin parameters based on CLI overrides."""
+    _apply_run_options(args)
+    _apply_dataset_options(args)
+    _apply_training_controls(args)
+    _apply_swa_options(args)
+    _apply_wandb_options(args)
     if args.torch_checkpoint:
         gin.bind_parameter(
             'mace_jax.tools.gin_model.model.torch_checkpoint',
@@ -146,21 +58,6 @@ def apply_cli_overrides(args: argparse.Namespace) -> None:
         gin.bind_parameter(
             'mace_jax.tools.gin_model.model.torch_param_dtype',
             args.torch_param_dtype,
-        )
-    if args.train_path:
-        gin.bind_parameter(
-            'mace_jax.tools.gin_datasets.datasets.train_path',
-            str(Path(args.train_path)),
-        )
-    if args.valid_path is not None:
-        gin.bind_parameter(
-            'mace_jax.tools.gin_datasets.datasets.valid_path',
-            None if args.valid_path == 'None' else str(Path(args.valid_path)),
-        )
-    if args.test_path is not None:
-        gin.bind_parameter(
-            'mace_jax.tools.gin_datasets.datasets.test_path',
-            None if args.test_path == 'None' else str(Path(args.test_path)),
         )
     if args.r_max is not None:
         gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.r_max', args.r_max)
@@ -210,6 +107,132 @@ def _load_head_configs(path: Path) -> dict[str, dict]:
             )
         normalized[str(head_name)] = cfg
     return normalized
+
+
+def _bind_if_not_none(param: str, value, *, transform=None) -> None:
+    if value is None:
+        return
+    gin.bind_parameter(param, transform(value) if transform else value)
+
+
+def _normalize_optional_path(path_str: str | None, allow_none: bool = False) -> str | None:
+    if path_str is None:
+        return None
+    if allow_none and path_str == 'None':
+        return None
+    return str(Path(path_str))
+
+
+def _apply_run_options(args: argparse.Namespace) -> None:
+    _bind_if_not_none('mace_jax.tools.gin_functions.logs.name', args.name)
+    if args.log_dir is not None:
+        _bind_if_not_none(
+            'mace_jax.tools.gin_functions.logs.directory',
+            str(Path(args.log_dir)),
+        )
+    _bind_if_not_none('mace_jax.tools.gin_functions.flags.seed', args.seed)
+    _bind_if_not_none('mace_jax.tools.gin_functions.flags.dtype', args.dtype)
+    if args.debug is not None:
+        gin.bind_parameter('mace_jax.tools.gin_functions.flags.debug', args.debug)
+
+
+def _apply_dataset_options(args: argparse.Namespace) -> None:
+    if args.train_path:
+        gin.bind_parameter(
+            'mace_jax.tools.gin_datasets.datasets.train_path',
+            _normalize_optional_path(args.train_path),
+        )
+    if args.valid_path is not None:
+        gin.bind_parameter(
+            'mace_jax.tools.gin_datasets.datasets.valid_path',
+            _normalize_optional_path(args.valid_path, allow_none=True),
+        )
+    if args.test_path is not None:
+        gin.bind_parameter(
+            'mace_jax.tools.gin_datasets.datasets.test_path',
+            _normalize_optional_path(args.test_path, allow_none=True),
+        )
+    _bind_if_not_none(
+        'mace_jax.tools.gin_datasets.datasets.valid_fraction', args.valid_fraction
+    )
+    _bind_if_not_none(
+        'mace_jax.tools.gin_datasets.datasets.valid_num', args.valid_num
+    )
+    _bind_if_not_none('mace_jax.tools.gin_datasets.datasets.test_num', args.test_num)
+
+
+def _apply_training_controls(args: argparse.Namespace) -> None:
+    _bind_if_not_none(
+        'mace_jax.tools.gin_functions.train.max_grad_norm', args.clip_grad
+    )
+    ema_decay = args.ema_decay
+    if getattr(args, 'ema', False) and ema_decay is None:
+        ema_decay = 0.99
+    _bind_if_not_none(
+        'mace_jax.tools.gin_functions.train.ema_decay', ema_decay
+    )
+
+
+def _apply_swa_options(args: argparse.Namespace) -> None:
+    requested = args.swa or any(
+        value is not None
+        for value in (
+            args.swa_start,
+            args.swa_every,
+            args.swa_min_snapshots,
+            args.swa_max_snapshots,
+            args.swa_prefer,
+        )
+    )
+    if not requested:
+        return
+    swa_config = SWAConfig(
+        start_interval=args.swa_start if args.swa_start is not None else 0,
+        update_interval=args.swa_every if args.swa_every is not None else 1,
+        min_snapshots_for_eval=
+        args.swa_min_snapshots if args.swa_min_snapshots is not None else 1,
+        max_snapshots=args.swa_max_snapshots,
+        prefer_swa_params=
+        args.swa_prefer if args.swa_prefer is not None else True,
+    )
+    gin.bind_parameter('mace_jax.tools.gin_functions.train.swa_config', swa_config)
+
+
+def _apply_wandb_options(args: argparse.Namespace) -> None:
+    has_tags = bool(args.wandb_tags)
+    wandb_requested = args.wandb_enable or any(
+        value is not None
+        for value in (
+            args.wandb_project,
+            args.wandb_entity,
+            args.wandb_group,
+            args.wandb_run_name,
+            args.wandb_notes,
+            args.wandb_mode,
+            args.wandb_dir,
+        )
+    ) or has_tags
+
+    if not wandb_requested:
+        if args.wandb_enable:
+            gin.bind_parameter('mace_jax.tools.gin_functions.wandb_run.enabled', True)
+        return
+
+    gin.bind_parameter('mace_jax.tools.gin_functions.wandb_run.enabled', True)
+    _bind_if_not_none('mace_jax.tools.gin_functions.wandb_run.project', args.wandb_project)
+    _bind_if_not_none('mace_jax.tools.gin_functions.wandb_run.entity', args.wandb_entity)
+    _bind_if_not_none('mace_jax.tools.gin_functions.wandb_run.group', args.wandb_group)
+    _bind_if_not_none('mace_jax.tools.gin_functions.wandb_run.name', args.wandb_run_name)
+    _bind_if_not_none('mace_jax.tools.gin_functions.wandb_run.notes', args.wandb_notes)
+    if args.wandb_tags:
+        gin.bind_parameter(
+            'mace_jax.tools.gin_functions.wandb_run.tags', tuple(args.wandb_tags)
+        )
+    _bind_if_not_none('mace_jax.tools.gin_functions.wandb_run.mode', args.wandb_mode)
+    if args.wandb_dir is not None:
+        gin.bind_parameter(
+            'mace_jax.tools.gin_functions.wandb_run.dir', str(Path(args.wandb_dir))
+        )
 
 
 def run_training(dry_run: bool = False) -> None:

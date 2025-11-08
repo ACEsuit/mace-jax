@@ -5,6 +5,7 @@ import pytest
 
 from mace_jax.cli import mace_jax_train as train_cli
 from mace_jax.cli import mace_jax_train_plot as train_plot
+from mace_jax.tools.train import SWAConfig
 import gin
 
 
@@ -108,4 +109,68 @@ def test_cli_head_overrides_bindings(tmp_path):
         'Default': {'train_path': 'a.xyz'},
         'Surface': {'train_path': 'b.xyz'},
     }
+    gin.clear_config()
+
+
+def test_cli_sets_runtime_and_training_controls(tmp_path):
+    gin.clear_config()
+    train_xyz = Path(__file__).resolve().parent / 'test_data' / 'simple.xyz'
+    args, _ = train_cli.parse_args(
+        [
+            '--name',
+            'cli-test',
+            '--log_dir',
+            str(tmp_path),
+            '--seed',
+            '321',
+            '--default_dtype',
+            'float32',
+            '--debug',
+            '--train_file',
+            str(train_xyz),
+            '--valid_file',
+            'None',
+            '--clip_grad',
+            '0.5',
+            '--ema',
+            '--swa',
+            '--start_swa',
+            '2',
+            '--swa_every',
+            '1',
+            '--swa_min_snapshots',
+            '2',
+            '--wandb',
+            '--wandb_project',
+            'mace-jax-tests',
+            '--wandb_tag',
+            'unit',
+        ]
+    )
+    train_cli.apply_cli_overrides(args)
+
+    assert gin.query_parameter('mace_jax.tools.gin_functions.logs.name') == 'cli-test'
+    assert (
+        gin.query_parameter('mace_jax.tools.gin_functions.logs.directory')
+        == str(tmp_path)
+    )
+    assert gin.query_parameter('mace_jax.tools.gin_functions.flags.seed') == 321
+    assert gin.query_parameter('mace_jax.tools.gin_functions.flags.dtype') == 'float32'
+    assert gin.query_parameter('mace_jax.tools.gin_functions.flags.debug') is True
+    assert gin.query_parameter('mace_jax.tools.gin_datasets.datasets.train_path') == str(
+        train_xyz
+    )
+    assert gin.query_parameter('mace_jax.tools.gin_datasets.datasets.valid_path') is None
+    assert gin.query_parameter('mace_jax.tools.gin_functions.train.max_grad_norm') == 0.5
+    assert gin.query_parameter('mace_jax.tools.gin_functions.train.ema_decay') == 0.99
+    swa_cfg = gin.query_parameter('mace_jax.tools.gin_functions.train.swa_config')
+    assert isinstance(swa_cfg, SWAConfig)
+    assert gin.query_parameter('mace_jax.tools.gin_functions.wandb_run.enabled') is True
+    assert (
+        gin.query_parameter('mace_jax.tools.gin_functions.wandb_run.project')
+        == 'mace-jax-tests'
+    )
+    assert gin.query_parameter('mace_jax.tools.gin_functions.wandb_run.tags') == (
+        'unit',
+    )
     gin.clear_config()

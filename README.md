@@ -63,47 +63,22 @@ mace-jax-train configs/finetune.gin \
 
 ##### Optional logging & averaging
 
-- **Weights & Biases** logging can be toggled via gin by enabling
-  `mace_jax.tools.gin_functions.wandb_run.enabled` and setting the desired
-  project/entity. The CLI automatically forwards the run name, output
-  directory, seed, and operative gin config, so a minimal config looks like
+- **Weights & Biases** logging is enabled via CLI flags: `--wandb` launches a
+  run with the automatically generated tag/operative gin, and you can supply
+  `--wandb-project`, `--wandb-entity`, `--wandb-tag`, etc. No manual gin edits
+  are necessary. Metrics for each evaluation split plus per-interval timing are
+  streamed to the configured run.
 
-  ```gin
-  mace_jax.tools.gin_functions.wandb_run.enabled = True
-  mace_jax.tools.gin_functions.wandb_run.project = 'mace-jax'
-  ```
+- **Stochastic Weight Averaging (SWA)** is available through `--swa` (with
+  `--swa-start`, `--swa-every`, `--swa-min-snapshots`, … mirroring the Torch
+  CLI). Once the requested number of snapshots has been accumulated,
+  evaluations use the SWA parameters while the raw/EMA weights continue to be
+  optimised.
 
-  Metrics for each evaluation split plus per-interval timing are streamed to
-  the configured run.
-
-- **Stochastic Weight Averaging (SWA)** is available through the
-  `mace_jax.tools.train.SWAConfig` helper. Bind it to
-  `mace_jax.tools.gin_functions.train.swa_config` to start collecting averaged
-  parameters after a given interval, e.g.
-
-  ```gin
-  mace_jax.tools.gin_functions.train.swa_config = @mace_jax.tools.train.SWAConfig(
-    start_interval = 5,
-    update_interval = 1,
-    min_snapshots_for_eval = 2,
-  )
-  ```
-
-  Once the requested number of snapshots has been accumulated, evaluations use
-  the SWA parameters while the raw/EMA weights continue to be optimised.
-
-- **Gradient clipping & EMA** can be enabled through the gin bindings
-  `mace_jax.tools.gin_functions.train.max_grad_norm` and
-  `mace_jax.tools.gin_functions.train.ema_decay`. For example:
-
-  ```gin
-  mace_jax.tools.gin_functions.train.max_grad_norm = 1.0
-  mace_jax.tools.gin_functions.train.ema_decay = 0.999
-  ```
-
-  This applies a global-norm clip to every update and evaluates checkpoints
-  using the smoothed EMA weights (with the same warm-up schedule as the Torch
-  trainer).
+- **Gradient clipping & EMA** can be toggled directly from the CLI using
+  `--clip-grad VALUE` and `--ema-decay VALUE`. These map to the same behaviour
+  as the Torch `--clip_grad`/`--ema` flags and remove the need for explicit gin
+  bindings.
 
 #### `mace-jax-train-plot`
 
