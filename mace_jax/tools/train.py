@@ -169,6 +169,7 @@ def train(
         if supports_iter_batches:
             epoch_batches = _epoch_batches(epoch)
             batch_iter = iter(epoch_batches)
+
             def _next_batch():
                 nonlocal batch_iter
                 try:
@@ -176,11 +177,13 @@ def train(
                 except StopIteration:
                     batch_iter = iter(epoch_batches)
                     return next(batch_iter)
+
         else:
             legacy_iter = _legacy_interval_loader()
             setter = getattr(train_loader, 'set_epoch', None)
             if callable(setter):
                 setter(epoch)
+
             def _next_batch():
                 return next(legacy_iter)
 

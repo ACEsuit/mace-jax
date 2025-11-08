@@ -3,10 +3,17 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import torch
-from mace.modules.radial import BesselBasis as BesselBasisTorch
-from mace.modules.radial import ChebychevBasis as ChebychevBasisTorch
-from mace.modules.radial import RadialMLP as RadialMLPTorch
-from mace.modules.radial import ZBLBasis as ZBLBasisTorch
+
+try:  # pragma: no cover - optional torch dependency for parity tests
+    from mace.modules.radial import BesselBasis as BesselBasisTorch
+    from mace.modules.radial import ChebychevBasis as ChebychevBasisTorch
+    from mace.modules.radial import RadialMLP as RadialMLPTorch
+    from mace.modules.radial import ZBLBasis as ZBLBasisTorch
+except Exception as exc:  # pragma: no cover
+    pytest.skip(
+        f'Torch MACE radial modules unavailable: {exc}',
+        allow_module_level=True,
+    )
 
 from mace_jax.modules.radial import BesselBasis as BesselBasisJAX
 from mace_jax.modules.radial import ChebychevBasis as ChebychevBasisJAX
@@ -42,6 +49,49 @@ class TestBesselBasisParity:
 
         assert out_t.shape == out_j.shape
         np.testing.assert_allclose(out_t, np.array(out_j), rtol=1e-6, atol=1e-6)
+
+    def test_near_zero_parity(self):
+        r_max = 5.0
+        num_basis = 6
+        torch_module = BesselBasisTorch(
+            r_max=r_max, num_basis=num_basis, trainable=False
+        )
+        torch_module.eval()
+
+        eps = torch.tensor(1e-7, dtype=torch.get_default_dtype())
+        x_t = torch.full((3, 1), eps, dtype=torch.get_default_dtype())
+        out_t = torch_module(x_t).detach().cpu().numpy()
+
+        model = BesselBasisJAX(r_max=r_max, num_basis=num_basis, trainable=False)
+        key = jax.random.PRNGKey(0)
+        x_j = jnp.array(x_t.detach().cpu().numpy())
+        variables = model.init(key, x_j)
+        variables = BesselBasisJAX.import_from_torch(torch_module, variables)
+        out_j = np.array(model.apply(variables, x_j))
+
+        np.testing.assert_allclose(out_t, out_j, rtol=1e-6, atol=1e-6)
+        assert np.all(np.isfinite(out_j))
+
+    def test_zero_distance_limit_jax(self):
+        r_max = 5.0
+        num_basis = 6
+        model = BesselBasisJAX(r_max=r_max, num_basis=num_basis, trainable=False)
+        key = jax.random.PRNGKey(0)
+        x_j = jnp.zeros((3, 1), dtype=jnp.float64)
+        variables = model.init(key, x_j)
+        out_j = np.array(model.apply(variables, x_j))
+
+        prefactor = np.sqrt(2.0 / r_max)
+        init_bessel = (
+            np.pi
+            / float(r_max)
+            * np.linspace(1.0, num_basis, num_basis, dtype=out_j.dtype)
+        )
+        expected = prefactor * init_bessel
+        expected = np.broadcast_to(expected, out_j.shape)
+
+        np.testing.assert_allclose(out_j, expected, rtol=1e-6, atol=1e-6)
+        assert np.all(np.isfinite(out_j))
 
 
 class TestChebychevBasisParity:

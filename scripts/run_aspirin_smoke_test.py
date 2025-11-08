@@ -42,7 +42,9 @@ def _normalize_optional(value: str | None) -> str | None:
     return stripped
 
 
-def _optional_path(value: str | None, *, ensure_exists: bool = False, label: str = 'dataset') -> str:
+def _optional_path(
+    value: str | None, *, ensure_exists: bool = False, label: str = 'dataset'
+) -> str:
     normalized = _normalize_optional(value)
     if normalized is None:
         return 'None'
@@ -128,21 +130,21 @@ def main() -> None:
     cli_args: list[str] = [str(config_path)]
 
     bindings = [
-        f"mace_jax.tools.gin_datasets.datasets.train_path={_quote_string(train_path)}",
-        f"mace_jax.tools.gin_datasets.datasets.valid_path={_optional_path(args.valid_path, ensure_exists=True, label='validation dataset')}",
-        f"mace_jax.tools.gin_datasets.datasets.test_path={_optional_path(args.test_path, ensure_exists=True, label='test dataset')}",
-        f"mace_jax.tools.gin_functions.flags.seed={args.seed}",
-        f"mace_jax.tools.gin_functions.optimizer.steps_per_interval={args.steps_per_interval}",
-        f"mace_jax.tools.gin_functions.optimizer.max_num_intervals={args.max_intervals}",
+        f'mace_jax.tools.gin_datasets.datasets.train_path={_quote_string(train_path)}',
+        f'mace_jax.tools.gin_datasets.datasets.valid_path={_optional_path(args.valid_path, ensure_exists=True, label="validation dataset")}',
+        f'mace_jax.tools.gin_datasets.datasets.test_path={_optional_path(args.test_path, ensure_exists=True, label="test dataset")}',
+        f'mace_jax.tools.gin_functions.flags.seed={args.seed}',
+        f'mace_jax.tools.gin_functions.optimizer.steps_per_interval={args.steps_per_interval}',
+        f'mace_jax.tools.gin_functions.optimizer.max_num_intervals={args.max_intervals}',
     ]
 
     if args.log_dir is not None:
         bindings.append(
-            f"mace_jax.tools.gin_functions.logs.directory={_quote_string(Path(args.log_dir))}"
+            f'mace_jax.tools.gin_functions.logs.directory={_quote_string(Path(args.log_dir))}'
         )
     if args.device:
         bindings.append(
-            f"mace_jax.tools.gin_functions.flags.device={_quote_string(args.device)}"
+            f'mace_jax.tools.gin_functions.flags.device={_quote_string(args.device)}'
         )
 
     for binding in bindings:

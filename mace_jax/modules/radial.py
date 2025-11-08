@@ -32,6 +32,7 @@ class BesselBasis(fnn.Module):
 
     @fnn.compact
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+        x = jnp.asarray(x)
         dtype = x.dtype
         init_bessel = (
             np.pi
@@ -47,8 +48,18 @@ class BesselBasis(fnn.Module):
             bessel_weights = init_bessel.astype(dtype)
 
         prefactor = jnp.sqrt(2.0 / jnp.asarray(self.r_max, dtype=dtype))
+
+        eps = jnp.asarray(jnp.finfo(dtype).eps, dtype=dtype)
+        near_zero = jnp.abs(x) < eps
+        safe_denominator = jnp.where(near_zero, 1.0, x)
+
         numerator = jnp.sin(bessel_weights * x)
-        return prefactor * (numerator / x)
+        safe_denominator = jnp.broadcast_to(safe_denominator, numerator.shape)
+        ratio = numerator / safe_denominator
+        near_zero_broadcast = jnp.broadcast_to(near_zero, ratio.shape)
+        weights_broadcast = jnp.broadcast_to(bessel_weights, ratio.shape)
+        ratio = jnp.where(near_zero_broadcast, weights_broadcast, ratio)
+        return prefactor * ratio
 
     def __repr__(self):
         return (

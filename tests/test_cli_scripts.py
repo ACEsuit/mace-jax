@@ -142,12 +142,10 @@ def test_cli_pt_head_from_cli(tmp_path):
     gin.clear_config()
     pt_file = tmp_path / 'pt.xyz'
     pt_file.write_text('', encoding='utf-8')
-    args, _ = train_cli.parse_args(
-        [
-            '--pt_train_file',
-            str(pt_file),
-        ]
-    )
+    args, _ = train_cli.parse_args([
+        '--pt_train_file',
+        str(pt_file),
+    ])
     train_cli.apply_cli_overrides(args)
     head_cfgs = gin.query_parameter('mace_jax.tools.gin_datasets.datasets.head_configs')
     assert 'pt_head' in head_cfgs
@@ -160,14 +158,12 @@ def test_cli_pt_head_respects_heads_list(tmp_path):
     gin.clear_config()
     pt_file = tmp_path / 'pt.xyz'
     pt_file.write_text('', encoding='utf-8')
-    args, _ = train_cli.parse_args(
-        [
-            '--heads',
-            'Default',
-            '--pt_train_file',
-            str(pt_file),
-        ]
-    )
+    args, _ = train_cli.parse_args([
+        '--heads',
+        'Default',
+        '--pt_train_file',
+        str(pt_file),
+    ])
     train_cli.apply_cli_overrides(args)
     heads = gin.query_parameter('mace_jax.tools.gin_model.model.heads')
     assert heads == ('Default', 'pt_head')
@@ -227,19 +223,17 @@ def test_cli_checkpoint_flags_with_foundation_model(tmp_path, monkeypatch):
     ])
     train_cli.apply_cli_overrides(args)
 
-    assert (
-        gin.query_parameter('mace_jax.tools.gin_functions.train.checkpoint_dir')
-        == str(checkpoint_dir)
-    )
+    assert gin.query_parameter(
+        'mace_jax.tools.gin_functions.train.checkpoint_dir'
+    ) == str(checkpoint_dir)
     assert (
         gin.query_parameter('mace_jax.tools.gin_functions.train.checkpoint_every') == 3
     )
     assert (
         gin.query_parameter('mace_jax.tools.gin_functions.train.checkpoint_keep') == 5
     )
-    assert (
-        gin.query_parameter('mace_jax.tools.gin_functions.train.resume_from')
-        == str(resume_path)
+    assert gin.query_parameter('mace_jax.tools.gin_functions.train.resume_from') == str(
+        resume_path
     )
     gin.clear_config()
     train_cli._cleanup_foundation_artifacts()
@@ -305,16 +299,10 @@ def test_cli_device_distributed_bindings():
     train_cli.apply_cli_overrides(args)
     assert gin.query_parameter('mace_jax.tools.gin_functions.flags.device') == 'cpu'
     assert gin.query_parameter('mace_jax.tools.gin_functions.flags.distributed') is True
+    assert gin.query_parameter('mace_jax.tools.gin_functions.flags.process_count') == 2
+    assert gin.query_parameter('mace_jax.tools.gin_functions.flags.process_index') == 1
     assert (
-        gin.query_parameter('mace_jax.tools.gin_functions.flags.process_count') == 2
-    )
-    assert (
-        gin.query_parameter('mace_jax.tools.gin_functions.flags.process_index') == 1
-    )
-    assert (
-        gin.query_parameter(
-            'mace_jax.tools.gin_functions.flags.coordinator_address'
-        )
+        gin.query_parameter('mace_jax.tools.gin_functions.flags.coordinator_address')
         == 'localhost'
     )
     assert (
@@ -409,9 +397,7 @@ def test_cli_swa_stage_two_options(tmp_path):
         == 1e-4
     )
     assert (
-        gin.query_parameter(
-            'mace_jax.tools.gin_functions.optimizer.stage_two_interval'
-        )
+        gin.query_parameter('mace_jax.tools.gin_functions.optimizer.stage_two_interval')
         == 3
     )
     gin.clear_config()
@@ -550,9 +536,7 @@ def test_foundation_multihead_without_pt_disables(monkeypatch, tmp_path, caplog)
         is True
     )
     assert (
-        gin.query_parameter(
-            'mace_jax.tools.gin_functions.optimizer.scheduler'
-        )
+        gin.query_parameter('mace_jax.tools.gin_functions.optimizer.scheduler')
         == gin_functions.reduce_on_plateau
     )
     gin.clear_config()
@@ -666,10 +650,9 @@ def test_cli_sets_runtime_and_training_controls(tmp_path):
         == 7
     )
     assert gin.query_parameter('mace_jax.tools.gin_functions.train.patience') == 4
-    assert (
-        gin.query_parameter('mace_jax.tools.gin_functions.train.eval_train')
-        == pytest.approx(0.5)
-    )
+    assert gin.query_parameter(
+        'mace_jax.tools.gin_functions.train.eval_train'
+    ) == pytest.approx(0.5)
     assert gin.query_parameter('mace_jax.tools.gin_functions.train.eval_test') is True
     assert gin.query_parameter('mace_jax.tools.gin_functions.train.eval_interval') == 2
     assert (

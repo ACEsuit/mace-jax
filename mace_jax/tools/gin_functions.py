@@ -7,7 +7,6 @@ import time
 from collections import deque
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Dict, List, Optional
 
 import gin
 import jax
@@ -15,6 +14,7 @@ import jax.numpy as jnp
 import jraph
 import numpy as np
 import optax
+
 try:
     from optax.contrib import schedule_free as optax_schedule_free
     from optax.contrib import schedule_free_eval_params
@@ -22,13 +22,13 @@ except ImportError:  # pragma: no cover - optax versions without contrib support
     optax_schedule_free = None
     schedule_free_eval_params = None
 from jax import config as jax_config
+from jax.experimental import multihost_utils
 from tqdm import tqdm
 from unique_names_generator import get_random_name
 from unique_names_generator.data import ADJECTIVES, NAMES
 
 from mace_jax import modules, tools
 from mace_jax.tools import device as device_utils
-from jax.experimental import multihost_utils
 
 _PROFILE_HELPER = None
 _PROFILE_HELPER_MISSING_WARNED = False
@@ -159,9 +159,7 @@ def logs(
     tools.setup_logger(
         level, directory=directory, filename=f'{tag}{suffix}.log', name=name
     )
-    logger = tools.MetricsLogger(
-        directory=directory, filename=f'{tag}{suffix}.metrics'
-    )
+    logger = tools.MetricsLogger(directory=directory, filename=f'{tag}{suffix}.metrics')
 
     return directory, tag, logger
 
@@ -512,7 +510,9 @@ def train(
     checkpoint_history: deque[Path] = deque()
     resume_path = Path(resume_from).expanduser() if resume_from else None
     schedule_free_eval_fn = getattr(gradient_transform, 'schedule_free_eval_fn', None)
-    if schedule_free_eval_fn is not None and (ema_decay is not None or swa_config is not None):
+    if schedule_free_eval_fn is not None and (
+        ema_decay is not None or swa_config is not None
+    ):
         _log_info(
             'ScheduleFree evaluation overrides EMA/SWA averages; using ScheduleFree parameters for eval.'
         )
@@ -562,7 +562,11 @@ def train(
             return None
         if epoch_idx < initial_epoch:
             return None
-        if checkpoint_every and checkpoint_every > 0 and epoch_idx % checkpoint_every != 0:
+        if (
+            checkpoint_every
+            and checkpoint_every > 0
+            and epoch_idx % checkpoint_every != 0
+        ):
             return None
         checkpoint_dir_path.mkdir(parents=True, exist_ok=True)
         filename = f'{tag}_epoch{epoch_idx:05d}.ckpt'
@@ -701,7 +705,10 @@ def train(
                 def _maybe_float(value):
                     if isinstance(value, numbers.Number):
                         return float(value)
-                    if isinstance(value, (np.ndarray, jnp.ndarray)) and value.shape == ():
+                    if (
+                        isinstance(value, (np.ndarray, jnp.ndarray))
+                        and value.shape == ()
+                    ):
                         return float(np.asarray(value))
                     return None
 
@@ -776,8 +783,10 @@ def train(
 
         evaluate_now = _should_run_eval(epoch, last_epoch)
 
-        if (eval_train or last_epoch) and evaluate_now and (
-            is_primary or process_count == 1
+        if (
+            (eval_train or last_epoch)
+            and evaluate_now
+            and (is_primary or process_count == 1)
         ):
             if isinstance(eval_train, (int, float)):
                 subset_loader = train_loader.subset(eval_train)

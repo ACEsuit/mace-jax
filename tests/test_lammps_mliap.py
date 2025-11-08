@@ -1,6 +1,5 @@
 import os
 from contextlib import ExitStack
-import os
 
 os.environ.setdefault('JAX_PLATFORM_NAME', 'cpu')
 
@@ -502,12 +501,10 @@ def test_lammps_mliap_wrapper_periodic_image_example(lammps_runtime):
         ],
         dtype=float,
     )
-    unit_shifts = np.array(
-        [
-            [-1.0, 0.0, 0.0],
-            [1.0, 0.0, 0.0],
-        ]
-    )
+    unit_shifts = np.array([
+        [-1.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+    ])
     shifts = unit_shifts @ cell
     vectors = jnp.asarray(
         positions[pair_j] - positions[pair_i] + shifts,
