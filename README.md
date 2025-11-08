@@ -35,7 +35,7 @@ Runs training driven by gin-config files. Example:
 
 ```sh
 mace-jax-train configs/aspirin_small.gin \
-  --binding "mace_jax.tools.gin_functions.flags.seed=0" \
+  --seed 0 \
   --print-config
 ```
 
