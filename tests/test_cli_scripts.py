@@ -5,7 +5,7 @@ import gin
 import pytest
 import torch
 
-from mace_jax import tools
+from mace_jax import modules, tools
 from mace_jax.cli import mace_jax_train as train_cli
 from mace_jax.cli import mace_jax_train_plot as train_plot
 from mace_jax.tools import gin_functions
@@ -294,6 +294,16 @@ def test_cli_sets_runtime_and_training_controls(tmp_path):
         '--clip_grad',
         '0.5',
         '--ema',
+        '--loss',
+        'huber',
+        '--energy_weight',
+        '0.7',
+        '--forces_weight',
+        '2.5',
+        '--stress_weight',
+        '0.1',
+        '--huber_delta',
+        '0.05',
         '--swa',
         '--start_swa',
         '2',
@@ -334,6 +344,12 @@ def test_cli_sets_runtime_and_training_controls(tmp_path):
     )
     assert gin.query_parameter('mace_jax.tools.gin_datasets.datasets.energy_key') == 'E'
     assert gin.query_parameter('mace_jax.tools.gin_datasets.datasets.forces_key') == 'F'
+    loss_fn = gin_functions.loss()
+    assert isinstance(loss_fn, modules.WeightedHuberEnergyForcesStressLoss)
+    assert loss_fn.energy_weight == pytest.approx(0.7)
+    assert loss_fn.forces_weight == pytest.approx(2.5)
+    assert loss_fn.stress_weight == pytest.approx(0.1)
+    assert loss_fn.huber_delta == pytest.approx(0.05)
     assert (
         gin.query_parameter('mace_jax.tools.gin_functions.train.max_grad_norm') == 0.5
     )

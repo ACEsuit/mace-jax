@@ -17,7 +17,7 @@ import optax
 import torch
 
 import mace_jax
-from mace_jax import tools
+from mace_jax import modules, tools
 from mace_jax.tools import gin_datasets, gin_functions, gin_model
 from mace_jax.tools.arg_parser import build_cli_arg_parser
 from mace_jax.tools.train import SWAConfig
@@ -32,6 +32,18 @@ _SCHEDULERS = {
     'constant': gin_functions.constant_schedule,
     'exponential': gin_functions.exponential_decay,
     'piecewise_constant': gin_functions.piecewise_constant_schedule,
+}
+
+_LOSS_FACTORIES = {
+    'weighted': modules.WeightedEnergyForcesStressLoss,
+    'stress': modules.WeightedEnergyForcesStressLoss,
+    'ef': modules.WeightedEnergyForcesLoss,
+    'forces_only': modules.WeightedForcesLoss,
+    'huber': modules.WeightedHuberEnergyForcesStressLoss,
+    'virials': modules.WeightedEnergyForcesVirialsLoss,
+    'dipole': modules.WeightedEnergyForcesDipoleLoss,
+    'energy_forces_dipole': modules.WeightedEnergyForcesDipoleLoss,
+    'l1l2': modules.WeightedEnergyForcesL1L2Loss,
 }
 
 _FOUNDATION_TEMP_DIRS: list[Path] = []
@@ -74,6 +86,7 @@ def apply_cli_overrides(args: argparse.Namespace) -> None:
     _apply_swa_options(args)
     _apply_wandb_options(args)
     _maybe_adjust_multihead_defaults(args)
+    _apply_loss_options(args)
     _apply_training_controls(args)
     _apply_optimizer_options(args)
     if args.torch_checkpoint:
@@ -365,6 +378,32 @@ def _apply_optimizer_options(args: argparse.Namespace) -> None:
             'mace_jax.tools.gin_functions.exponential_decay.decay_rate',
             args.lr_scheduler_gamma,
         )
+
+
+def _apply_loss_options(args: argparse.Namespace) -> None:
+    loss_choice = getattr(args, 'loss', None)
+    weight_params = [
+        ('energy_weight', 'energy_weight'),
+        ('forces_weight', 'forces_weight'),
+        ('stress_weight', 'stress_weight'),
+        ('virials_weight', 'virials_weight'),
+        ('dipole_weight', 'dipole_weight'),
+        ('polarizability_weight', 'polarizability_weight'),
+        ('huber_delta', 'huber_delta'),
+    ]
+    configured_weights = {
+        param: getattr(args, arg_name)
+        for param, arg_name in weight_params
+        if getattr(args, arg_name, None) is not None
+    }
+    if not loss_choice and not configured_weights:
+        return
+    factory = _LOSS_FACTORIES.get(
+        loss_choice, modules.WeightedEnergyForcesStressLoss
+    )
+    gin.bind_parameter('loss.loss_cls', factory)
+    for param_name, value in configured_weights.items():
+        gin.bind_parameter(f'loss.{param_name}', value)
 
 
 def _load_foundation_model(name: str, *, default_dtype: str | None = None):

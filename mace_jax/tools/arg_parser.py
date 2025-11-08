@@ -263,6 +263,71 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
         help='Decay rate used by the exponential scheduler.',
     )
     parser.add_argument(
+        '--loss',
+        choices=[
+            'weighted',
+            'ef',
+            'forces_only',
+            'stress',
+            'huber',
+            'virials',
+            'dipole',
+            'energy_forces_dipole',
+            'l1l2',
+        ],
+        default=None,
+        help='Select loss function (mirrors Torch CLI choices).',
+    )
+    parser.add_argument(
+        '--energy-weight',
+        '--energy_weight',
+        type=float,
+        default=None,
+        help='Weight for the energy loss term.',
+    )
+    parser.add_argument(
+        '--forces-weight',
+        '--forces_weight',
+        type=float,
+        default=None,
+        help='Weight for the forces loss term.',
+    )
+    parser.add_argument(
+        '--stress-weight',
+        '--stress_weight',
+        type=float,
+        default=None,
+        help='Weight for the stress loss term.',
+    )
+    parser.add_argument(
+        '--virials-weight',
+        '--virials_weight',
+        type=float,
+        default=None,
+        help='Weight for the virials loss term.',
+    )
+    parser.add_argument(
+        '--dipole-weight',
+        '--dipole_weight',
+        type=float,
+        default=None,
+        help='Weight for the dipole loss term.',
+    )
+    parser.add_argument(
+        '--polarizability-weight',
+        '--polarizability_weight',
+        type=float,
+        default=None,
+        help='Weight for the polarizability loss term.',
+    )
+    parser.add_argument(
+        '--huber-delta',
+        '--huber_delta',
+        type=float,
+        default=None,
+        help='Delta parameter for Huber losses.',
+    )
+    parser.add_argument(
         '--swa',
         action='store_true',
         help='Enable stochastic weight averaging with default settings.',

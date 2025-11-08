@@ -1,9 +1,11 @@
 import datetime
+import inspect
 import logging
 import numbers
 import pickle
 import time
-from typing import Callable, Dict, List, Optional, Sequence
+from collections.abc import Callable, Sequence
+from typing import Dict, List, Optional
 
 import gin
 import jax
@@ -18,7 +20,78 @@ from unique_names_generator.data import ADJECTIVES, NAMES
 
 from mace_jax import modules, tools
 
-loss = gin.configurable('loss')(modules.WeightedEnergyForcesStressLoss)
+_PROFILE_HELPER = None
+_PROFILE_HELPER_MISSING_WARNED = False
+
+
+def _get_profile_helper(*, log_warning: bool) -> object | None:
+    global _PROFILE_HELPER, _PROFILE_HELPER_MISSING_WARNED
+    if _PROFILE_HELPER is not None:
+        return _PROFILE_HELPER
+    if _PROFILE_HELPER_MISSING_WARNED and not log_warning:
+        return None
+    try:
+        import profile_nn_jax  # noqa: PLC0415
+    except ImportError:
+        if log_warning and not _PROFILE_HELPER_MISSING_WARNED:
+            logging.warning(
+                'Requested profiler (--profile) but profile_nn_jax is not installed; '
+                'continuing without profiling.'
+            )
+        _PROFILE_HELPER_MISSING_WARNED = True
+        return None
+    else:
+        _PROFILE_HELPER = profile_nn_jax
+        return _PROFILE_HELPER
+
+
+def _instantiate_loss(loss_cls, overrides: dict):
+    target = loss_cls.__init__ if inspect.isclass(loss_cls) else loss_cls
+    try:
+        signature = inspect.signature(target)
+    except (TypeError, ValueError):
+        signature = None
+
+    if signature is None:
+        return loss_cls(**overrides)
+
+    accepts_kwargs = any(
+        param.kind == inspect.Parameter.VAR_KEYWORD
+        for param in signature.parameters.values()
+    )
+    if not accepts_kwargs:
+        valid_params = {name for name in signature.parameters.keys() if name != 'self'}
+        invalid = [key for key in overrides if key not in valid_params]
+        if invalid:
+            joined = ', '.join(sorted(invalid))
+            raise ValueError(
+                f"Loss '{loss_cls.__name__}' does not accept parameter(s): {joined}."
+            )
+    return loss_cls(**overrides)
+
+
+@gin.configurable('loss')
+def loss(
+    loss_cls=modules.WeightedEnergyForcesStressLoss,
+    energy_weight: float | None = None,
+    forces_weight: float | None = None,
+    stress_weight: float | None = None,
+    virials_weight: float | None = None,
+    dipole_weight: float | None = None,
+    polarizability_weight: float | None = None,
+    huber_delta: float | None = None,
+):
+    overrides = {
+        'energy_weight': energy_weight,
+        'forces_weight': forces_weight,
+        'stress_weight': stress_weight,
+        'virials_weight': virials_weight,
+        'dipole_weight': dipole_weight,
+        'polarizability_weight': polarizability_weight,
+        'huber_delta': huber_delta,
+    }
+    filtered = {key: value for key, value in overrides.items() if value is not None}
+    return _instantiate_loss(loss_cls, filtered)
 
 
 @gin.configurable
@@ -33,9 +106,9 @@ def flags(
     tools.set_default_dtype(dtype)
     tools.set_seeds(seed)
     if profile:
-        import profile_nn_jax
-
-        profile_nn_jax.enable()
+        helper = _get_profile_helper(log_warning=True)
+        if helper is not None:
+            helper.enable()
     return seed
 
 
@@ -79,7 +152,7 @@ def wandb_run(
     if not enabled:
         return None
     try:
-        import wandb  # type: ignore
+        import wandb  # noqa: PLC0415
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise ImportError(
             'wandb is not installed; install it or disable wandb logging.'
@@ -175,7 +248,7 @@ def exponential_decay(
     decay_rate: float = 0.5,
     transition_begin: float = 0.0,
     staircase: bool = True,
-    end_value: Optional[float] = None,
+    end_value: float | None = None,
 ):
     return optax.exponential_decay(
         init_value=lr,
@@ -189,7 +262,7 @@ def exponential_decay(
 
 @gin.configurable
 def piecewise_constant_schedule(
-    lr: float, steps_per_interval: int, *, boundaries_and_scales: Dict[float, float]
+    lr: float, steps_per_interval: int, *, boundaries_and_scales: dict[float, float]
 ):
     boundaries_and_scales = {
         boundary * steps_per_interval: scale
@@ -256,12 +329,12 @@ def train(
     directory,
     tag,
     *,
-    patience: Optional[int] = None,
+    patience: int | None = None,
     eval_train: bool = False,
     eval_test: bool = False,
     log_errors: str = 'PerAtomRMSE',
-    ema_decay: Optional[float] = None,
-    max_grad_norm: Optional[float] = None,
+    ema_decay: float | None = None,
+    max_grad_norm: float | None = None,
     wandb_run=None,
     **kwargs,
 ):
@@ -286,12 +359,9 @@ def train(
         total_time_per_interval += [time.perf_counter() - start_time]
         start_time = time.perf_counter()
 
-        try:
-            import profile_nn_jax
-        except ImportError:
-            pass
-        else:
-            profile_nn_jax.restart_timer()
+        helper = _get_profile_helper(log_warning=False)
+        if helper is not None:
+            helper.restart_timer()
 
         last_interval = interval == max_num_intervals
 
@@ -428,7 +498,7 @@ def train(
     return interval, eval_params
 
 
-def parse_argv(argv: List[str]):
+def parse_argv(argv: list[str]):
     def gin_bind_parameter(key: str, value: str):
         # We need to guess if value is a string or not
         value = value.strip()
