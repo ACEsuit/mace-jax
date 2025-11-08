@@ -201,7 +201,8 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
         '--head-config',
         help=(
             'Path to a JSON (or YAML if PyYAML is installed) file describing per-head '
-            'dataset overrides (binds mace_jax.tools.gin_datasets.datasets.head_configs).'
+            'dataset overrides. Each head may override train/valid/test paths, '
+            'loss weights, energy/force keys, etc. (binds mace_jax.tools.gin_datasets.datasets.head_configs).'
         ),
     )
     parser.add_argument(
@@ -227,7 +228,7 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         '--optimizer',
         help='Optimizer for parameter updates.',
-        choices=['adam', 'amsgrad', 'sgd'],
+        choices=['adam', 'adamw', 'amsgrad', 'sgd'],
         default=None,
     )
     parser.add_argument(
@@ -253,6 +254,7 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
         '--scheduler',
         type=str,
         default=None,
+        choices=['constant', 'exponential', 'piecewise_constant', 'plateau'],
         help='Learning-rate scheduler name.',
     )
     parser.add_argument(
@@ -261,6 +263,107 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help='Decay rate used by the exponential scheduler.',
+    )
+    parser.add_argument(
+        '--lr-factor',
+        '--lr_factor',
+        type=float,
+        default=None,
+        help='Multiplicative factor used when the plateau scheduler steps.',
+    )
+    parser.add_argument(
+        '--scheduler-patience',
+        '--scheduler_patience',
+        type=int,
+        default=None,
+        help='Number of evaluations without improvement before plateau scheduler steps.',
+    )
+    parser.add_argument(
+        '--steps-per-interval',
+        '--steps_per_interval',
+        type=int,
+        default=None,
+        help='Number of optimizer steps per evaluation interval.',
+    )
+    parser.add_argument(
+        '--max-num-intervals',
+        '--max_num_intervals',
+        type=int,
+        default=None,
+        help='Maximum number of evaluation intervals before stopping.',
+    )
+    parser.add_argument(
+        '--patience',
+        type=int,
+        default=None,
+        help='Intervals to wait for validation improvement before stopping early.',
+    )
+    parser.add_argument(
+        '--eval-interval',
+        '--eval_interval',
+        type=int,
+        default=None,
+        help='How many intervals to wait between evaluations.',
+    )
+    parser.add_argument(
+        '--eval-train',
+        '--eval_train',
+        dest='eval_train',
+        action='store_const',
+        const=True,
+        default=None,
+        help='Evaluate on the training set each interval.',
+    )
+    parser.add_argument(
+        '--no-eval-train',
+        '--no_eval_train',
+        dest='eval_train',
+        action='store_const',
+        const=False,
+        help='Disable training-set evaluation.',
+    )
+    parser.add_argument(
+        '--eval-train-fraction',
+        '--eval_train_fraction',
+        type=float,
+        default=None,
+        help='Evaluate only this fraction of the training set (0.0-1.0).',
+    )
+    parser.add_argument(
+        '--eval-test',
+        '--eval_test',
+        dest='eval_test',
+        action='store_const',
+        const=True,
+        default=None,
+        help='Evaluate on the test set each interval.',
+    )
+    parser.add_argument(
+        '--no-eval-test',
+        '--no_eval_test',
+        dest='eval_test',
+        action='store_const',
+        const=False,
+        help='Disable test-set evaluation.',
+    )
+    parser.add_argument(
+        '--log-errors',
+        '--log_errors',
+        choices=[
+            'PerAtomRMSE',
+            'rel_PerAtomRMSE',
+            'TotalRMSE',
+            'PerAtomMAE',
+            'rel_PerAtomMAE',
+            'TotalMAE',
+            'PerAtomRMSEstressvirials',
+            'PerAtomMAEstressvirials',
+            'DipoleRMSE',
+            'DipolePolarRMSE',
+            'EnergyDipoleRMSE',
+        ],
+        default=None,
+        help='Select which error summary to log each interval.',
     )
     parser.add_argument(
         '--loss',
@@ -377,6 +480,79 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
         action='store_const',
         const=False,
         help='Disable automatic preference for SWA params.',
+    )
+    parser.add_argument(
+        '--swa-loss',
+        '--swa_loss',
+        choices=[
+            'weighted',
+            'ef',
+            'forces_only',
+            'stress',
+            'huber',
+            'virials',
+            'dipole',
+            'energy_forces_dipole',
+            'l1l2',
+        ],
+        default=None,
+        help='Override the loss used once SWA/Stage Two begins.',
+    )
+    parser.add_argument(
+        '--swa-energy-weight',
+        '--swa_energy_weight',
+        type=float,
+        default=None,
+        help='Stage Two energy weight.',
+    )
+    parser.add_argument(
+        '--swa-forces-weight',
+        '--swa_forces_weight',
+        type=float,
+        default=None,
+        help='Stage Two forces weight.',
+    )
+    parser.add_argument(
+        '--swa-stress-weight',
+        '--swa_stress_weight',
+        type=float,
+        default=None,
+        help='Stage Two stress weight.',
+    )
+    parser.add_argument(
+        '--swa-virials-weight',
+        '--swa_virials_weight',
+        type=float,
+        default=None,
+        help='Stage Two virials weight.',
+    )
+    parser.add_argument(
+        '--swa-dipole-weight',
+        '--swa_dipole_weight',
+        type=float,
+        default=None,
+        help='Stage Two dipole weight.',
+    )
+    parser.add_argument(
+        '--swa-polarizability-weight',
+        '--swa_polarizability_weight',
+        type=float,
+        default=None,
+        help='Stage Two polarizability weight.',
+    )
+    parser.add_argument(
+        '--swa-huber-delta',
+        '--swa_huber_delta',
+        type=float,
+        default=None,
+        help='Stage Two Huber delta.',
+    )
+    parser.add_argument(
+        '--swa-lr',
+        '--swa_lr',
+        type=float,
+        default=None,
+        help='Learning rate to use during Stage Two/SWA.',
     )
     parser.add_argument(
         '--multiheads_finetuning',

@@ -24,6 +24,7 @@ from mace_jax.tools.train import SWAConfig
 
 _OPTIMIZER_ALGORITHMS = {
     'adam': optax.scale_by_adam,
+    'adamw': optax.scale_by_adam,
     'amsgrad': tools.scale_by_amsgrad,
     'sgd': optax.identity,
 }
@@ -32,6 +33,7 @@ _SCHEDULERS = {
     'constant': gin_functions.constant_schedule,
     'exponential': gin_functions.exponential_decay,
     'piecewise_constant': gin_functions.piecewise_constant_schedule,
+    'plateau': gin_functions.reduce_on_plateau,
 }
 
 _LOSS_FACTORIES = {
@@ -47,6 +49,15 @@ _LOSS_FACTORIES = {
 }
 
 _FOUNDATION_TEMP_DIRS: list[Path] = []
+
+
+def _is_named_mp_foundation(name: str) -> bool:
+    from mace.calculators.foundations_models import mace_mp_names
+
+    normalized = name.lower()
+    known = {m for m in mace_mp_names if m}
+    known.update({'small', 'medium', 'large', 'small_off', 'medium_off', 'large_off'})
+    return normalized in known
 
 
 def _cleanup_foundation_artifacts() -> None:
@@ -277,6 +288,16 @@ def _apply_dataset_options(args: argparse.Namespace) -> None:
 
 
 def _apply_training_controls(args: argparse.Namespace) -> None:
+    if args.steps_per_interval is not None:
+        gin.bind_parameter(
+            'mace_jax.tools.gin_functions.optimizer.steps_per_interval',
+            args.steps_per_interval,
+        )
+    if args.max_num_intervals is not None:
+        gin.bind_parameter(
+            'mace_jax.tools.gin_functions.optimizer.max_num_intervals',
+            args.max_num_intervals,
+        )
     _bind_if_not_none(
         'mace_jax.tools.gin_functions.train.max_grad_norm', args.clip_grad
     )
@@ -284,6 +305,26 @@ def _apply_training_controls(args: argparse.Namespace) -> None:
     if getattr(args, 'ema', False) and ema_decay is None:
         ema_decay = 0.99
     _bind_if_not_none('mace_jax.tools.gin_functions.train.ema_decay', ema_decay)
+    _bind_if_not_none('mace_jax.tools.gin_functions.train.patience', args.patience)
+    _bind_if_not_none(
+        'mace_jax.tools.gin_functions.train.eval_interval', args.eval_interval
+    )
+    if args.eval_train_fraction is not None:
+        gin.bind_parameter(
+            'mace_jax.tools.gin_functions.train.eval_train', args.eval_train_fraction
+        )
+    elif args.eval_train is not None:
+        gin.bind_parameter(
+            'mace_jax.tools.gin_functions.train.eval_train', args.eval_train
+        )
+    if args.eval_test is not None:
+        gin.bind_parameter(
+            'mace_jax.tools.gin_functions.train.eval_test', args.eval_test
+        )
+    if args.log_errors is not None:
+        gin.bind_parameter(
+            'mace_jax.tools.gin_functions.train.log_errors', args.log_errors
+        )
 
 
 def _apply_swa_options(args: argparse.Namespace) -> None:
@@ -299,6 +340,7 @@ def _apply_swa_options(args: argparse.Namespace) -> None:
     )
     if not requested:
         return
+    stage_loss_kwargs = _collect_swa_loss_kwargs(args)
     swa_config = SWAConfig(
         start_interval=args.swa_start if args.swa_start is not None else 0,
         update_interval=args.swa_every if args.swa_every is not None else 1,
@@ -307,8 +349,18 @@ def _apply_swa_options(args: argparse.Namespace) -> None:
         else 1,
         max_snapshots=args.swa_max_snapshots,
         prefer_swa_params=args.swa_prefer if args.swa_prefer is not None else True,
+        stage_loss_factory=_resolve_swa_loss_factory(args, stage_loss_kwargs),
+        stage_loss_kwargs=stage_loss_kwargs,
     )
     gin.bind_parameter('mace_jax.tools.gin_functions.train.swa_config', swa_config)
+    if args.swa_lr is not None:
+        gin.bind_parameter(
+            'mace_jax.tools.gin_functions.optimizer.stage_two_lr', args.swa_lr
+        )
+        gin.bind_parameter(
+            'mace_jax.tools.gin_functions.optimizer.stage_two_interval',
+            args.swa_start if args.swa_start is not None else swa_config.start_interval,
+        )
 
 
 def _apply_wandb_options(args: argparse.Namespace) -> None:
@@ -364,6 +416,16 @@ def _apply_optimizer_options(args: argparse.Namespace) -> None:
             'mace_jax.tools.gin_functions.optimizer.algorithm',
             _OPTIMIZER_ALGORITHMS[args.optimizer],
         )
+        decoupled = True
+        if args.optimizer in {'adam', 'amsgrad'}:
+            decoupled = False
+        gin.bind_parameter(
+            'mace_jax.tools.gin_functions.optimizer.decoupled_weight_decay',
+            decoupled,
+        )
+    if args.beta is not None:
+        gin.bind_parameter('adam.b1', args.beta)
+        gin.bind_parameter('amsgrad.b1', args.beta)
     _bind_if_not_none('mace_jax.tools.gin_functions.optimizer.lr', args.lr)
     _bind_if_not_none(
         'mace_jax.tools.gin_functions.optimizer.weight_decay', args.weight_decay
@@ -377,6 +439,16 @@ def _apply_optimizer_options(args: argparse.Namespace) -> None:
         gin.bind_parameter(
             'mace_jax.tools.gin_functions.exponential_decay.decay_rate',
             args.lr_scheduler_gamma,
+        )
+    if getattr(args, 'lr_factor', None) is not None:
+        gin.bind_parameter(
+            'mace_jax.tools.gin_functions.reduce_on_plateau.factor',
+            args.lr_factor,
+        )
+    if getattr(args, 'scheduler_patience', None) is not None:
+        gin.bind_parameter(
+            'mace_jax.tools.gin_functions.reduce_on_plateau.patience',
+            args.scheduler_patience,
         )
 
 
@@ -404,6 +476,34 @@ def _apply_loss_options(args: argparse.Namespace) -> None:
     gin.bind_parameter('loss.loss_cls', factory)
     for param_name, value in configured_weights.items():
         gin.bind_parameter(f'loss.{param_name}', value)
+
+
+def _collect_swa_loss_kwargs(args: argparse.Namespace) -> dict[str, float] | None:
+    fields = [
+        ('energy_weight', 'swa_energy_weight'),
+        ('forces_weight', 'swa_forces_weight'),
+        ('stress_weight', 'swa_stress_weight'),
+        ('virials_weight', 'swa_virials_weight'),
+        ('dipole_weight', 'swa_dipole_weight'),
+        ('polarizability_weight', 'swa_polarizability_weight'),
+        ('huber_delta', 'swa_huber_delta'),
+    ]
+    values = {
+        field: getattr(args, arg_name)
+        for field, arg_name in fields
+        if getattr(args, arg_name, None) is not None
+    }
+    return values or None
+
+
+def _resolve_swa_loss_factory(
+    args: argparse.Namespace, stage_loss_kwargs: dict[str, float] | None
+):
+    requested = getattr(args, 'swa_loss', None)
+    if not requested and not stage_loss_kwargs:
+        return None
+    key = requested or getattr(args, 'loss', None)
+    return _LOSS_FACTORIES.get(key, modules.WeightedEnergyForcesStressLoss)
 
 
 def _load_foundation_model(name: str, *, default_dtype: str | None = None):
@@ -460,7 +560,10 @@ def _prepare_foundation_checkpoint(args: argparse.Namespace) -> None:
         return
     if args.torch_checkpoint:
         raise ValueError('Specify either --torch-checkpoint or --foundation-model, not both.')
+    foundation_name = foundation_spec.lower()
+    is_named_foundation = _is_named_mp_foundation(foundation_name)
     candidate = Path(foundation_spec)
+    torch_model = None
     if candidate.exists():
         args.torch_checkpoint = str(candidate)
     else:
@@ -474,6 +577,25 @@ def _prepare_foundation_checkpoint(args: argparse.Namespace) -> None:
         args.torch_checkpoint = str(checkpoint_path)
         if args.r_max is None and hasattr(torch_model, 'r_max'):
             args.r_max = float(torch_model.r_max.item())
+    if torch_model is not None:
+        foundation_heads = getattr(torch_model, 'heads', None)
+        if foundation_heads and not getattr(args, 'heads', None):
+            args.heads = list(foundation_heads)
+        if args.foundation_head is None and foundation_heads:
+            args.foundation_head = foundation_heads[0]
+    if (
+        getattr(args, 'multiheads_finetuning', False)
+        and not args.pt_train_file
+        and not args.pt_valid_file
+        and not is_named_foundation
+    ):
+        logging.warning(
+            'Multihead finetuning requires pretraining data; disabling because foundation model %s '
+            'is not a Materials Project checkpoint and no PT dataset was provided. '
+            'Specify --pt_train_file/--pt_valid_file or choose a MP foundation.',
+            foundation_spec,
+        )
+        args.multiheads_finetuning = False
     if args.foundation_head and not args.torch_head:
         args.torch_head = args.foundation_head
     _maybe_adjust_multihead_defaults(args)
@@ -537,6 +659,18 @@ def run_training(dry_run: bool = False) -> None:
         gradient_transform, steps_per_interval, max_num_intervals = (
             gin_functions.optimizer()
         )
+        if not steps_per_interval or steps_per_interval <= 0:
+            auto_steps = train_loader.approx_length()
+            logging.info(
+                'Auto-setting steps_per_interval to %s based on training loader length.',
+                auto_steps,
+            )
+            gin.bind_parameter(
+                'mace_jax.tools.gin_functions.optimizer.steps_per_interval', auto_steps
+            )
+            gradient_transform, steps_per_interval, max_num_intervals = (
+                gin_functions.optimizer()
+            )
         optimizer_state = gradient_transform.init(params)
 
         num_params = tools.count_parameters(params)

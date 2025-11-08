@@ -278,6 +278,47 @@ def constant_schedule(lr, steps_per_interval):
     return optax.constant_schedule(lr)
 
 
+@gin.configurable
+def reduce_on_plateau(
+    lr: float,
+    steps_per_interval: int,
+    *,
+    factor: float = 0.8,
+    patience: int = 10,
+    min_lr: float = 0.0,
+    threshold: float = 1e-4,
+):
+    state = {
+        'best': np.inf,
+        'num_bad': 0,
+        'current_lr': lr,
+        'min_lr': min_lr,
+    }
+
+    def schedule(step):
+        return state['current_lr']
+
+    def update(loss_value):
+        if loss_value + threshold < state['best']:
+            state['best'] = float(loss_value)
+            state['num_bad'] = 0
+            return
+        state['num_bad'] += 1
+        if state['num_bad'] >= patience:
+            new_lr = max(state['current_lr'] * factor, state['min_lr'])
+            if new_lr < state['current_lr'] - threshold:
+                logging.info(
+                    'Plateau scheduler triggered: lr %.3e -> %.3e',
+                    state['current_lr'],
+                    new_lr,
+                )
+                state['current_lr'] = new_lr
+            state['num_bad'] = 0
+
+    schedule.update = update
+    return schedule
+
+
 gin.configurable('adam')(optax.scale_by_adam)
 gin.configurable('amsgrad')(tools.scale_by_amsgrad)
 gin.register('sgd')(optax.identity)
@@ -291,6 +332,9 @@ def optimizer(
     lr=0.01,
     algorithm: Callable = optax.scale_by_adam,
     scheduler: Callable = constant_schedule,
+    stage_two_lr: float | None = None,
+    stage_two_interval: int | None = None,
+    decoupled_weight_decay: bool = True,
 ):
     def weight_decay_mask(params):
         params = tools.flatten_dict(params)
@@ -302,16 +346,70 @@ def optimizer(
         assert any(any(('symmetric_contraction' in ki) for ki in k) for k in params)
         return tools.unflatten_dict(mask)
 
+    schedule = scheduler(lr, steps_per_interval)
+    if (
+        stage_two_lr is not None
+        and stage_two_interval is not None
+        and steps_per_interval is not None
+        and stage_two_interval >= 0
+    ):
+        boundary_step = stage_two_interval * steps_per_interval
+        stage_schedule = optax.constant_schedule(stage_two_lr)
+        schedule = optax.join_schedules(
+            schedules=[schedule, stage_schedule],
+            boundaries=[boundary_step],
+        )
+
+    transforms = []
+    if weight_decay and weight_decay != 0.0:
+        if decoupled_weight_decay:
+            transforms.append(
+                optax.add_decayed_weights(weight_decay, mask=weight_decay_mask)
+            )
+        else:
+            transforms.append(
+                _masked_additive_weight_decay(
+                    weight_decay=weight_decay, mask_fn=weight_decay_mask
+                )
+            )
+    transforms.extend([
+        algorithm(),
+        optax.scale_by_schedule(schedule),
+        optax.scale(-1.0),
+    ])
+
+    gradient_chain = optax.chain(*transforms)
+    plateau_update = getattr(schedule, 'update', None)
+    if callable(plateau_update):
+        setattr(gradient_chain, 'scheduler_update', plateau_update)
+
     return (
-        optax.chain(
-            optax.add_decayed_weights(weight_decay, mask=weight_decay_mask),
-            algorithm(),
-            optax.scale_by_schedule(scheduler(lr, steps_per_interval)),
-            optax.scale(-1.0),  # Gradient descent.
-        ),
+        gradient_chain,
         steps_per_interval,
         max_num_intervals,
     )
+
+
+def _masked_additive_weight_decay(
+    weight_decay: float, mask_fn: Callable[[dict], dict]
+) -> optax.GradientTransformation:
+    def init_fn(params):
+        return ()
+
+    def update_fn(updates, state, params=None):
+        if params is None:
+            raise ValueError('Additive weight decay requires current parameters.')
+        mask = mask_fn(params)
+
+        def apply(update, param, mask_entry):
+            if not mask_entry:
+                return update
+            return update + weight_decay * param
+
+        updates = jax.tree_util.tree_map(apply, updates, params, mask)
+        return updates, state
+
+    return optax.GradientTransformation(init_fn, update_fn)
 
 
 @gin.configurable
@@ -332,10 +430,12 @@ def train(
     patience: int | None = None,
     eval_train: bool = False,
     eval_test: bool = False,
+    eval_interval: int = 1,
     log_errors: str = 'PerAtomRMSE',
     ema_decay: float | None = None,
     max_grad_norm: float | None = None,
     wandb_run=None,
+    swa_config=None,
     **kwargs,
 ):
     lowest_loss = np.inf
@@ -368,8 +468,21 @@ def train(
             return [(head, sub_loader) for head, sub_loader in head_loaders.items()]
         return [(None, loader)]
 
+    swa_loss_fn = None
+    stage_two_active = False
+    if swa_config and swa_config.stage_loss_factory is not None:
+        swa_loss_fn = _instantiate_loss(
+            swa_config.stage_loss_factory, swa_config.stage_loss_kwargs or {}
+        )
     valid_head_loaders = _split_loader_by_heads(valid_loader)
     test_head_loaders = _split_loader_by_heads(test_loader)
+
+    def _should_run_eval(current_interval: int, is_last: bool) -> bool:
+        if is_last:
+            return True
+        if eval_interval is None or eval_interval <= 0:
+            return True
+        return (current_interval + 1) % eval_interval == 0
 
     for interval, params, optimizer_state, eval_params in tools.train(
         params=params,
@@ -408,6 +521,7 @@ def train(
             if head_name is not None:
                 metrics_['head'] = head_name
             metrics_['interval'] = interval
+            metrics_['epoch'] = interval + 1
             logger.log(metrics_)
 
             def _maybe_float(value):
@@ -467,6 +581,7 @@ def train(
                 wandb_mode = eval_mode
                 wandb_payload = {
                     'interval': int(interval),
+                    'epoch': int(interval + 1),
                     f'{wandb_mode}/loss': float(loss_),
                 }
                 for key, value in metrics_.items():
@@ -476,25 +591,32 @@ def train(
                 wandb_run.log(wandb_payload, step=int(interval))
             return loss_
 
-        if eval_train or last_interval:
+        evaluate_now = _should_run_eval(interval, last_interval)
+
+        if (eval_train or last_interval) and evaluate_now:
             if isinstance(eval_train, (int, float)):
                 eval_and_print(train_loader.subset(eval_train), 'eval_train')
             else:
                 eval_and_print(train_loader, 'eval_train')
 
-        if (eval_test or last_interval) and _loader_has_graphs(test_loader):
+        if (
+            (eval_test or last_interval)
+            and _loader_has_graphs(test_loader)
+            and evaluate_now
+        ):
             for head_name, loader in _enumerate_eval_targets(
                 test_loader, test_head_loaders
             ):
                 eval_and_print(loader, 'eval_test', head_name=head_name)
 
         last_valid_loss = None
-        for head_name, loader in _enumerate_eval_targets(
-            valid_loader, valid_head_loaders
-        ):
-            last_valid_loss = eval_and_print(
-                loader, 'eval_valid', head_name=head_name
-            )
+        if evaluate_now:
+            for head_name, loader in _enumerate_eval_targets(
+                valid_loader, valid_head_loaders
+            ):
+                last_valid_loss = eval_and_print(
+                    loader, 'eval_valid', head_name=head_name
+                )
 
         if last_valid_loss is not None:
             if last_valid_loss >= lowest_loss:
@@ -507,6 +629,21 @@ def train(
             else:
                 lowest_loss = last_valid_loss
                 patience_counter = 0
+
+        if (
+            swa_loss_fn is not None
+            and not stage_two_active
+            and swa_config is not None
+            and interval >= swa_config.start_interval
+        ):
+            logging.info(
+                'SWA stage starting at interval %s: switching to Stage Two loss.',
+                interval,
+            )
+            loss_fn = swa_loss_fn
+            lowest_loss = np.inf
+            patience_counter = 0
+            stage_two_active = True
 
         eval_time_per_interval += [time.perf_counter() - start_time]
         avg_time_per_interval = np.mean(total_time_per_interval[-3:])
@@ -525,6 +662,10 @@ def train(
                 },
                 step=int(interval),
             )
+
+        plateau_updater = getattr(gradient_transform, 'scheduler_update', None)
+        if callable(plateau_updater) and last_valid_loss is not None:
+            plateau_updater(last_valid_loss)
 
         if last_interval:
             break

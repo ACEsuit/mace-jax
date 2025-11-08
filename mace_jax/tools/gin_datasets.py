@@ -213,16 +213,20 @@ def datasets(
             head_test_num = head_cfg.get('test_num', test_num)
             head_seed = seed + head_to_index[head_name]
             allow_unlabeled = bool(head_cfg.get('allow_unlabeled', False))
+            head_energy_key = head_cfg.get('energy_key', energy_key)
+            head_forces_key = head_cfg.get('forces_key', forces_key)
+            head_prefactor_stress = head_cfg.get('prefactor_stress', prefactor_stress)
+            head_remap_stress = head_cfg.get('remap_stress', remap_stress)
 
             head_all_train: list[data.Configuration] = []
             for head_train_path in head_train_paths:
                 head_atomic, head_chunk = _load_configs_from_path(
                     head_train_path,
                     config_type_weights=head_ct_weights,
-                    energy_key=energy_key,
-                    forces_key=forces_key,
-                    prefactor_stress=prefactor_stress,
-                    remap_stress=remap_stress,
+                    energy_key=head_energy_key,
+                    forces_key=head_forces_key,
+                    prefactor_stress=head_prefactor_stress,
+                    remap_stress=head_remap_stress,
                     head_name=head_name,
                     num_configs=head_train_num,
                     extract_atomic_energies=True,
@@ -241,10 +245,10 @@ def datasets(
                 _, head_valid = _load_configs_from_path(
                     head_valid_path,
                     config_type_weights=head_ct_weights,
-                    energy_key=energy_key,
-                    forces_key=forces_key,
-                    prefactor_stress=prefactor_stress,
-                    remap_stress=remap_stress,
+                    energy_key=head_energy_key,
+                    forces_key=head_forces_key,
+                    prefactor_stress=head_prefactor_stress,
+                    remap_stress=head_remap_stress,
                     head_name=head_name,
                     num_configs=None,
                     extract_atomic_energies=False,
@@ -287,10 +291,10 @@ def datasets(
                 _, head_test = _load_configs_from_path(
                     head_test_path,
                     config_type_weights=head_ct_weights,
-                    energy_key=energy_key,
-                    forces_key=forces_key,
-                    prefactor_stress=prefactor_stress,
-                    remap_stress=remap_stress,
+                    energy_key=head_energy_key,
+                    forces_key=head_forces_key,
+                    prefactor_stress=head_prefactor_stress,
+                    remap_stress=head_remap_stress,
                     head_name=head_name,
                     num_configs=head_test_num,
                     extract_atomic_energies=False,

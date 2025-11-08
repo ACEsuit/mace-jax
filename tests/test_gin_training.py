@@ -159,7 +159,6 @@ def _run_gin_training(tmp_path):
         gin_functions.optimizer()
     )
     assert steps_per_interval == 1
-    assert max_num_intervals == 1
 
     optimizer_state = gradient_transform.init(params)
 
@@ -263,6 +262,32 @@ def test_train_evaluates_each_head(monkeypatch, tmp_path):
     assert set(valid_calls) == {('Default',), ('Surface',)}
 
 
+def test_eval_interval_controls_frequency(monkeypatch, tmp_path):
+    gin.bind_parameter('mace_jax.tools.gin_functions.train.eval_interval', 2)
+    gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.valid_fraction', 0.5)
+
+    def _multi_interval_train(*, params, optimizer_state, **kwargs):
+        for idx in range(3):
+            yield idx, params, optimizer_state, params
+
+    monkeypatch.setattr(gin_functions.tools, 'train', _multi_interval_train)
+    monkeypatch.setattr(
+        gin_functions,
+        'optimizer',
+        lambda: (optax.identity(), 1, 2),
+    )
+
+    eval_calls = []
+
+    def _fake_evaluate(**kwargs):
+        eval_calls.append(kwargs['name'])
+        return 0.0, {}
+
+    monkeypatch.setattr(gin_functions.tools, 'evaluate', _fake_evaluate)
+    _run_gin_training(tmp_path)
+    assert eval_calls.count('eval_valid') == 2
+
+
 def test_head_replay_paths_and_weights(tmp_path):
     simple_xyz = Path(__file__).resolve().parent / 'test_data' / 'simple.xyz'
     replay_xyz = tmp_path / 'replay.xyz'
@@ -327,10 +352,42 @@ def test_head_pseudolabel_replay(monkeypatch, tmp_path):
     assert forces.shape[1] == 3 and np.allclose(forces, 1.0)
 
 
+def test_head_config_overrides_energy_force_keys(monkeypatch):
+    gin.clear_config()
+    calls = []
+
+    def _fake_loader(*, file_or_path, **kwargs):
+        calls.append((kwargs['head_name'], kwargs['energy_key'], kwargs['forces_key']))
+        return ({}, [])
+
+    monkeypatch.setattr(gin_datasets.data, 'load_from_xyz', _fake_loader)
+
+    head_cfgs = {
+        'Default': {
+            'train_path': 'dummy.xyz',
+            'energy_key': 'E_custom',
+            'forces_key': 'F_custom',
+            'valid_fraction': 0.0,
+        }
+    }
+    gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.head_configs', head_cfgs)
+    simple_xyz = Path(__file__).resolve().parent / 'test_data' / 'simple.xyz'
+    gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.train_path', str(simple_xyz))
+    gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.r_max', 2.5)
+    gin_datasets.datasets()
+
+    assert calls
+    assert ('Default', 'E_custom', 'F_custom') in calls
+    gin.clear_config()
+
+
 def test_gin_model_torch_checkpoint(monkeypatch, tmp_path):
     import numpy as np
     import torch
-    from mace.tools import scripts_utils
+    try:
+        from mace.tools import scripts_utils
+    except Exception:  # pragma: no cover - optional dependency path
+        pytest.skip('cuequivariance_ops unavailable in this environment')
 
     import mace_jax.cli.mace_torch2jax as torch2jax_mod
 

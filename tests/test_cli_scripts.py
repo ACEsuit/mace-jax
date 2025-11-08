@@ -1,4 +1,5 @@
 import json
+import logging
 from pathlib import Path
 
 import gin
@@ -181,6 +182,7 @@ def test_cli_foundation_model_helper(tmp_path, monkeypatch):
         '_load_foundation_model',
         lambda *_, **__: _DummyTorchModel(),
     )
+    monkeypatch.setattr(train_cli, '_is_named_mp_foundation', lambda name: True)
     args, _ = train_cli.parse_args([
         '--foundation_model',
         'small',
@@ -221,6 +223,7 @@ def test_cli_multiheads_adjusts_defaults(monkeypatch):
         '_load_foundation_model',
         lambda *_, **__: _DummyTorchModel(),
     )
+    monkeypatch.setattr(train_cli, '_is_named_mp_foundation', lambda name: True)
     args, _ = train_cli.parse_args([
         '--foundation_model',
         'small',
@@ -241,6 +244,7 @@ def test_cli_multiheads_force_override(monkeypatch):
         '_load_foundation_model',
         lambda *_, **__: _DummyTorchModel(),
     )
+    monkeypatch.setattr(train_cli, '_is_named_mp_foundation', lambda name: True)
     args, _ = train_cli.parse_args([
         '--foundation_model',
         'small',
@@ -266,6 +270,182 @@ def test_cli_multiheads_without_foundation():
     assert gin.query_parameter('mace_jax.tools.gin_functions.optimizer.lr') == 1e-4
     assert (
         gin.query_parameter('mace_jax.tools.gin_functions.train.ema_decay') == 0.99999
+    )
+    gin.clear_config()
+
+
+def test_cli_swa_stage_two_options(tmp_path):
+    gin.clear_config()
+    train_xyz = Path(__file__).resolve().parent / 'test_data' / 'simple.xyz'
+    args, _ = train_cli.parse_args([
+        '--train-file',
+        str(train_xyz),
+        '--valid-file',
+        'None',
+        '--swa',
+        '--start_swa',
+        '3',
+        '--swa-loss',
+        'huber',
+        '--swa-energy-weight',
+        '0.5',
+        '--swa-lr',
+        '1e-4',
+    ])
+    train_cli.apply_cli_overrides(args)
+    swa_cfg = gin.query_parameter('mace_jax.tools.gin_functions.train.swa_config')
+    assert swa_cfg.stage_loss_factory is modules.WeightedHuberEnergyForcesStressLoss
+    assert swa_cfg.stage_loss_kwargs == {'energy_weight': 0.5}
+    assert (
+        gin.query_parameter('mace_jax.tools.gin_functions.optimizer.stage_two_lr')
+        == 1e-4
+    )
+    assert (
+        gin.query_parameter(
+            'mace_jax.tools.gin_functions.optimizer.stage_two_interval'
+        )
+        == 3
+    )
+    gin.clear_config()
+
+
+def test_cli_eval_train_flag(tmp_path):
+    gin.clear_config()
+    train_xyz = Path(__file__).resolve().parent / 'test_data' / 'simple.xyz'
+    args, _ = train_cli.parse_args([
+        '--train-file',
+        str(train_xyz),
+        '--valid-file',
+        'None',
+        '--eval-train',
+        '--no-eval-test',
+    ])
+    train_cli.apply_cli_overrides(args)
+    assert gin.query_parameter('mace_jax.tools.gin_functions.train.eval_train') is True
+    assert gin.query_parameter('mace_jax.tools.gin_functions.train.eval_test') is False
+    gin.clear_config()
+
+
+def test_cli_adamw_sets_decoupled(tmp_path):
+    gin.clear_config()
+
+
+def test_foundation_model_populates_heads(monkeypatch, tmp_path):
+    gin.clear_config()
+
+    class _DummyRMax:
+        def __init__(self, value):
+            self._value = value
+
+        def item(self):
+            return self._value
+
+    class _DummyTorchModel:
+        def __init__(self):
+            self.heads = ['Default', 'Surface']
+            self.r_max = _DummyRMax(4.0)
+
+    def _fake_loader(name, default_dtype=None):
+        assert name == 'dummy-foundation'
+        assert default_dtype is None
+        return _DummyTorchModel()
+
+    monkeypatch.setattr(train_cli, '_load_foundation_model', _fake_loader)
+    monkeypatch.setattr(train_cli, '_is_named_mp_foundation', lambda name: True)
+    monkeypatch.setattr(train_cli.torch, 'save', lambda *_, **__: None)
+    tmp_dir = tmp_path / 'tmp'
+    tmp_dir.mkdir()
+    monkeypatch.setattr(
+        train_cli.tempfile,
+        'mkdtemp',
+        lambda suffix=None, prefix=None, dir=None: str(tmp_dir),
+    )
+
+    args, _ = train_cli.parse_args([
+        '--foundation-model',
+        'dummy-foundation',
+    ])
+    train_cli.apply_cli_overrides(args)
+    assert gin.query_parameter('mace_jax.tools.gin_model.model.heads') == (
+        'Default',
+        'Surface',
+    )
+    assert gin.query_parameter('mace_jax.tools.gin_datasets.datasets.heads') == (
+        'Default',
+        'Surface',
+    )
+    train_cli._cleanup_foundation_artifacts()
+    gin.clear_config()
+
+
+def test_foundation_multihead_without_pt_disables(monkeypatch, tmp_path, caplog):
+    gin.clear_config()
+
+    class _DummyRMax:
+        def __init__(self, value):
+            self._value = value
+
+        def item(self):
+            return self._value
+
+    class _DummyTorchModel:
+        def __init__(self):
+            self.heads = ['Default']
+            self.r_max = _DummyRMax(4.0)
+
+    def _fake_loader(name, default_dtype=None):
+        return _DummyTorchModel()
+
+    monkeypatch.setattr(train_cli, '_load_foundation_model', _fake_loader)
+    tmp_dir = tmp_path / 'tmp'
+    tmp_dir.mkdir()
+    monkeypatch.setattr(
+        train_cli.tempfile,
+        'mkdtemp',
+        lambda suffix=None, prefix=None, dir=None: str(tmp_dir),
+    )
+    monkeypatch.setattr(train_cli.torch, 'save', lambda *_, **__: None)
+    monkeypatch.setattr(train_cli, '_is_named_mp_foundation', lambda name: False)
+
+    args, _ = train_cli.parse_args([
+        '--foundation-model',
+        'custom-foundation',
+        '--multiheads_finetuning',
+    ])
+    with caplog.at_level(logging.WARNING):
+        train_cli.apply_cli_overrides(args)
+    with pytest.raises(ValueError):
+        gin.query_parameter('mace_jax.tools.gin_functions.optimizer.lr')
+    assert 'Multihead finetuning requires pretraining data' in caplog.text
+    train_cli._cleanup_foundation_artifacts()
+    gin.clear_config()
+    train_xyz = Path(__file__).resolve().parent / 'test_data' / 'simple.xyz'
+    args, _ = train_cli.parse_args([
+        '--train-file',
+        str(train_xyz),
+        '--valid-file',
+        'None',
+        '--optimizer',
+        'adamw',
+        '--scheduler',
+        'plateau',
+        '--lr-factor',
+        '0.5',
+        '--scheduler-patience',
+        '4',
+    ])
+    train_cli.apply_cli_overrides(args)
+    assert (
+        gin.query_parameter(
+            'mace_jax.tools.gin_functions.optimizer.decoupled_weight_decay'
+        )
+        is True
+    )
+    assert (
+        gin.query_parameter(
+            'mace_jax.tools.gin_functions.optimizer.scheduler'
+        )
+        == gin_functions.reduce_on_plateau
     )
     gin.clear_config()
 
@@ -326,6 +506,21 @@ def test_cli_sets_runtime_and_training_controls(tmp_path):
         'exponential',
         '--lr_scheduler_gamma',
         '0.5',
+        '--eval-interval',
+        '2',
+        '--steps-per-interval',
+        '3',
+        '--max-num-intervals',
+        '7',
+        '--patience',
+        '4',
+        '--eval-train-fraction',
+        '0.5',
+        '--eval-test',
+        '--log-errors',
+        'PerAtomMAE',
+        '--beta',
+        '0.7',
     ])
     train_cli.apply_cli_overrides(args)
 
@@ -354,6 +549,25 @@ def test_cli_sets_runtime_and_training_controls(tmp_path):
         gin.query_parameter('mace_jax.tools.gin_functions.train.max_grad_norm') == 0.5
     )
     assert gin.query_parameter('mace_jax.tools.gin_functions.train.ema_decay') == 0.99
+    assert (
+        gin.query_parameter('mace_jax.tools.gin_functions.optimizer.steps_per_interval')
+        == 3
+    )
+    assert (
+        gin.query_parameter('mace_jax.tools.gin_functions.optimizer.max_num_intervals')
+        == 7
+    )
+    assert gin.query_parameter('mace_jax.tools.gin_functions.train.patience') == 4
+    assert (
+        gin.query_parameter('mace_jax.tools.gin_functions.train.eval_train')
+        == pytest.approx(0.5)
+    )
+    assert gin.query_parameter('mace_jax.tools.gin_functions.train.eval_test') is True
+    assert gin.query_parameter('mace_jax.tools.gin_functions.train.eval_interval') == 2
+    assert (
+        gin.query_parameter('mace_jax.tools.gin_functions.train.log_errors')
+        == 'PerAtomMAE'
+    )
     swa_cfg = gin.query_parameter('mace_jax.tools.gin_functions.train.swa_config')
     assert isinstance(swa_cfg, SWAConfig)
     assert gin.query_parameter('mace_jax.tools.gin_functions.wandb_run.enabled') is True
@@ -380,5 +594,12 @@ def test_cli_sets_runtime_and_training_controls(tmp_path):
     assert (
         gin.query_parameter('mace_jax.tools.gin_functions.exponential_decay.decay_rate')
         == 0.5
+    )
+    assert gin.query_parameter('amsgrad.b1') == 0.7
+    assert (
+        gin.query_parameter(
+            'mace_jax.tools.gin_functions.optimizer.decoupled_weight_decay'
+        )
+        is False
     )
     gin.clear_config()

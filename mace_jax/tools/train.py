@@ -27,6 +27,8 @@ class SWAConfig:
     min_snapshots_for_eval: int = 1
     max_snapshots: int | None = None
     prefer_swa_params: bool = True
+    stage_loss_factory: Callable | None = None
+    stage_loss_kwargs: dict[str, float] | None = None
 
     def __post_init__(self) -> None:
         if self.start_interval < 0:
