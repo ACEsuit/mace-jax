@@ -2,8 +2,9 @@ import dataclasses
 import itertools
 import logging
 import time
+from collections.abc import Callable
 from functools import partial
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any
 
 import gin
 import jax
@@ -24,7 +25,7 @@ class SWAConfig:
     start_interval: int = 0
     update_interval: int = 1
     min_snapshots_for_eval: int = 1
-    max_snapshots: Optional[int] = None
+    max_snapshots: int | None = None
     prefer_swa_params: bool = True
 
     def __post_init__(self) -> None:
@@ -54,11 +55,12 @@ def train(
     total_loss_fn: Callable,  # loss_fn(params, graph) -> [num_graphs]
     train_loader: data.GraphDataLoader,  # device parallel done on the (optional) extra dimension
     gradient_transform: Any,
-    optimizer_state: Dict[str, Any],
+    optimizer_state: dict[str, Any],
     steps_per_interval: int,
-    ema_decay: Optional[float] = None,
+    ema_decay: float | None = None,
     progress_bar: bool = True,
-    swa_config: Optional[SWAConfig] = None,
+    swa_config: SWAConfig | None = None,
+    max_grad_norm: float | None = None,
 ):
     """
     for interval, params, optimizer_state, ema_params in train(...):
@@ -87,13 +89,20 @@ def train(
     @jax.jit
     def update_fn(
         params, optimizer_state, ema_params, num_updates: int, graph: jraph.GraphsTuple
-    ) -> Tuple[float, Any, Any]:
+    ) -> tuple[float, Any, Any]:
         if graph.n_node.ndim == 1:
             graph = jax.tree_util.tree_map(lambda x: x[None, ...], graph)
 
         n, loss, grad = grad_fn(params, graph)
         loss = jnp.sum(loss) / jnp.sum(n)
         grad = jax.tree_util.tree_map(lambda x: jnp.sum(x, axis=0) / jnp.sum(n), grad)
+
+        if max_grad_norm is not None:
+            grad_norm = jnp.sqrt(
+                sum(jnp.sum(jnp.square(x)) for x in jax.tree_util.tree_leaves(grad))
+            )
+            clip_coef = jnp.minimum(1.0, max_grad_norm / (grad_norm + 1e-12))
+            grad = jax.tree_util.tree_map(lambda g: g * clip_coef, grad)
 
         updates, optimizer_state = gradient_transform.update(
             grad, optimizer_state, params
@@ -172,9 +181,8 @@ def train(
                     interval,
                     swa_state['count'],
                 )
-            if (
-                swa_state['params'] is not None
-                and swa_config.should_use(swa_state['count'])
+            if swa_state['params'] is not None and swa_config.should_use(
+                swa_state['count']
             ):
                 eval_params = swa_state['params']
 
@@ -186,7 +194,7 @@ def evaluate(
     data_loader: data.GraphDataLoader,
     name: str = 'Evaluation',
     progress_bar: bool = True,
-) -> Tuple[float, Dict[str, Any]]:
+) -> tuple[float, dict[str, Any]]:
     r"""Evaluate the predictor on the given data loader.
 
     Args:
@@ -313,55 +321,47 @@ def evaluate(
         delta_es_per_atom = np.concatenate(delta_es_per_atom_list, axis=0)
         es = np.concatenate(es_list, axis=0)
         es_per_atom = np.concatenate(es_per_atom_list, axis=0)
-        aux.update(
-            {
-                # Mean absolute error
-                'mae_e': tools.compute_mae(delta_es),
-                'rel_mae_e': tools.compute_rel_mae(delta_es, es),
-                'mae_e_per_atom': tools.compute_mae(delta_es_per_atom),
-                'rel_mae_e_per_atom': tools.compute_rel_mae(
-                    delta_es_per_atom, es_per_atom
-                ),
-                # Root-mean-square error
-                'rmse_e': tools.compute_rmse(delta_es),
-                'rel_rmse_e': tools.compute_rel_rmse(delta_es, es),
-                'rmse_e_per_atom': tools.compute_rmse(delta_es_per_atom),
-                'rel_rmse_e_per_atom': tools.compute_rel_rmse(
-                    delta_es_per_atom, es_per_atom
-                ),
-                # Q_95
-                'q95_e': tools.compute_q95(delta_es),
-            }
-        )
+        aux.update({
+            # Mean absolute error
+            'mae_e': tools.compute_mae(delta_es),
+            'rel_mae_e': tools.compute_rel_mae(delta_es, es),
+            'mae_e_per_atom': tools.compute_mae(delta_es_per_atom),
+            'rel_mae_e_per_atom': tools.compute_rel_mae(delta_es_per_atom, es_per_atom),
+            # Root-mean-square error
+            'rmse_e': tools.compute_rmse(delta_es),
+            'rel_rmse_e': tools.compute_rel_rmse(delta_es, es),
+            'rmse_e_per_atom': tools.compute_rmse(delta_es_per_atom),
+            'rel_rmse_e_per_atom': tools.compute_rel_rmse(
+                delta_es_per_atom, es_per_atom
+            ),
+            # Q_95
+            'q95_e': tools.compute_q95(delta_es),
+        })
     if len(delta_fs_list) > 0:
         delta_fs = np.concatenate(delta_fs_list, axis=0)
         fs = np.concatenate(fs_list, axis=0)
-        aux.update(
-            {
-                # Mean absolute error
-                'mae_f': tools.compute_mae(delta_fs),
-                'rel_mae_f': tools.compute_rel_mae(delta_fs, fs),
-                # Root-mean-square error
-                'rmse_f': tools.compute_rmse(delta_fs),
-                'rel_rmse_f': tools.compute_rel_rmse(delta_fs, fs),
-                # Q_95
-                'q95_f': tools.compute_q95(delta_fs),
-            }
-        )
+        aux.update({
+            # Mean absolute error
+            'mae_f': tools.compute_mae(delta_fs),
+            'rel_mae_f': tools.compute_rel_mae(delta_fs, fs),
+            # Root-mean-square error
+            'rmse_f': tools.compute_rmse(delta_fs),
+            'rel_rmse_f': tools.compute_rel_rmse(delta_fs, fs),
+            # Q_95
+            'q95_f': tools.compute_q95(delta_fs),
+        })
     if len(delta_stress_list) > 0:
         delta_stress = np.concatenate(delta_stress_list, axis=0)
         stress = np.concatenate(stress_list, axis=0)
-        aux.update(
-            {
-                # Mean absolute error
-                'mae_s': tools.compute_mae(delta_stress),
-                'rel_mae_s': tools.compute_rel_mae(delta_stress, stress),
-                # Root-mean-square error
-                'rmse_s': tools.compute_rmse(delta_stress),
-                'rel_rmse_s': tools.compute_rel_rmse(delta_stress, stress),
-                # Q_95
-                'q95_s': tools.compute_q95(delta_stress),
-            }
-        )
+        aux.update({
+            # Mean absolute error
+            'mae_s': tools.compute_mae(delta_stress),
+            'rel_mae_s': tools.compute_rel_mae(delta_stress, stress),
+            # Root-mean-square error
+            'rmse_s': tools.compute_rmse(delta_stress),
+            'rel_rmse_s': tools.compute_rel_rmse(delta_stress, stress),
+            # Q_95
+            'q95_s': tools.compute_q95(delta_stress),
+        })
 
     return avg_loss, aux

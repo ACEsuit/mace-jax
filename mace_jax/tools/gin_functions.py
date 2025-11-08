@@ -260,6 +260,8 @@ def train(
     eval_train: bool = False,
     eval_test: bool = False,
     log_errors: str = 'PerAtomRMSE',
+    ema_decay: Optional[float] = None,
+    max_grad_norm: Optional[float] = None,
     wandb_run=None,
     **kwargs,
 ):
@@ -277,6 +279,8 @@ def train(
         gradient_transform=gradient_transform,
         optimizer_state=optimizer_state,
         steps_per_interval=steps_per_interval,
+        ema_decay=ema_decay,
+        max_grad_norm=max_grad_norm,
         **kwargs,
     ):
         total_time_per_interval += [time.perf_counter() - start_time]

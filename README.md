@@ -92,6 +92,19 @@ mace-jax-train configs/finetune.gin \
   Once the requested number of snapshots has been accumulated, evaluations use
   the SWA parameters while the raw/EMA weights continue to be optimised.
 
+- **Gradient clipping & EMA** can be enabled through the gin bindings
+  `mace_jax.tools.gin_functions.train.max_grad_norm` and
+  `mace_jax.tools.gin_functions.train.ema_decay`. For example:
+
+  ```gin
+  mace_jax.tools.gin_functions.train.max_grad_norm = 1.0
+  mace_jax.tools.gin_functions.train.ema_decay = 0.999
+  ```
+
+  This applies a global-norm clip to every update and evaluates checkpoints
+  using the smoothed EMA weights (with the same warm-up schedule as the Torch
+  trainer).
+
 #### `mace-jax-train-plot`
 
 Produces loss/metric curves from `.metrics` logs generated during training:
