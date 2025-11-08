@@ -712,51 +712,62 @@ def train(
                         return float(np.asarray(value))
                     return None
 
-                if log_errors == 'PerAtomRMSE':
-                    error_e = 'rmse_e_per_atom'
-                    error_f = 'rmse_f'
-                    error_s = 'rmse_s'
-                elif log_errors == 'rel_PerAtomRMSE':
-                    error_e = 'rmse_e_per_atom'
-                    error_f = 'rel_rmse_f'
-                    error_s = 'rel_rmse_s'
-                elif log_errors == 'TotalRMSE':
-                    error_e = 'rmse_e'
-                    error_f = 'rmse_f'
-                    error_s = 'rmse_s'
-                elif log_errors == 'PerAtomMAE':
-                    error_e = 'mae_e_per_atom'
-                    error_f = 'mae_f'
-                    error_s = 'mae_s'
-                elif log_errors == 'rel_PerAtomMAE':
-                    error_e = 'mae_e_per_atom'
-                    error_f = 'rel_mae_f'
-                    error_s = 'rel_mae_s'
-                elif log_errors == 'TotalMAE':
-                    error_e = 'mae_e'
-                    error_f = 'mae_f'
-                    error_s = 'mae_s'
+                stress_rmse_key = (
+                    'rmse_stress'
+                    if metrics_.get('rmse_stress') is not None
+                    else 'rmse_virials_per_atom'
+                )
+                stress_mae_key = (
+                    'mae_stress'
+                    if metrics_.get('mae_stress') is not None
+                    else 'mae_virials'
+                )
+                log_selection = {
+                    'PerAtomRMSE': ['rmse_e_per_atom', 'rmse_f', stress_rmse_key],
+                    'rel_PerAtomRMSE': ['rmse_e_per_atom', 'rel_rmse_f', 'rel_rmse_stress'],
+                    'TotalRMSE': ['rmse_e', 'rmse_f', stress_rmse_key],
+                    'PerAtomMAE': ['mae_e_per_atom', 'mae_f', stress_mae_key],
+                    'rel_PerAtomMAE': ['mae_e_per_atom', 'rel_mae_f', 'rel_mae_stress'],
+                    'TotalMAE': ['mae_e', 'mae_f', stress_mae_key],
+                    'PerAtomRMSEstressvirials': ['rmse_e_per_atom', 'rmse_f', stress_rmse_key],
+                    'PerAtomMAEstressvirials': ['mae_e_per_atom', 'mae_f', stress_mae_key],
+                    'DipoleRMSE': ['rmse_mu_per_atom'],
+                    'DipolePolarRMSE': ['rmse_mu_per_atom', 'rmse_polarizability_per_atom'],
+                    'EnergyDipoleRMSE': ['rmse_e_per_atom', 'rmse_f', 'rmse_mu_per_atom'],
+                }
+                selected_metrics = log_selection.get(
+                    log_errors or 'PerAtomRMSE',
+                    log_selection['PerAtomRMSE'],
+                )
 
-                def _(x: str):
-                    v: float = metrics_.get(x, None)
+                def _(key: str | None):
+                    if not key:
+                        return 'N/A'
+                    v = metrics_.get(key, None)
                     if v is None:
                         return 'N/A'
-                    if x.startswith('rel_'):
+                    if key.startswith('rel_'):
                         return f'{100 * v:.1f}%'
-                    if '_e' in x:
-                        return f'{1e3 * v:.1f} meV'
-                    if '_f' in x:
-                        return f'{1e3 * v:.1f} meV/Å'
-                    if '_s' in x:
+                    lower_key = key.lower()
+                    if 'mu' in lower_key:
+                        return f'{1e3 * v:.1f} mDebye'
+                    if 'polarizability' in lower_key:
+                        return f'{1e3 * v:.1f} me Å^2 / V'
+                    if 'virials' in lower_key or 'stress' in lower_key or lower_key.endswith('_s'):
                         return f'{1e3 * v:.1f} meV/Å³'
-                    raise NotImplementedError
+                    if lower_key.endswith('_f'):
+                        return f'{1e3 * v:.1f} meV/Å'
+                    if '_e' in key:
+                        return f'{1e3 * v:.1f} meV'
+                    return f'{v:.4e}'
 
+                metrics_blob = ', '.join(
+                    f'{metric}={_(metric)}' for metric in selected_metrics
+                )
                 _log_info(
                     f'Epoch {epoch}: {eval_mode}: '
-                    f'loss={loss_:.4f}, '
-                    f'{error_e}={_(error_e)}, '
-                    f'{error_f}={_(error_f)}, '
-                    f'{error_s}={_(error_s)}'
+                    f'loss={loss_:.4f}'
+                    + (f', {metrics_blob}' if metrics_blob else '')
                 )
                 if wandb_run is not None and is_primary:
                     wandb_mode = eval_mode

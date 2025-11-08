@@ -37,6 +37,9 @@ class Configuration:
     energy: float | None = None  # eV
     forces: Forces | None = None  # eV/Angstrom
     stress: Stress | None = None  # eV/Angstrom^3
+    virials: Stress | None = None  # eV
+    dipole: np.ndarray | None = None  # eÅ
+    polarizability: np.ndarray | None = None  # eÅ²/V
     cell: Cell | None = None
     pbc: Pbc | None = None
 
@@ -422,6 +425,9 @@ class GraphGlobals(NamedTuple):
     stress: np.ndarray | None
     weight: np.ndarray
     head: np.ndarray | None = None
+    virials: np.ndarray | None = None
+    dipole: np.ndarray | None = None
+    polarizability: np.ndarray | None = None
 
 
 def graph_from_configuration(
@@ -469,13 +475,16 @@ def graph_from_configuration(
         ),
         edges=GraphEdges(shifts=shifts, unit_shifts=unit_shifts),
         globals=jax.tree_util.tree_map(
-            lambda x: x[None, ...],
+            lambda x: x[None, ...] if x is not None else None,
             GraphGlobals(
                 cell=cell,
                 energy=config.energy,
                 stress=config.stress,
                 weight=np.asarray(config.weight),
                 head=head_array,
+                virials=config.virials,
+                dipole=config.dipole,
+                polarizability=config.polarizability,
             ),
         ),
         receivers=receivers,

@@ -267,6 +267,14 @@ def evaluate(
 
     delta_stress_list = []
     stress_list = []
+    delta_virials_list = []
+    delta_virials_per_atom_list = []
+    virials_list = []
+    delta_dipoles_list = []
+    delta_dipoles_per_atom_list = []
+    dipoles_list = []
+    delta_polar_list = []
+    delta_polar_per_atom_list = []
 
     if hasattr(predictor, '_cache_size'):
         last_cache_size = predictor._cache_size()
@@ -284,12 +292,13 @@ def evaluate(
 
     for ref_graph in p_bar:
         output = predictor(params, ref_graph)
-        pred_graph = ref_graph._replace(
-            nodes=ref_graph.nodes._replace(forces=output['forces']),
-            globals=ref_graph.globals._replace(
-                energy=output['energy'], stress=output['stress']
-            ),
-        )
+        nodes = ref_graph.nodes._replace(forces=output.get('forces'))
+        globals_updates = {}
+        for key in ('energy', 'stress', 'virials', 'dipole', 'polarizability'):
+            if key in output and output[key] is not None:
+                globals_updates[key] = output[key]
+        globals_attr = ref_graph.globals._replace(**globals_updates) if globals_updates else ref_graph.globals
+        pred_graph = ref_graph._replace(nodes=nodes, globals=globals_attr)
 
         if last_cache_size is not None and last_cache_size != predictor._cache_size():
             last_cache_size = predictor._cache_size()
@@ -302,16 +311,22 @@ def evaluate(
         ref_graph = jraph.unpad_with_graphs(ref_graph)
         pred_graph = jraph.unpad_with_graphs(pred_graph)
 
-        loss = jnp.sum(
-            loss_fn(
-                ref_graph,
-                dict(
-                    energy=pred_graph.globals.energy,
-                    forces=pred_graph.nodes.forces,
-                    stress=pred_graph.globals.stress,
-                ),
-            )
-        )
+        pred_outputs = {
+            'energy': pred_graph.globals.energy,
+            'forces': pred_graph.nodes.forces,
+            'stress': pred_graph.globals.stress,
+        }
+        virials_value = getattr(pred_graph.globals, 'virials', None)
+        if virials_value is not None:
+            pred_outputs['virials'] = virials_value
+        dipole_value = getattr(pred_graph.globals, 'dipole', None)
+        if dipole_value is not None:
+            pred_outputs['dipole'] = dipole_value
+        polar_value = getattr(pred_graph.globals, 'polarizability', None)
+        if polar_value is not None:
+            pred_outputs['polarizability'] = polar_value
+
+        loss = jnp.sum(loss_fn(ref_graph, pred_outputs))
         total_loss += float(loss)
         num_graphs += len(ref_graph.n_edge)
         p_bar.set_postfix({'n': num_graphs})
@@ -335,6 +350,40 @@ def evaluate(
                 ref_graph.globals.stress - pred_graph.globals.stress
             )
             stress_list.append(ref_graph.globals.stress)
+
+        if (
+            hasattr(ref_graph.globals, 'virials')
+            and ref_graph.globals.virials is not None
+            and pred_graph.globals.virials is not None
+        ):
+            delta_virials = ref_graph.globals.virials - pred_graph.globals.virials
+            virials_list.append(ref_graph.globals.virials)
+            atom_counts = jnp.maximum(ref_graph.n_node, 1)[:, None, None]
+            delta_virials_list.append(delta_virials)
+            delta_virials_per_atom_list.append(delta_virials / atom_counts)
+
+        if (
+            hasattr(ref_graph.globals, 'dipole')
+            and ref_graph.globals.dipole is not None
+            and pred_graph.globals.dipole is not None
+        ):
+            delta_mus = ref_graph.globals.dipole - pred_graph.globals.dipole
+            dipoles_list.append(ref_graph.globals.dipole)
+            atom_counts = jnp.maximum(ref_graph.n_node, 1)[:, None]
+            delta_dipoles_list.append(delta_mus)
+            delta_dipoles_per_atom_list.append(delta_mus / atom_counts)
+
+        if (
+            hasattr(ref_graph.globals, 'polarizability')
+            and ref_graph.globals.polarizability is not None
+            and pred_graph.globals.polarizability is not None
+        ):
+            delta_polar = (
+                ref_graph.globals.polarizability - pred_graph.globals.polarizability
+            )
+            atom_counts = jnp.maximum(ref_graph.n_node, 1)[:, None, None]
+            delta_polar_list.append(delta_polar)
+            delta_polar_per_atom_list.append(delta_polar / atom_counts)
 
     if num_graphs == 0:
         logging.warning(f'No graphs in data_loader ! Returning 0.0 for {name}')
@@ -364,6 +413,27 @@ def evaluate(
         'rmse_s': None,
         'rel_rmse_s': None,
         'q95_s': None,
+        'mae_stress': None,
+        'rel_mae_stress': None,
+        'rmse_stress': None,
+        'rel_rmse_stress': None,
+        'q95_stress': None,
+        'mae_virials': None,
+        'rmse_virials': None,
+        'rmse_virials_per_atom': None,
+        'q95_virials': None,
+        'mae_mu': None,
+        'mae_mu_per_atom': None,
+        'rel_mae_mu': None,
+        'rmse_mu': None,
+        'rmse_mu_per_atom': None,
+        'rel_rmse_mu': None,
+        'q95_mu': None,
+        'mae_polarizability': None,
+        'mae_polarizability_per_atom': None,
+        'rmse_polarizability': None,
+        'rmse_polarizability_per_atom': None,
+        'q95_polarizability': None,
     }
 
     if len(delta_es_list) > 0:
@@ -412,6 +482,48 @@ def evaluate(
             'rel_rmse_s': tools.compute_rel_rmse(delta_stress, stress),
             # Q_95
             'q95_s': tools.compute_q95(delta_stress),
+        })
+    aux['mae_stress'] = aux['mae_s']
+    aux['rel_mae_stress'] = aux['rel_mae_s']
+    aux['rmse_stress'] = aux['rmse_s']
+    aux['rel_rmse_stress'] = aux['rel_rmse_s']
+    aux['q95_stress'] = aux['q95_s']
+
+    if len(delta_virials_list) > 0:
+        delta_virials = np.concatenate(delta_virials_list, axis=0)
+        delta_virials_per_atom = np.concatenate(delta_virials_per_atom_list, axis=0)
+        aux.update({
+            'mae_virials': tools.compute_mae(delta_virials),
+            'rmse_virials': tools.compute_rmse(delta_virials),
+            'rmse_virials_per_atom': tools.compute_rmse(delta_virials_per_atom),
+            'q95_virials': tools.compute_q95(delta_virials),
+        })
+
+    if len(delta_dipoles_list) > 0:
+        delta_mus = np.concatenate(delta_dipoles_list, axis=0)
+        delta_mus_per_atom = np.concatenate(delta_dipoles_per_atom_list, axis=0)
+        mus = np.concatenate(dipoles_list, axis=0)
+        aux.update({
+            'mae_mu': tools.compute_mae(delta_mus),
+            'mae_mu_per_atom': tools.compute_mae(delta_mus_per_atom),
+            'rel_mae_mu': tools.compute_rel_mae(delta_mus, mus),
+            'rmse_mu': tools.compute_rmse(delta_mus),
+            'rmse_mu_per_atom': tools.compute_rmse(delta_mus_per_atom),
+            'rel_rmse_mu': tools.compute_rel_rmse(delta_mus, mus),
+            'q95_mu': tools.compute_q95(delta_mus),
+        })
+
+    if len(delta_polar_list) > 0:
+        delta_polar = np.concatenate(delta_polar_list, axis=0)
+        delta_polar_per_atom = np.concatenate(delta_polar_per_atom_list, axis=0)
+        aux.update({
+            'mae_polarizability': tools.compute_mae(delta_polar),
+            'mae_polarizability_per_atom': tools.compute_mae(delta_polar_per_atom),
+            'rmse_polarizability': tools.compute_rmse(delta_polar),
+            'rmse_polarizability_per_atom': tools.compute_rmse(
+                delta_polar_per_atom
+            ),
+            'q95_polarizability': tools.compute_q95(delta_polar),
         })
 
     return avg_loss, aux
