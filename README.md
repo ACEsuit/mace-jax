@@ -83,6 +83,11 @@ mace-jax-train configs/finetune.gin \
   (`adam`, `amsgrad`, `sgd`), `--lr`, `--weight-decay`, `--scheduler`
   (`constant`, `exponential`, `piecewise_constant`), and `--lr_scheduler_gamma`.
   These bind directly into the gin optimizer helper, mirroring the Torch CLI.
+- **Foundation models** can be pulled directly via the same interface as Torch
+  MACE. Use `--foundation_model small` (or `medium`, `large`, `small_off`, …) to
+  download and initialize from the released checkpoints, or pass a custom path.
+  The CLI adjusts the cutoff, learning-rate defaults, and multihead finetuning
+  knobs just like `mace run_train`.
 
 #### `mace-jax-train-plot`
 

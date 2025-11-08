@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import argparse
 import ast
+import atexit
 import json
 import logging
+import shutil
 import sys
+import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 
 import gin
 import jax
 import optax
+import torch
 
 import mace_jax
 from mace_jax import tools
@@ -29,6 +33,17 @@ _SCHEDULERS = {
     'exponential': gin_functions.exponential_decay,
     'piecewise_constant': gin_functions.piecewise_constant_schedule,
 }
+
+_FOUNDATION_TEMP_DIRS: list[Path] = []
+
+
+def _cleanup_foundation_artifacts() -> None:
+    while _FOUNDATION_TEMP_DIRS:
+        path = _FOUNDATION_TEMP_DIRS.pop()
+        shutil.rmtree(path, ignore_errors=True)
+
+
+atexit.register(_cleanup_foundation_artifacts)
 
 
 def parse_args(
@@ -59,6 +74,7 @@ def apply_cli_overrides(args: argparse.Namespace) -> None:
     _apply_swa_options(args)
     _apply_wandb_options(args)
     _apply_optimizer_options(args)
+    _prepare_foundation_checkpoint(args)
     if args.torch_checkpoint:
         gin.bind_parameter(
             'mace_jax.tools.gin_model.model.torch_checkpoint',
@@ -312,6 +328,57 @@ def _apply_optimizer_options(args: argparse.Namespace) -> None:
             'mace_jax.tools.gin_functions.exponential_decay.decay_rate',
             args.lr_scheduler_gamma,
         )
+
+
+def _load_foundation_model(name: str, *, default_dtype: str | None = None):
+    from mace.calculators import foundations_models
+    from mace.calculators.foundations_models import mace_mp_names
+
+    name = name.lower()
+    dtype = default_dtype or 'float32'
+    mp_names = {m for m in mace_mp_names if m}
+    if name in mp_names:
+        calc = foundations_models.mace_mp(
+            model=name,
+            device='cpu',
+            default_dtype=dtype,
+        )
+        return calc.models[0]
+    if name in {'small_off', 'medium_off', 'large_off'}:
+        model_type = name.split('_')[0]
+        calc = foundations_models.mace_off(
+            model=model_type,
+            device='cpu',
+            default_dtype=dtype,
+        )
+        return calc.models[0]
+    raise ValueError(
+        f"Unknown foundation_model '{name}'. Provide a valid mace-mp/mace-off name or a checkpoint path."
+    )
+
+
+def _prepare_foundation_checkpoint(args: argparse.Namespace) -> None:
+    foundation_spec = getattr(args, 'foundation_model', None)
+    if not foundation_spec:
+        return
+    if args.torch_checkpoint:
+        raise ValueError('Specify either --torch-checkpoint or --foundation-model, not both.')
+    candidate = Path(foundation_spec)
+    if candidate.exists():
+        args.torch_checkpoint = str(candidate)
+    else:
+        torch_model = _load_foundation_model(
+            foundation_spec, default_dtype=args.dtype
+        )
+        tmp_dir = Path(tempfile.mkdtemp(prefix='mace_jax_foundation_'))
+        checkpoint_path = tmp_dir / f'{foundation_spec}.pt'
+        torch.save({'model': torch_model}, checkpoint_path)
+        _FOUNDATION_TEMP_DIRS.append(tmp_dir)
+        args.torch_checkpoint = str(checkpoint_path)
+        if args.r_max is None and hasattr(torch_model, 'r_max'):
+            args.r_max = float(torch_model.r_max.item())
+    if args.foundation_head and not args.torch_head:
+        args.torch_head = args.foundation_head
 
 
 def run_training(dry_run: bool = False) -> None:

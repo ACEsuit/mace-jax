@@ -338,4 +338,16 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help='Directory used by Weights & Biases for run data.',
     )
+    parser.add_argument(
+        '--foundation-model',
+        '--foundation_model',
+        help='Name or path of a Torch foundation model checkpoint to import.',
+        default=None,
+    )
+    parser.add_argument(
+        '--foundation-head',
+        '--foundation_head',
+        help='Optional head to select from the foundation model.',
+        default=None,
+    )
     return parser
