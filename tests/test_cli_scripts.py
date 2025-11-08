@@ -137,6 +137,42 @@ def test_cli_heads_literal_sets_configs():
     gin.clear_config()
 
 
+def test_cli_pt_head_from_cli(tmp_path):
+    gin.clear_config()
+    pt_file = tmp_path / 'pt.xyz'
+    pt_file.write_text('', encoding='utf-8')
+    args, _ = train_cli.parse_args(
+        [
+            '--pt_train_file',
+            str(pt_file),
+        ]
+    )
+    train_cli.apply_cli_overrides(args)
+    head_cfgs = gin.query_parameter('mace_jax.tools.gin_datasets.datasets.head_configs')
+    assert 'pt_head' in head_cfgs
+    assert head_cfgs['pt_head']['train_path'] == [str(pt_file)]
+    assert 'pt_head' in gin.query_parameter('mace_jax.tools.gin_model.model.heads')
+    gin.clear_config()
+
+
+def test_cli_pt_head_respects_heads_list(tmp_path):
+    gin.clear_config()
+    pt_file = tmp_path / 'pt.xyz'
+    pt_file.write_text('', encoding='utf-8')
+    args, _ = train_cli.parse_args(
+        [
+            '--heads',
+            'Default',
+            '--pt_train_file',
+            str(pt_file),
+        ]
+    )
+    train_cli.apply_cli_overrides(args)
+    heads = gin.query_parameter('mace_jax.tools.gin_model.model.heads')
+    assert heads == ('Default', 'pt_head')
+    gin.clear_config()
+
+
 def test_cli_foundation_model_helper(tmp_path, monkeypatch):
     gin.clear_config()
 

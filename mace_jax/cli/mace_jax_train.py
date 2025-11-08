@@ -105,6 +105,7 @@ def apply_cli_overrides(args: argparse.Namespace) -> None:
                 'Specify either --head-config or --heads-config, not both.'
             )
         head_configs_data = inline_configs
+    head_configs_data = _inject_pt_head_config(head_configs_data, args)
     if head_configs_data:
         gin.bind_parameter(
             'mace_jax.tools.gin_datasets.datasets.head_configs', head_configs_data
@@ -112,14 +113,15 @@ def apply_cli_overrides(args: argparse.Namespace) -> None:
 
     heads_list = None
     if head_configs_data:
-        heads_list = list(head_configs_data.keys())
+        configs_keys = list(head_configs_data.keys())
         if getattr(args, 'heads', None):
             explicit = list(args.heads)
-            if set(explicit) != set(heads_list):
-                raise ValueError(
-                    '--heads must match the keys defined in --head-config/--heads-config.'
-                )
+            for key in configs_keys:
+                if key not in explicit:
+                    explicit.append(key)
             heads_list = explicit
+        else:
+            heads_list = configs_keys
     elif getattr(args, 'heads', None):
         heads_list = list(args.heads)
 
@@ -154,6 +156,38 @@ def _load_head_configs(path: Path) -> dict[str, dict]:
             )
         normalized[str(head_name)] = cfg
     return normalized
+
+
+def _inject_pt_head_config(
+    head_configs: dict[str, dict] | None, args: argparse.Namespace
+) -> dict[str, dict] | None:
+    train_files = getattr(args, 'pt_train_file', None)
+    valid_files = getattr(args, 'pt_valid_file', None)
+    if not train_files and not valid_files:
+        return head_configs
+
+    def _list_paths(items):
+        if not items:
+            return None
+        return [str(Path(p)) for p in items]
+
+    configs = dict(head_configs) if head_configs else {}
+    head_name = getattr(args, 'pt_head_name', 'pt_head') or 'pt_head'
+    entry = dict(configs.get(head_name, {}))
+
+    normalized_train = _list_paths(train_files)
+    normalized_valid = _list_paths(valid_files)
+
+    if normalized_train:
+        entry['train_path'] = normalized_train
+    if normalized_valid:
+        entry['valid_path'] = normalized_valid
+
+    if not entry:
+        raise ValueError('At least one of --pt_train_file/--pt_valid_file must be provided.')
+
+    configs[head_name] = entry
+    return configs
 
 
 def _parse_heads_literal(literal: str) -> dict[str, dict]:

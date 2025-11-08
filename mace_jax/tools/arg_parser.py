@@ -181,6 +181,23 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
         default=None,
     )
     parser.add_argument(
+        '--pt_train_file',
+        action='append',
+        help='Additional training file(s) for the pt_head used during multihead finetuning.',
+        default=None,
+    )
+    parser.add_argument(
+        '--pt_valid_file',
+        action='append',
+        help='Validation file(s) for the pt_head.',
+        default=None,
+    )
+    parser.add_argument(
+        '--pt_head_name',
+        help='Name of the pretraining head when using --pt_train_file/--pt_valid_file.',
+        default='pt_head',
+    )
+    parser.add_argument(
         '--head-config',
         help=(
             'Path to a JSON (or YAML if PyYAML is installed) file describing per-head '
