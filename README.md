@@ -88,6 +88,10 @@ mace-jax-train configs/finetune.gin \
   download and initialize from the released checkpoints, or pass a custom path.
   The CLI adjusts the cutoff, learning-rate defaults, and multihead finetuning
   knobs just like `mace run_train`.
+- **Multihead finetuning** mirrors the Torch defaults via `--multiheads_finetuning`
+  (optionally with `--force_mh_ft_lr`): learning rate/EMA defaults are adjusted
+  automatically when combined with `--foundation_model`, so migrating scripts
+  can keep the same behaviour.
 
 #### `mace-jax-train-plot`
 

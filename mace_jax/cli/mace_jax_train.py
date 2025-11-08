@@ -69,12 +69,13 @@ def configure_gin(args: argparse.Namespace, remaining: list[str]) -> None:
 def apply_cli_overrides(args: argparse.Namespace) -> None:
     """Bind gin parameters based on CLI overrides."""
     _apply_run_options(args)
+    _prepare_foundation_checkpoint(args)
     _apply_dataset_options(args)
-    _apply_training_controls(args)
     _apply_swa_options(args)
     _apply_wandb_options(args)
+    _maybe_adjust_multihead_defaults(args)
+    _apply_training_controls(args)
     _apply_optimizer_options(args)
-    _prepare_foundation_checkpoint(args)
     if args.torch_checkpoint:
         gin.bind_parameter(
             'mace_jax.tools.gin_model.model.torch_checkpoint',
@@ -224,6 +225,8 @@ def _apply_dataset_options(args: argparse.Namespace) -> None:
     )
     _bind_if_not_none('mace_jax.tools.gin_datasets.datasets.valid_num', args.valid_num)
     _bind_if_not_none('mace_jax.tools.gin_datasets.datasets.test_num', args.test_num)
+    _bind_if_not_none('mace_jax.tools.gin_datasets.datasets.energy_key', args.energy_key)
+    _bind_if_not_none('mace_jax.tools.gin_datasets.datasets.forces_key', args.forces_key)
 
 
 def _apply_training_controls(args: argparse.Namespace) -> None:
@@ -357,6 +360,27 @@ def _load_foundation_model(name: str, *, default_dtype: str | None = None):
     )
 
 
+def _maybe_adjust_multihead_defaults(args: argparse.Namespace) -> None:
+    if getattr(args, '_multihead_adjusted', False):
+        return
+    if not getattr(args, 'multiheads_finetuning', False):
+        return
+    if getattr(args, 'force_mh_ft_lr', False):
+        return
+    if args.lr is None:
+        args.lr = 1e-4
+        logging.info(
+            'Multihead finetuning: setting learning rate to 1e-4 (use --force_mh_ft_lr to override).'
+        )
+    if not getattr(args, 'ema', False):
+        args.ema = True
+        logging.info('Multihead finetuning: enabling EMA.')
+    if args.ema_decay is None:
+        args.ema_decay = 0.99999
+        logging.info('Multihead finetuning: setting EMA decay to 0.99999.')
+    args._multihead_adjusted = True
+
+
 def _prepare_foundation_checkpoint(args: argparse.Namespace) -> None:
     foundation_spec = getattr(args, 'foundation_model', None)
     if not foundation_spec:
@@ -379,6 +403,7 @@ def _prepare_foundation_checkpoint(args: argparse.Namespace) -> None:
             args.r_max = float(torch_model.r_max.item())
     if args.foundation_head and not args.torch_head:
         args.torch_head = args.foundation_head
+    _maybe_adjust_multihead_defaults(args)
 
 
 def run_training(dry_run: bool = False) -> None:

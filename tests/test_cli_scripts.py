@@ -178,6 +178,62 @@ def test_cli_foundation_conflict(tmp_path):
     gin.clear_config()
 
 
+def test_cli_multiheads_adjusts_defaults(monkeypatch):
+    gin.clear_config()
+    monkeypatch.setattr(
+        train_cli,
+        '_load_foundation_model',
+        lambda *_, **__: _DummyTorchModel(),
+    )
+    args, _ = train_cli.parse_args([
+        '--foundation_model',
+        'small',
+        '--multiheads_finetuning',
+    ])
+    train_cli.apply_cli_overrides(args)
+    assert gin.query_parameter('mace_jax.tools.gin_functions.optimizer.lr') == 1e-4
+    assert (
+        gin.query_parameter('mace_jax.tools.gin_functions.train.ema_decay') == 0.99999
+    )
+    gin.clear_config()
+
+
+def test_cli_multiheads_force_override(monkeypatch):
+    gin.clear_config()
+    monkeypatch.setattr(
+        train_cli,
+        '_load_foundation_model',
+        lambda *_, **__: _DummyTorchModel(),
+    )
+    args, _ = train_cli.parse_args([
+        '--foundation_model',
+        'small',
+        '--multiheads_finetuning',
+        '--force_mh_ft_lr',
+        '--lr',
+        '0.005',
+        '--ema-decay',
+        '0.9',
+    ])
+    train_cli.apply_cli_overrides(args)
+    assert gin.query_parameter('mace_jax.tools.gin_functions.optimizer.lr') == 0.005
+    assert gin.query_parameter('mace_jax.tools.gin_functions.train.ema_decay') == 0.9
+    gin.clear_config()
+
+
+def test_cli_multiheads_without_foundation():
+    gin.clear_config()
+    args, _ = train_cli.parse_args([
+        '--multiheads_finetuning',
+    ])
+    train_cli.apply_cli_overrides(args)
+    assert gin.query_parameter('mace_jax.tools.gin_functions.optimizer.lr') == 1e-4
+    assert (
+        gin.query_parameter('mace_jax.tools.gin_functions.train.ema_decay') == 0.99999
+    )
+    gin.clear_config()
+
+
 def test_cli_sets_runtime_and_training_controls(tmp_path):
     gin.clear_config()
     train_xyz = Path(__file__).resolve().parent / 'test_data' / 'simple.xyz'
@@ -195,6 +251,10 @@ def test_cli_sets_runtime_and_training_controls(tmp_path):
         str(train_xyz),
         '--valid_file',
         'None',
+        '--energy_key',
+        'E',
+        '--forces_key',
+        'F',
         '--clip_grad',
         '0.5',
         '--ema',
@@ -236,6 +296,8 @@ def test_cli_sets_runtime_and_training_controls(tmp_path):
     assert (
         gin.query_parameter('mace_jax.tools.gin_datasets.datasets.valid_path') is None
     )
+    assert gin.query_parameter('mace_jax.tools.gin_datasets.datasets.energy_key') == 'E'
+    assert gin.query_parameter('mace_jax.tools.gin_datasets.datasets.forces_key') == 'F'
     assert (
         gin.query_parameter('mace_jax.tools.gin_functions.train.max_grad_norm') == 0.5
     )

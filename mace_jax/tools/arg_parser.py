@@ -140,6 +140,20 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
         help='Number of configs sampled for the test set.',
     )
     parser.add_argument(
+        '--energy-key',
+        '--energy_key',
+        type=str,
+        default=None,
+        help='Key used to read energies from datasets.',
+    )
+    parser.add_argument(
+        '--forces-key',
+        '--forces_key',
+        type=str,
+        default=None,
+        help='Key used to read forces from datasets.',
+    )
+    parser.add_argument(
         '--r-max',
         type=float,
         help=(
@@ -281,6 +295,16 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
         action='store_const',
         const=False,
         help='Disable automatic preference for SWA params.',
+    )
+    parser.add_argument(
+        '--multiheads_finetuning',
+        action='store_true',
+        help='Enable multihead finetuning defaults when using foundation models.',
+    )
+    parser.add_argument(
+        '--force_mh_ft_lr',
+        action='store_true',
+        help='Prevent automatic learning-rate/EMA overrides during multihead finetuning.',
     )
     parser.add_argument(
         '--wandb',
