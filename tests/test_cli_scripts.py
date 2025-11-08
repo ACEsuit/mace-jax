@@ -115,6 +115,28 @@ def test_cli_head_overrides_bindings(tmp_path):
     gin.clear_config()
 
 
+def test_cli_heads_literal_sets_configs():
+    gin.clear_config()
+    head_literal = "{'Default': {'train_path': 'a.xyz'}, 'Surface': {'train_path': 'b.xyz'}}"
+    args, _ = train_cli.parse_args(
+        [
+            '--heads_config',
+            head_literal,
+        ]
+    )
+    train_cli.apply_cli_overrides(args)
+
+    assert gin.query_parameter('mace_jax.tools.gin_model.model.heads') == (
+        'Default',
+        'Surface',
+    )
+    assert gin.query_parameter('mace_jax.tools.gin_datasets.datasets.head_configs') == {
+        'Default': {'train_path': 'a.xyz'},
+        'Surface': {'train_path': 'b.xyz'},
+    }
+    gin.clear_config()
+
+
 def test_cli_sets_runtime_and_training_controls(tmp_path):
     gin.clear_config()
     train_xyz = Path(__file__).resolve().parent / 'test_data' / 'simple.xyz'

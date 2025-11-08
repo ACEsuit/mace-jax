@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import logging
 import sys
@@ -80,15 +81,30 @@ def apply_cli_overrides(args: argparse.Namespace) -> None:
     head_configs_data = None
     if getattr(args, 'head_config', None):
         head_configs_data = _load_head_configs(Path(args.head_config))
+    if getattr(args, 'heads_config', None):
+        inline_configs = _parse_heads_literal(args.heads_config)
+        if head_configs_data:
+            raise ValueError(
+                'Specify either --head-config or --heads-config, not both.'
+            )
+        head_configs_data = inline_configs
+    if head_configs_data:
         gin.bind_parameter(
             'mace_jax.tools.gin_datasets.datasets.head_configs', head_configs_data
         )
 
     heads_list = None
-    if getattr(args, 'heads', None):
-        heads_list = list(args.heads)
-    elif head_configs_data:
+    if head_configs_data:
         heads_list = list(head_configs_data.keys())
+        if getattr(args, 'heads', None):
+            explicit = list(args.heads)
+            if set(explicit) != set(heads_list):
+                raise ValueError(
+                    '--heads must match the keys defined in --head-config/--heads-config.'
+                )
+            heads_list = explicit
+    elif getattr(args, 'heads', None):
+        heads_list = list(args.heads)
 
     if heads_list:
         gin.bind_parameter(
@@ -120,6 +136,25 @@ def _load_head_configs(path: Path) -> dict[str, dict]:
                 f'Head configuration for {head_name!r} must be a mapping, got {type(cfg)}.'
             )
         normalized[str(head_name)] = cfg
+    return normalized
+
+
+def _parse_heads_literal(literal: str) -> dict[str, dict]:
+    try:
+        data = ast.literal_eval(literal)
+    except (ValueError, SyntaxError) as exc:
+        raise ValueError(
+            f'--heads expects a Python/JSON dictionary string, got {literal!r}.'
+        ) from exc
+    if not isinstance(data, dict):
+        raise ValueError('--heads must evaluate to a dictionary mapping head names.')
+    normalized = {}
+    for key, value in data.items():
+        if not isinstance(value, dict):
+            raise ValueError(
+                f'Head definition for {key!r} must be a dict, got {type(value)}.'
+            )
+        normalized[str(key)] = value
     return normalized
 
 

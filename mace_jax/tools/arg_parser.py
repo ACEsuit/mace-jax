@@ -158,6 +158,15 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        '--heads-config',
+        '--heads_config',
+        help=(
+            'Dictionary describing head-specific datasets (same syntax as the Torch CLI). '
+            'Example: --heads-config "{\'Default\':{\'train_path\':\'data.xyz\'}, \'Surface\':{...}}"'
+        ),
+        default=None,
+    )
+    parser.add_argument(
         '--head-config',
         help=(
             'Path to a JSON (or YAML if PyYAML is installed) file describing per-head '
