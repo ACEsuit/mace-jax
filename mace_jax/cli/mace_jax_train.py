@@ -217,66 +217,99 @@ def run_training(dry_run: bool = False) -> None:
     directory, tag, logger = gin_functions.logs()
 
     Path(directory).mkdir(parents=True, exist_ok=True)
+    operative_config = gin.operative_config_str()
     with open(Path(directory) / f'{tag}.gin', 'w', encoding='utf-8') as f:
-        f.write(gin.operative_config_str())
+        f.write(operative_config)
 
     logging.info('MACE-JAX version: %s', mace_jax.__version__)
 
-    if dry_run:
-        logging.info('Dry-run requested; skipping dataset construction and training.')
-        return
+    wandb_run = None
+    try:
+        if dry_run:
+            logging.info('Dry-run requested; skipping dataset construction and training.')
+            return
 
-    (
-        train_loader,
-        valid_loader,
-        test_loader,
-        atomic_energies_dict,
-        r_max,
-    ) = gin_datasets.datasets()
+        (
+            train_loader,
+            valid_loader,
+            test_loader,
+            atomic_energies_dict,
+            r_max,
+        ) = gin_datasets.datasets()
 
-    model_fn, params, num_message_passing = gin_model.model(
-        r_max=r_max,
-        atomic_energies_dict=atomic_energies_dict,
-        train_graphs=train_loader.graphs,
-        initialize_seed=seed,
-    )
-    logging.info('Number of interaction blocks: %s', num_message_passing)
+        wandb_run = gin_functions.wandb(
+            name=tag,
+            dir=directory,
+            config={
+                'gin_config': operative_config,
+                'mace_jax_version': mace_jax.__version__,
+                'seed': seed,
+            },
+        )
 
-    params = gin_functions.reload(params)
+        model_fn, params, num_message_passing = gin_model.model(
+            r_max=r_max,
+            atomic_energies_dict=atomic_energies_dict,
+            train_graphs=train_loader.graphs,
+            initialize_seed=seed,
+        )
+        logging.info('Number of interaction blocks: %s', num_message_passing)
 
-    predictor = jax.jit(
-        lambda w, g: model_fn(w, g, compute_force=True, compute_stress=True)
-    )
+        params = gin_functions.reload(params)
 
-    if gin_functions.checks(predictor, params, train_loader):
-        logging.info('Checks enabled; exiting after sanity verification.')
-        return
+        predictor = jax.jit(
+            lambda w, g: model_fn(w, g, compute_force=True, compute_stress=True)
+        )
 
-    gradient_transform, steps_per_interval, max_num_intervals = (
-        gin_functions.optimizer()
-    )
-    optimizer_state = gradient_transform.init(params)
+        if gin_functions.checks(predictor, params, train_loader):
+            logging.info('Checks enabled; exiting after sanity verification.')
+            return
 
-    logging.info('Number of parameters: %s', tools.count_parameters(params))
-    logging.info(
-        'Number of optimizer parameters: %s',
-        tools.count_parameters(optimizer_state),
-    )
+        gradient_transform, steps_per_interval, max_num_intervals = (
+            gin_functions.optimizer()
+        )
+        optimizer_state = gradient_transform.init(params)
 
-    gin_functions.train(
-        predictor=predictor,
-        params=params,
-        optimizer_state=optimizer_state,
-        train_loader=train_loader,
-        valid_loader=valid_loader,
-        test_loader=test_loader,
-        gradient_transform=gradient_transform,
-        max_num_intervals=max_num_intervals,
-        steps_per_interval=steps_per_interval,
-        logger=logger,
-        directory=directory,
-        tag=tag,
-    )
+        num_params = tools.count_parameters(params)
+        num_opt_params = tools.count_parameters(optimizer_state)
+        logging.info('Number of parameters: %s', num_params)
+        logging.info('Number of optimizer parameters: %s', num_opt_params)
+
+        if wandb_run is not None:
+            def _graph_count(loader):
+                if loader is None:
+                    return 0
+                graphs = getattr(loader, 'graphs', None)
+                if graphs is None:
+                    return 0
+                return len(graphs)
+
+            dataset_info = {
+                'num_train_graphs': _graph_count(train_loader),
+                'num_valid_graphs': _graph_count(valid_loader),
+                'num_test_graphs': _graph_count(test_loader),
+                'num_message_passing': num_message_passing,
+                'num_parameters': num_params,
+            }
+            wandb_run.config.update(dataset_info, allow_val_change=True)
+
+        gin_functions.train(
+            predictor=predictor,
+            params=params,
+            optimizer_state=optimizer_state,
+            train_loader=train_loader,
+            valid_loader=valid_loader,
+            test_loader=test_loader,
+            gradient_transform=gradient_transform,
+            max_num_intervals=max_num_intervals,
+            steps_per_interval=steps_per_interval,
+            logger=logger,
+            directory=directory,
+            tag=tag,
+            wandb_run=wandb_run,
+        )
+    finally:
+        gin_functions.finish_wandb(wandb_run)
 
 
 def main(argv: Sequence[str] | None = None) -> None:

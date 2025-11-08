@@ -1,9 +1,11 @@
+import dataclasses
 import itertools
 import logging
 import time
 from functools import partial
 from typing import Any, Callable, Dict, Optional, Tuple
 
+import gin
 import jax
 import jax.numpy as jnp
 import jraph
@@ -12,6 +14,39 @@ import optax
 import tqdm
 
 from mace_jax import data, tools
+
+
+@gin.register
+@dataclasses.dataclass
+class SWAConfig:
+    """Configuration for simple Stochastic Weight Averaging."""
+
+    start_interval: int = 0
+    update_interval: int = 1
+    min_snapshots_for_eval: int = 1
+    max_snapshots: Optional[int] = None
+    prefer_swa_params: bool = True
+
+    def __post_init__(self) -> None:
+        if self.start_interval < 0:
+            raise ValueError('SWA start_interval must be non-negative')
+        if self.update_interval <= 0:
+            raise ValueError('SWA update_interval must be positive')
+        if self.min_snapshots_for_eval <= 0:
+            raise ValueError('SWA min_snapshots_for_eval must be positive')
+
+    def should_collect(self, interval: int, num_snapshots: int) -> bool:
+        if interval < self.start_interval:
+            return False
+        if self.max_snapshots is not None and num_snapshots >= self.max_snapshots:
+            return False
+        offset = interval - self.start_interval
+        return offset % self.update_interval == 0
+
+    def should_use(self, num_snapshots: int) -> bool:
+        if not self.prefer_swa_params:
+            return False
+        return num_snapshots >= self.min_snapshots_for_eval
 
 
 def train(
@@ -23,6 +58,7 @@ def train(
     steps_per_interval: int,
     ema_decay: Optional[float] = None,
     progress_bar: bool = True,
+    swa_config: Optional[SWAConfig] = None,
 ):
     """
     for interval, params, optimizer_state, ema_params in train(...):
@@ -30,6 +66,10 @@ def train(
     """
     num_updates = 0
     ema_params = params
+    eval_params = params
+    swa_state = None
+    if swa_config is not None:
+        swa_state = {'params': None, 'count': 0}
 
     logging.info('Started training')
 
@@ -49,11 +89,11 @@ def train(
         params, optimizer_state, ema_params, num_updates: int, graph: jraph.GraphsTuple
     ) -> Tuple[float, Any, Any]:
         if graph.n_node.ndim == 1:
-            graph = jax.tree_map(lambda x: x[None, ...], graph)
+            graph = jax.tree_util.tree_map(lambda x: x[None, ...], graph)
 
         n, loss, grad = grad_fn(params, graph)
         loss = jnp.sum(loss) / jnp.sum(n)
-        grad = jax.tree_map(lambda x: jnp.sum(x, axis=0) / jnp.sum(n), grad)
+        grad = jax.tree_util.tree_map(lambda x: jnp.sum(x, axis=0) / jnp.sum(n), grad)
 
         updates, optimizer_state = gradient_transform.update(
             grad, optimizer_state, params
@@ -70,6 +110,16 @@ def train(
 
     last_cache_size = update_fn._cache_size()
 
+    def _swa_average(current_avg, new_tree, new_count: int):
+        if current_avg is None:
+            return new_tree
+        alpha = 1.0 / float(new_count)
+        return jax.tree_util.tree_map(
+            lambda avg, new: avg + (new - avg) * alpha,
+            current_avg,
+            new_tree,
+        )
+
     def interval_loader():
         i = 0
         while True:
@@ -80,7 +130,7 @@ def train(
                     return
 
     for interval in itertools.count():
-        yield interval, params, optimizer_state, ema_params
+        yield interval, params, optimizer_state, eval_params
 
         # Train one interval
         p_bar = tqdm.tqdm(
@@ -108,6 +158,25 @@ def train(
                 logging.info(
                     f'Compilation time: {time.time() - start_time:.3f}s, cache size: {last_cache_size}'
                 )
+
+        eval_params = ema_params
+        if swa_state is not None and swa_config is not None:
+            if swa_config.should_collect(interval, swa_state['count']):
+                new_count = swa_state['count'] + 1
+                swa_state['params'] = _swa_average(
+                    swa_state['params'], params, new_count
+                )
+                swa_state['count'] = new_count
+                logging.info(
+                    'Updated SWA parameters at interval %s (snapshots=%s).',
+                    interval,
+                    swa_state['count'],
+                )
+            if (
+                swa_state['params'] is not None
+                and swa_config.should_use(swa_state['count'])
+            ):
+                eval_params = swa_state['params']
 
 
 def evaluate(

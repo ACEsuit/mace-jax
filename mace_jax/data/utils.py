@@ -604,7 +604,7 @@ class ParallelLoader:
         it = iter(self.loader)
         while True:
             try:
-                yield jax.tree_map(
+                yield jax.tree_util.tree_map(
                     lambda *x: jnp.stack(x), *[next(it) for _ in range(self.n)]
                 )
             except StopIteration:

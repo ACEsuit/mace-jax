@@ -61,6 +61,37 @@ mace-jax-train configs/finetune.gin \
   --print-config
 ```
 
+##### Optional logging & averaging
+
+- **Weights & Biases** logging can be toggled via gin by enabling
+  `mace_jax.tools.gin_functions.wandb_run.enabled` and setting the desired
+  project/entity. The CLI automatically forwards the run name, output
+  directory, seed, and operative gin config, so a minimal config looks like
+
+  ```gin
+  mace_jax.tools.gin_functions.wandb_run.enabled = True
+  mace_jax.tools.gin_functions.wandb_run.project = 'mace-jax'
+  ```
+
+  Metrics for each evaluation split plus per-interval timing are streamed to
+  the configured run.
+
+- **Stochastic Weight Averaging (SWA)** is available through the
+  `mace_jax.tools.train.SWAConfig` helper. Bind it to
+  `mace_jax.tools.gin_functions.train.swa_config` to start collecting averaged
+  parameters after a given interval, e.g.
+
+  ```gin
+  mace_jax.tools.gin_functions.train.swa_config = @mace_jax.tools.train.SWAConfig(
+    start_interval = 5,
+    update_interval = 1,
+    min_snapshots_for_eval = 2,
+  )
+  ```
+
+  Once the requested number of snapshots has been accumulated, evaluations use
+  the SWA parameters while the raw/EMA weights continue to be optimised.
+
 #### `mace-jax-train-plot`
 
 Produces loss/metric curves from `.metrics` logs generated during training:

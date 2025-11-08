@@ -1,8 +1,9 @@
 import datetime
 import logging
+import numbers
 import pickle
 import time
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Sequence
 
 import gin
 import jax
@@ -57,6 +58,63 @@ def logs(
     logger = tools.MetricsLogger(directory=directory, filename=f'{tag}.metrics')
 
     return directory, tag, logger
+
+
+@gin.configurable
+def wandb_run(
+    *,
+    enabled: bool = False,
+    project: str | None = None,
+    entity: str | None = None,
+    name: str | None = None,
+    group: str | None = None,
+    tags: Sequence[str] = (),
+    notes: str | None = None,
+    mode: str | None = None,
+    resume: str | bool | None = None,
+    dir: str | None = None,
+    config: dict | None = None,
+    anonymous: str | None = None,
+):
+    if not enabled:
+        return None
+    try:
+        import wandb  # type: ignore
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        raise ImportError(
+            'wandb is not installed; install it or disable wandb logging.'
+        ) from exc
+
+    init_kwargs = dict(
+        project=project,
+        entity=entity,
+        name=name,
+        group=group,
+        notes=notes,
+        mode=mode,
+        resume=resume,
+        dir=dir,
+        config=config,
+        anonymous=anonymous,
+    )
+    init_kwargs = {k: v for k, v in init_kwargs.items() if v is not None}
+    if tags:
+        init_kwargs['tags'] = list(tags)
+
+    logging.info('Initializing Weights & Biases run %s', name or '')
+    return wandb.init(**init_kwargs)
+
+
+def finish_wandb(run) -> None:
+    if run is None:
+        return
+    finish = getattr(run, 'finish', None)
+    if finish is None:
+        return
+    try:
+        finish()
+    except Exception:  # pragma: no cover - best effort cleanup
+        logging.debug('Failed to close wandb run cleanly', exc_info=True)
 
 
 @gin.configurable
@@ -202,6 +260,7 @@ def train(
     eval_train: bool = False,
     eval_test: bool = False,
     log_errors: str = 'PerAtomRMSE',
+    wandb_run=None,
     **kwargs,
 ):
     lowest_loss = np.inf
@@ -211,7 +270,7 @@ def train(
     total_time_per_interval = []
     eval_time_per_interval = []
 
-    for interval, params, optimizer_state, ema_params in tools.train(
+    for interval, params, optimizer_state, eval_params in tools.train(
         params=params,
         total_loss_fn=lambda params, graph: loss_fn(graph, predictor(params, graph)),
         train_loader=train_loader,
@@ -239,7 +298,7 @@ def train(
         def eval_and_print(loader, mode: str):
             loss_, metrics_ = tools.evaluate(
                 predictor=predictor,
-                params=ema_params,
+                params=eval_params,
                 loss_fn=loss_fn,
                 data_loader=loader,
                 name=mode,
@@ -247,6 +306,13 @@ def train(
             metrics_['mode'] = mode
             metrics_['interval'] = interval
             logger.log(metrics_)
+
+            def _maybe_float(value):
+                if isinstance(value, numbers.Number):
+                    return float(value)
+                if isinstance(value, (np.ndarray, jnp.ndarray)) and value.shape == ():
+                    return float(np.asarray(value))
+                return None
 
             if log_errors == 'PerAtomRMSE':
                 error_e = 'rmse_e_per_atom'
@@ -294,6 +360,16 @@ def train(
                 f'{error_f}={_(error_f)}, '
                 f'{error_s}={_(error_s)}'
             )
+            if wandb_run is not None:
+                wandb_payload = {
+                    'interval': int(interval),
+                    f'{mode}/loss': float(loss_),
+                }
+                for key, value in metrics_.items():
+                    maybe_value = _maybe_float(value)
+                    if maybe_value is not None:
+                        wandb_payload[f'{mode}/{key}'] = maybe_value
+                wandb_run.log(wandb_payload, step=int(interval))
             return loss_
 
         if eval_train or last_interval:
@@ -331,12 +407,21 @@ def train(
             f'Interval {interval}: Time per interval: {avg_time_per_interval:.1f}s, '
             f'among which {avg_eval_time_per_interval:.1f}s for evaluation.'
         )
+        if wandb_run is not None and total_time_per_interval and eval_time_per_interval:
+            wandb_run.log(
+                {
+                    'interval': int(interval),
+                    'timing/interval_seconds': float(total_time_per_interval[-1]),
+                    'timing/eval_seconds': float(eval_time_per_interval[-1]),
+                },
+                step=int(interval),
+            )
 
         if last_interval:
             break
 
     logging.info('Training complete')
-    return interval, ema_params
+    return interval, eval_params
 
 
 def parse_argv(argv: List[str]):
