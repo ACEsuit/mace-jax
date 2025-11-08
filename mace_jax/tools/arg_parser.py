@@ -176,7 +176,7 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
         '--heads_config',
         help=(
             'Dictionary describing head-specific datasets (same syntax as the Torch CLI). '
-            'Example: --heads-config "{\'Default\':{\'train_path\':\'data.xyz\'}, \'Surface\':{...}}"'
+            "Example: --heads-config \"{'Default':{'train_path':'data.xyz'}, 'Surface':{...}}\""
         ),
         default=None,
     )
@@ -364,6 +364,32 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
         ],
         default=None,
         help='Select which error summary to log each interval.',
+    )
+    parser.add_argument(
+        '--checkpoint-dir',
+        '--checkpoint_dir',
+        help='Directory used to store training checkpoints (binds gin train.checkpoint_dir).',
+        default=None,
+    )
+    parser.add_argument(
+        '--checkpoint-every',
+        '--checkpoint_every',
+        type=int,
+        default=None,
+        help='Save a checkpoint every N epochs (binds gin train.checkpoint_every).',
+    )
+    parser.add_argument(
+        '--checkpoint-keep',
+        '--checkpoint_keep',
+        type=int,
+        default=None,
+        help='Keep only the most recent N checkpoints (binds gin train.checkpoint_keep).',
+    )
+    parser.add_argument(
+        '--resume-from',
+        '--resume_from',
+        help='Resume training from a previously saved checkpoint file.',
+        default=None,
     )
     parser.add_argument(
         '--loss',

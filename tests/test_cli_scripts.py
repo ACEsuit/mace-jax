@@ -199,6 +199,52 @@ def test_cli_foundation_model_helper(tmp_path, monkeypatch):
     train_cli._cleanup_foundation_artifacts()
 
 
+def test_cli_checkpoint_flags_with_foundation_model(tmp_path, monkeypatch):
+    gin.clear_config()
+
+    monkeypatch.setattr(
+        train_cli,
+        '_load_foundation_model',
+        lambda *_, **__: _DummyTorchModel(),
+    )
+    monkeypatch.setattr(train_cli, '_is_named_mp_foundation', lambda name: True)
+
+    checkpoint_dir = tmp_path / 'ckpts'
+    resume_path = tmp_path / 'resume.ckpt'
+    resume_path.write_bytes(b'dummy')
+
+    args, _ = train_cli.parse_args([
+        '--foundation_model',
+        'small',
+        '--checkpoint-dir',
+        str(checkpoint_dir),
+        '--checkpoint-every',
+        '3',
+        '--checkpoint-keep',
+        '5',
+        '--resume-from',
+        str(resume_path),
+    ])
+    train_cli.apply_cli_overrides(args)
+
+    assert (
+        gin.query_parameter('mace_jax.tools.gin_functions.train.checkpoint_dir')
+        == str(checkpoint_dir)
+    )
+    assert (
+        gin.query_parameter('mace_jax.tools.gin_functions.train.checkpoint_every') == 3
+    )
+    assert (
+        gin.query_parameter('mace_jax.tools.gin_functions.train.checkpoint_keep') == 5
+    )
+    assert (
+        gin.query_parameter('mace_jax.tools.gin_functions.train.resume_from')
+        == str(resume_path)
+    )
+    gin.clear_config()
+    train_cli._cleanup_foundation_artifacts()
+
+
 def test_cli_foundation_conflict(tmp_path):
     gin.clear_config()
     dummy_ckpt = tmp_path / 'model.pt'

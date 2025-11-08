@@ -1,3 +1,4 @@
+import pickle
 import shutil
 from pathlib import Path
 
@@ -133,7 +134,7 @@ def test_gin_training_smoke(tmp_path):
     _run_gin_training(tmp_path)
 
 
-def _run_gin_training(tmp_path):
+def _run_gin_training(tmp_path, **train_kwargs):
     train_loader, valid_loader, test_loader, atomic_energies_dict, r_max = (
         gin_datasets.datasets()
     )
@@ -183,6 +184,7 @@ def _run_gin_training(tmp_path):
         eval_train=False,
         eval_test=False,
         log_errors='PerAtomRMSE',
+        **train_kwargs,
     )
 
     assert ema_params is not None
@@ -208,6 +210,67 @@ def test_multihead_training(tmp_path):
 
     ema_params = _run_gin_training(tmp_path)
     assert ema_params is not None
+
+
+def test_checkpoint_writes_file(tmp_path):
+    ckpt_dir = tmp_path / 'checkpoints'
+    _run_gin_training(
+        tmp_path,
+        checkpoint_dir=str(ckpt_dir),
+        checkpoint_every=1,
+        checkpoint_keep=2,
+    )
+    saved = list(ckpt_dir.glob('*.ckpt'))
+    assert saved, 'Expected at least one checkpoint to be created.'
+
+
+def test_resume_from_checkpoint_passes_state(tmp_path, monkeypatch):
+    resume_path = tmp_path / 'resume.ckpt'
+    expected_params = {'resume': jnp.array(1.0)}
+    expected_opt = {'state': 42}
+    state = {
+        'epoch': 2,
+        'params': expected_params,
+        'optimizer_state': expected_opt,
+        'eval_params': expected_params,
+        'lowest_loss': 0.5,
+        'patience_counter': 1,
+    }
+    with resume_path.open('wb') as f:
+        pickle.dump(state, f)
+
+    captured: dict[str, object] = {}
+
+    def _fake_train(
+        *,
+        params,
+        optimizer_state,
+        start_interval=0,
+        **kwargs,
+    ):
+        del kwargs
+        captured['params'] = params
+        captured['optimizer_state'] = optimizer_state
+        captured['start_interval'] = start_interval
+        yield start_interval, params, optimizer_state, params
+
+    def _fake_evaluate(**kwargs):
+        del kwargs
+        return 0.0, {}
+
+    monkeypatch.setattr(gin_functions.tools, 'train', _fake_train)
+    monkeypatch.setattr(gin_functions.tools, 'evaluate', _fake_evaluate)
+
+    _run_gin_training(
+        tmp_path,
+        checkpoint_dir=str(tmp_path / 'resume_out'),
+        checkpoint_every=1,
+        resume_from=str(resume_path),
+    )
+
+    assert captured['params'] == expected_params
+    assert captured['optimizer_state'] == expected_opt
+    assert captured['start_interval'] == state['epoch'] + 1
 
 
 def test_graph_dataloader_split_by_heads(tmp_path):

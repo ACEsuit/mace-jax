@@ -63,6 +63,8 @@ def train(
     progress_bar: bool = True,
     swa_config: SWAConfig | None = None,
     max_grad_norm: float | None = None,
+    *,
+    start_interval: int = 0,
 ):
     """
     for interval, params, optimizer_state, ema_params in train(...):
@@ -140,13 +142,13 @@ def train(
                 if i >= steps_per_interval:
                     return
 
-    for interval in itertools.count():
+    for interval in itertools.count(start_interval):
         yield interval, params, optimizer_state, eval_params
 
         # Train one interval
         p_bar = tqdm.tqdm(
             interval_loader(),
-            desc=f'Train interval {interval}',
+            desc=f'Epoch {interval}',
             total=steps_per_interval,
             disable=not progress_bar,
         )

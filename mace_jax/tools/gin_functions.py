@@ -4,7 +4,9 @@ import logging
 import numbers
 import pickle
 import time
+from collections import deque
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import Dict, List, Optional
 
 import gin
@@ -436,6 +438,10 @@ def train(
     max_grad_norm: float | None = None,
     wandb_run=None,
     swa_config=None,
+    checkpoint_dir: str | None = None,
+    checkpoint_every: int | None = None,
+    checkpoint_keep: int | None = 1,
+    resume_from: str | None = None,
     **kwargs,
 ):
     lowest_loss = np.inf
@@ -444,6 +450,71 @@ def train(
     start_time = time.perf_counter()
     total_time_per_interval = []
     eval_time_per_interval = []
+
+    checkpoint_enabled = bool(checkpoint_every and checkpoint_every > 0)
+    checkpoint_dir_path: Path | None = None
+    checkpoint_history: deque[Path] = deque()
+    resume_path = Path(resume_from).expanduser() if resume_from else None
+
+    def _resolve_checkpoint_dir() -> Path:
+        if checkpoint_dir:
+            return Path(checkpoint_dir).expanduser()
+        if resume_path is not None:
+            return resume_path.parent
+        return Path(directory) / 'checkpoints'
+
+    def _save_checkpoint(
+        epoch_idx, current_params, current_optimizer_state, eval_params_
+    ):
+        if not checkpoint_enabled:
+            return None
+        if checkpoint_every and (epoch_idx + 1) % checkpoint_every != 0:
+            return None
+        checkpoint_dir_path.mkdir(parents=True, exist_ok=True)
+        filename = f'{tag}_epoch{epoch_idx + 1:05d}.ckpt'
+        path = checkpoint_dir_path / filename
+        state = {
+            'epoch': epoch_idx,
+            'params': current_params,
+            'optimizer_state': current_optimizer_state,
+            'eval_params': eval_params_,
+            'lowest_loss': lowest_loss,
+            'patience_counter': patience_counter,
+        }
+        with path.open('wb') as f:
+            pickle.dump(state, f)
+        checkpoint_history.append(path)
+        if checkpoint_keep and checkpoint_keep > 0:
+            while len(checkpoint_history) > checkpoint_keep:
+                old_path = checkpoint_history.popleft()
+                try:
+                    old_path.unlink(missing_ok=True)
+                except FileNotFoundError:
+                    pass
+        logging.info('Saved checkpoint to %s', path)
+        return path
+
+    start_interval = 0
+    if resume_path is not None:
+        if not resume_path.exists():
+            raise FileNotFoundError(
+                f"Requested resume checkpoint '{resume_from}' does not exist."
+            )
+        with resume_path.open('rb') as f:
+            resume_state = pickle.load(f)
+        params = resume_state.get('params', params)
+        optimizer_state = resume_state.get('optimizer_state', optimizer_state)
+        lowest_loss = resume_state.get('lowest_loss', lowest_loss)
+        patience_counter = resume_state.get('patience_counter', patience_counter)
+        start_interval = resume_state.get('epoch', -1) + 1
+        logging.info(
+            'Resuming training from checkpoint %s (starting at epoch %s).',
+            resume_path,
+            start_interval,
+        )
+
+    if checkpoint_enabled:
+        checkpoint_dir_path = _resolve_checkpoint_dir()
 
     def _loader_has_graphs(loader):
         if loader is None:
@@ -484,6 +555,7 @@ def train(
             return True
         return (current_interval + 1) % eval_interval == 0
 
+    stop_after_epoch = False
     for interval, params, optimizer_state, eval_params in tools.train(
         params=params,
         total_loss_fn=lambda params, graph: loss_fn(graph, predictor(params, graph)),
@@ -493,8 +565,10 @@ def train(
         steps_per_interval=steps_per_interval,
         ema_decay=ema_decay,
         max_grad_norm=max_grad_norm,
+        start_interval=start_interval,
         **kwargs,
     ):
+        stop_after_epoch = False
         total_time_per_interval += [time.perf_counter() - start_time]
         start_time = time.perf_counter()
 
@@ -625,7 +699,7 @@ def train(
                     logging.info(
                         f'Stopping optimization after {patience_counter} intervals without improvement'
                     )
-                    break
+                    stop_after_epoch = True
             else:
                 lowest_loss = last_valid_loss
                 patience_counter = 0
@@ -667,7 +741,9 @@ def train(
         if callable(plateau_updater) and last_valid_loss is not None:
             plateau_updater(last_valid_loss)
 
-        if last_interval:
+        _save_checkpoint(interval, params, optimizer_state, eval_params)
+
+        if stop_after_epoch or last_interval:
             break
 
     logging.info('Training complete')

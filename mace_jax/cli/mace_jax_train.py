@@ -52,7 +52,7 @@ _FOUNDATION_TEMP_DIRS: list[Path] = []
 
 
 def _is_named_mp_foundation(name: str) -> bool:
-    from mace.calculators.foundations_models import mace_mp_names
+    from mace.calculators.foundations_models import mace_mp_names  # noqa: PLC0415
 
     normalized = name.lower()
     known = {m for m in mace_mp_names if m}
@@ -100,6 +100,25 @@ def apply_cli_overrides(args: argparse.Namespace) -> None:
     _apply_loss_options(args)
     _apply_training_controls(args)
     _apply_optimizer_options(args)
+    if args.checkpoint_dir:
+        gin.bind_parameter(
+            'mace_jax.tools.gin_functions.train.checkpoint_dir',
+            str(Path(args.checkpoint_dir)),
+        )
+    if args.checkpoint_every is not None:
+        gin.bind_parameter(
+            'mace_jax.tools.gin_functions.train.checkpoint_every',
+            args.checkpoint_every,
+        )
+    if args.checkpoint_keep is not None:
+        gin.bind_parameter(
+            'mace_jax.tools.gin_functions.train.checkpoint_keep', args.checkpoint_keep
+        )
+    if args.resume_from:
+        gin.bind_parameter(
+            'mace_jax.tools.gin_functions.train.resume_from',
+            str(Path(args.resume_from)),
+        )
     if args.torch_checkpoint:
         gin.bind_parameter(
             'mace_jax.tools.gin_model.model.torch_checkpoint',
@@ -162,7 +181,7 @@ def _load_head_configs(path: Path) -> dict[str, dict]:
         data = json.loads(raw_text)
     except json.JSONDecodeError:
         try:
-            import yaml  # type: ignore
+            import yaml  # noqa: PLC0415
         except ImportError as exc:  # pragma: no cover - only triggered without PyYAML
             raise ValueError(
                 f'Failed to parse head config {path}. Install PyYAML to use YAML files.'
@@ -208,7 +227,9 @@ def _inject_pt_head_config(
         entry['valid_path'] = normalized_valid
 
     if not entry:
-        raise ValueError('At least one of --pt_train_file/--pt_valid_file must be provided.')
+        raise ValueError(
+            'At least one of --pt_train_file/--pt_valid_file must be provided.'
+        )
 
     configs[head_name] = entry
     return configs
@@ -283,8 +304,12 @@ def _apply_dataset_options(args: argparse.Namespace) -> None:
     )
     _bind_if_not_none('mace_jax.tools.gin_datasets.datasets.valid_num', args.valid_num)
     _bind_if_not_none('mace_jax.tools.gin_datasets.datasets.test_num', args.test_num)
-    _bind_if_not_none('mace_jax.tools.gin_datasets.datasets.energy_key', args.energy_key)
-    _bind_if_not_none('mace_jax.tools.gin_datasets.datasets.forces_key', args.forces_key)
+    _bind_if_not_none(
+        'mace_jax.tools.gin_datasets.datasets.energy_key', args.energy_key
+    )
+    _bind_if_not_none(
+        'mace_jax.tools.gin_datasets.datasets.forces_key', args.forces_key
+    )
 
 
 def _apply_training_controls(args: argparse.Namespace) -> None:
@@ -470,9 +495,7 @@ def _apply_loss_options(args: argparse.Namespace) -> None:
     }
     if not loss_choice and not configured_weights:
         return
-    factory = _LOSS_FACTORIES.get(
-        loss_choice, modules.WeightedEnergyForcesStressLoss
-    )
+    factory = _LOSS_FACTORIES.get(loss_choice, modules.WeightedEnergyForcesStressLoss)
     gin.bind_parameter('loss.loss_cls', factory)
     for param_name, value in configured_weights.items():
         gin.bind_parameter(f'loss.{param_name}', value)
@@ -559,7 +582,9 @@ def _prepare_foundation_checkpoint(args: argparse.Namespace) -> None:
     if not foundation_spec:
         return
     if args.torch_checkpoint:
-        raise ValueError('Specify either --torch-checkpoint or --foundation-model, not both.')
+        raise ValueError(
+            'Specify either --torch-checkpoint or --foundation-model, not both.'
+        )
     foundation_name = foundation_spec.lower()
     is_named_foundation = _is_named_mp_foundation(foundation_name)
     candidate = Path(foundation_spec)
@@ -567,9 +592,7 @@ def _prepare_foundation_checkpoint(args: argparse.Namespace) -> None:
     if candidate.exists():
         args.torch_checkpoint = str(candidate)
     else:
-        torch_model = _load_foundation_model(
-            foundation_spec, default_dtype=args.dtype
-        )
+        torch_model = _load_foundation_model(foundation_spec, default_dtype=args.dtype)
         tmp_dir = Path(tempfile.mkdtemp(prefix='mace_jax_foundation_'))
         checkpoint_path = tmp_dir / f'{foundation_spec}.pt'
         torch.save({'model': torch_model}, checkpoint_path)
