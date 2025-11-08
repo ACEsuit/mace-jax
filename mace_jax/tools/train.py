@@ -63,6 +63,7 @@ def train(
     progress_bar: bool = True,
     swa_config: SWAConfig | None = None,
     max_grad_norm: float | None = None,
+    schedule_free_eval_fn: Callable | None = None,
     *,
     start_interval: int = 0,
 ):
@@ -142,13 +143,16 @@ def train(
                 if i >= steps_per_interval:
                     return
 
-    for interval in itertools.count(start_interval):
-        yield interval, params, optimizer_state, eval_params
+    initial_eval = eval_params
+    if schedule_free_eval_fn is not None:
+        initial_eval = schedule_free_eval_fn(optimizer_state, params)
+    yield start_interval, params, optimizer_state, initial_eval
 
-        # Train one interval
+    for epoch in itertools.count(start_interval):
+        # Train one epoch
         p_bar = tqdm.tqdm(
             interval_loader(),
-            desc=f'Epoch {interval}',
+            desc=f'Epoch {epoch + 1}',
             total=steps_per_interval,
             disable=not progress_bar,
         )
@@ -174,21 +178,25 @@ def train(
 
         eval_params = ema_params
         if swa_state is not None and swa_config is not None:
-            if swa_config.should_collect(interval, swa_state['count']):
+            if swa_config.should_collect(epoch, swa_state['count']):
                 new_count = swa_state['count'] + 1
                 swa_state['params'] = _swa_average(
                     swa_state['params'], params, new_count
                 )
                 swa_state['count'] = new_count
                 logging.info(
-                    'Updated SWA parameters at interval %s (snapshots=%s).',
-                    interval,
+                    'Updated SWA parameters at epoch %s (snapshots=%s).',
+                    epoch,
                     swa_state['count'],
                 )
             if swa_state['params'] is not None and swa_config.should_use(
                 swa_state['count']
             ):
                 eval_params = swa_state['params']
+        if schedule_free_eval_fn is not None:
+            eval_params = schedule_free_eval_fn(optimizer_state, params)
+
+        yield epoch + 1, params, optimizer_state, eval_params
 
 
 def evaluate(

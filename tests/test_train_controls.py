@@ -122,3 +122,33 @@ def test_ema_eval_uses_smoothed_parameters():
     )
 
     assert np.isclose(eval_param, expected, atol=1e-8)
+
+
+def test_schedule_free_eval_fn_overrides_eval_params():
+    params = {'w': jnp.zeros((1,), dtype=jnp.float64)}
+    gradient_transform = optax.sgd(learning_rate=0.0)
+    optimizer_state = gradient_transform.init(params)
+    loader = _Loader([0.0])
+
+    eval_marker = jnp.asarray([42.0], dtype=jnp.float64)
+
+    def _eval_fn(state, current_params):
+        assert state is not None
+        assert 'w' in current_params
+        return {'w': eval_marker}
+
+    trainer = train_loop(
+        params=params,
+        total_loss_fn=_loss_fn,
+        train_loader=loader,
+        gradient_transform=gradient_transform,
+        optimizer_state=optimizer_state,
+        steps_per_interval=1,
+        progress_bar=False,
+        schedule_free_eval_fn=_eval_fn,
+    )
+
+    epoch_zero = next(trainer)
+    assert epoch_zero[3]['w'][0] == eval_marker[0]
+    epoch_one = next(trainer)
+    assert epoch_one[3]['w'][0] == eval_marker[0]

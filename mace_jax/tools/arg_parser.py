@@ -228,7 +228,7 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         '--optimizer',
         help='Optimizer for parameter updates.',
-        choices=['adam', 'adamw', 'amsgrad', 'sgd'],
+        choices=['adam', 'adamw', 'amsgrad', 'sgd', 'schedulefree'],
         default=None,
     )
     parser.add_argument(
@@ -249,6 +249,20 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help='Weight decay applied to selected parameters.',
+    )
+    parser.add_argument(
+        '--schedule-free-b1',
+        '--schedule_free_b1',
+        type=float,
+        default=None,
+        help='Beta_1 parameter used by ScheduleFree (ignored for other optimizers).',
+    )
+    parser.add_argument(
+        '--schedule-free-weight-lr-power',
+        '--schedule_free_weight_lr_power',
+        type=float,
+        default=None,
+        help='Weight exponent controlling ScheduleFree averaging (ignored otherwise).',
     )
     parser.add_argument(
         '--scheduler',
@@ -281,16 +295,20 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         '--steps-per-interval',
         '--steps_per_interval',
+        '--steps-per-epoch',
+        '--steps_per_epoch',
         type=int,
         default=None,
-        help='Number of optimizer steps per evaluation interval.',
+        help='Number of optimizer steps per evaluation interval (epoch).',
     )
     parser.add_argument(
         '--max-num-intervals',
         '--max_num_intervals',
+        '--max-num-epochs',
+        '--max_num_epochs',
         type=int,
         default=None,
-        help='Maximum number of evaluation intervals before stopping.',
+        help='Maximum number of intervals/epochs before stopping.',
     )
     parser.add_argument(
         '--patience',

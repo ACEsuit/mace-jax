@@ -15,6 +15,12 @@ import jax.numpy as jnp
 import jraph
 import numpy as np
 import optax
+try:
+    from optax.contrib import schedule_free as optax_schedule_free
+    from optax.contrib import schedule_free_eval_params
+except ImportError:  # pragma: no cover - optax versions without contrib support
+    optax_schedule_free = None
+    schedule_free_eval_params = None
 from jax import config as jax_config
 from tqdm import tqdm
 from unique_names_generator import get_random_name
@@ -337,6 +343,9 @@ def optimizer(
     stage_two_lr: float | None = None,
     stage_two_interval: int | None = None,
     decoupled_weight_decay: bool = True,
+    schedule_free: bool = False,
+    schedule_free_b1: float = 0.95,
+    schedule_free_weight_lr_power: float = 2.0,
 ):
     def weight_decay_mask(params):
         params = tools.flatten_dict(params)
@@ -384,6 +393,19 @@ def optimizer(
     plateau_update = getattr(schedule, 'update', None)
     if callable(plateau_update):
         setattr(gradient_chain, 'scheduler_update', plateau_update)
+
+    if schedule_free:
+        if optax_schedule_free is None or schedule_free_eval_params is None:
+            raise ImportError(
+                'optax.contrib.schedule_free is unavailable; upgrade optax to use ScheduleFree.'
+            )
+        gradient_chain = optax_schedule_free(
+            base_optimizer=gradient_chain,
+            learning_rate=schedule,
+            b1=schedule_free_b1,
+            weight_lr_power=schedule_free_weight_lr_power,
+        )
+        setattr(gradient_chain, 'schedule_free_eval_fn', schedule_free_eval_params)
 
     return (
         gradient_chain,
@@ -455,6 +477,11 @@ def train(
     checkpoint_dir_path: Path | None = None
     checkpoint_history: deque[Path] = deque()
     resume_path = Path(resume_from).expanduser() if resume_from else None
+    schedule_free_eval_fn = getattr(gradient_transform, 'schedule_free_eval_fn', None)
+    if schedule_free_eval_fn is not None and (ema_decay is not None or swa_config is not None):
+        logging.info(
+            'ScheduleFree evaluation overrides EMA/SWA averages; using ScheduleFree parameters for eval.'
+        )
 
     def _resolve_checkpoint_dir() -> Path:
         if checkpoint_dir:
@@ -462,37 +489,6 @@ def train(
         if resume_path is not None:
             return resume_path.parent
         return Path(directory) / 'checkpoints'
-
-    def _save_checkpoint(
-        epoch_idx, current_params, current_optimizer_state, eval_params_
-    ):
-        if not checkpoint_enabled:
-            return None
-        if checkpoint_every and (epoch_idx + 1) % checkpoint_every != 0:
-            return None
-        checkpoint_dir_path.mkdir(parents=True, exist_ok=True)
-        filename = f'{tag}_epoch{epoch_idx + 1:05d}.ckpt'
-        path = checkpoint_dir_path / filename
-        state = {
-            'epoch': epoch_idx,
-            'params': current_params,
-            'optimizer_state': current_optimizer_state,
-            'eval_params': eval_params_,
-            'lowest_loss': lowest_loss,
-            'patience_counter': patience_counter,
-        }
-        with path.open('wb') as f:
-            pickle.dump(state, f)
-        checkpoint_history.append(path)
-        if checkpoint_keep and checkpoint_keep > 0:
-            while len(checkpoint_history) > checkpoint_keep:
-                old_path = checkpoint_history.popleft()
-                try:
-                    old_path.unlink(missing_ok=True)
-                except FileNotFoundError:
-                    pass
-        logging.info('Saved checkpoint to %s', path)
-        return path
 
     start_interval = 0
     if resume_path is not None:
@@ -506,15 +502,51 @@ def train(
         optimizer_state = resume_state.get('optimizer_state', optimizer_state)
         lowest_loss = resume_state.get('lowest_loss', lowest_loss)
         patience_counter = resume_state.get('patience_counter', patience_counter)
-        start_interval = resume_state.get('epoch', -1) + 1
+        start_interval = resume_state.get('epoch', 0)
         logging.info(
             'Resuming training from checkpoint %s (starting at epoch %s).',
             resume_path,
             start_interval,
         )
 
+    initial_epoch = start_interval
+
     if checkpoint_enabled:
         checkpoint_dir_path = _resolve_checkpoint_dir()
+
+    def _save_checkpoint(
+        epoch_idx, current_params, current_optimizer_state, eval_params_
+    ):
+        if not checkpoint_enabled:
+            return None
+        if epoch_idx < initial_epoch:
+            return None
+        if checkpoint_every and checkpoint_every > 0 and epoch_idx % checkpoint_every != 0:
+            return None
+        checkpoint_dir_path.mkdir(parents=True, exist_ok=True)
+        filename = f'{tag}_epoch{epoch_idx:05d}.ckpt'
+        path = checkpoint_dir_path / filename
+        state = {
+            'epoch': epoch_idx,
+            'params': current_params,
+            'optimizer_state': current_optimizer_state,
+            'eval_params': eval_params_,
+            'lowest_loss': lowest_loss,
+            'patience_counter': patience_counter,
+            'checkpoint_format': 2,
+        }
+        with path.open('wb') as f:
+            pickle.dump(state, f)
+        checkpoint_history.append(path)
+        if checkpoint_keep and checkpoint_keep > 0:
+            while len(checkpoint_history) > checkpoint_keep:
+                old_path = checkpoint_history.popleft()
+                try:
+                    old_path.unlink(missing_ok=True)
+                except FileNotFoundError:
+                    pass
+        logging.info('Saved checkpoint to %s', path)
+        return path
 
     def _loader_has_graphs(loader):
         if loader is None:
@@ -548,15 +580,17 @@ def train(
     valid_head_loaders = _split_loader_by_heads(valid_loader)
     test_head_loaders = _split_loader_by_heads(test_loader)
 
-    def _should_run_eval(current_interval: int, is_last: bool) -> bool:
+    def _should_run_eval(current_epoch: int, is_last: bool) -> bool:
         if is_last:
+            return True
+        if current_epoch == initial_epoch:
             return True
         if eval_interval is None or eval_interval <= 0:
             return True
-        return (current_interval + 1) % eval_interval == 0
+        return current_epoch % eval_interval == 0
 
     stop_after_epoch = False
-    for interval, params, optimizer_state, eval_params in tools.train(
+    for epoch, params, optimizer_state, eval_params in tools.train(
         params=params,
         total_loss_fn=lambda params, graph: loss_fn(graph, predictor(params, graph)),
         train_loader=train_loader,
@@ -566,6 +600,7 @@ def train(
         ema_decay=ema_decay,
         max_grad_norm=max_grad_norm,
         start_interval=start_interval,
+        schedule_free_eval_fn=schedule_free_eval_fn,
         **kwargs,
     ):
         stop_after_epoch = False
@@ -576,7 +611,7 @@ def train(
         if helper is not None:
             helper.restart_timer()
 
-        last_interval = interval == max_num_intervals
+        last_epoch = max_num_intervals is not None and epoch >= max_num_intervals
 
         with open(f'{directory}/{tag}.pkl', 'wb') as f:
             pickle.dump(gin.operative_config_str(), f)
@@ -594,8 +629,8 @@ def train(
             metrics_['mode'] = mode
             if head_name is not None:
                 metrics_['head'] = head_name
-            metrics_['interval'] = interval
-            metrics_['epoch'] = interval + 1
+            metrics_['interval'] = epoch
+            metrics_['epoch'] = epoch
             logger.log(metrics_)
 
             def _maybe_float(value):
@@ -645,7 +680,7 @@ def train(
                 raise NotImplementedError
 
             logging.info(
-                f'Interval {interval}: {eval_mode}: '
+                f'Epoch {epoch}: {eval_mode}: '
                 f'loss={loss_:.4f}, '
                 f'{error_e}={_(error_e)}, '
                 f'{error_f}={_(error_f)}, '
@@ -654,27 +689,27 @@ def train(
             if wandb_run is not None:
                 wandb_mode = eval_mode
                 wandb_payload = {
-                    'interval': int(interval),
-                    'epoch': int(interval + 1),
+                    'interval': int(epoch),
+                    'epoch': int(epoch),
                     f'{wandb_mode}/loss': float(loss_),
                 }
                 for key, value in metrics_.items():
                     maybe_value = _maybe_float(value)
                     if maybe_value is not None:
                         wandb_payload[f'{wandb_mode}/{key}'] = maybe_value
-                wandb_run.log(wandb_payload, step=int(interval))
+                wandb_run.log(wandb_payload, step=int(epoch))
             return loss_
 
-        evaluate_now = _should_run_eval(interval, last_interval)
+        evaluate_now = _should_run_eval(epoch, last_epoch)
 
-        if (eval_train or last_interval) and evaluate_now:
+        if (eval_train or last_epoch) and evaluate_now:
             if isinstance(eval_train, (int, float)):
                 eval_and_print(train_loader.subset(eval_train), 'eval_train')
             else:
                 eval_and_print(train_loader, 'eval_train')
 
         if (
-            (eval_test or last_interval)
+            (eval_test or last_epoch)
             and _loader_has_graphs(test_loader)
             and evaluate_now
         ):
@@ -697,7 +732,7 @@ def train(
                 patience_counter += 1
                 if patience is not None and patience_counter >= patience:
                     logging.info(
-                        f'Stopping optimization after {patience_counter} intervals without improvement'
+                        f'Stopping optimization after {patience_counter} epochs without improvement'
                     )
                     stop_after_epoch = True
             else:
@@ -708,11 +743,11 @@ def train(
             swa_loss_fn is not None
             and not stage_two_active
             and swa_config is not None
-            and interval >= swa_config.start_interval
+            and epoch >= swa_config.start_interval
         ):
             logging.info(
-                'SWA stage starting at interval %s: switching to Stage Two loss.',
-                interval,
+                'SWA stage starting at epoch %s: switching to Stage Two loss.',
+                epoch,
             )
             loss_fn = swa_loss_fn
             lowest_loss = np.inf
@@ -724,30 +759,30 @@ def train(
         avg_eval_time_per_interval = np.mean(eval_time_per_interval[-3:])
 
         logging.info(
-            f'Interval {interval}: Time per interval: {avg_time_per_interval:.1f}s, '
+            f'Epoch {epoch}: Time per epoch: {avg_time_per_interval:.1f}s, '
             f'among which {avg_eval_time_per_interval:.1f}s for evaluation.'
         )
         if wandb_run is not None and total_time_per_interval and eval_time_per_interval:
             wandb_run.log(
                 {
-                    'interval': int(interval),
+                    'interval': int(epoch),
                     'timing/interval_seconds': float(total_time_per_interval[-1]),
                     'timing/eval_seconds': float(eval_time_per_interval[-1]),
                 },
-                step=int(interval),
+                step=int(epoch),
             )
 
         plateau_updater = getattr(gradient_transform, 'scheduler_update', None)
         if callable(plateau_updater) and last_valid_loss is not None:
             plateau_updater(last_valid_loss)
 
-        _save_checkpoint(interval, params, optimizer_state, eval_params)
+        _save_checkpoint(epoch, params, optimizer_state, eval_params)
 
-        if stop_after_epoch or last_interval:
+        if stop_after_epoch or last_epoch:
             break
 
     logging.info('Training complete')
-    return interval, eval_params
+    return epoch, eval_params
 
 
 def parse_argv(argv: list[str]):

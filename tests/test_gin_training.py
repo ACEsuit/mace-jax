@@ -235,6 +235,7 @@ def test_resume_from_checkpoint_passes_state(tmp_path, monkeypatch):
         'eval_params': expected_params,
         'lowest_loss': 0.5,
         'patience_counter': 1,
+        'checkpoint_format': 2,
     }
     with resume_path.open('wb') as f:
         pickle.dump(state, f)
@@ -270,7 +271,7 @@ def test_resume_from_checkpoint_passes_state(tmp_path, monkeypatch):
 
     assert captured['params'] == expected_params
     assert captured['optimizer_state'] == expected_opt
-    assert captured['start_interval'] == state['epoch'] + 1
+    assert captured['start_interval'] == state['epoch']
 
 
 def test_graph_dataloader_split_by_heads(tmp_path):

@@ -262,6 +262,31 @@ def test_cli_foundation_conflict(tmp_path):
     gin.clear_config()
 
 
+def test_cli_schedulefree_binds_params():
+    gin.clear_config()
+    args, _ = train_cli.parse_args([
+        '--optimizer',
+        'schedulefree',
+        '--schedule-free-b1',
+        '0.97',
+        '--schedule-free-weight-lr-power',
+        '1.5',
+    ])
+    train_cli.apply_cli_overrides(args)
+    assert gin.query_parameter('mace_jax.tools.gin_functions.optimizer.schedule_free')
+    assert (
+        gin.query_parameter('mace_jax.tools.gin_functions.optimizer.schedule_free_b1')
+        == 0.97
+    )
+    assert (
+        gin.query_parameter(
+            'mace_jax.tools.gin_functions.optimizer.schedule_free_weight_lr_power'
+        )
+        == 1.5
+    )
+    gin.clear_config()
+
+
 def test_cli_multiheads_adjusts_defaults(monkeypatch):
     gin.clear_config()
     monkeypatch.setattr(

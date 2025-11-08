@@ -27,6 +27,7 @@ _OPTIMIZER_ALGORITHMS = {
     'adamw': optax.scale_by_adam,
     'amsgrad': tools.scale_by_amsgrad,
     'sgd': optax.identity,
+    'schedulefree': optax.scale_by_adam,
 }
 
 _SCHEDULERS = {
@@ -437,6 +438,7 @@ def _apply_wandb_options(args: argparse.Namespace) -> None:
 
 def _apply_optimizer_options(args: argparse.Namespace) -> None:
     if getattr(args, 'optimizer', None):
+        schedule_free_selected = args.optimizer == 'schedulefree'
         gin.bind_parameter(
             'mace_jax.tools.gin_functions.optimizer.algorithm',
             _OPTIMIZER_ALGORITHMS[args.optimizer],
@@ -448,7 +450,24 @@ def _apply_optimizer_options(args: argparse.Namespace) -> None:
             'mace_jax.tools.gin_functions.optimizer.decoupled_weight_decay',
             decoupled,
         )
-    if args.beta is not None:
+        if schedule_free_selected:
+            gin.bind_parameter(
+                'mace_jax.tools.gin_functions.optimizer.schedule_free', True
+            )
+            _bind_if_not_none(
+                'mace_jax.tools.gin_functions.optimizer.schedule_free_b1',
+                args.schedule_free_b1,
+            )
+            _bind_if_not_none(
+                'mace_jax.tools.gin_functions.optimizer.schedule_free_weight_lr_power',
+                args.schedule_free_weight_lr_power,
+            )
+            gin.bind_parameter('adam.b1', 0.0)
+            gin.bind_parameter('amsgrad.b1', 0.0)
+        elif args.beta is not None:
+            gin.bind_parameter('adam.b1', args.beta)
+            gin.bind_parameter('amsgrad.b1', args.beta)
+    elif args.beta is not None:
         gin.bind_parameter('adam.b1', args.beta)
         gin.bind_parameter('amsgrad.b1', args.beta)
     _bind_if_not_none('mace_jax.tools.gin_functions.optimizer.lr', args.lr)
