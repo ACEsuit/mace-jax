@@ -9,12 +9,25 @@ from pathlib import Path
 
 import gin
 import jax
+import optax
 
 import mace_jax
 from mace_jax import tools
 from mace_jax.tools import gin_datasets, gin_functions, gin_model
 from mace_jax.tools.arg_parser import build_cli_arg_parser
 from mace_jax.tools.train import SWAConfig
+
+_OPTIMIZER_ALGORITHMS = {
+    'adam': optax.scale_by_adam,
+    'amsgrad': tools.scale_by_amsgrad,
+    'sgd': optax.identity,
+}
+
+_SCHEDULERS = {
+    'constant': gin_functions.constant_schedule,
+    'exponential': gin_functions.exponential_decay,
+    'piecewise_constant': gin_functions.piecewise_constant_schedule,
+}
 
 
 def parse_args(
@@ -44,6 +57,7 @@ def apply_cli_overrides(args: argparse.Namespace) -> None:
     _apply_training_controls(args)
     _apply_swa_options(args)
     _apply_wandb_options(args)
+    _apply_optimizer_options(args)
     if args.torch_checkpoint:
         gin.bind_parameter(
             'mace_jax.tools.gin_model.model.torch_checkpoint',
@@ -115,7 +129,9 @@ def _bind_if_not_none(param: str, value, *, transform=None) -> None:
     gin.bind_parameter(param, transform(value) if transform else value)
 
 
-def _normalize_optional_path(path_str: str | None, allow_none: bool = False) -> str | None:
+def _normalize_optional_path(
+    path_str: str | None, allow_none: bool = False
+) -> str | None:
     if path_str is None:
         return None
     if allow_none and path_str == 'None':
@@ -155,9 +171,7 @@ def _apply_dataset_options(args: argparse.Namespace) -> None:
     _bind_if_not_none(
         'mace_jax.tools.gin_datasets.datasets.valid_fraction', args.valid_fraction
     )
-    _bind_if_not_none(
-        'mace_jax.tools.gin_datasets.datasets.valid_num', args.valid_num
-    )
+    _bind_if_not_none('mace_jax.tools.gin_datasets.datasets.valid_num', args.valid_num)
     _bind_if_not_none('mace_jax.tools.gin_datasets.datasets.test_num', args.test_num)
 
 
@@ -168,9 +182,7 @@ def _apply_training_controls(args: argparse.Namespace) -> None:
     ema_decay = args.ema_decay
     if getattr(args, 'ema', False) and ema_decay is None:
         ema_decay = 0.99
-    _bind_if_not_none(
-        'mace_jax.tools.gin_functions.train.ema_decay', ema_decay
-    )
+    _bind_if_not_none('mace_jax.tools.gin_functions.train.ema_decay', ema_decay)
 
 
 def _apply_swa_options(args: argparse.Namespace) -> None:
@@ -189,29 +201,33 @@ def _apply_swa_options(args: argparse.Namespace) -> None:
     swa_config = SWAConfig(
         start_interval=args.swa_start if args.swa_start is not None else 0,
         update_interval=args.swa_every if args.swa_every is not None else 1,
-        min_snapshots_for_eval=
-        args.swa_min_snapshots if args.swa_min_snapshots is not None else 1,
+        min_snapshots_for_eval=args.swa_min_snapshots
+        if args.swa_min_snapshots is not None
+        else 1,
         max_snapshots=args.swa_max_snapshots,
-        prefer_swa_params=
-        args.swa_prefer if args.swa_prefer is not None else True,
+        prefer_swa_params=args.swa_prefer if args.swa_prefer is not None else True,
     )
     gin.bind_parameter('mace_jax.tools.gin_functions.train.swa_config', swa_config)
 
 
 def _apply_wandb_options(args: argparse.Namespace) -> None:
     has_tags = bool(args.wandb_tags)
-    wandb_requested = args.wandb_enable or any(
-        value is not None
-        for value in (
-            args.wandb_project,
-            args.wandb_entity,
-            args.wandb_group,
-            args.wandb_run_name,
-            args.wandb_notes,
-            args.wandb_mode,
-            args.wandb_dir,
+    wandb_requested = (
+        args.wandb_enable
+        or any(
+            value is not None
+            for value in (
+                args.wandb_project,
+                args.wandb_entity,
+                args.wandb_group,
+                args.wandb_run_name,
+                args.wandb_notes,
+                args.wandb_mode,
+                args.wandb_dir,
+            )
         )
-    ) or has_tags
+        or has_tags
+    )
 
     if not wandb_requested:
         if args.wandb_enable:
@@ -219,10 +235,16 @@ def _apply_wandb_options(args: argparse.Namespace) -> None:
         return
 
     gin.bind_parameter('mace_jax.tools.gin_functions.wandb_run.enabled', True)
-    _bind_if_not_none('mace_jax.tools.gin_functions.wandb_run.project', args.wandb_project)
-    _bind_if_not_none('mace_jax.tools.gin_functions.wandb_run.entity', args.wandb_entity)
+    _bind_if_not_none(
+        'mace_jax.tools.gin_functions.wandb_run.project', args.wandb_project
+    )
+    _bind_if_not_none(
+        'mace_jax.tools.gin_functions.wandb_run.entity', args.wandb_entity
+    )
     _bind_if_not_none('mace_jax.tools.gin_functions.wandb_run.group', args.wandb_group)
-    _bind_if_not_none('mace_jax.tools.gin_functions.wandb_run.name', args.wandb_run_name)
+    _bind_if_not_none(
+        'mace_jax.tools.gin_functions.wandb_run.name', args.wandb_run_name
+    )
     _bind_if_not_none('mace_jax.tools.gin_functions.wandb_run.notes', args.wandb_notes)
     if args.wandb_tags:
         gin.bind_parameter(
@@ -232,6 +254,28 @@ def _apply_wandb_options(args: argparse.Namespace) -> None:
     if args.wandb_dir is not None:
         gin.bind_parameter(
             'mace_jax.tools.gin_functions.wandb_run.dir', str(Path(args.wandb_dir))
+        )
+
+
+def _apply_optimizer_options(args: argparse.Namespace) -> None:
+    if getattr(args, 'optimizer', None):
+        gin.bind_parameter(
+            'mace_jax.tools.gin_functions.optimizer.algorithm',
+            _OPTIMIZER_ALGORITHMS[args.optimizer],
+        )
+    _bind_if_not_none('mace_jax.tools.gin_functions.optimizer.lr', args.lr)
+    _bind_if_not_none(
+        'mace_jax.tools.gin_functions.optimizer.weight_decay', args.weight_decay
+    )
+    if getattr(args, 'scheduler', None):
+        gin.bind_parameter(
+            'mace_jax.tools.gin_functions.optimizer.scheduler',
+            _SCHEDULERS[args.scheduler],
+        )
+    if getattr(args, 'lr_scheduler_gamma', None) is not None:
+        gin.bind_parameter(
+            'mace_jax.tools.gin_functions.exponential_decay.decay_rate',
+            args.lr_scheduler_gamma,
         )
 
 
@@ -249,7 +293,9 @@ def run_training(dry_run: bool = False) -> None:
     wandb_run = None
     try:
         if dry_run:
-            logging.info('Dry-run requested; skipping dataset construction and training.')
+            logging.info(
+                'Dry-run requested; skipping dataset construction and training.'
+            )
             return
 
         (
@@ -299,6 +345,7 @@ def run_training(dry_run: bool = False) -> None:
         logging.info('Number of optimizer parameters: %s', num_opt_params)
 
         if wandb_run is not None:
+
             def _graph_count(loader):
                 if loader is None:
                     return 0

@@ -3,10 +3,13 @@ from pathlib import Path
 
 import pytest
 
+import gin
+
+from mace_jax import tools
 from mace_jax.cli import mace_jax_train as train_cli
 from mace_jax.cli import mace_jax_train_plot as train_plot
+from mace_jax.tools import gin_functions
 from mace_jax.tools.train import SWAConfig
-import gin
 
 
 @pytest.mark.slow
@@ -145,6 +148,16 @@ def test_cli_sets_runtime_and_training_controls(tmp_path):
             'mace-jax-tests',
             '--wandb_tag',
             'unit',
+            '--optimizer',
+            'amsgrad',
+            '--lr',
+            '0.02',
+            '--weight-decay',
+            '1e-4',
+            '--scheduler',
+            'exponential',
+            '--lr_scheduler_gamma',
+            '0.5',
         ]
     )
     train_cli.apply_cli_overrides(args)
@@ -172,5 +185,22 @@ def test_cli_sets_runtime_and_training_controls(tmp_path):
     )
     assert gin.query_parameter('mace_jax.tools.gin_functions.wandb_run.tags') == (
         'unit',
+    )
+    assert (
+        gin.query_parameter('mace_jax.tools.gin_functions.optimizer.algorithm')
+        == tools.scale_by_amsgrad
+    )
+    assert gin.query_parameter('mace_jax.tools.gin_functions.optimizer.lr') == 0.02
+    assert (
+        gin.query_parameter('mace_jax.tools.gin_functions.optimizer.weight_decay')
+        == 1e-4
+    )
+    assert (
+        gin.query_parameter('mace_jax.tools.gin_functions.optimizer.scheduler')
+        == gin_functions.exponential_decay
+    )
+    assert (
+        gin.query_parameter('mace_jax.tools.gin_functions.exponential_decay.decay_rate')
+        == 0.5
     )
     gin.clear_config()

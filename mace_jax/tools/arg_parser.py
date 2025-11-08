@@ -185,6 +185,44 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
         help='Exponential moving average decay applied to evaluation params.',
     )
     parser.add_argument(
+        '--optimizer',
+        help='Optimizer for parameter updates.',
+        choices=['adam', 'amsgrad', 'sgd'],
+        default=None,
+    )
+    parser.add_argument(
+        '--beta',
+        type=float,
+        default=None,
+        help='Optimizer beta parameter (mirrors Torch CLI).',
+    )
+    parser.add_argument(
+        '--lr',
+        type=float,
+        default=None,
+        help='Learning rate for the optimizer.',
+    )
+    parser.add_argument(
+        '--weight-decay',
+        '--weight_decay',
+        type=float,
+        default=None,
+        help='Weight decay applied to selected parameters.',
+    )
+    parser.add_argument(
+        '--scheduler',
+        type=str,
+        default=None,
+        help='Learning-rate scheduler name.',
+    )
+    parser.add_argument(
+        '--lr-scheduler-gamma',
+        '--lr_scheduler_gamma',
+        type=float,
+        default=None,
+        help='Decay rate used by the exponential scheduler.',
+    )
+    parser.add_argument(
         '--swa',
         action='store_true',
         help='Enable stochastic weight averaging with default settings.',

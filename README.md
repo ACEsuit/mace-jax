@@ -79,6 +79,10 @@ mace-jax-train configs/finetune.gin \
   `--clip-grad VALUE` and `--ema-decay VALUE`. These map to the same behaviour
   as the Torch `--clip_grad`/`--ema` flags and remove the need for explicit gin
   bindings.
+- **Optimizer & scheduler** settings can be specified via `--optimizer`
+  (`adam`, `amsgrad`, `sgd`), `--lr`, `--weight-decay`, `--scheduler`
+  (`constant`, `exponential`, `piecewise_constant`), and `--lr_scheduler_gamma`.
+  These bind directly into the gin optimizer helper, mirroring the Torch CLI.
 
 #### `mace-jax-train-plot`
 
