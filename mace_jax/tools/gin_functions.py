@@ -345,6 +345,32 @@ def train(
     total_time_per_interval = []
     eval_time_per_interval = []
 
+    def _loader_has_graphs(loader):
+        if loader is None:
+            return False
+        graphs = getattr(loader, 'graphs', None)
+        if graphs is None:
+            return True
+        return len(graphs) > 0
+
+    def _split_loader_by_heads(loader):
+        if loader is None:
+            return {}
+        splitter = getattr(loader, 'split_by_heads', None)
+        if splitter is None:
+            return {}
+        return splitter()
+
+    def _enumerate_eval_targets(loader, head_loaders):
+        if not _loader_has_graphs(loader):
+            return []
+        if head_loaders:
+            return [(head, sub_loader) for head, sub_loader in head_loaders.items()]
+        return [(None, loader)]
+
+    valid_head_loaders = _split_loader_by_heads(valid_loader)
+    test_head_loaders = _split_loader_by_heads(test_loader)
+
     for interval, params, optimizer_state, eval_params in tools.train(
         params=params,
         total_loss_fn=lambda params, graph: loss_fn(graph, predictor(params, graph)),
@@ -369,15 +395,18 @@ def train(
             pickle.dump(gin.operative_config_str(), f)
             pickle.dump(params, f)
 
-        def eval_and_print(loader, mode: str):
+        def eval_and_print(loader, mode: str, *, head_name: str | None = None):
+            eval_mode = mode if head_name is None else f'{mode}:{head_name}'
             loss_, metrics_ = tools.evaluate(
                 predictor=predictor,
                 params=eval_params,
                 loss_fn=loss_fn,
                 data_loader=loader,
-                name=mode,
+                name=eval_mode,
             )
             metrics_['mode'] = mode
+            if head_name is not None:
+                metrics_['head'] = head_name
             metrics_['interval'] = interval
             logger.log(metrics_)
 
@@ -428,21 +457,22 @@ def train(
                 raise NotImplementedError
 
             logging.info(
-                f'Interval {interval}: {mode}: '
+                f'Interval {interval}: {eval_mode}: '
                 f'loss={loss_:.4f}, '
                 f'{error_e}={_(error_e)}, '
                 f'{error_f}={_(error_f)}, '
                 f'{error_s}={_(error_s)}'
             )
             if wandb_run is not None:
+                wandb_mode = eval_mode
                 wandb_payload = {
                     'interval': int(interval),
-                    f'{mode}/loss': float(loss_),
+                    f'{wandb_mode}/loss': float(loss_),
                 }
                 for key, value in metrics_.items():
                     maybe_value = _maybe_float(value)
                     if maybe_value is not None:
-                        wandb_payload[f'{mode}/{key}'] = maybe_value
+                        wandb_payload[f'{wandb_mode}/{key}'] = maybe_value
                 wandb_run.log(wandb_payload, step=int(interval))
             return loss_
 
@@ -452,17 +482,22 @@ def train(
             else:
                 eval_and_print(train_loader, 'eval_train')
 
-        if (
-            (eval_test or last_interval)
-            and test_loader is not None
-            and len(test_loader) > 0
+        if (eval_test or last_interval) and _loader_has_graphs(test_loader):
+            for head_name, loader in _enumerate_eval_targets(
+                test_loader, test_head_loaders
+            ):
+                eval_and_print(loader, 'eval_test', head_name=head_name)
+
+        last_valid_loss = None
+        for head_name, loader in _enumerate_eval_targets(
+            valid_loader, valid_head_loaders
         ):
-            eval_and_print(test_loader, 'eval_test')
+            last_valid_loss = eval_and_print(
+                loader, 'eval_valid', head_name=head_name
+            )
 
-        if valid_loader is not None and len(valid_loader) > 0:
-            loss_ = eval_and_print(valid_loader, 'eval_valid')
-
-            if loss_ >= lowest_loss:
+        if last_valid_loss is not None:
+            if last_valid_loss >= lowest_loss:
                 patience_counter += 1
                 if patience is not None and patience_counter >= patience:
                     logging.info(
@@ -470,7 +505,7 @@ def train(
                     )
                     break
             else:
-                lowest_loss = loss_
+                lowest_loss = last_valid_loss
                 patience_counter = 0
 
         eval_time_per_interval += [time.perf_counter() - start_time]

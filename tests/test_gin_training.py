@@ -11,8 +11,8 @@ from ase import io as ase_io
 
 import mace_jax.data as data_pkg
 import mace_jax.data.utils as data_utils
-from mace_jax.data.utils import Configuration, graph_from_configuration
 from mace_jax.data import neighborhood
+from mace_jax.data.utils import Configuration, graph_from_configuration
 from mace_jax.tools import gin_datasets, gin_functions, gin_model
 
 GIN_CONFIG = """
@@ -211,6 +211,58 @@ def test_multihead_training(tmp_path):
     assert ema_params is not None
 
 
+def test_graph_dataloader_split_by_heads(tmp_path):
+    simple_xyz = Path(__file__).resolve().parent / 'test_data' / 'simple.xyz'
+    head_cfgs = {
+        'Default': {'train_path': str(simple_xyz), 'valid_fraction': 0.5},
+        'Surface': {'train_path': str(simple_xyz), 'valid_fraction': 0.5},
+    }
+    gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.head_configs', head_cfgs)
+    gin.bind_parameter(
+        'mace_jax.tools.gin_datasets.datasets.heads', ['Default', 'Surface']
+    )
+    gin.bind_parameter('mace_jax.tools.gin_model.model.heads', ['Default', 'Surface'])
+    _, valid_loader, _, _, _ = gin_datasets.datasets()
+
+    per_head = valid_loader.split_by_heads()
+    assert set(per_head) == {'Default', 'Surface'}
+    for head_name, loader in per_head.items():
+        assert loader.heads == (head_name,)
+        assert loader.graphs, f'Expected graphs for head {head_name}'
+        expected_idx = ['Default', 'Surface'].index(head_name)
+        for graph in loader.graphs:
+            head_attr = np.asarray(graph.globals.head).reshape(-1)[0]
+            assert int(head_attr) == expected_idx
+
+
+def test_train_evaluates_each_head(monkeypatch, tmp_path):
+    simple_xyz = Path(__file__).resolve().parent / 'test_data' / 'simple.xyz'
+    head_cfgs = {
+        'Default': {'train_path': str(simple_xyz), 'valid_fraction': 0.5},
+        'Surface': {'train_path': str(simple_xyz), 'valid_fraction': 0.5},
+    }
+    gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.head_configs', head_cfgs)
+    gin.bind_parameter(
+        'mace_jax.tools.gin_datasets.datasets.heads', ['Default', 'Surface']
+    )
+    gin.bind_parameter('mace_jax.tools.gin_model.model.heads', ['Default', 'Surface'])
+
+    eval_calls: list[tuple[str, tuple[str, ...]]] = []
+
+    def _fake_evaluate(**kwargs):
+        loader = kwargs['data_loader']
+        name = kwargs['name']
+        heads = tuple(getattr(loader, 'heads', ()) or ())
+        eval_calls.append((name, heads))
+        return 0.0, {}
+
+    monkeypatch.setattr(gin_functions.tools, 'evaluate', _fake_evaluate)
+    _run_gin_training(tmp_path)
+
+    valid_calls = [heads for name, heads in eval_calls if name.startswith('eval_valid')]
+    assert set(valid_calls) == {('Default',), ('Surface',)}
+
+
 def test_head_replay_paths_and_weights(tmp_path):
     simple_xyz = Path(__file__).resolve().parent / 'test_data' / 'simple.xyz'
     replay_xyz = tmp_path / 'replay.xyz'
@@ -278,7 +330,8 @@ def test_head_pseudolabel_replay(monkeypatch, tmp_path):
 def test_gin_model_torch_checkpoint(monkeypatch, tmp_path):
     import numpy as np
     import torch
-    import mace.tools.scripts_utils as scripts_utils
+    from mace.tools import scripts_utils
+
     import mace_jax.cli.mace_torch2jax as torch2jax_mod
 
     ckpt = tmp_path / 'dummy.pt'

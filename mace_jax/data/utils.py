@@ -1,5 +1,5 @@
 import logging
-from collections import defaultdict, namedtuple
+from collections import OrderedDict, defaultdict, namedtuple
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from random import shuffle
@@ -102,9 +102,9 @@ def config_from_atoms(
     # pressure = None
 
     forces = atoms.arrays.get(forces_key, None)  # eV / Ang
-    atomic_numbers = np.array(
-        [ase.data.atomic_numbers[symbol] for symbol in atoms.symbols]
-    )
+    atomic_numbers = np.array([
+        ase.data.atomic_numbers[symbol] for symbol in atoms.symbols
+    ])
     pbc = tuple(atoms.get_pbc())
     cell = np.array(atoms.get_cell())
     assert np.linalg.det(cell) >= 0.0
@@ -265,7 +265,12 @@ def load_from_hdf5(
                         remap = np.asarray(remap_stress)
                         stress = stress.flatten()[remap].reshape(3, 3)
 
-                if not no_data_ok and energy is None and forces is None and stress is None:
+                if (
+                    not no_data_ok
+                    and energy is None
+                    and forces is None
+                    and stress is None
+                ):
                     continue
 
                 cell = np.asarray(subgroup['cell'][()], dtype=float)
@@ -567,20 +572,35 @@ class GraphDataLoader:
         if isinstance(i, float):
             graphs = graphs[: int(len(graphs) * i)]
 
-        return GraphDataLoader(
-            graphs=graphs,
-            n_node=self.n_node,
-            n_edge=self.n_edge,
-            n_graph=self.n_graph,
-            min_n_node=self.min_n_node,
-            min_n_edge=self.min_n_edge,
-            min_n_graph=self.min_n_graph,
-            shuffle=self.shuffle,
-            n_mantissa_bits=self.n_mantissa_bits,
-            heads=self.heads,
+        return self._spawn_loader(graphs, heads=self.heads, shuffle=self.shuffle)
+
+    def replace_graphs(
+        self, graphs: list[jraph.GraphsTuple], heads: Sequence[str] | None = None
+    ):
+        desired_heads = tuple(heads) if heads is not None else self.heads
+        return self._spawn_loader(graphs, heads=desired_heads, shuffle=self.shuffle)
+
+    def split_by_heads(self) -> dict[str, 'GraphDataLoader']:
+        if not self.heads or len(self.heads) <= 1:
+            return {}
+        grouped = OrderedDict((name, []) for name in self.heads)
+        for graph in self.graphs:
+            head_attr = getattr(graph.globals, 'head', None)
+            head_index = 0
+            if head_attr is not None:
+                head_index = int(np.asarray(head_attr).reshape(-1)[0])
+            head_index = max(0, min(head_index, len(self.heads) - 1))
+            grouped[self.heads[head_index]].append(graph)
+        return OrderedDict(
+            (
+                head_name,
+                self._spawn_loader(graphs, heads=(head_name,), shuffle=self.shuffle),
+            )
+            for head_name, graphs in grouped.items()
+            if graphs
         )
 
-    def replace_graphs(self, graphs: list[jraph.GraphsTuple]):
+    def _spawn_loader(self, graphs, *, heads, shuffle):
         return GraphDataLoader(
             graphs=graphs,
             n_node=self.n_node,
@@ -589,9 +609,9 @@ class GraphDataLoader:
             min_n_node=self.min_n_node,
             min_n_edge=self.min_n_edge,
             min_n_graph=self.min_n_graph,
-            shuffle=self.shuffle,
+            shuffle=shuffle,
             n_mantissa_bits=self.n_mantissa_bits,
-            heads=self.heads,
+            heads=heads,
         )
 
 
