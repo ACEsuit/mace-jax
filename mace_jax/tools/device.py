@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import os
 from typing import Any
 
 import jax
@@ -10,6 +12,7 @@ except ImportError:  # pragma: no cover - torch not installed
     torch = None  # type: ignore[assignment]
 
 _GPU_PLATFORMS: tuple[str, ...] = ('cuda', 'gpu', 'rocm')
+_JAX_RUNTIME_INITIALIZED = False
 
 
 def get_torch_device(
@@ -87,9 +90,84 @@ def runtime_device_summary(torch_device: Any | None) -> dict[str, object]:
     return summary
 
 
+def _env_or(value: Any | None, env_key: str, *, cast=int):
+    if value is not None:
+        return value
+    raw = os.environ.get(env_key)
+    if raw is None:
+        return None
+    try:
+        return cast(raw)
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return None
+
+
+def _resolve_coordinator(address: str | None, port: int | None) -> str | None:
+    if not address:
+        return None
+    if ':' in address:
+        return address
+    return f'{address}:{port or 12345}'
+
+
+def initialize_jax_runtime(
+    *,
+    device: str | None = None,
+    distributed: bool = False,
+    process_count: int | None = None,
+    process_index: int | None = None,
+    coordinator_address: str | None = None,
+    coordinator_port: int | None = None,
+) -> None:
+    """Configure JAX runtime platform and optionally initialize distributed mode."""
+
+    global _JAX_RUNTIME_INITIALIZED  # pylint: disable=global-statement
+
+    if device and device not in {'auto', 'default'}:
+        normalized = device.lower()
+        jax.config.update('jax_platform_name', normalized)
+
+    if not distributed:
+        return
+
+    if not hasattr(jax, 'distributed'):  # pragma: no cover - very old jax
+        raise RuntimeError('This JAX build does not expose jax.distributed.initialize.')
+
+    if _JAX_RUNTIME_INITIALIZED:
+        return
+
+    process_count = _env_or(process_count, 'JAX_PROCESS_COUNT')
+    process_index = _env_or(process_index, 'JAX_PROCESS_INDEX')
+    coordinator_from_env = os.environ.get('JAX_COORDINATOR_ADDRESS')
+    coordinator_address = coordinator_address or coordinator_from_env
+    coordinator = _resolve_coordinator(coordinator_address, coordinator_port)
+
+    init_kwargs: dict[str, Any] = {}
+    if coordinator is not None:
+        init_kwargs['coordinator_address'] = coordinator
+    if process_count is not None:
+        init_kwargs['num_processes'] = process_count
+    if process_index is not None:
+        init_kwargs['process_id'] = process_index
+
+    try:
+        jax.distributed.initialize(**init_kwargs)
+    except RuntimeError as exc:  # pragma: no cover - initialization race
+        if 'already initialized' not in str(exc):
+            raise
+    else:
+        _JAX_RUNTIME_INITIALIZED = True
+        logging.info(
+            'Initialized JAX distributed runtime (process %s/%s).',
+            jax.process_index(),
+            jax.process_count(),
+        )
+
+
 __all__ = [
     'configure_torch_runtime',
     'get_torch_device',
+    'initialize_jax_runtime',
     'runtime_device_summary',
     'select_jax_device',
 ]

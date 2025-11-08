@@ -5,6 +5,7 @@ from pathlib import Path
 import gin
 import jax
 import jax.numpy as jnp
+import jraph
 import numpy as np
 import optax
 import pytest
@@ -298,6 +299,39 @@ def test_graph_dataloader_split_by_heads(tmp_path):
             assert int(head_attr) == expected_idx
 
 
+def test_graph_dataloader_shard_splits_graphs():
+    def _graph(idx: int) -> jraph.GraphsTuple:
+        return jraph.GraphsTuple(
+            nodes=jnp.array([[idx]], dtype=jnp.float32),
+            edges=jnp.zeros((1, 1), dtype=jnp.float32),
+            senders=jnp.array([0], dtype=jnp.int32),
+            receivers=jnp.array([0], dtype=jnp.int32),
+            n_node=jnp.array([1], dtype=jnp.int32),
+            n_edge=jnp.array([1], dtype=jnp.int32),
+            globals={'head': jnp.array([idx + 1], dtype=jnp.int32)},
+        )
+
+    graphs = [_graph(i) for i in range(6)]
+    loader = data_utils.GraphDataLoader(
+        graphs=graphs,
+        n_node=4,
+        n_edge=4,
+        n_graph=4,
+        shuffle=False,
+    )
+
+    shard0 = loader.shard(3, 0)
+    shard1 = loader.shard(3, 1)
+    shard2 = loader.shard(3, 2)
+
+    assert [int(g.nodes[0, 0]) for g in shard0.graphs] == [0, 3]
+    assert [int(g.nodes[0, 0]) for g in shard1.graphs] == [1, 4]
+    assert [int(g.nodes[0, 0]) for g in shard2.graphs] == [2, 5]
+
+    with pytest.raises(ValueError):
+        loader.shard(2, 3)
+
+
 def test_train_evaluates_each_head(monkeypatch, tmp_path):
     simple_xyz = Path(__file__).resolve().parent / 'test_data' / 'simple.xyz'
     head_cfgs = {
@@ -372,6 +406,70 @@ def test_head_replay_paths_and_weights(tmp_path):
     assert len(train_loader.graphs) == 2 * n_base
     replay_weight = float(train_loader.graphs[-1].globals.weight[0])
     assert np.isclose(replay_weight, 0.25)
+
+
+def test_graph_dataloader_iter_batches_deterministic():
+    def _graph(idx: int) -> jraph.GraphsTuple:
+        return jraph.GraphsTuple(
+            nodes=jnp.array([[idx]], dtype=jnp.float32),
+            edges=jnp.zeros((1, 1), dtype=jnp.float32),
+            senders=jnp.array([0], dtype=jnp.int32),
+            receivers=jnp.array([0], dtype=jnp.int32),
+            n_node=jnp.array([1], dtype=jnp.int32),
+            n_edge=jnp.array([1], dtype=jnp.int32),
+            globals={'head': jnp.array([idx + 1], dtype=jnp.int32)},
+        )
+
+    graphs = [_graph(i) for i in range(8)]
+    loader = data_utils.GraphDataLoader(
+        graphs=graphs,
+        n_node=4,
+        n_edge=4,
+        n_graph=4,
+        shuffle=True,
+    )
+
+    def _collect_batches(epoch, process_count, process_index):
+        batches = list(
+            loader.iter_batches(
+                epoch=epoch,
+                seed=123,
+                process_count=process_count,
+                process_index=process_index,
+            )
+        )
+        assert batches
+        return batches
+
+    def _ids_from_batches(batches):
+        ids = set()
+        for batch in batches:
+            heads = np.asarray(batch.globals['head']).reshape(-1)
+            ids.update(int(h) - 1 for h in heads if h > 0)
+        return ids
+
+    def _sequence_signature(batches):
+        return [
+            tuple(
+                sorted(int(h) - 1 for h in np.asarray(batch.globals['head']).reshape(-1) if h > 0)
+            )
+            for batch in batches
+        ]
+
+    rank0_batches = _collect_batches(epoch=0, process_count=2, process_index=0)
+    rank1_batches = _collect_batches(epoch=0, process_count=2, process_index=1)
+    ids_rank0 = _ids_from_batches(rank0_batches)
+    ids_rank1 = _ids_from_batches(rank1_batches)
+    assert ids_rank0.isdisjoint(ids_rank1)
+    assert sorted(ids_rank0 | ids_rank1) == list(range(8))
+
+    seq_epoch0 = _sequence_signature(
+        _collect_batches(epoch=0, process_count=1, process_index=0)
+    )
+    seq_epoch1 = _sequence_signature(
+        _collect_batches(epoch=1, process_count=1, process_index=0)
+    )
+    assert seq_epoch0 != seq_epoch1
 
 
 def test_head_pseudolabel_replay(monkeypatch, tmp_path):

@@ -27,6 +27,8 @@ from unique_names_generator import get_random_name
 from unique_names_generator.data import ADJECTIVES, NAMES
 
 from mace_jax import modules, tools
+from mace_jax.tools import device as device_utils
+from jax.experimental import multihost_utils
 
 _PROFILE_HELPER = None
 _PROFILE_HELPER_MISSING_WARNED = False
@@ -108,11 +110,27 @@ def flags(
     dtype: str,
     seed: int,
     profile: bool = False,
+    device: str | None = None,
+    distributed: bool = False,
+    process_count: int | None = None,
+    process_index: int | None = None,
+    coordinator_address: str | None = None,
+    coordinator_port: int | None = None,
 ):
     jax_config.update('jax_debug_nans', debug)
     jax_config.update('jax_debug_infs', debug)
     tools.set_default_dtype(dtype)
-    tools.set_seeds(seed)
+    device_utils.initialize_jax_runtime(
+        device=device,
+        distributed=distributed,
+        process_count=process_count,
+        process_index=process_index,
+        coordinator_address=coordinator_address,
+        coordinator_port=coordinator_port,
+    )
+    process_rank = getattr(jax, 'process_index', lambda: 0)()
+    effective_seed = seed + int(process_rank)
+    tools.set_seeds(effective_seed)
     if profile:
         helper = _get_profile_helper(log_warning=True)
         if helper is not None:
@@ -135,8 +153,15 @@ def logs(
 
     tag = f'{date}_{name}'
 
-    tools.setup_logger(level, directory=directory, filename=f'{tag}.log', name=name)
-    logger = tools.MetricsLogger(directory=directory, filename=f'{tag}.metrics')
+    process_index = getattr(jax, 'process_index', lambda: 0)()
+    suffix = f'.rank{process_index}' if process_index else ''
+
+    tools.setup_logger(
+        level, directory=directory, filename=f'{tag}{suffix}.log', name=name
+    )
+    logger = tools.MetricsLogger(
+        directory=directory, filename=f'{tag}{suffix}.metrics'
+    )
 
     return directory, tag, logger
 
@@ -464,6 +489,7 @@ def train(
     checkpoint_every: int | None = None,
     checkpoint_keep: int | None = 1,
     resume_from: str | None = None,
+    data_seed: int | None = None,
     **kwargs,
 ):
     lowest_loss = np.inf
@@ -474,14 +500,29 @@ def train(
     eval_time_per_interval = []
 
     checkpoint_enabled = bool(checkpoint_every and checkpoint_every > 0)
+    process_index = getattr(jax, 'process_index', lambda: 0)()
+    process_count = getattr(jax, 'process_count', lambda: 1)()
+    is_primary = process_index == 0
+
+    def _log_info(message, *args):
+        if is_primary:
+            logging.info(message, *args)
+
     checkpoint_dir_path: Path | None = None
     checkpoint_history: deque[Path] = deque()
     resume_path = Path(resume_from).expanduser() if resume_from else None
     schedule_free_eval_fn = getattr(gradient_transform, 'schedule_free_eval_fn', None)
     if schedule_free_eval_fn is not None and (ema_decay is not None or swa_config is not None):
-        logging.info(
+        _log_info(
             'ScheduleFree evaluation overrides EMA/SWA averages; using ScheduleFree parameters for eval.'
         )
+
+    def _shard_loader(loader):
+        if loader is None:
+            return None
+        if process_count > 1:
+            return loader.shard(process_count, process_index)
+        return loader
 
     def _resolve_checkpoint_dir() -> Path:
         if checkpoint_dir:
@@ -503,7 +544,7 @@ def train(
         lowest_loss = resume_state.get('lowest_loss', lowest_loss)
         patience_counter = resume_state.get('patience_counter', patience_counter)
         start_interval = resume_state.get('epoch', 0)
-        logging.info(
+        _log_info(
             'Resuming training from checkpoint %s (starting at epoch %s).',
             resume_path,
             start_interval,
@@ -517,7 +558,7 @@ def train(
     def _save_checkpoint(
         epoch_idx, current_params, current_optimizer_state, eval_params_
     ):
-        if not checkpoint_enabled:
+        if not checkpoint_enabled or not is_primary:
             return None
         if epoch_idx < initial_epoch:
             return None
@@ -545,7 +586,7 @@ def train(
                     old_path.unlink(missing_ok=True)
                 except FileNotFoundError:
                     pass
-        logging.info('Saved checkpoint to %s', path)
+        _log_info('Saved checkpoint to %s', path)
         return path
 
     def _loader_has_graphs(loader):
@@ -564,12 +605,30 @@ def train(
             return {}
         return splitter()
 
-    def _enumerate_eval_targets(loader, head_loaders):
+    def _prepare_loader_for_eval(loader, epoch):
+        if loader is None:
+            return None
+        loader = _shard_loader(loader)
+        if loader is None:
+            return None
+        setter = getattr(loader, 'set_epoch', None)
+        if callable(setter):
+            setter(epoch)
+        return loader
+
+    def _enumerate_eval_targets(loader, head_loaders, epoch):
+        if process_count > 1 and not is_primary:
+            return []
         if not _loader_has_graphs(loader):
             return []
         if head_loaders:
-            return [(head, sub_loader) for head, sub_loader in head_loaders.items()]
-        return [(None, loader)]
+            items = []
+            for head, sub_loader in head_loaders.items():
+                prepped = _prepare_loader_for_eval(sub_loader, epoch)
+                if _loader_has_graphs(prepped):
+                    items.append((head, prepped))
+            return items
+        return [(None, _prepare_loader_for_eval(loader, epoch))]
 
     swa_loss_fn = None
     stage_two_active = False
@@ -601,6 +660,7 @@ def train(
         max_grad_norm=max_grad_norm,
         start_interval=start_interval,
         schedule_free_eval_fn=schedule_free_eval_fn,
+        data_seed=data_seed,
         **kwargs,
     ):
         stop_after_epoch = False
@@ -613,115 +673,136 @@ def train(
 
         last_epoch = max_num_intervals is not None and epoch >= max_num_intervals
 
-        with open(f'{directory}/{tag}.pkl', 'wb') as f:
-            pickle.dump(gin.operative_config_str(), f)
-            pickle.dump(params, f)
+        if is_primary:
+            with open(f'{directory}/{tag}.pkl', 'wb') as f:
+                pickle.dump(gin.operative_config_str(), f)
+                pickle.dump(params, f)
 
         def eval_and_print(loader, mode: str, *, head_name: str | None = None):
             eval_mode = mode if head_name is None else f'{mode}:{head_name}'
-            loss_, metrics_ = tools.evaluate(
-                predictor=predictor,
-                params=eval_params,
-                loss_fn=loss_fn,
-                data_loader=loader,
-                name=eval_mode,
-            )
-            metrics_['mode'] = mode
-            if head_name is not None:
-                metrics_['head'] = head_name
-            metrics_['interval'] = epoch
-            metrics_['epoch'] = epoch
-            logger.log(metrics_)
+            loss_ = None
+            metrics_: dict[str, Any] = {}
+            if is_primary or process_count == 1:
+                loss_, metrics_ = tools.evaluate(
+                    predictor=predictor,
+                    params=eval_params,
+                    loss_fn=loss_fn,
+                    data_loader=loader,
+                    name=eval_mode,
+                )
+                metrics_['mode'] = mode
+                if head_name is not None:
+                    metrics_['head'] = head_name
+                metrics_['interval'] = epoch
+                metrics_['epoch'] = epoch
+                if is_primary:
+                    logger.log(metrics_)
 
-            def _maybe_float(value):
-                if isinstance(value, numbers.Number):
-                    return float(value)
-                if isinstance(value, (np.ndarray, jnp.ndarray)) and value.shape == ():
-                    return float(np.asarray(value))
-                return None
+                def _maybe_float(value):
+                    if isinstance(value, numbers.Number):
+                        return float(value)
+                    if isinstance(value, (np.ndarray, jnp.ndarray)) and value.shape == ():
+                        return float(np.asarray(value))
+                    return None
 
-            if log_errors == 'PerAtomRMSE':
-                error_e = 'rmse_e_per_atom'
-                error_f = 'rmse_f'
-                error_s = 'rmse_s'
-            elif log_errors == 'rel_PerAtomRMSE':
-                error_e = 'rmse_e_per_atom'
-                error_f = 'rel_rmse_f'
-                error_s = 'rel_rmse_s'
-            elif log_errors == 'TotalRMSE':
-                error_e = 'rmse_e'
-                error_f = 'rmse_f'
-                error_s = 'rmse_s'
-            elif log_errors == 'PerAtomMAE':
-                error_e = 'mae_e_per_atom'
-                error_f = 'mae_f'
-                error_s = 'mae_s'
-            elif log_errors == 'rel_PerAtomMAE':
-                error_e = 'mae_e_per_atom'
-                error_f = 'rel_mae_f'
-                error_s = 'rel_mae_s'
-            elif log_errors == 'TotalMAE':
-                error_e = 'mae_e'
-                error_f = 'mae_f'
-                error_s = 'mae_s'
+                if log_errors == 'PerAtomRMSE':
+                    error_e = 'rmse_e_per_atom'
+                    error_f = 'rmse_f'
+                    error_s = 'rmse_s'
+                elif log_errors == 'rel_PerAtomRMSE':
+                    error_e = 'rmse_e_per_atom'
+                    error_f = 'rel_rmse_f'
+                    error_s = 'rel_rmse_s'
+                elif log_errors == 'TotalRMSE':
+                    error_e = 'rmse_e'
+                    error_f = 'rmse_f'
+                    error_s = 'rmse_s'
+                elif log_errors == 'PerAtomMAE':
+                    error_e = 'mae_e_per_atom'
+                    error_f = 'mae_f'
+                    error_s = 'mae_s'
+                elif log_errors == 'rel_PerAtomMAE':
+                    error_e = 'mae_e_per_atom'
+                    error_f = 'rel_mae_f'
+                    error_s = 'rel_mae_s'
+                elif log_errors == 'TotalMAE':
+                    error_e = 'mae_e'
+                    error_f = 'mae_f'
+                    error_s = 'mae_s'
 
-            def _(x: str):
-                v: float = metrics_.get(x, None)
-                if v is None:
-                    return 'N/A'
-                if x.startswith('rel_'):
-                    return f'{100 * v:.1f}%'
-                if '_e' in x:
-                    return f'{1e3 * v:.1f} meV'
-                if '_f' in x:
-                    return f'{1e3 * v:.1f} meV/Å'
-                if '_s' in x:
-                    return f'{1e3 * v:.1f} meV/Å³'
-                raise NotImplementedError
+                def _(x: str):
+                    v: float = metrics_.get(x, None)
+                    if v is None:
+                        return 'N/A'
+                    if x.startswith('rel_'):
+                        return f'{100 * v:.1f}%'
+                    if '_e' in x:
+                        return f'{1e3 * v:.1f} meV'
+                    if '_f' in x:
+                        return f'{1e3 * v:.1f} meV/Å'
+                    if '_s' in x:
+                        return f'{1e3 * v:.1f} meV/Å³'
+                    raise NotImplementedError
 
-            logging.info(
-                f'Epoch {epoch}: {eval_mode}: '
-                f'loss={loss_:.4f}, '
-                f'{error_e}={_(error_e)}, '
-                f'{error_f}={_(error_f)}, '
-                f'{error_s}={_(error_s)}'
-            )
-            if wandb_run is not None:
-                wandb_mode = eval_mode
-                wandb_payload = {
-                    'interval': int(epoch),
-                    'epoch': int(epoch),
-                    f'{wandb_mode}/loss': float(loss_),
-                }
-                for key, value in metrics_.items():
-                    maybe_value = _maybe_float(value)
-                    if maybe_value is not None:
-                        wandb_payload[f'{wandb_mode}/{key}'] = maybe_value
-                wandb_run.log(wandb_payload, step=int(epoch))
-            return loss_
+                _log_info(
+                    f'Epoch {epoch}: {eval_mode}: '
+                    f'loss={loss_:.4f}, '
+                    f'{error_e}={_(error_e)}, '
+                    f'{error_f}={_(error_f)}, '
+                    f'{error_s}={_(error_s)}'
+                )
+                if wandb_run is not None and is_primary:
+                    wandb_mode = eval_mode
+                    wandb_payload = {
+                        'interval': int(epoch),
+                        'epoch': int(epoch),
+                        f'{wandb_mode}/loss': float(loss_),
+                    }
+                    for key, value in metrics_.items():
+                        maybe_value = _maybe_float(value)
+                        if maybe_value is not None:
+                            wandb_payload[f'{wandb_mode}/{key}'] = maybe_value
+                    wandb_run.log(wandb_payload, step=int(epoch))
+
+            synced_loss = loss_
+            if process_count > 1:
+                loss_value = 0.0 if loss_ is None else float(loss_)
+                synced = multihost_utils.broadcast_one_to_all(
+                    jnp.array(loss_value, dtype=jnp.float32),
+                    is_source=is_primary,
+                )
+                synced_loss = float(np.asarray(synced))
+            return synced_loss
 
         evaluate_now = _should_run_eval(epoch, last_epoch)
 
-        if (eval_train or last_epoch) and evaluate_now:
+        if (eval_train or last_epoch) and evaluate_now and (
+            is_primary or process_count == 1
+        ):
             if isinstance(eval_train, (int, float)):
-                eval_and_print(train_loader.subset(eval_train), 'eval_train')
+                subset_loader = train_loader.subset(eval_train)
+                subset_loader = _prepare_loader_for_eval(subset_loader, epoch)
+                eval_and_print(subset_loader, 'eval_train')
             else:
-                eval_and_print(train_loader, 'eval_train')
+                eval_and_print(
+                    _prepare_loader_for_eval(train_loader, epoch), 'eval_train'
+                )
 
         if (
             (eval_test or last_epoch)
             and _loader_has_graphs(test_loader)
             and evaluate_now
+            and (is_primary or process_count == 1)
         ):
             for head_name, loader in _enumerate_eval_targets(
-                test_loader, test_head_loaders
+                test_loader, test_head_loaders, epoch
             ):
                 eval_and_print(loader, 'eval_test', head_name=head_name)
 
         last_valid_loss = None
         if evaluate_now:
             for head_name, loader in _enumerate_eval_targets(
-                valid_loader, valid_head_loaders
+                valid_loader, valid_head_loaders, epoch
             ):
                 last_valid_loss = eval_and_print(
                     loader, 'eval_valid', head_name=head_name
@@ -731,7 +812,7 @@ def train(
             if last_valid_loss >= lowest_loss:
                 patience_counter += 1
                 if patience is not None and patience_counter >= patience:
-                    logging.info(
+                    _log_info(
                         f'Stopping optimization after {patience_counter} epochs without improvement'
                     )
                     stop_after_epoch = True
@@ -745,7 +826,7 @@ def train(
             and swa_config is not None
             and epoch >= swa_config.start_interval
         ):
-            logging.info(
+            _log_info(
                 'SWA stage starting at epoch %s: switching to Stage Two loss.',
                 epoch,
             )
@@ -758,7 +839,7 @@ def train(
         avg_time_per_interval = np.mean(total_time_per_interval[-3:])
         avg_eval_time_per_interval = np.mean(eval_time_per_interval[-3:])
 
-        logging.info(
+        _log_info(
             f'Epoch {epoch}: Time per epoch: {avg_time_per_interval:.1f}s, '
             f'among which {avg_eval_time_per_interval:.1f}s for evaluation.'
         )
@@ -781,7 +862,7 @@ def train(
         if stop_after_epoch or last_epoch:
             break
 
-    logging.info('Training complete')
+    _log_info('Training complete')
     return epoch, eval_params
 
 

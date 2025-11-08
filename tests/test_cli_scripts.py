@@ -287,6 +287,43 @@ def test_cli_schedulefree_binds_params():
     gin.clear_config()
 
 
+def test_cli_device_distributed_bindings():
+    gin.clear_config()
+    args, _ = train_cli.parse_args([
+        '--device',
+        'cpu',
+        '--distributed',
+        '--process-count',
+        '2',
+        '--process-index',
+        '1',
+        '--coordinator-address',
+        'localhost',
+        '--coordinator-port',
+        '12345',
+    ])
+    train_cli.apply_cli_overrides(args)
+    assert gin.query_parameter('mace_jax.tools.gin_functions.flags.device') == 'cpu'
+    assert gin.query_parameter('mace_jax.tools.gin_functions.flags.distributed') is True
+    assert (
+        gin.query_parameter('mace_jax.tools.gin_functions.flags.process_count') == 2
+    )
+    assert (
+        gin.query_parameter('mace_jax.tools.gin_functions.flags.process_index') == 1
+    )
+    assert (
+        gin.query_parameter(
+            'mace_jax.tools.gin_functions.flags.coordinator_address'
+        )
+        == 'localhost'
+    )
+    assert (
+        gin.query_parameter('mace_jax.tools.gin_functions.flags.coordinator_port')
+        == 12345
+    )
+    gin.clear_config()
+
+
 def test_cli_multiheads_adjusts_defaults(monkeypatch):
     gin.clear_config()
     monkeypatch.setattr(

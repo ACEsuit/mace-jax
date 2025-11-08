@@ -52,6 +52,44 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
         help='Disable JAX NaN/inf checks via gin_functions.flags.debug.',
     )
     parser.add_argument(
+        '--device',
+        choices=['auto', 'cpu', 'cuda', 'tpu'],
+        default=None,
+        help='Preferred JAX platform for execution.',
+    )
+    parser.add_argument(
+        '--distributed',
+        action='store_true',
+        help='Initialize jax.distributed for multi-process training.',
+    )
+    parser.add_argument(
+        '--process-count',
+        '--process_count',
+        type=int,
+        default=None,
+        help='Total number of JAX processes when using --distributed.',
+    )
+    parser.add_argument(
+        '--process-index',
+        '--process_index',
+        type=int,
+        default=None,
+        help='Index of this JAX process when using --distributed.',
+    )
+    parser.add_argument(
+        '--coordinator-address',
+        '--coordinator_address',
+        default=None,
+        help='Coordinator address for jax.distributed initialization.',
+    )
+    parser.add_argument(
+        '--coordinator-port',
+        '--coordinator_port',
+        type=int,
+        default=None,
+        help='Coordinator port for jax.distributed initialization.',
+    )
+    parser.add_argument(
         '-b',
         '--binding',
         action='append',

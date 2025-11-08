@@ -2,6 +2,7 @@ from .amsgrad import scale_by_amsgrad
 from .device import (
     configure_torch_runtime,
     get_torch_device,
+    initialize_jax_runtime,
     runtime_device_summary,
     select_jax_device,
 )
@@ -61,6 +62,7 @@ __all__ = [
     'dummyfy',
     'configure_torch_runtime',
     'get_torch_device',
+    'initialize_jax_runtime',
     'runtime_device_summary',
     'select_jax_device',
 ]

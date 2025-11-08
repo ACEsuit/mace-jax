@@ -1,4 +1,5 @@
 import logging
+import random
 from collections import OrderedDict, defaultdict, namedtuple
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -497,6 +498,7 @@ class GraphDataLoader:
         shuffle: bool = True,
         n_mantissa_bits: int | None = None,
         heads: Sequence[str] | None = None,
+        seed: int | None = None,
     ):
         self.graphs = graphs
         self.n_node = n_node
@@ -509,6 +511,8 @@ class GraphDataLoader:
         self.n_mantissa_bits = n_mantissa_bits
         self._length = None
         self.heads = tuple(heads) if heads is not None else None
+        self._seed = seed if seed is not None else random.randrange(0, 2**31)
+        self._current_epoch = 0
 
         keep_graphs = [
             graph
@@ -523,31 +527,9 @@ class GraphDataLoader:
         self.graphs = keep_graphs
 
     def __iter__(self):
-        graphs = self.graphs.copy()  # this is a shallow copy
-        if self.shuffle:
-            shuffle(graphs)
-
-        for batched_graph in dynamically_batch(
-            graphs,
-            n_node=self.n_node,
-            n_edge=self.n_edge,
-            n_graph=self.n_graph,
-        ):
-            if self.n_mantissa_bits is None:
-                yield jraph.pad_with_graphs(
-                    batched_graph, self.n_node, self.n_edge, self.n_graph
-                )
-            else:
-                yield pad_graph_to_nearest_ceil_mantissa(
-                    batched_graph,
-                    n_mantissa_bits=self.n_mantissa_bits,
-                    n_min_nodes=self.min_n_node,
-                    n_min_edges=self.min_n_edge,
-                    n_min_graphs=self.min_n_graph,
-                    n_max_nodes=self.n_node,
-                    n_max_edges=self.n_edge,
-                    n_max_graphs=self.n_graph,
-                )
+        yield from self._batch_iterator(
+            self._ordered_graphs(epoch=self._current_epoch, seed=self._seed)
+        )
 
     def __len__(self):
         if self.shuffle:
@@ -600,6 +582,46 @@ class GraphDataLoader:
             if graphs
         )
 
+    def shard(self, process_count: int, process_index: int) -> 'GraphDataLoader':
+        if process_count <= 1:
+            return self
+        if not (0 <= process_index < process_count):
+            raise ValueError(
+                f'process_index {process_index} must be in [0, {process_count}).'
+            )
+        sliced = [
+            graph for idx, graph in enumerate(self.graphs) if idx % process_count == process_index
+        ]
+        return self._spawn_loader(sliced, heads=self.heads, shuffle=self.shuffle)
+
+    def set_epoch(self, epoch: int) -> None:
+        self._current_epoch = int(epoch)
+
+    def iter_batches(
+        self,
+        *,
+        epoch: int,
+        seed: int | None,
+        process_count: int,
+        process_index: int,
+    ):
+        if process_count <= 0:
+            raise ValueError('process_count must be positive')
+        graphs = self._ordered_graphs(epoch=epoch, seed=seed)
+        if process_count > 1:
+            if not (0 <= process_index < process_count):
+                raise ValueError(
+                    f'process_index {process_index} must be in [0, {process_count}).'
+                )
+            graphs = [
+                graph
+                for idx, graph in enumerate(graphs)
+                if idx % process_count == process_index
+            ]
+        if not graphs:
+            return iter(())
+        return self._batch_iterator(graphs)
+
     def _spawn_loader(self, graphs, *, heads, shuffle):
         return GraphDataLoader(
             graphs=graphs,
@@ -612,7 +634,43 @@ class GraphDataLoader:
             shuffle=shuffle,
             n_mantissa_bits=self.n_mantissa_bits,
             heads=heads,
+            seed=self._seed,
         )
+
+    def _ordered_graphs(self, *, epoch: int, seed: int | None):
+        graphs = self.graphs.copy()
+        if self.shuffle:
+            if seed is None:
+                shuffle(graphs)
+            else:
+                rng = random.Random(seed + epoch)
+                rng.shuffle(graphs)
+        return graphs
+
+    def _batch_iterator(self, graphs):
+        if not graphs:
+            return iter(())
+        for batched_graph in dynamically_batch(
+            graphs,
+            n_node=self.n_node,
+            n_edge=self.n_edge,
+            n_graph=self.n_graph,
+        ):
+            if self.n_mantissa_bits is None:
+                yield jraph.pad_with_graphs(
+                    batched_graph, self.n_node, self.n_edge, self.n_graph
+                )
+            else:
+                yield pad_graph_to_nearest_ceil_mantissa(
+                    batched_graph,
+                    n_mantissa_bits=self.n_mantissa_bits,
+                    n_min_nodes=self.min_n_node,
+                    n_min_edges=self.min_n_edge,
+                    n_min_graphs=self.min_n_graph,
+                    n_max_nodes=self.n_node,
+                    n_max_edges=self.n_edge,
+                    n_max_graphs=self.n_graph,
+                )
 
 
 class ParallelLoader:

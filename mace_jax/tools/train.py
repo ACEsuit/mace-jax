@@ -66,6 +66,7 @@ def train(
     schedule_free_eval_fn: Callable | None = None,
     *,
     start_interval: int = 0,
+    data_seed: int | None = None,
 ):
     """
     for interval, params, optimizer_state, ema_params in train(...):
@@ -134,14 +135,30 @@ def train(
             new_tree,
         )
 
-    def interval_loader():
-        i = 0
+    process_index = getattr(jax, 'process_index', lambda: 0)()
+    is_primary = process_index == 0
+    process_count = getattr(jax, 'process_count', lambda: 1)()
+    supports_iter_batches = hasattr(train_loader, 'iter_batches')
+
+    def _epoch_batches(epoch: int):
+        iterator = train_loader.iter_batches(
+            epoch=epoch,
+            seed=data_seed,
+            process_count=process_count,
+            process_index=process_index,
+        )
+        batches = tuple(iterator)
+        if not batches:
+            raise ValueError(
+                'No batches available for process '
+                f'{process_index}/{process_count}. Reduce process count or provide more data.'
+            )
+        return batches
+
+    def _legacy_interval_loader():
         while True:
             for graph in train_loader:
                 yield graph
-                i += 1
-                if i >= steps_per_interval:
-                    return
 
     initial_eval = eval_params
     if schedule_free_eval_fn is not None:
@@ -149,21 +166,39 @@ def train(
     yield start_interval, params, optimizer_state, initial_eval
 
     for epoch in itertools.count(start_interval):
-        # Train one epoch
+        if supports_iter_batches:
+            epoch_batches = _epoch_batches(epoch)
+            batch_iter = iter(epoch_batches)
+            def _next_batch():
+                nonlocal batch_iter
+                try:
+                    return next(batch_iter)
+                except StopIteration:
+                    batch_iter = iter(epoch_batches)
+                    return next(batch_iter)
+        else:
+            legacy_iter = _legacy_interval_loader()
+            setter = getattr(train_loader, 'set_epoch', None)
+            if callable(setter):
+                setter(epoch)
+            def _next_batch():
+                return next(legacy_iter)
+
         p_bar = tqdm.tqdm(
-            interval_loader(),
+            range(steps_per_interval),
             desc=f'Epoch {epoch + 1}',
-            total=steps_per_interval,
-            disable=not progress_bar,
+            disable=not (progress_bar and is_primary),
         )
-        for graph in p_bar:
+        for _ in p_bar:
+            graph = _next_batch()
             num_updates += 1
             start_time = time.time()
             loss, params, optimizer_state, ema_params = update_fn(
                 params, optimizer_state, ema_params, num_updates, graph
             )
             loss = float(loss)
-            p_bar.set_postfix({'loss': f'{loss:7.3f}'})
+            if is_primary:
+                p_bar.set_postfix({'loss': f'{loss:7.3f}'})
 
             if last_cache_size != update_fn._cache_size():
                 last_cache_size = update_fn._cache_size()

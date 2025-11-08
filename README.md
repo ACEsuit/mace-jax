@@ -35,11 +35,22 @@ Runs training driven by gin-config files. Example:
 
 ```sh
 mace-jax-train configs/aspirin_small.gin \
-  -b "mace_jax.tools.gin_functions.flags.seed=0" \
+  --binding "mace_jax.tools.gin_functions.flags.seed=0" \
   --print-config
 ```
 
 Use `--dry-run` to validate the configuration without launching training. The operative configuration is saved alongside the run logs.
+
+A repository helper mirrors this example and runs a one-interval smoke test on
+the bundled 3BPA dataset:
+
+```sh
+python scripts/run_aspirin_smoke_test.py --print-config
+```
+
+The script exposes knobs for the dataset paths, seed, device, log directory, and
+epoch length, making it convenient for CI or quick local validation without
+editing gin files.
 
 Additional convenience flags let you adjust common gin settings directly from the CLI:
 
@@ -80,8 +91,10 @@ mace-jax-train configs/finetune.gin \
   as the Torch `--clip_grad`/`--ema` flags and remove the need for explicit gin
   bindings.
 - **Optimizer & scheduler** settings can be specified via `--optimizer`
-  (`adam`, `amsgrad`, `sgd`), `--lr`, `--weight-decay`, `--scheduler`
-  (`constant`, `exponential`, `piecewise_constant`), and `--lr_scheduler_gamma`.
+  (`adam`, `adamw`, `amsgrad`, `sgd`, `schedulefree`), `--lr`, `--weight-decay`,
+  `--schedule-free-b1`, `--schedule-free-weight-lr-power`, `--scheduler`
+  (`constant`, `exponential`, `piecewise_constant`, `plateau`), and
+  `--lr_scheduler_gamma`.
   These bind directly into the gin optimizer helper, mirroring the Torch CLI.
 - **Foundation models** can be pulled directly via the same interface as Torch
   MACE. Use `--foundation_model small` (or `medium`, `large`, `small_off`, …) to
@@ -92,6 +105,24 @@ mace-jax-train configs/finetune.gin \
   (optionally with `--force_mh_ft_lr`): learning rate/EMA defaults are adjusted
   automatically when combined with `--foundation_model`, so migrating scripts
   can keep the same behaviour.
+- **Distributed training** is enabled via `--device` (e.g. `cuda`/`cpu`) together with
+  `--distributed`, `--process-count`, `--process-index`, and optional
+  `--coordinator-address/--coordinator-port`. When these flags are provided the CLI
+  initialises `jax.distributed`, shards the training/validation/test datasets per
+  process with deterministic per-epoch shuffles, and only writes logs/checkpoints from
+  rank 0. Environment variables such as `JAX_PROCESS_COUNT`, `JAX_PROCESS_INDEX` or
+  Slurm launch variables can also be used; they override the CLI defaults automatically.
+  A typical 2-host launch (one process per host) looks like:
+
+  ```sh
+  JAX_PROCESS_COUNT=2 \
+  JAX_PROCESS_INDEX=${SLURM_PROCID} \
+  mace-jax-train configs/aspirin_small.gin \
+    --device cuda \
+    --distributed \
+    --coordinator-address host0 \
+    --coordinator-port 12345
+  ```
 
 #### `mace-jax-train-plot`
 

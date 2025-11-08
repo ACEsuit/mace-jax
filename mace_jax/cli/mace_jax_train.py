@@ -282,6 +282,23 @@ def _apply_run_options(args: argparse.Namespace) -> None:
     _bind_if_not_none('mace_jax.tools.gin_functions.flags.dtype', args.dtype)
     if args.debug is not None:
         gin.bind_parameter('mace_jax.tools.gin_functions.flags.debug', args.debug)
+    _bind_if_not_none('mace_jax.tools.gin_functions.flags.device', args.device)
+    if getattr(args, 'distributed', False):
+        gin.bind_parameter('mace_jax.tools.gin_functions.flags.distributed', True)
+    _bind_if_not_none(
+        'mace_jax.tools.gin_functions.flags.process_count', args.process_count
+    )
+    _bind_if_not_none(
+        'mace_jax.tools.gin_functions.flags.process_index', args.process_index
+    )
+    _bind_if_not_none(
+        'mace_jax.tools.gin_functions.flags.coordinator_address',
+        args.coordinator_address,
+    )
+    _bind_if_not_none(
+        'mace_jax.tools.gin_functions.flags.coordinator_port',
+        args.coordinator_port,
+    )
 
 
 def _apply_dataset_options(args: argparse.Namespace) -> None:
@@ -646,11 +663,14 @@ def _prepare_foundation_checkpoint(args: argparse.Namespace) -> None:
 def run_training(dry_run: bool = False) -> None:
     seed = gin_functions.flags()
     directory, tag, logger = gin_functions.logs()
+    process_index = getattr(jax, 'process_index', lambda: 0)()
+    is_primary = process_index == 0
 
     Path(directory).mkdir(parents=True, exist_ok=True)
     operative_config = gin.operative_config_str()
-    with open(Path(directory) / f'{tag}.gin', 'w', encoding='utf-8') as f:
-        f.write(operative_config)
+    if is_primary:
+        with open(Path(directory) / f'{tag}.gin', 'w', encoding='utf-8') as f:
+            f.write(operative_config)
 
     logging.info('MACE-JAX version: %s', mace_jax.__version__)
 
@@ -670,15 +690,16 @@ def run_training(dry_run: bool = False) -> None:
             r_max,
         ) = gin_datasets.datasets()
 
-        wandb_run = gin_functions.wandb(
-            name=tag,
-            dir=directory,
-            config={
-                'gin_config': operative_config,
-                'mace_jax_version': mace_jax.__version__,
-                'seed': seed,
-            },
-        )
+        if is_primary:
+            wandb_run = gin_functions.wandb_run(
+                name=tag,
+                dir=directory,
+                config={
+                    'gin_config': operative_config,
+                    'mace_jax_version': mace_jax.__version__,
+                    'seed': seed,
+                },
+            )
 
         model_fn, params, num_message_passing = gin_model.model(
             r_max=r_max,
@@ -752,6 +773,7 @@ def run_training(dry_run: bool = False) -> None:
             logger=logger,
             directory=directory,
             tag=tag,
+            data_seed=seed,
             wandb_run=wandb_run,
         )
     finally:

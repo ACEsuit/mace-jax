@@ -71,15 +71,14 @@ def _graph_to_data(
 
     # Graph-level mask: True for real graphs, False for padding.
     n_node = jnp.asarray(graph.n_node, dtype=jnp.int32)
-    if jnp.all(n_node > 0):
-        graph_mask = jnp.ones_like(n_node, dtype=bool)
-    else:
-        graph_mask = jraph.get_graph_padding_mask(graph)
-    # Per-node mask derived from graph_mask.
-    node_mask = jnp.repeat(
-        graph_mask, graph.n_node, total_repeat_length=positions.shape[0]
+    padding_mask = jraph.get_graph_padding_mask(graph)
+    graph_mask = jnp.where(
+        jnp.all(n_node > 0),
+        jnp.ones_like(n_node, dtype=bool),
+        padding_mask,
     )
-    node_mask = node_mask.astype(positions.dtype)
+    # Per-node mask derived from graph_mask.
+    node_mask = jraph.get_node_padding_mask(graph).astype(positions.dtype)
 
     # Build one-hot node attributes (zeroed for padded nodes).
     node_attrs = jax.nn.one_hot(
@@ -364,6 +363,20 @@ def model(
     kwargs.pop('avg_r_min', None)
     kwargs.pop('radial_basis', None)
     kwargs.pop('radial_envelope', None)
+
+    def _ensure_irreps(value):
+        if value is None:
+            return None
+        if isinstance(value, e3nn.Irreps):
+            return value
+        if isinstance(value, str):
+            return e3nn.Irreps(value)
+        return value
+
+    for irreps_key in ('hidden_irreps', 'MLP_irreps', 'edge_irreps'):
+        if irreps_key in kwargs:
+            kwargs[irreps_key] = _ensure_irreps(kwargs[irreps_key])
+
     kwargs.setdefault('interaction_cls', RealAgnosticResidualInteractionBlock)
     kwargs.setdefault('interaction_cls_first', RealAgnosticResidualInteractionBlock)
 
@@ -390,7 +403,7 @@ def model(
 
         # Apply optional rescaling consistent with the historical Haiku version.
         graph_mask = jraph.get_graph_padding_mask(graph).astype(outputs['energy'].dtype)
-        node_mask = jnp.repeat(graph_mask, graph.n_node)
+        node_mask = jraph.get_node_padding_mask(graph).astype(outputs['energy'].dtype)
 
         num_nodes = graph.n_node.astype(outputs['energy'].dtype)
         energy = outputs['energy']

@@ -22,16 +22,14 @@ bessel_basis.number = 8
 
 model.radial_envelope = @soft_envelope
 
-model.symmetric_tensor_product_basis = True  # symmetric is slightly worse but slightly faster
-model.off_diagonal = False
+model.num_bessel = 8
+model.num_polynomial_cutoff = 6
 model.max_ell = 3
 model.num_interactions = 2
 model.hidden_irreps = "256x0e + 256x1o"
-model.interaction_irreps = "o3_restricted"  # "o3_restricted" seems to be better than "o3_full"
-model.epsilon = 0.4  # set to None to use the default value of MACE, 1/sqrt(avg_num_neighbors)
+model.MLP_irreps = "16x0e"
 model.correlation = 3  # 4 is better but 5x slower
 model.gate = @silu
-model.readout_mlp_irreps = "16x0e"
 model.num_species = 11
 model.atomic_energies = "average"
 model.avg_num_neighbors = "average"
