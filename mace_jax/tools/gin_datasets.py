@@ -19,7 +19,11 @@ def _ensure_list(value) -> list[str]:
 
 
 def _load_pseudolabel_predictor(
-    checkpoint: str, *, torch_head: str | None, torch_param_dtype: str | None, r_max: float
+    checkpoint: str,
+    *,
+    torch_head: str | None,
+    torch_param_dtype: str | None,
+    r_max: float,
 ):
     logging.info('Loading Torch checkpoint %s for pseudolabeling', checkpoint)
     predictor_fn, params, _ = gin_model.model(
@@ -78,7 +82,8 @@ def _maybe_apply_pseudolabels(
 
     if not configs:
         logging.info(
-            "No configurations available for pseudolabel target '%s'; skipping.", targets
+            "No configurations available for pseudolabel target '%s'; skipping.",
+            targets,
         )
         return
 
@@ -90,7 +95,7 @@ def _maybe_apply_pseudolabels(
     )
 
     logging.info(
-        "Applying pseudolabels from %s to %d configurations (%s target).",
+        'Applying pseudolabels from %s to %d configurations (%s target).',
         checkpoint,
         len(configs),
         targets,
@@ -433,9 +438,7 @@ def datasets(
 
     def _graphs(configs: list[data.Configuration]):
         return [
-            data.graph_from_configuration(
-                c, cutoff=r_max, head_to_index=head_to_index
-            )
+            data.graph_from_configuration(c, cutoff=r_max, head_to_index=head_to_index)
             for c in tqdm(configs)
         ]
 

@@ -80,10 +80,12 @@ def runtime_device_summary(torch_device: Any | None) -> dict[str, object]:
     summary: dict[str, object] = {'jax_devices': jax_devices}
 
     if torch is not None:
-        summary.update({
-            'torch_device': str(torch_device) if torch_device is not None else None,
-            'torch_cuda_available': torch.cuda.is_available(),
-        })
+        summary.update(
+            {
+                'torch_device': str(torch_device) if torch_device is not None else None,
+                'torch_cuda_available': torch.cuda.is_available(),
+            }
+        )
     else:  # pragma: no cover - torch optional dependency
         summary['torch_available'] = False
 

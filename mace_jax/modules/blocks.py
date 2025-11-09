@@ -237,16 +237,20 @@ class NonLinearDipoleReadoutBlock(fnn.Module):
         else:
             self.irreps_out = Irreps('1x0e + 1x1o')
 
-        irreps_scalars = Irreps([
-            (mul, ir)
-            for mul, ir in self.hidden_irreps
-            if ir.l == 0 and ir in self.irreps_out
-        ])
-        irreps_gated = Irreps([
-            (mul, ir)
-            for mul, ir in self.hidden_irreps
-            if ir.l > 0 and ir in self.irreps_out
-        ])
+        irreps_scalars = Irreps(
+            [
+                (mul, ir)
+                for mul, ir in self.hidden_irreps
+                if ir.l == 0 and ir in self.irreps_out
+            ]
+        )
+        irreps_gated = Irreps(
+            [
+                (mul, ir)
+                for mul, ir in self.hidden_irreps
+                if ir.l > 0 and ir in self.irreps_out
+            ]
+        )
         irreps_gates = Irreps([(mul, Irreps('0e')[0][1]) for mul, _ in irreps_gated])
 
         self.equivariant_nonlin = nn.Gate(
@@ -321,16 +325,20 @@ class NonLinearDipolePolarReadoutBlock(fnn.Module):
             )
         self.irreps_out = Irreps('2x0e + 1x1o + 1x2e')
 
-        irreps_scalars = Irreps([
-            (mul, ir)
-            for mul, ir in self.hidden_irreps
-            if ir.l == 0 and ir in self.irreps_out
-        ])
-        irreps_gated = Irreps([
-            (mul, ir)
-            for mul, ir in self.hidden_irreps
-            if ir.l > 0 and ir in self.irreps_out
-        ])
+        irreps_scalars = Irreps(
+            [
+                (mul, ir)
+                for mul, ir in self.hidden_irreps
+                if ir.l == 0 and ir in self.irreps_out
+            ]
+        )
+        irreps_gated = Irreps(
+            [
+                (mul, ir)
+                for mul, ir in self.hidden_irreps
+                if ir.l > 0 and ir in self.irreps_out
+            ]
+        )
         irreps_gates = Irreps([(mul, '0e') for mul, _ in irreps_gated])
 
         self.equivariant_nonlin = nn.Gate(
@@ -1173,9 +1181,9 @@ class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
 class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
     def _setup(self) -> None:
         # Compute scalar irreps
-        node_scalar_irreps = Irreps([
-            (self.node_feats_irreps.count(Irrep(0, 1)), (0, 1))
-        ])
+        node_scalar_irreps = Irreps(
+            [(self.node_feats_irreps.count(Irrep(0, 1)), (0, 1))]
+        )
 
         # Source/target embeddings
         self.source_embedding = Linear(

@@ -93,15 +93,19 @@ def _cue_device_or_skip() -> torch.device:
     device = configure_torch_runtime('cuda')
 
     cfg = CuEquivarianceConfigTorch(enabled=True, optimize_symmetric=True)
-    block = EquivariantProductBasisBlockTorch(
-        node_feats_irreps='1x0e',
-        target_irreps='1x0e',
-        correlation=1,
-        use_sc=False,
-        num_elements=1,
-        use_reduced_cg=True,
-        cueq_config=cfg,
-    ).float().to(device)
+    block = (
+        EquivariantProductBasisBlockTorch(
+            node_feats_irreps='1x0e',
+            target_irreps='1x0e',
+            correlation=1,
+            use_sc=False,
+            num_elements=1,
+            use_reduced_cg=True,
+            cueq_config=cfg,
+        )
+        .float()
+        .to(device)
+    )
 
     dtype = _module_dtype(block)
     x = torch.zeros((1, 1, 1), dtype=dtype, device=device)

@@ -454,6 +454,8 @@ def _import_e3nn_linear(module, variables, scope: Sequence[str]) -> None:
             module.bias.detach().cpu().numpy(),
             dtype=target['bias'].dtype,
         )
+
+
 _GATE_MAP: dict[str, Callable | None] = {
     'silu': jnn.silu,
     'silu6': jnn.silu,

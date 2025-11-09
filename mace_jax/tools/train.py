@@ -297,7 +297,11 @@ def evaluate(
         for key in ('energy', 'stress', 'virials', 'dipole', 'polarizability'):
             if key in output and output[key] is not None:
                 globals_updates[key] = output[key]
-        globals_attr = ref_graph.globals._replace(**globals_updates) if globals_updates else ref_graph.globals
+        globals_attr = (
+            ref_graph.globals._replace(**globals_updates)
+            if globals_updates
+            else ref_graph.globals
+        )
         pred_graph = ref_graph._replace(nodes=nodes, globals=globals_attr)
 
         if last_cache_size is not None and last_cache_size != predictor._cache_size():
@@ -441,48 +445,56 @@ def evaluate(
         delta_es_per_atom = np.concatenate(delta_es_per_atom_list, axis=0)
         es = np.concatenate(es_list, axis=0)
         es_per_atom = np.concatenate(es_per_atom_list, axis=0)
-        aux.update({
-            # Mean absolute error
-            'mae_e': tools.compute_mae(delta_es),
-            'rel_mae_e': tools.compute_rel_mae(delta_es, es),
-            'mae_e_per_atom': tools.compute_mae(delta_es_per_atom),
-            'rel_mae_e_per_atom': tools.compute_rel_mae(delta_es_per_atom, es_per_atom),
-            # Root-mean-square error
-            'rmse_e': tools.compute_rmse(delta_es),
-            'rel_rmse_e': tools.compute_rel_rmse(delta_es, es),
-            'rmse_e_per_atom': tools.compute_rmse(delta_es_per_atom),
-            'rel_rmse_e_per_atom': tools.compute_rel_rmse(
-                delta_es_per_atom, es_per_atom
-            ),
-            # Q_95
-            'q95_e': tools.compute_q95(delta_es),
-        })
+        aux.update(
+            {
+                # Mean absolute error
+                'mae_e': tools.compute_mae(delta_es),
+                'rel_mae_e': tools.compute_rel_mae(delta_es, es),
+                'mae_e_per_atom': tools.compute_mae(delta_es_per_atom),
+                'rel_mae_e_per_atom': tools.compute_rel_mae(
+                    delta_es_per_atom, es_per_atom
+                ),
+                # Root-mean-square error
+                'rmse_e': tools.compute_rmse(delta_es),
+                'rel_rmse_e': tools.compute_rel_rmse(delta_es, es),
+                'rmse_e_per_atom': tools.compute_rmse(delta_es_per_atom),
+                'rel_rmse_e_per_atom': tools.compute_rel_rmse(
+                    delta_es_per_atom, es_per_atom
+                ),
+                # Q_95
+                'q95_e': tools.compute_q95(delta_es),
+            }
+        )
     if len(delta_fs_list) > 0:
         delta_fs = np.concatenate(delta_fs_list, axis=0)
         fs = np.concatenate(fs_list, axis=0)
-        aux.update({
-            # Mean absolute error
-            'mae_f': tools.compute_mae(delta_fs),
-            'rel_mae_f': tools.compute_rel_mae(delta_fs, fs),
-            # Root-mean-square error
-            'rmse_f': tools.compute_rmse(delta_fs),
-            'rel_rmse_f': tools.compute_rel_rmse(delta_fs, fs),
-            # Q_95
-            'q95_f': tools.compute_q95(delta_fs),
-        })
+        aux.update(
+            {
+                # Mean absolute error
+                'mae_f': tools.compute_mae(delta_fs),
+                'rel_mae_f': tools.compute_rel_mae(delta_fs, fs),
+                # Root-mean-square error
+                'rmse_f': tools.compute_rmse(delta_fs),
+                'rel_rmse_f': tools.compute_rel_rmse(delta_fs, fs),
+                # Q_95
+                'q95_f': tools.compute_q95(delta_fs),
+            }
+        )
     if len(delta_stress_list) > 0:
         delta_stress = np.concatenate(delta_stress_list, axis=0)
         stress = np.concatenate(stress_list, axis=0)
-        aux.update({
-            # Mean absolute error
-            'mae_s': tools.compute_mae(delta_stress),
-            'rel_mae_s': tools.compute_rel_mae(delta_stress, stress),
-            # Root-mean-square error
-            'rmse_s': tools.compute_rmse(delta_stress),
-            'rel_rmse_s': tools.compute_rel_rmse(delta_stress, stress),
-            # Q_95
-            'q95_s': tools.compute_q95(delta_stress),
-        })
+        aux.update(
+            {
+                # Mean absolute error
+                'mae_s': tools.compute_mae(delta_stress),
+                'rel_mae_s': tools.compute_rel_mae(delta_stress, stress),
+                # Root-mean-square error
+                'rmse_s': tools.compute_rmse(delta_stress),
+                'rel_rmse_s': tools.compute_rel_rmse(delta_stress, stress),
+                # Q_95
+                'q95_s': tools.compute_q95(delta_stress),
+            }
+        )
     aux['mae_stress'] = aux['mae_s']
     aux['rel_mae_stress'] = aux['rel_mae_s']
     aux['rmse_stress'] = aux['rmse_s']
@@ -492,38 +504,44 @@ def evaluate(
     if len(delta_virials_list) > 0:
         delta_virials = np.concatenate(delta_virials_list, axis=0)
         delta_virials_per_atom = np.concatenate(delta_virials_per_atom_list, axis=0)
-        aux.update({
-            'mae_virials': tools.compute_mae(delta_virials),
-            'rmse_virials': tools.compute_rmse(delta_virials),
-            'rmse_virials_per_atom': tools.compute_rmse(delta_virials_per_atom),
-            'q95_virials': tools.compute_q95(delta_virials),
-        })
+        aux.update(
+            {
+                'mae_virials': tools.compute_mae(delta_virials),
+                'rmse_virials': tools.compute_rmse(delta_virials),
+                'rmse_virials_per_atom': tools.compute_rmse(delta_virials_per_atom),
+                'q95_virials': tools.compute_q95(delta_virials),
+            }
+        )
 
     if len(delta_dipoles_list) > 0:
         delta_mus = np.concatenate(delta_dipoles_list, axis=0)
         delta_mus_per_atom = np.concatenate(delta_dipoles_per_atom_list, axis=0)
         mus = np.concatenate(dipoles_list, axis=0)
-        aux.update({
-            'mae_mu': tools.compute_mae(delta_mus),
-            'mae_mu_per_atom': tools.compute_mae(delta_mus_per_atom),
-            'rel_mae_mu': tools.compute_rel_mae(delta_mus, mus),
-            'rmse_mu': tools.compute_rmse(delta_mus),
-            'rmse_mu_per_atom': tools.compute_rmse(delta_mus_per_atom),
-            'rel_rmse_mu': tools.compute_rel_rmse(delta_mus, mus),
-            'q95_mu': tools.compute_q95(delta_mus),
-        })
+        aux.update(
+            {
+                'mae_mu': tools.compute_mae(delta_mus),
+                'mae_mu_per_atom': tools.compute_mae(delta_mus_per_atom),
+                'rel_mae_mu': tools.compute_rel_mae(delta_mus, mus),
+                'rmse_mu': tools.compute_rmse(delta_mus),
+                'rmse_mu_per_atom': tools.compute_rmse(delta_mus_per_atom),
+                'rel_rmse_mu': tools.compute_rel_rmse(delta_mus, mus),
+                'q95_mu': tools.compute_q95(delta_mus),
+            }
+        )
 
     if len(delta_polar_list) > 0:
         delta_polar = np.concatenate(delta_polar_list, axis=0)
         delta_polar_per_atom = np.concatenate(delta_polar_per_atom_list, axis=0)
-        aux.update({
-            'mae_polarizability': tools.compute_mae(delta_polar),
-            'mae_polarizability_per_atom': tools.compute_mae(delta_polar_per_atom),
-            'rmse_polarizability': tools.compute_rmse(delta_polar),
-            'rmse_polarizability_per_atom': tools.compute_rmse(
-                delta_polar_per_atom
-            ),
-            'q95_polarizability': tools.compute_q95(delta_polar),
-        })
+        aux.update(
+            {
+                'mae_polarizability': tools.compute_mae(delta_polar),
+                'mae_polarizability_per_atom': tools.compute_mae(delta_polar_per_atom),
+                'rmse_polarizability': tools.compute_rmse(delta_polar),
+                'rmse_polarizability_per_atom': tools.compute_rmse(
+                    delta_polar_per_atom
+                ),
+                'q95_polarizability': tools.compute_q95(delta_polar),
+            }
+        )
 
     return avg_loss, aux

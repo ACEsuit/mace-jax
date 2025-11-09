@@ -443,19 +443,23 @@ def add_output_interface(cls=None):
                 force_flag = bool(has_force)
                 stress_flag = bool(has_stress)
             except TracerBoolConversionError:
-                result.update({
-                    'energy': total_energy,
-                    'forces': forces,
-                    'stress': stress,
-                    'forces_mask': has_force,
-                    'stress_mask': has_stress,
-                })
+                result.update(
+                    {
+                        'energy': total_energy,
+                        'forces': forces,
+                        'stress': stress,
+                        'forces_mask': has_force,
+                        'stress_mask': has_stress,
+                    }
+                )
             else:
-                result.update({
-                    'energy': total_energy,
-                    'forces': forces if force_flag else None,
-                    'stress': stress if stress_flag else None,
-                })
+                result.update(
+                    {
+                        'energy': total_energy,
+                        'forces': forces if force_flag else None,
+                        'stress': stress if stress_flag else None,
+                    }
+                )
             return result
 
         # Move __call__ to _energy_fn

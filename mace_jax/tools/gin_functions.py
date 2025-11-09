@@ -406,11 +406,13 @@ def optimizer(
                     weight_decay=weight_decay, mask_fn=weight_decay_mask
                 )
             )
-    transforms.extend([
-        algorithm(),
-        optax.scale_by_schedule(schedule),
-        optax.scale(-1.0),
-    ])
+    transforms.extend(
+        [
+            algorithm(),
+            optax.scale_by_schedule(schedule),
+            optax.scale(-1.0),
+        ]
+    )
 
     gradient_chain = optax.chain(*transforms)
     plateau_update = getattr(schedule, 'update', None)
@@ -724,16 +726,35 @@ def train(
                 )
                 log_selection = {
                     'PerAtomRMSE': ['rmse_e_per_atom', 'rmse_f', stress_rmse_key],
-                    'rel_PerAtomRMSE': ['rmse_e_per_atom', 'rel_rmse_f', 'rel_rmse_stress'],
+                    'rel_PerAtomRMSE': [
+                        'rmse_e_per_atom',
+                        'rel_rmse_f',
+                        'rel_rmse_stress',
+                    ],
                     'TotalRMSE': ['rmse_e', 'rmse_f', stress_rmse_key],
                     'PerAtomMAE': ['mae_e_per_atom', 'mae_f', stress_mae_key],
                     'rel_PerAtomMAE': ['mae_e_per_atom', 'rel_mae_f', 'rel_mae_stress'],
                     'TotalMAE': ['mae_e', 'mae_f', stress_mae_key],
-                    'PerAtomRMSEstressvirials': ['rmse_e_per_atom', 'rmse_f', stress_rmse_key],
-                    'PerAtomMAEstressvirials': ['mae_e_per_atom', 'mae_f', stress_mae_key],
+                    'PerAtomRMSEstressvirials': [
+                        'rmse_e_per_atom',
+                        'rmse_f',
+                        stress_rmse_key,
+                    ],
+                    'PerAtomMAEstressvirials': [
+                        'mae_e_per_atom',
+                        'mae_f',
+                        stress_mae_key,
+                    ],
                     'DipoleRMSE': ['rmse_mu_per_atom'],
-                    'DipolePolarRMSE': ['rmse_mu_per_atom', 'rmse_polarizability_per_atom'],
-                    'EnergyDipoleRMSE': ['rmse_e_per_atom', 'rmse_f', 'rmse_mu_per_atom'],
+                    'DipolePolarRMSE': [
+                        'rmse_mu_per_atom',
+                        'rmse_polarizability_per_atom',
+                    ],
+                    'EnergyDipoleRMSE': [
+                        'rmse_e_per_atom',
+                        'rmse_f',
+                        'rmse_mu_per_atom',
+                    ],
                 }
                 selected_metrics = log_selection.get(
                     log_errors or 'PerAtomRMSE',
@@ -753,7 +774,11 @@ def train(
                         return f'{1e3 * v:.1f} mDebye'
                     if 'polarizability' in lower_key:
                         return f'{1e3 * v:.1f} me Å^2 / V'
-                    if 'virials' in lower_key or 'stress' in lower_key or lower_key.endswith('_s'):
+                    if (
+                        'virials' in lower_key
+                        or 'stress' in lower_key
+                        or lower_key.endswith('_s')
+                    ):
                         return f'{1e3 * v:.1f} meV/Å³'
                     if lower_key.endswith('_f'):
                         return f'{1e3 * v:.1f} meV/Å'
@@ -766,8 +791,7 @@ def train(
                 )
                 _log_info(
                     f'Epoch {epoch}: {eval_mode}: '
-                    f'loss={loss_:.4f}'
-                    + (f', {metrics_blob}' if metrics_blob else '')
+                    f'loss={loss_:.4f}' + (f', {metrics_blob}' if metrics_blob else '')
                 )
                 if wandb_run is not None and is_primary:
                     wandb_mode = eval_mode

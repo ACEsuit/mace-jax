@@ -283,9 +283,9 @@ def main():
         if not configurations:
             raise ValueError(f'No configurations found in {args.predict}')
 
-        species_table = data_utils.AtomicNumberTable([
-            int(z) for z in config['atomic_numbers']
-        ])
+        species_table = data_utils.AtomicNumberTable(
+            [int(z) for z in config['atomic_numbers']]
+        )
 
         for idx, configuration in enumerate(configurations):
             species_indices = data_utils.atomic_numbers_to_indices(

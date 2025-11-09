@@ -32,13 +32,17 @@ def _available_torch_devices() -> list[str]:
 
 def _validate_cue_on_device(device: torch.device) -> None:
     cfg = CuEquivarianceConfig(enabled=True, optimize_symmetric=True)
-    module = SymmetricContractionWrapper(
-        irreps_in=o3.Irreps('1x0e'),
-        irreps_out=o3.Irreps('1x0e'),
-        correlation=1,
-        num_elements=2,
-        cueq_config=cfg,
-    ).to(device).eval()
+    module = (
+        SymmetricContractionWrapper(
+            irreps_in=o3.Irreps('1x0e'),
+            irreps_out=o3.Irreps('1x0e'),
+            correlation=1,
+            num_elements=2,
+            cueq_config=cfg,
+        )
+        .to(device)
+        .eval()
+    )
 
     dtype = _module_dtype(module)
     x = torch.zeros((1, 1), dtype=dtype, device=device)
@@ -81,17 +85,21 @@ class TestSymmetricContractionImport:
     def test_forward_matches_cue_torch(self, module_and_params, torch_device):
         module, params = module_and_params
 
-        torch_module = SymmetricContractionWrapper(
-            irreps_in=o3.Irreps('1x0e'),
-            irreps_out=o3.Irreps('1x0e'),
-            correlation=1,
-            num_elements=2,
-            cueq_config=CuEquivarianceConfig(
-                enabled=True,
-                layout='mul_ir',
-                optimize_symmetric=True,
-            ),
-        ).to(torch_device).eval()
+        torch_module = (
+            SymmetricContractionWrapper(
+                irreps_in=o3.Irreps('1x0e'),
+                irreps_out=o3.Irreps('1x0e'),
+                correlation=1,
+                num_elements=2,
+                cueq_config=CuEquivarianceConfig(
+                    enabled=True,
+                    layout='mul_ir',
+                    optimize_symmetric=True,
+                ),
+            )
+            .to(torch_device)
+            .eval()
+        )
         dtype = _module_dtype(torch_module)
 
         variables = module.import_from_torch(torch_module, params)
@@ -147,13 +155,17 @@ class TestSymmetricContractionImport:
         init_indices = jnp.zeros((1,), dtype=jnp.int32)
         params = module.init(jax.random.PRNGKey(0), init_inputs, init_indices)
 
-        torch_module = SymmetricContractionWrapper(
-            irreps_in=o3.Irreps(str(irreps_in)),
-            irreps_out=o3.Irreps(str(irreps_out)),
-            correlation=correlation,
-            num_elements=num_elements,
-            use_reduced_cg=True,
-        ).to(torch_device).eval()
+        torch_module = (
+            SymmetricContractionWrapper(
+                irreps_in=o3.Irreps(str(irreps_in)),
+                irreps_out=o3.Irreps(str(irreps_out)),
+                correlation=correlation,
+                num_elements=num_elements,
+                use_reduced_cg=True,
+            )
+            .to(torch_device)
+            .eval()
+        )
         dtype = _module_dtype(torch_module)
 
         variables = module.import_from_torch(torch_module, params)
@@ -219,17 +231,21 @@ class TestSymmetricContractionImport:
         init_indices = jnp.zeros((1,), dtype=jnp.int32)
         params = module.init(jax.random.PRNGKey(0), init_inputs, init_indices)
 
-        torch_module = SymmetricContractionWrapper(
-            irreps_in=o3.Irreps(str(irreps_in)),
-            irreps_out=o3.Irreps(str(irreps_out)),
-            correlation=correlation,
-            num_elements=num_elements,
-            cueq_config=CuEquivarianceConfig(
-                enabled=True,
-                layout='mul_ir',
-                optimize_symmetric=True,
-            ),
-        ).to(torch_device).eval()
+        torch_module = (
+            SymmetricContractionWrapper(
+                irreps_in=o3.Irreps(str(irreps_in)),
+                irreps_out=o3.Irreps(str(irreps_out)),
+                correlation=correlation,
+                num_elements=num_elements,
+                cueq_config=CuEquivarianceConfig(
+                    enabled=True,
+                    layout='mul_ir',
+                    optimize_symmetric=True,
+                ),
+            )
+            .to(torch_device)
+            .eval()
+        )
         dtype = _module_dtype(torch_module)
 
         variables = module.import_from_torch(torch_module, params)
@@ -293,12 +309,16 @@ class TestSymmetricContractionImport:
         init_indices = jnp.zeros((1,), dtype=jnp.int32)
         params = module.init(jax.random.PRNGKey(0), init_inputs, init_indices)
 
-        torch_module = SymmetricContractionWrapper(
-            irreps_in=o3.Irreps(str(irreps_in)),
-            irreps_out=o3.Irreps(str(irreps_out)),
-            correlation=correlation,
-            num_elements=num_elements,
-        ).to(torch_device).eval()
+        torch_module = (
+            SymmetricContractionWrapper(
+                irreps_in=o3.Irreps(str(irreps_in)),
+                irreps_out=o3.Irreps(str(irreps_out)),
+                correlation=correlation,
+                num_elements=num_elements,
+            )
+            .to(torch_device)
+            .eval()
+        )
         dtype = _module_dtype(torch_module)
 
         variables = module.import_from_torch(torch_module, params)
@@ -361,13 +381,17 @@ class TestSymmetricContractionImport:
         init_indices = jnp.zeros((1,), dtype=jnp.int32)
         params = module.init(jax.random.PRNGKey(0), init_inputs, init_indices)
 
-        torch_module = SymmetricContractionWrapper(
-            irreps_in=o3.Irreps(str(irreps_in)),
-            irreps_out=o3.Irreps(str(irreps_out)),
-            correlation=correlation,
-            num_elements=num_elements,
-            use_reduced_cg=False,
-        ).to(torch_device).eval()
+        torch_module = (
+            SymmetricContractionWrapper(
+                irreps_in=o3.Irreps(str(irreps_in)),
+                irreps_out=o3.Irreps(str(irreps_out)),
+                correlation=correlation,
+                num_elements=num_elements,
+                use_reduced_cg=False,
+            )
+            .to(torch_device)
+            .eval()
+        )
         dtype = _module_dtype(torch_module)
 
         variables = module.import_from_torch(torch_module, params)

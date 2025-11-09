@@ -106,9 +106,9 @@ def config_from_atoms(
     # pressure = None
 
     forces = atoms.arrays.get(forces_key, None)  # eV / Ang
-    atomic_numbers = np.array([
-        ase.data.atomic_numbers[symbol] for symbol in atoms.symbols
-    ])
+    atomic_numbers = np.array(
+        [ase.data.atomic_numbers[symbol] for symbol in atoms.symbols]
+    )
     pbc = tuple(atoms.get_pbc())
     cell = np.array(atoms.get_cell())
     assert np.linalg.det(cell) >= 0.0
@@ -599,7 +599,9 @@ class GraphDataLoader:
                 f'process_index {process_index} must be in [0, {process_count}).'
             )
         sliced = [
-            graph for idx, graph in enumerate(self.graphs) if idx % process_count == process_index
+            graph
+            for idx, graph in enumerate(self.graphs)
+            if idx % process_count == process_index
         ]
         return self._spawn_loader(sliced, heads=self.heads, shuffle=self.shuffle)
 

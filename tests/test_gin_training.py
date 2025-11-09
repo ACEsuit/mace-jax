@@ -451,7 +451,11 @@ def test_graph_dataloader_iter_batches_deterministic():
     def _sequence_signature(batches):
         return [
             tuple(
-                sorted(int(h) - 1 for h in np.asarray(batch.globals['head']).reshape(-1) if h > 0)
+                sorted(
+                    int(h) - 1
+                    for h in np.asarray(batch.globals['head']).reshape(-1)
+                    if h > 0
+                )
             )
             for batch in batches
         ]
@@ -534,7 +538,9 @@ def test_head_config_overrides_energy_force_keys(monkeypatch):
     }
     gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.head_configs', head_cfgs)
     simple_xyz = Path(__file__).resolve().parent / 'test_data' / 'simple.xyz'
-    gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.train_path', str(simple_xyz))
+    gin.bind_parameter(
+        'mace_jax.tools.gin_datasets.datasets.train_path', str(simple_xyz)
+    )
     gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.r_max', 2.5)
     gin_datasets.datasets()
 
@@ -546,6 +552,7 @@ def test_head_config_overrides_energy_force_keys(monkeypatch):
 def test_gin_model_torch_checkpoint(monkeypatch, tmp_path):
     import numpy as np
     import torch
+
     try:
         from mace.tools import scripts_utils
     except Exception:  # pragma: no cover - optional dependency path

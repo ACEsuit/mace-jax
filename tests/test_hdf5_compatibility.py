@@ -4,11 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import h5py
 import numpy as np
 import pytest
-
-import h5py
-
 from mace.data.utils import Configuration as TorchConfiguration
 from mace.data.utils import save_configurations_as_HDF5
 from mace.tools.utils import AtomicNumberTable

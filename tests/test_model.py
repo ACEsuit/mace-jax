@@ -149,9 +149,7 @@ class ModelEquivalenceTestBase:
     @classmethod
     def setup_class(cls):
         if _TORCH_MODEL_IMPORT_ERROR is not None:
-            pytest.skip(
-                f'Torch model helpers unavailable: {_TORCH_MODEL_IMPORT_ERROR}'
-            )
+            pytest.skip(f'Torch model helpers unavailable: {_TORCH_MODEL_IMPORT_ERROR}')
         if cls.statistics is None:
             cls.statistics = _load_statistics(cls.stats_path)
         cls.structures = cls._build_structures()
