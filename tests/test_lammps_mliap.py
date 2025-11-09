@@ -14,7 +14,7 @@ from mace_jax.calculators.lammps_mliap_mace import (
     LAMMPS_MLIAP_MACE,
     create_lammps_mliap_calculator,
 )
-from mace_jax.tools.device import configure_torch_runtime, select_jax_device
+from mace_jax.tools.device import configure_torch_runtime
 
 try:
     import torch

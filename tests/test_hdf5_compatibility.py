@@ -9,7 +9,6 @@ import numpy as np
 import pytest
 from mace.data.utils import Configuration as TorchConfiguration
 from mace.data.utils import save_configurations_as_HDF5
-from mace.tools.utils import AtomicNumberTable
 
 from mace_jax import data as jax_data
 

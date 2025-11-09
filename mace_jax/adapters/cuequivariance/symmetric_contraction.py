@@ -27,7 +27,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import torch
-from e3nn import o3
 from e3nn_jax import Irreps
 from flax import linen as fnn
 from flax.core import freeze, unfreeze
@@ -644,9 +643,23 @@ def _cached_full_cg_transform(
     linear-algebra work is only performed the first time a specific combination
     of irreps and correlation order is requested.
     """
-    from mace.modules.wrapper_ops import (  # noqa: PLC0415
-        SymmetricContractionWrapper as TorchSymmetricContraction,
-    )
+    try:
+        from e3nn import o3  # noqa: PLC0415
+    except ModuleNotFoundError as exc:  # pragma: no cover - import guard
+        raise ModuleNotFoundError(
+            'Full CG transforms require the optional dependency "e3nn". '
+            'Install mace with its PyTorch extras to enable this feature.'
+        ) from exc
+
+    try:
+        from mace.modules.wrapper_ops import (  # noqa: PLC0415
+            SymmetricContractionWrapper as TorchSymmetricContraction,
+        )
+    except ModuleNotFoundError as exc:  # pragma: no cover - import guard
+        raise ModuleNotFoundError(
+            'Full CG transforms rely on the PyTorch wrapper ops, which are only '
+            'available when mace is installed with its torch components.'
+        ) from exc
 
     irreps_in_o3 = o3.Irreps(irreps_in_str)
     irreps_out_o3 = o3.Irreps(irreps_out_str)
