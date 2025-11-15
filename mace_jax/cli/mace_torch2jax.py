@@ -72,6 +72,79 @@ def _load_torch_model_from_foundations(
         return torch_model
 
 
+def _parse_parity(parity: Any) -> int:
+    if parity is None:
+        return 1
+    if isinstance(parity, str):
+        p = parity.strip().lower()
+        if p in {'e', 'even'}:
+            return 1
+        if p in {'o', 'odd'}:
+            return -1
+    try:
+        parity_int = int(parity)
+    except (TypeError, ValueError):
+        return 1
+    return 1 if parity_int >= 0 else -1
+
+
+def _as_irrep_entry(entry: Any):
+    if isinstance(entry, dict):
+        mul = entry.get('mul') or entry.get('multiplicity') or entry.get('n')
+        rep = entry.get('irrep') or entry.get('rep') or entry.get('l')
+        parity = entry.get('p') or entry.get('parity')
+        if isinstance(rep, dict):
+            l_val = rep.get('l')
+            parity = parity or rep.get('p') or rep.get('parity')
+        else:
+            l_val = rep
+        if mul is None or l_val is None:
+            return None
+        return int(mul), (int(l_val), _parse_parity(parity))
+
+    if isinstance(entry, (list, tuple)):
+        if len(entry) == 2 and isinstance(entry[0], (int, np.integer)):
+            mul = int(entry[0])
+            rep = entry[1]
+            if isinstance(rep, (list, tuple)):
+                if not rep:
+                    return None
+                l_val = int(rep[0])
+                parity = _parse_parity(rep[1] if len(rep) > 1 else None)
+                return mul, (l_val, parity)
+            if isinstance(rep, dict):
+                l_val = rep.get('l')
+                parity = rep.get('p') or rep.get('parity')
+                if l_val is None:
+                    return None
+                return mul, (int(l_val), _parse_parity(parity))
+            if isinstance(rep, (int, np.integer)):
+                return mul, (int(rep), 1)
+    return None
+
+
+def _normalize_irreps(value: Any):
+    if isinstance(value, dict):
+        value = [value]
+
+    if isinstance(value, (list, tuple)):
+        if value and _as_irrep_entry(value) is not None:
+            entries = [value]
+        else:
+            entries = value
+
+        parsed = []
+        for item in entries:
+            entry = _as_irrep_entry(item)
+            if entry is None:
+                return None
+            parsed.append(entry)
+
+        return parsed
+
+    return None
+
+
 def _as_irreps(value: Any) -> Irreps:
     if isinstance(value, Irreps):
         return value
@@ -79,6 +152,9 @@ def _as_irreps(value: Any) -> Irreps:
         return Irreps(value)
     if isinstance(value, int):
         return Irreps(f'{value}x0e')
+    normalized = _normalize_irreps(value)
+    if normalized is not None:
+        return Irreps(normalized)
     return Irreps(str(value))
 
 
