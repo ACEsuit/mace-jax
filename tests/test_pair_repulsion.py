@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import flax.core as flax_core
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -35,7 +36,9 @@ def _graph_to_data(distance: float, cutoff: float = 6.0) -> dict[str, jnp.ndarra
     return gin_model._graph_to_data(graph, num_species=1)
 
 
-def _build_mace_model(*, pair_repulsion: bool, distance_transform: str = 'None'):
+def _build_mace_model(
+    *, pair_repulsion: bool, distance_transform: str = 'None', avg_num_neighbors: float = 1.0
+):
     return modules.ScaleShiftMACE(
         r_max=6.0,
         num_bessel=2,
@@ -52,7 +55,7 @@ def _build_mace_model(*, pair_repulsion: bool, distance_transform: str = 'None')
         hidden_irreps=Irreps('1x0e'),
         MLP_irreps=Irreps('1x0e'),
         atomic_energies=np.zeros((1,), dtype=np.float64),
-        avg_num_neighbors=1.0,
+        avg_num_neighbors=avg_num_neighbors,
         atomic_numbers=(29,),
         correlation=1,
         gate=None,
@@ -61,6 +64,17 @@ def _build_mace_model(*, pair_repulsion: bool, distance_transform: str = 'None')
         atomic_inter_scale=np.asarray(1.0),
         atomic_inter_shift=np.asarray(0.0),
     )
+
+
+def _fill_params(params, value: float):
+    """Recursively fill numeric leaves with a constant for deterministic comparisons."""
+    if isinstance(params, dict):
+        return {k: _fill_params(v, value) for k, v in params.items()}
+    if isinstance(params, (list, tuple)):
+        return type(params)(_fill_params(v, value) for v in params)
+    if isinstance(params, (np.ndarray, jnp.ndarray)):
+        return jnp.ones_like(params) * value
+    return params
 
 
 def _energy_from_model(model, params, data) -> float:
@@ -95,6 +109,44 @@ def test_pair_repulsion_raises_close_contact_energy():
 
     assert rep_delta > baseline_delta + 1e-3
     assert energy_close_with > energy_far_with
+
+
+def test_pair_repulsion_contributes_to_interaction_energy():
+    """Pair repulsion should raise the interaction energy for close contacts."""
+    close_data = _graph_to_data(1.0)
+    far_data = _graph_to_data(3.0)
+
+    base_kwargs = dict(distance_transform='None')
+
+    model_no_rep = _build_mace_model(pair_repulsion=False, **base_kwargs)
+    params_no_rep_close = model_no_rep.init(jax.random.PRNGKey(0), close_data)
+    params_no_rep_far = model_no_rep.init(jax.random.PRNGKey(1), far_data)
+
+    model_with_rep = _build_mace_model(pair_repulsion=True, **base_kwargs)
+    params_with_rep_close = model_with_rep.init(jax.random.PRNGKey(0), close_data)
+    params_with_rep_far = model_with_rep.init(jax.random.PRNGKey(1), far_data)
+
+    out_close_no = model_no_rep.apply(
+        params_no_rep_close, close_data, compute_force=False, compute_stress=False
+    )
+    out_far_no = model_no_rep.apply(
+        params_no_rep_far, far_data, compute_force=False, compute_stress=False
+    )
+    out_close_rep = model_with_rep.apply(
+        params_with_rep_close, close_data, compute_force=False, compute_stress=False
+    )
+    out_far_rep = model_with_rep.apply(
+        params_with_rep_far, far_data, compute_force=False, compute_stress=False
+    )
+
+    inter_close_no = float(np.asarray(out_close_no['interaction_energy'])[0])
+    inter_far_no = float(np.asarray(out_far_no['interaction_energy'])[0])
+    inter_close_rep = float(np.asarray(out_close_rep['interaction_energy'])[0])
+    inter_far_rep = float(np.asarray(out_far_rep['interaction_energy'])[0])
+
+    # Pair repulsion should elevate interaction energy at close distance, but not far.
+    assert inter_close_rep > inter_close_no
+    assert inter_far_rep >= inter_far_no  # far case should be negligible or equal
 
 
 def test_distance_transform_changes_radial_embedding():

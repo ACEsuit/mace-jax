@@ -5,11 +5,12 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 
 import e3nn_jax as e3nn
+import jax
 import jax.numpy as jnp
 from e3nn_jax import Irreps, IrrepsArray
-from e3nn_jax._src.activation import parity_function
+from e3nn_jax._src.activation import parity_function, scalar_activation
 
-from mace_jax.adapters.e3nn.math import normalize2mom
+from mace_jax.adapters.e3nn.math import normalize2mom, register_normalize2mom_const
 
 
 class Activation:
@@ -30,6 +31,12 @@ class Activation:
         del name  # preserved for backward compatibility
 
         self.irreps_in = Irreps(irreps_in)
+
+        # If Torch provided pre-normalized activations, register their constants.
+        for act in acts:
+            const = getattr(act, '_normalize2mom_const', None)
+            if const is not None:
+                register_normalize2mom_const(act, const)
 
         if normalize_act:
             acts = [normalize2mom(act) if act is not None else None for act in acts]
@@ -121,14 +128,15 @@ class Activation:
 
             irreps_array = e3nn.IrrepsArray(self.irreps_in, array)
 
-        activated = e3nn.scalar_activation(
+        # Use e3nn_jax.scalar_activation to mirror torch implementation.
+        activated = scalar_activation(
             irreps_array,
             acts=self._acts,
             normalize_act=self._normalize_act,
         ).array
 
         if isinstance(features, IrrepsArray):
-            return activated
+            return IrrepsArray(self.irreps_out, activated)
 
         if moved:
             activated = jnp.moveaxis(activated, -1, axis)

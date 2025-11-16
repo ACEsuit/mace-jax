@@ -13,6 +13,7 @@ from mace_jax.adapters.flax.torch import (
     auto_import_from_torch_flax,
     register_flax_module,
 )
+from mace_jax.adapters.e3nn.math import register_normalize2mom_const
 from mace_jax.modules.wrapper_ops import (
     CuEquivarianceConfig,
     FullyConnectedTensorProduct,
@@ -136,6 +137,24 @@ class NonLinearReadoutBlock(fnn.Module):
         if self.num_heads > 1 and heads is not None:
             x = mask_head(x, heads, self.num_heads)
         return self.linear_2(x)
+
+    @classmethod
+    def import_from_torch(cls, torch_module, flax_variables):
+        # Preserve Torch normalize2mom constants for activations.
+        acts = getattr(getattr(torch_module, 'non_linearity', None), 'acts', None)
+        if acts is not None:
+            for act in acts:
+                const = getattr(act, '_normalize2mom_const', None)
+                orig = getattr(act, '_normalize2mom_original', None)
+                if const is not None and orig is not None:
+                    register_normalize2mom_const(orig, const)
+                elif const is not None:
+                    register_normalize2mom_const(act, const)
+        return cls._import_from_torch_impl(
+            torch_module,
+            flax_variables,
+            skip_root=False,
+        )
 
 
 @register_flax_module('mace.modules.blocks.NonLinearBiasReadoutBlock')
