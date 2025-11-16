@@ -1,3 +1,5 @@
+import math
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -87,6 +89,23 @@ def _module_dtype(module: torch.nn.Module) -> torch.dtype:
     return torch.float32
 
 
+def _features_from_xyz(simple_xyz_features: np.ndarray, irreps_in: o3.Irreps) -> np.ndarray:
+    """Expand XYZ-derived scalar/vector channels to match an irreps' total dim."""
+    base_scalar = simple_xyz_features[:, :1]
+    base_vector = simple_xyz_features[:, 1:]
+    parts = []
+    for mul, ir in irreps_in:
+        dim = ir.dim * mul
+        if ir.l == 0:
+            scalars = np.tile(base_scalar, (1, dim))
+            parts.append(scalars)
+        else:
+            repeats = math.ceil(dim / base_vector.shape[1])
+            vecs = np.tile(base_vector, (1, repeats))[:, :dim]
+            parts.append(vecs)
+    return np.concatenate(parts, axis=1).astype(np.float32)
+
+
 def _cue_device_or_skip() -> torch.device:
     if not torch.cuda.is_available():
         pytest.skip('Cue-equivariance kernels require CUDA.')
@@ -126,21 +145,17 @@ class TestLinearNodeEmbeddingBlock:
     @pytest.mark.parametrize(
         'irreps_in, irreps_out',
         [
-            ('3x0e', '2x0e'),  # scalars → scalars
-            ('1x0e + 1x1o', '1x0e + 1x1o'),  # mixed scalar + vector → same
+            ('3x0e', '2x0e'),  # pure scalar inputs
+            ('1x0e + 1x1o', '1x0e + 1x1o'),  # scalar + vector inputs
         ],
     )
-    def test_forward_match(self, irreps_in, irreps_out):
-        """Check JAX and Torch implementations match on forward pass."""
+    def test_forward_match_real_xyz(self, irreps_in, irreps_out, simple_xyz_features):
+        """Check JAX and Torch implementations match on real XYZ-derived inputs."""
 
         irreps_in_obj = o3.Irreps(irreps_in)
         irreps_out_obj = o3.Irreps(irreps_out)
 
-        n_nodes = 5
-
-        # --- Create random input ---
-        rng = np.random.default_rng(0)
-        x_np = rng.standard_normal((n_nodes, irreps_in_obj.dim)).astype(np.float32)
+        x_np = _features_from_xyz(simple_xyz_features, irreps_in_obj)
         x_jax = jnp.asarray(x_np)
         x_torch = torch.tensor(x_np, dtype=torch.float32)
 
@@ -185,17 +200,13 @@ class TestLinearReadoutBlock:
             ('1x0e + 1x1o', '2x0e'),  # mixed input → scalar outputs
         ],
     )
-    def test_forward_match(self, irreps_in, irrep_out):
-        """Check JAX and Torch implementations match on forward pass."""
+    def test_forward_match_real_xyz(self, irreps_in, irrep_out, simple_xyz_features):
+        """Check parity using real XYZ-derived scalar+vector inputs."""
 
         irreps_in_obj = o3.Irreps(irreps_in)
         irrep_out_obj = o3.Irreps(irrep_out)
 
-        n_nodes = 5
-
-        # --- Create random input ---
-        rng = np.random.default_rng(0)
-        x_np = rng.standard_normal((n_nodes, irreps_in_obj.dim)).astype(np.float32)
+        x_np = _features_from_xyz(simple_xyz_features, irreps_in_obj)
         x_jax = jnp.asarray(x_np)
         x_torch = torch.tensor(x_np, dtype=torch.float32)
 
@@ -234,27 +245,24 @@ class TestNonLinearReadoutBlock:
     @pytest.mark.parametrize(
         'irreps_in, MLP_irreps, irrep_out, num_heads',
         [
-            ('3x0e', '4x0e', '1x0e', 1),  # simple scalar case
-            ('10x0e', '2x0e', '1x0e', 1),  # mixed scalars + vector
+            ('3x0e', '4x0e', '1x0e', 1),  # scalar-only case
+            ('10x0e', '2x0e', '1x0e', 1),  # wider scalar input
+            ('1x0e + 1x1o', '2x0e', '1x0e', 2),  # mix with multi-head
         ],
     )
-    def test_forward_match(self, irreps_in, MLP_irreps, irrep_out, num_heads):
-        """Check forward pass matches between JAX and Torch."""
-
+    def test_forward_match_real_xyz(
+        self, irreps_in, MLP_irreps, irrep_out, num_heads, simple_xyz_features
+    ):
+        """Parity check on real XYZ-derived inputs to catch ordering issues."""
         irreps_in_obj = o3.Irreps(irreps_in)
         MLP_irreps_obj = o3.Irreps(MLP_irreps)
         irrep_out_obj = o3.Irreps(irrep_out)
 
-        n_nodes = 5
-
-        # --- Create random input ---
-        rng = np.random.default_rng(0)
-        x_np = rng.standard_normal((n_nodes, irreps_in_obj.dim)).astype(np.float32)
+        x_np = _features_from_xyz(simple_xyz_features, irreps_in_obj)
         x_jax = jnp.asarray(x_np)
         x_ir = IrrepsArray(irreps_in_obj, x_jax)
         x_torch = torch.tensor(x_np, dtype=torch.float32)
 
-        # --- Torch model ---
         torch_model = NonLinearReadoutBlockTorch(
             irreps_in=irreps_in_obj,
             MLP_irreps=MLP_irreps_obj,
@@ -262,11 +270,8 @@ class TestNonLinearReadoutBlock:
             irrep_out=irrep_out_obj,
             num_heads=num_heads,
         ).float()
-
-        # --- Torch output ---
         out_torch = torch_model(x_torch)
 
-        # --- JAX model ---
         module = NonLinearReadoutBlockJAX(
             irreps_in=irreps_in_obj,
             MLP_irreps=MLP_irreps_obj,
@@ -283,7 +288,6 @@ class TestNonLinearReadoutBlock:
 
         out_jax = module.apply(variables, x_ir)
 
-        # --- Compare outputs ---
         np.testing.assert_allclose(
             _to_numpy(out_jax),
             out_torch.detach().cpu().numpy(),
