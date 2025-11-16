@@ -58,6 +58,8 @@ class Linear(fnn.Module):
         self._weight_layout = descriptor.inputs[0].layout
         self._descriptor_input_layout = descriptor.inputs[1].layout
         self._descriptor_output_layout = descriptor.outputs[0].layout
+        # Stash chosen layout for later validation (e.g., during Torch import).
+        self.variable('meta', 'layout', lambda: self._layout_str)
 
     @staticmethod
     def _resolve_layout(layout_obj: object) -> tuple[cue.IrrepsLayout, str]:
@@ -207,3 +209,53 @@ class Linear(fnn.Module):
         if had_irreps:
             return IrrepsArray(irreps_out, out_mul_ir)
         return out_mul_ir
+
+
+def _linear_import_from_torch_with_layout(cls, torch_module, flax_variables):
+    """Wrapper around the auto-generated import that enforces layout parity."""
+    meta = flax_variables.get('meta', {})
+    expected_layout = None
+    if isinstance(meta, dict):
+        expected_layout = meta.get('layout', None)
+    elif hasattr(meta, 'get'):
+        expected_layout = meta.get('layout', None)
+
+    def _layout_str_from_obj(layout_obj) -> str | None:
+        if layout_obj is None:
+            return None
+        if isinstance(layout_obj, str):
+            return layout_obj
+        for attr in ('layout_str', 'name', '__name__'):
+            val = getattr(layout_obj, attr, None)
+            if val is not None:
+                return str(val)
+        return str(layout_obj)
+
+    torch_layout_str = _layout_str_from_obj(getattr(torch_module, 'layout', None))
+    if torch_layout_str is None:
+        descriptor = getattr(torch_module, 'descriptor', None) or getattr(
+            torch_module, '_descriptor', None
+        )
+        if descriptor is not None:
+            try:
+                torch_layout_str = _layout_str_from_obj(descriptor.inputs[1].layout)
+            except Exception:
+                torch_layout_str = None
+    if torch_layout_str is None:
+        torch_layout_str = 'mul_ir'
+
+    if expected_layout is not None and str(expected_layout) != str(torch_layout_str):
+        raise ValueError(
+            f'JAX Linear expected layout {expected_layout!r} but Torch module uses '
+            f'layout {torch_layout_str!r}.'
+        )
+
+    return cls._import_from_torch_impl(
+        torch_module,
+        flax_variables,
+        skip_root=False,
+    )
+
+
+# Override the auto-generated import_from_torch with layout validation.
+Linear.import_from_torch = classmethod(_linear_import_from_torch_with_layout)

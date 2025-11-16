@@ -276,12 +276,33 @@ class TestLinearParity:
         )
         features_jax = jnp.asarray(features_mul_ir)
         variables = module.init(jax.random.PRNGKey(2), features_jax)
-        variables = JaxLinear.import_from_torch(torch_layer, variables)
-        out_jax = module.apply(variables, features_jax)
 
-        np.testing.assert_allclose(
-            np.asarray(out_jax),
-            np.asarray(out_torch),
-            rtol=1e-5,
-            atol=1e-6,
+        # Import should raise due to layout mismatch between JAX (ir_mul)
+        # and the torch module (mul_ir); this avoids silently copying weights.
+        with pytest.raises(ValueError, match='expected layout'):
+            JaxLinear.import_from_torch(torch_layer, variables)
+
+    def test_import_rejects_layout_mismatch(self):
+        """Import should fail when Torch and JAX layouts disagree."""
+        irreps_in = '1x0e + 1x1o'
+        irreps_out = '1x0e'
+
+        torch_layer = CueLinearTorch(
+            cue.Irreps(cue.O3, irreps_in),
+            cue.Irreps(cue.O3, irreps_out),
+            layout=cue.mul_ir,  # Torch uses mul_ir
+        ).float()
+
+        features_np = np.zeros((2, o3.Irreps(irreps_in).dim), dtype=np.float32)
+        features_jax = jnp.asarray(features_np)
+
+        # JAX module expects ir_mul
+        module = JaxLinear(
+            irreps_in=Irreps(irreps_in),
+            irreps_out=Irreps(irreps_out),
+            layout='ir_mul',
         )
+        variables = module.init(jax.random.PRNGKey(0), features_jax)
+
+        with pytest.raises(ValueError, match='expected layout'):
+            JaxLinear.import_from_torch(torch_layer, variables)
