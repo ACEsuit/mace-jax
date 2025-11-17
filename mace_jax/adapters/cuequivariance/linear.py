@@ -59,7 +59,9 @@ class Linear(fnn.Module):
         self._descriptor_input_layout = descriptor.inputs[1].layout
         self._descriptor_output_layout = descriptor.outputs[0].layout
         # Stash chosen layout for later validation (e.g., during Torch import).
-        self.variable('meta', 'layout', lambda: self._layout_str)
+        # Store as int code (0=mul_ir, 1=ir_mul) to keep the variables tree JIT-safe.
+        layout_code = 0 if self._layout_str == 'mul_ir' else 1
+        self.variable('meta', 'layout', lambda: jnp.asarray(layout_code, dtype=jnp.int32))
 
     @staticmethod
     def _resolve_layout(layout_obj: object) -> tuple[cue.IrrepsLayout, str]:
@@ -220,6 +222,18 @@ def _linear_import_from_torch_with_layout(cls, torch_module, flax_variables):
     elif hasattr(meta, 'get'):
         expected_layout = meta.get('layout', None)
 
+    def _decode_layout(val):
+        # Meta layout is stored as int code (0=mul_ir, 1=ir_mul) for JIT safety.
+        if isinstance(val, jnp.ndarray):
+            try:
+                val_int = int(val)
+            except Exception:
+                return None
+            return 'mul_ir' if val_int == 0 else 'ir_mul'
+        if isinstance(val, (int, np.integer)):
+            return 'mul_ir' if int(val) == 0 else 'ir_mul'
+        return val
+
     def _layout_str_from_obj(layout_obj) -> str | None:
         if layout_obj is None:
             return None
@@ -231,6 +245,7 @@ def _linear_import_from_torch_with_layout(cls, torch_module, flax_variables):
                 return str(val)
         return str(layout_obj)
 
+    expected_layout = _decode_layout(expected_layout)
     torch_layout_str = _layout_str_from_obj(getattr(torch_module, 'layout', None))
     if torch_layout_str is None:
         descriptor = getattr(torch_module, 'descriptor', None) or getattr(

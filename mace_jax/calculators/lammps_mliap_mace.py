@@ -65,7 +65,19 @@ class MACEEdgeForcesWrapper:
 
     def __init__(self, model: Any, params: Any, **kwargs: Any) -> None:
         self.model = model
-        self.params = params
+
+        def _strip_meta(tree, in_meta=False):
+            if isinstance(tree, dict):
+                out = {}
+                for k, v in tree.items():
+                    next_in_meta = in_meta or k == 'meta'
+                    out[k] = _strip_meta(v, next_in_meta)
+                return out
+            if in_meta and isinstance(tree, str):
+                return jnp.asarray(0, dtype=jnp.int32)
+            return tree
+
+        self.params = _strip_meta(params)
 
         self.atomic_numbers = np.asarray(model.atomic_numbers, dtype=np.int64)
         self.r_max = float(model.r_max)

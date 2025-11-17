@@ -55,6 +55,11 @@ def reset_gin():
         'mace_jax.tools.gin_datasets.datasets.train_path', str(data_path)
     )
     gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.test_path', None)
+    # Keep toy dataset graphs by setting generous size limits.
+    gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.n_node', 64)
+    gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.n_edge', 128)
+    gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.min_n_graph', 1)
+    gin.bind_parameter('mace_jax.tools.gin_model.model.num_species', 64)
     yield
     gin.clear_config()
 
