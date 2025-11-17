@@ -17,7 +17,9 @@ class Activation:
     """Apply scalar activations chunk-wise according to an ``Irreps`` layout.
 
     This class mirrors the Torch ``e3nn.nn.Activation`` helper but emits plain
-    JAX arrays by default, allowing it to sit inside larger Flax modules.
+    JAX arrays by default, allowing it to sit inside larger Flax modules. We
+    also take care to preserve Torch-side normalize2mom constants so imported
+    models use identical activation scaling without re-estimation.
     """
 
     def __init__(
@@ -32,14 +34,54 @@ class Activation:
 
         self.irreps_in = Irreps(irreps_in)
 
-        # If Torch provided pre-normalized activations, register their constants.
-        for act in acts:
-            const = getattr(act, '_normalize2mom_const', None)
-            if const is not None:
-                register_normalize2mom_const(act, const)
+        # Map common Torch activations to their JAX equivalents so we can apply
+        # JAX-side normalisation while still honouring Torch-stored constants.
+        def _to_jax_act(act: Callable | None) -> Callable | None:
+            if act is None:
+                return None
+            if hasattr(act, '__name__'):
+                name = act.__name__.lower()
+                if name in ('silu', 'swish'):
+                    return jax.nn.silu
+            cls_name = getattr(getattr(act, '__class__', None), '__name__', '').lower()
+            if cls_name in ('silu', 'swish'):
+                return jax.nn.silu
+            # Torch normalize2mom wrapper stores the underlying torch function as ``f``.
+            wrapped = getattr(act, 'f', None)
+            if wrapped is not None and wrapped is not act:
+                mapped = _to_jax_act(wrapped)
+                if mapped is not None:
+                    return mapped
+            return act
 
-        if normalize_act:
-            acts = [normalize2mom(act) if act is not None else None for act in acts]
+        # Extract any Torch normalize2mom constant and original function.
+        # Torch normalize2mom exposes constants as ``cst`` and the wrapped
+        # callable as ``f`` rather than the JAX-side private attributes.
+        def _maybe_get_const(act):
+            if act is None:
+                return None, None
+            const = getattr(act, '_normalize2mom_const', None)
+            if const is None:
+                const = getattr(act, 'cst', None)  # Torch normalize2mom module
+            orig = getattr(act, '_normalize2mom_original', None)
+            if orig is None:
+                orig = getattr(act, 'f', None)  # Torch normalize2mom module
+            return const, orig
+
+        processed_acts: list[Callable | None] = []
+        for act in acts:
+            jax_act = _to_jax_act(act)
+            const, orig = _maybe_get_const(act)
+            if const is not None:
+                # Allow normalize2mom to reuse the Torch constant.
+                register_normalize2mom_const(orig or jax_act or act, const)
+            use_norm = normalize_act or const is not None
+            if use_norm:
+                processed_acts.append(normalize2mom(jax_act) if jax_act is not None else None)
+            else:
+                processed_acts.append(jax_act)
+
+        acts = processed_acts
 
         self._acts = tuple(acts)
         self._normalize_act = False
@@ -128,7 +170,6 @@ class Activation:
 
             irreps_array = e3nn.IrrepsArray(self.irreps_in, array)
 
-        # Use e3nn_jax.scalar_activation to mirror torch implementation.
         activated = scalar_activation(
             irreps_array,
             acts=self._acts,

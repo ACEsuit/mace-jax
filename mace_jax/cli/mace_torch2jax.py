@@ -283,6 +283,7 @@ def convert_model(
             raise
     template_data = _prepare_template_data(config)
     variables = jax_model.init(jax.random.PRNGKey(0), template_data)
+
     variables = import_from_torch(jax_model, torch_model, variables)
     return jax_model, variables, template_data
 
@@ -353,6 +354,10 @@ def main():
     params_bytes = serialization.to_bytes(variables)
     output_path.write_bytes(params_bytes)
     print(f'Serialized JAX parameters written to {output_path}')
+    # Persist config alongside parameters.
+    config_path = output_path.with_suffix('.json')
+    config_path.write_text(json.dumps(config, indent=2))
+    print(f'Config written to {config_path}')
 
     if args.predict:
         _, configurations = data_utils.load_from_xyz(args.predict)

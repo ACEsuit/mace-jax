@@ -5,8 +5,8 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, MutableMapping, Sequence
 
-import jax.numpy as jnp
 import jax.nn as jnn
+import jax.numpy as jnp
 
 from flax.core import freeze, unfreeze
 from mace_jax.adapters.e3nn.math._normalize_activation import (
@@ -414,7 +414,24 @@ def _import_embedding(module, variables, scope: Sequence[str]) -> None:
 
 @register_import_mapper('e3nn.nn._activation.Activation')
 def _import_e3nn_activation(module, variables, scope: Sequence[str]) -> None:
-    """No-op mapper for activation wrappers with no parameters."""
+    """Register normalize2mom constants carried inside Activation.acts.
+
+    Torch wraps scalar gates in ``normalize2mom``, exposing constants as ``cst``
+    and the underlying callable as ``f``. We record those so JAX uses identical
+    scaling without re-estimating moments.
+    """
+    acts = getattr(module, 'acts', None)
+    if acts is not None:
+        for act in acts:
+            const = getattr(act, '_normalize2mom_const', None)
+            orig = getattr(act, '_normalize2mom_original', None)
+            if const is None:
+                const = getattr(act, 'cst', None)
+            if orig is None:
+                orig = getattr(act, 'f', None)
+            if const is not None:
+                # Prefer original callable when available for keying.
+                register_normalize2mom_const(orig or act, float(const))
     return variables
 
 

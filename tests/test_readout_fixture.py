@@ -1,7 +1,6 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
 import torch
 from e3nn import o3
 from e3nn_jax import Irreps, IrrepsArray
@@ -20,11 +19,66 @@ def _as_irreps_array(irreps: Irreps, array: jnp.ndarray) -> IrrepsArray:
 
 
 class TestReadoutFixture:
+    def test_non_linear_readout_components_parity(self):
+        """Step-by-step parity for linear_1 -> activation -> linear_2."""
+        rng = np.random.default_rng(1)
+        prod = rng.normal(size=(3, 128)).astype(np.float32)
+
+        irreps_in = Irreps('128x0e')
+        irreps_out = Irreps('16x0e')
+
+        torch_readout = TorchReadout(
+            irreps_in=o3.Irreps(str(irreps_in)),
+            MLP_irreps=o3.Irreps(str(irreps_out)),
+            gate=torch.nn.functional.silu,
+            num_heads=1,
+        ).float()
+        torch_readout.eval()
+
+        prod_t = torch.tensor(prod)
+        torch_lin1 = torch_readout.linear_1(prod_t).detach().cpu().numpy()
+        torch_act = (
+            torch_readout.non_linearity(torch_readout.linear_1(prod_t))
+            .detach()
+            .cpu()
+            .numpy()
+        )
+        torch_out = torch_readout(prod_t).detach().cpu().numpy()
+
+        jax_readout = JaxReadout(
+            irreps_in=irreps_in,
+            MLP_irreps=irreps_out,
+            gate=jax.nn.silu,
+            num_heads=1,
+        )
+        prod_jax = _as_irreps_array(irreps_in, jnp.asarray(prod))
+        variables = jax_readout.init(jax.random.PRNGKey(0), prod_jax)
+        variables = JaxReadout.import_from_torch(torch_readout, variables)
+
+        def _call_linear1(mod, x):
+            return mod.linear_1(x)
+
+        def _call_activation(mod, x):
+            return mod.non_linearity(x)
+
+        def _call_linear2(mod, x):
+            return mod.linear_2(x)
+
+        lin1 = jax_readout.apply(variables, prod_jax, method=_call_linear1)
+        act = jax_readout.apply(variables, lin1, method=_call_activation)
+        out = jax_readout.apply(variables, act, method=_call_linear2)
+
+        lin1_np = np.asarray(lin1.array if hasattr(lin1, 'array') else lin1)
+        act_np = np.asarray(act.array if hasattr(act, 'array') else act)
+        out_np = np.asarray(out.array if hasattr(out, 'array') else out)
+
+        np.testing.assert_allclose(lin1_np, torch_lin1, rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(act_np, torch_act, rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(out_np, torch_out, rtol=1e-6, atol=1e-6)
+
     def test_non_linear_readout_scalar_parity_foundation_shapes(self):
         """Parity on foundation-style scalar readout weights."""
-        pytest.xfail(
-            'Known small delta persists on foundation readout parity; under investigation.'
-        )
+
         rng = np.random.default_rng(0)
         # Match foundation product_1 scalar shape: (batch_nodes, 128) scalars
         prod = rng.normal(size=(8, 128)).astype(np.float32)
