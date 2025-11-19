@@ -7,6 +7,7 @@ import jax
 import jax.numpy as jnp
 from e3nn_jax import Irreps, IrrepsArray  # type: ignore
 from flax import linen as fnn
+from flax.errors import ScopeCollectionNotFound
 
 import cuequivariance as cue
 from mace_jax.adapters.flax.torch import auto_import_from_torch_flax
@@ -61,7 +62,9 @@ class Linear(fnn.Module):
         # Stash chosen layout for later validation (e.g., during Torch import).
         # Store as int code (0=mul_ir, 1=ir_mul) to keep the variables tree JIT-safe.
         layout_code = 0 if self._layout_str == 'mul_ir' else 1
-        self.variable('meta', 'layout', lambda: jnp.asarray(layout_code, dtype=jnp.int32))
+        self.variable(
+            'meta', 'layout', lambda: jnp.asarray(layout_code, dtype=jnp.int32)
+        )
 
     @staticmethod
     def _resolve_layout(layout_obj: object) -> tuple[cue.IrrepsLayout, str]:

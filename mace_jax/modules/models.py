@@ -11,6 +11,7 @@ from flax import struct
 
 from mace_jax.adapters.e3nn.o3 import SphericalHarmonics
 from mace_jax.adapters.flax.torch import auto_import_from_torch_flax
+from mace_jax.adapters.e3nn.math import register_normalize2mom_const
 from mace_jax.modules.embeddings import GenericJointEmbedding
 from mace_jax.modules.radial import ZBLBasis
 from mace_jax.tools.dtype import default_dtype
@@ -93,6 +94,12 @@ class MACE(fnn.Module):
     readout_cls: type[NonLinearReadoutBlock] = struct.field(
         pytree_node=False, default=NonLinearReadoutBlock
     )
+    normalize2mom_consts: dict[str, float] | None = struct.field(
+        pytree_node=False, default=None
+    )
+    normalize2mom_consts: dict[str, float] | None = struct.field(
+        pytree_node=False, default=None
+    )
 
     def setup(self) -> None:
         self._heads = tuple(self.heads) if self.heads is not None else ('Default',)
@@ -119,6 +126,26 @@ class MACE(fnn.Module):
         )
         self._hidden_irreps = hidden_irreps
         self._mlp_irreps = mlp_irreps
+
+        consts = self.normalize2mom_consts or {'silu': 0.0, 'swish': 0.0}
+        const_arrays = {
+            key: jnp.asarray(float(val), dtype=jnp.float32) for key, val in consts.items()
+        }
+        normalize_var = self.variable(
+            'constants',
+            'normalize2mom_consts',
+            lambda: const_arrays,
+        )
+        norm_values = (
+            dict(normalize_var.value)
+            if hasattr(normalize_var.value, 'items')
+            else consts
+        )
+        for key, val in norm_values.items():
+            try:
+                register_normalize2mom_const(key, float(val))
+            except Exception:
+                continue
 
         node_attr_irreps = Irreps([(self.num_elements, (0, 1))])
         scalar_mul = hidden_irreps.count(Irrep(0, 1))

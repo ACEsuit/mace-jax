@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import warnings
 from dataclasses import replace
 from pathlib import Path
@@ -13,6 +14,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from mace_jax.adapters.e3nn.math import register_normalize2mom_const
 from mace_jax.modules.wrapper_ops import CuEquivarianceConfig
 
 warnings.filterwarnings(
@@ -23,6 +25,7 @@ warnings.filterwarnings(
 
 import torch
 from e3nn_jax import Irreps
+from flax import core as flax_core
 from flax import serialization
 from mace.calculators import foundations_models
 from mace.tools.scripts_utils import extract_config_mace_model
@@ -88,6 +91,39 @@ def _parse_parity(parity: Any) -> int:
     return 1 if parity_int >= 0 else -1
 
 
+def _as_l_parity(rep: Any):
+    """
+    Best-effort extraction of (l, parity) from torch/e3nn Irrep-like objects.
+    """
+
+    try:
+        module = getattr(rep, '__module__', '')
+    except Exception:
+        module = ''
+
+    # Unwrap _MulIr (torch) to its contained irrep.
+    if hasattr(rep, 'ir') and not hasattr(rep, 'l'):
+        try:
+            rep = rep.ir  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+    if hasattr(rep, 'l') and hasattr(rep, 'p'):
+        try:
+            return int(rep.l), _parse_parity(rep.p)
+        except Exception:
+            return None
+
+    if module.startswith('e3nn.o3') and hasattr(rep, '__len__'):
+        try:
+            if len(rep) == 2 and all(isinstance(x, (int, np.integer)) for x in rep):
+                return int(rep[0]), _parse_parity(rep[1])
+        except Exception:
+            return None
+
+    return None
+
+
 def _as_irrep_entry(entry: Any):
     if isinstance(entry, dict):
         mul = entry.get('mul') or entry.get('multiplicity') or entry.get('n')
@@ -106,8 +142,11 @@ def _as_irrep_entry(entry: Any):
         if len(entry) == 2 and isinstance(entry[0], (int, np.integer)):
             mul = int(entry[0])
             rep = entry[1]
+            l_parity = _as_l_parity(rep)
+            if l_parity is not None:
+                return mul, l_parity
             if isinstance(rep, (list, tuple)):
-                if not rep:
+                if rep is None:
                     return None
                 l_val = int(rep[0])
                 parity = _parse_parity(rep[1] if len(rep) > 1 else None)
@@ -120,6 +159,9 @@ def _as_irrep_entry(entry: Any):
                 return mul, (int(l_val), _parse_parity(parity))
             if isinstance(rep, (int, np.integer)):
                 return mul, (int(rep), 1)
+    l_parity = _as_l_parity(entry)
+    if l_parity is not None:
+        return 1, l_parity
     return None
 
 
@@ -148,6 +190,12 @@ def _normalize_irreps(value: Any):
 def _as_irreps(value: Any) -> Irreps:
     if isinstance(value, Irreps):
         return value
+    module = getattr(value, '__module__', '')
+    if isinstance(module, str) and module.startswith('e3nn.o3'):
+        try:
+            return Irreps(str(value))
+        except Exception:
+            pass
     if isinstance(value, str):
         return Irreps(value)
     if isinstance(value, int):
@@ -274,6 +322,21 @@ def convert_model(
     *,
     cueq_config: CuEquivarianceConfig | None = None,
 ):
+    def _ensure_nontrainable_collections(
+        vars_imported: flax_core.FrozenDict, template_vars: flax_core.FrozenDict
+    ) -> flax_core.FrozenDict:
+        # import_from_torch only populates parameter leaves; unless we copy the
+        # template’s auxiliary collections (constants/meta) back in, the
+        # exported bundle won’t carry normalize2mom/layout metadata, breaking
+        # parity when reloading. This keeps the non-trainable collections from
+        # the template alongside the imported params.
+        merged = flax_core.unfreeze(vars_imported)
+        template_unfrozen = flax_core.unfreeze(template_vars)
+        for collection in ('constants', 'meta'):
+            if collection not in merged and collection in template_unfrozen:
+                merged[collection] = template_unfrozen[collection]
+        return flax_core.freeze(merged)
+
     try:
         jax_model = _build_jax_model(config, cueq_config=cueq_config)
     except TypeError as exc:
@@ -282,9 +345,19 @@ def convert_model(
         else:
             raise
     template_data = _prepare_template_data(config)
-    variables = jax_model.init(jax.random.PRNGKey(0), template_data)
+    template_vars = jax_model.init(jax.random.PRNGKey(0), template_data)
 
-    variables = import_from_torch(jax_model, torch_model, variables)
+    variables = import_from_torch(jax_model, torch_model, template_vars)
+    variables = _ensure_nontrainable_collections(variables, template_vars)
+    consts_loaded = (
+        variables.get('constants', {}).get('normalize2mom_consts', None)
+        if isinstance(variables, dict) or hasattr(variables, 'get')
+        else None
+    )
+    if consts_loaded:
+        config['normalize2mom_consts'] = {
+            key: float(np.asarray(val)) for key, val in consts_loaded.items()
+        }
     return jax_model, variables, template_data
 
 
