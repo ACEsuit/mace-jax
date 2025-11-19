@@ -14,7 +14,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from mace_jax.adapters.e3nn.math import register_normalize2mom_const
 from mace_jax.modules.wrapper_ops import CuEquivarianceConfig
 
 warnings.filterwarnings(

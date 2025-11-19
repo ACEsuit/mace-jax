@@ -11,7 +11,6 @@ from flax import struct
 
 from mace_jax.adapters.e3nn.o3 import SphericalHarmonics
 from mace_jax.adapters.flax.torch import auto_import_from_torch_flax
-from mace_jax.adapters.e3nn.math import register_normalize2mom_const
 from mace_jax.modules.embeddings import GenericJointEmbedding
 from mace_jax.modules.radial import ZBLBasis
 from mace_jax.tools.dtype import default_dtype
@@ -131,21 +130,11 @@ class MACE(fnn.Module):
         const_arrays = {
             key: jnp.asarray(float(val), dtype=jnp.float32) for key, val in consts.items()
         }
-        normalize_var = self.variable(
+        self.variable(
             'constants',
             'normalize2mom_consts',
             lambda: const_arrays,
         )
-        norm_values = (
-            dict(normalize_var.value)
-            if hasattr(normalize_var.value, 'items')
-            else consts
-        )
-        for key, val in norm_values.items():
-            try:
-                register_normalize2mom_const(key, float(val))
-            except Exception:
-                continue
 
         node_attr_irreps = Irreps([(self.num_elements, (0, 1))])
         scalar_mul = hidden_irreps.count(Irrep(0, 1))
