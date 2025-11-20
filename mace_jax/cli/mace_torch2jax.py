@@ -296,6 +296,11 @@ def _build_jax_model(
         cueq_config=cue_config_obj,
     )
 
+    if config.get('normalize2mom_consts') is not None:
+        common_kwargs['normalize2mom_consts'] = {
+            str(k): float(v) for k, v in config['normalize2mom_consts'].items()
+        }
+
     if config.get('radial_MLP') is not None:
         common_kwargs['radial_MLP'] = tuple(int(x) for x in config['radial_MLP'])
 

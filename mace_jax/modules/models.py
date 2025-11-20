@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -9,6 +10,7 @@ from e3nn_jax import Irrep, Irreps
 from flax import linen as fnn
 from flax import struct
 
+from mace_jax.adapters.e3nn.math import register_normalize2mom_const
 from mace_jax.adapters.e3nn.o3 import SphericalHarmonics
 from mace_jax.adapters.flax.torch import auto_import_from_torch_flax
 from mace_jax.modules.embeddings import GenericJointEmbedding
@@ -126,15 +128,31 @@ class MACE(fnn.Module):
         self._hidden_irreps = hidden_irreps
         self._mlp_irreps = mlp_irreps
 
+        # Normalize2mom constants originate from the Torch model (or fall back
+        # to defaults) and are kept as scalar arrays for serialization.
         consts = self.normalize2mom_consts or {'silu': 0.0, 'swish': 0.0}
         const_arrays = {
-            key: jnp.asarray(float(val), dtype=jnp.float32) for key, val in consts.items()
+            key: jnp.asarray(float(val), dtype=jnp.float32)
+            for key, val in consts.items()
         }
+        # Store normalize2mom constants as a non-trainable collection so they
+        # are serialized with the bundle (mirrors Torch-derived values).
         self.variable(
             'constants',
             'normalize2mom_consts',
             lambda: const_arrays,
         )
+        # Also seed the e3nn normalize2mom cache at runtime to enforce those
+        # constants during forward passes (keeps Torch/JAX energy parity).
+        for key, val in const_arrays.items():
+            try:
+                register_normalize2mom_const(key, float(val))
+            except Exception as exc:
+                warnings.warn(
+                    f'Failed to register normalize2mom constant for {key}: {exc}',
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
 
         node_attr_irreps = Irreps([(self.num_elements, (0, 1))])
         scalar_mul = hidden_irreps.count(Irrep(0, 1))
