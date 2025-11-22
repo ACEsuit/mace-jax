@@ -330,13 +330,13 @@ def convert_model(
         vars_imported: flax_core.FrozenDict, template_vars: flax_core.FrozenDict
     ) -> flax_core.FrozenDict:
         # import_from_torch only populates parameter leaves; unless we copy the
-        # template’s auxiliary collections (constants/meta) back in, the
+        # template’s auxiliary collections (config/constants) back in, the
         # exported bundle won’t carry normalize2mom/layout metadata, breaking
         # parity when reloading. This keeps the non-trainable collections from
         # the template alongside the imported params.
         merged = flax_core.unfreeze(vars_imported)
         template_unfrozen = flax_core.unfreeze(template_vars)
-        for collection in ('constants', 'meta'):
+        for collection in ('config', 'constants', 'meta'):
             if collection not in merged and collection in template_unfrozen:
                 merged[collection] = template_unfrozen[collection]
         return flax_core.freeze(merged)
@@ -353,11 +353,10 @@ def convert_model(
 
     variables = import_from_torch(jax_model, torch_model, template_vars)
     variables = _ensure_nontrainable_collections(variables, template_vars)
-    consts_loaded = (
-        variables.get('constants', {}).get('normalize2mom_consts', None)
-        if isinstance(variables, dict) or hasattr(variables, 'get')
-        else None
-    )
+    consts_loaded = None
+    if isinstance(variables, dict) or hasattr(variables, 'get'):
+        config_coll = variables.get('config', {}) or variables.get('constants', {})
+        consts_loaded = config_coll.get('normalize2mom_consts', None)
     if consts_loaded:
         config['normalize2mom_consts'] = {
             key: float(np.asarray(val)) for key, val in consts_loaded.items()

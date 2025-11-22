@@ -5,7 +5,7 @@ import numbers
 import pickle
 import time
 from collections import deque
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 import gin
@@ -53,6 +53,18 @@ def _get_profile_helper(*, log_warning: bool) -> object | None:
     else:
         _PROFILE_HELPER = profile_nn_jax
         return _PROFILE_HELPER
+
+
+def _split_config(params):
+    if isinstance(params, Mapping) and 'params' in params:
+        return params['params'], params.get('config')
+    return params, None
+
+
+def _attach_config(trainable, config):
+    if config is None:
+        return trainable
+    return {'params': trainable, 'config': config}
 
 
 def _instantiate_loss(loss_cls, overrides: dict):
@@ -492,6 +504,7 @@ def train(
     data_seed: int | None = None,
     **kwargs,
 ):
+    trainable_params, static_config = _split_config(params)
     lowest_loss = np.inf
     patience_counter = 0
     loss_fn = loss()
@@ -541,7 +554,8 @@ def train(
             )
         with resume_path.open('rb') as f:
             resume_state = pickle.load(f)
-        params = resume_state.get('params', params)
+        params = resume_state.get('params', _attach_config(trainable_params, static_config))
+        trainable_params, static_config = _split_config(params)
         optimizer_state = resume_state.get('optimizer_state', optimizer_state)
         lowest_loss = resume_state.get('lowest_loss', lowest_loss)
         patience_counter = resume_state.get('patience_counter', patience_counter)
@@ -575,9 +589,9 @@ def train(
         path = checkpoint_dir_path / filename
         state = {
             'epoch': epoch_idx,
-            'params': current_params,
+            'params': _attach_config(current_params, static_config),
             'optimizer_state': current_optimizer_state,
-            'eval_params': eval_params_,
+            'eval_params': _attach_config(eval_params_, static_config),
             'lowest_loss': lowest_loss,
             'patience_counter': patience_counter,
             'checkpoint_format': 2,
@@ -654,10 +668,15 @@ def train(
             return True
         return current_epoch % eval_interval == 0
 
+    with_config = lambda p: _attach_config(p, static_config)
+    predictor_with_config = lambda p, g: predictor(with_config(p), g)
+
     stop_after_epoch = False
-    for epoch, params, optimizer_state, eval_params in tools.train(
-        params=params,
-        total_loss_fn=lambda params, graph: loss_fn(graph, predictor(params, graph)),
+    for epoch, trainable_params, optimizer_state, eval_params in tools.train(
+        params=trainable_params,
+        total_loss_fn=lambda params, graph: loss_fn(
+            graph, predictor_with_config(params, graph)
+        ),
         train_loader=train_loader,
         gradient_transform=gradient_transform,
         optimizer_state=optimizer_state,
@@ -682,7 +701,7 @@ def train(
         if is_primary:
             with open(f'{directory}/{tag}.pkl', 'wb') as f:
                 pickle.dump(gin.operative_config_str(), f)
-                pickle.dump(params, f)
+                pickle.dump(with_config(trainable_params), f)
 
         def eval_and_print(loader, mode: str, *, head_name: str | None = None):
             eval_mode = mode if head_name is None else f'{mode}:{head_name}'
@@ -690,7 +709,7 @@ def train(
             metrics_: dict[str, Any] = {}
             if is_primary or process_count == 1:
                 loss_, metrics_ = tools.evaluate(
-                    predictor=predictor,
+                    predictor=predictor_with_config,
                     params=eval_params,
                     loss_fn=loss_fn,
                     data_loader=loader,
@@ -901,13 +920,13 @@ def train(
         if callable(plateau_updater) and last_valid_loss is not None:
             plateau_updater(last_valid_loss)
 
-        _save_checkpoint(epoch, params, optimizer_state, eval_params)
+        _save_checkpoint(epoch, trainable_params, optimizer_state, eval_params)
 
         if stop_after_epoch or last_epoch:
             break
 
     _log_info('Training complete')
-    return epoch, eval_params
+    return epoch, _attach_config(eval_params, static_config)
 
 
 def parse_argv(argv: list[str]):

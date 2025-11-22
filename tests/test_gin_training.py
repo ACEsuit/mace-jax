@@ -167,7 +167,8 @@ def _run_gin_training(tmp_path, **train_kwargs):
     )
     assert steps_per_interval == 1
 
-    optimizer_state = gradient_transform.init(params)
+    params_for_opt, _ = gin_functions._split_config(params)
+    optimizer_state = gradient_transform.init(params_for_opt)
 
     directory, tag, logger = gin_functions.logs(
         name='test-gin', directory=str(tmp_path)

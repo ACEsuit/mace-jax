@@ -59,12 +59,19 @@ def import_from_torch(jax_model, torch_model, variables):
     )
     variables = jax_model.import_from_torch(torch_model, variables)
 
-    # Persist normalize2mom constants in a non-trainable collection.
+    # Persist normalize2mom constants in non-trainable collections.
     norm_consts = _extract_norm_consts()
     if norm_consts:
         vars_mut = (
             variables.unfreeze() if hasattr(variables, 'unfreeze') else dict(variables)
         )
+        cfg = vars_mut.get('config', {})
+        cfg = cfg.copy() if hasattr(cfg, 'copy') else dict(cfg)
+        cfg['normalize2mom_consts'] = {
+            k: jax.lax.stop_gradient(jnp.asarray(v, dtype=jnp.float32))
+            for k, v in norm_consts.items()
+        }
+        vars_mut['config'] = cfg
         consts = vars_mut.get('constants', {})
         consts = consts.copy() if hasattr(consts, 'copy') else dict(consts)
         consts['normalize2mom_consts'] = {

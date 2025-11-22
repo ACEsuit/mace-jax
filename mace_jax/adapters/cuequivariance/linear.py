@@ -63,7 +63,7 @@ class Linear(fnn.Module):
         # Store as int code (0=mul_ir, 1=ir_mul) to keep the variables tree JIT-safe.
         layout_code = 0 if self._layout_str == 'mul_ir' else 1
         self.variable(
-            'meta', 'layout', lambda: jnp.asarray(layout_code, dtype=jnp.int32)
+            'config', 'layout', lambda: jnp.asarray(layout_code, dtype=jnp.int32)
         )
 
     @staticmethod
@@ -218,12 +218,12 @@ class Linear(fnn.Module):
 
 def _linear_import_from_torch_with_layout(cls, torch_module, flax_variables):
     """Wrapper around the auto-generated import that enforces layout parity."""
-    meta = flax_variables.get('meta', {})
+    cfg = flax_variables.get('config', {}) or flax_variables.get('meta', {})
     expected_layout = None
-    if isinstance(meta, dict):
-        expected_layout = meta.get('layout', None)
-    elif hasattr(meta, 'get'):
-        expected_layout = meta.get('layout', None)
+    if isinstance(cfg, dict):
+        expected_layout = cfg.get('layout', None)
+    elif hasattr(cfg, 'get'):
+        expected_layout = cfg.get('layout', None)
 
     def _decode_layout(val):
         # Meta layout is stored as int code (0=mul_ir, 1=ir_mul) for JIT safety.

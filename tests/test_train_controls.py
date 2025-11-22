@@ -6,7 +6,6 @@ import optax
 
 from mace_jax.tools.train import train as train_loop
 
-
 jax.config.update('jax_enable_x64', True)
 
 

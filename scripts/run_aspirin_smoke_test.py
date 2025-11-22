@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import logging
+import os
 from pathlib import Path
 
 try:
@@ -15,8 +17,6 @@ else:
     if add_safe_globals is not None:
         # e3nn caches Wigner constants that include bare slice objects.
         add_safe_globals([slice])  # type: ignore[arg-type]
-
-from mace_jax.cli import mace_jax_train
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = ROOT / 'configs' / 'aspirin_small.gin'
@@ -107,8 +107,8 @@ def main() -> None:
     parser.add_argument(
         '--device',
         choices=['auto', 'cpu', 'cuda', 'tpu'],
-        default=None,
-        help='Optional device hint forwarded to the CLI.',
+        default='cpu',
+        help='Optional device hint forwarded to the CLI (defaults to cpu).',
     )
     parser.add_argument(
         '--print-config',
@@ -123,6 +123,18 @@ def main() -> None:
     args, unknown = parser.parse_known_args()
     if unknown:
         raise SystemExit(f'Unexpected extra CLI arguments: {unknown}')
+
+    if args.device in (None, 'cpu'):
+        # Force JAX to prefer CPU to avoid GPU plugin init errors on systems
+        # without CUDA.
+        os.environ.setdefault('JAX_PLATFORMS', 'cpu')
+        os.environ.setdefault('JAX_PLATFORM_NAME', 'cpu')
+        os.environ.setdefault('JAX_PLUGINS', '')
+        os.environ.setdefault('CUDA_VISIBLE_DEVICES', '-1')
+        logging.getLogger('jax._src.xla_bridge').setLevel(logging.CRITICAL)
+
+    # Delay import until after environment hints are set.
+    from mace_jax.cli import mace_jax_train
 
     config_path = _ensure_exists(Path(args.config), 'Gin config')
     train_path = _ensure_exists(Path(args.train_path), 'Training dataset')

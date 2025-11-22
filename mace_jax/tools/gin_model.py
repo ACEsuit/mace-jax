@@ -1,5 +1,5 @@
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 import e3nn_jax as e3nn
@@ -192,7 +192,15 @@ def model(
         config['torch_model_class'] = torch_model.__class__.__name__
 
         logging.info('Converting Torch model to JAX representation')
-        jax_module, params, _ = mace_torch2jax.convert_model(torch_model, config)
+        jax_module, variables, _ = mace_torch2jax.convert_model(torch_model, config)
+
+        # Separate trainable params from config/state collections.
+        config_state = None
+        if isinstance(variables, dict) or hasattr(variables, 'get'):
+            config_state = variables.get('config') or variables.get('constants')
+            params = variables.get('params', variables)
+        else:
+            params = variables
 
         if torch_param_dtype is not None:
             if torch_param_dtype not in {'float64', 'float32'}:
@@ -206,6 +214,14 @@ def model(
                 lambda x: x.astype(target_dtype) if isinstance(x, jnp.ndarray) else x,
                 params,
             )
+            if config_state is not None:
+                config_state = jax.tree_util.tree_map(
+                    lambda x: x.astype(target_dtype)
+                    if isinstance(x, jnp.ndarray)
+                    and jnp.issubdtype(x.dtype, jnp.inexact)
+                    else x,
+                    config_state,
+                )
 
         torch_atomic_numbers = tuple(int(z) for z in config['atomic_numbers'])
         num_species_local = len(torch_atomic_numbers)
@@ -224,6 +240,12 @@ def model(
             compute_force: bool = True,
             compute_stress: bool = False,
         ) -> dict[str, jnp.ndarray]:
+            variables_local = parameters
+            if config_state is not None and not (
+                isinstance(parameters, dict) and 'config' in parameters
+            ):
+                variables_local = {'params': parameters, 'config': config_state}
+
             data_dict = _graph_to_data(graph, num_species=num_species_local)
             if torch_head is not None:
                 head_names = config.get('heads') or []
@@ -234,13 +256,16 @@ def model(
                 head_index = head_names.index(torch_head)
                 data_dict['head'] = jnp.asarray([head_index], dtype=jnp.int32)
             return jax_module.apply(
-                parameters,
+                variables_local,
                 data_dict,
                 compute_force=compute_force,
                 compute_stress=compute_stress,
             )
 
-        return apply_fn, params, torch_num_interactions
+        params_bundle = (
+            {'params': params, 'config': config_state} if config_state else params
+        )
+        return apply_fn, params_bundle, torch_num_interactions
 
     if train_graphs is None:
         z_table = None
@@ -381,6 +406,7 @@ def model(
     kwargs.setdefault('interaction_cls_first', RealAgnosticResidualInteractionBlock)
 
     mace_module = modules.MACE(**kwargs)
+    config_state = None
 
     def apply_fn(
         params,
@@ -393,9 +419,15 @@ def model(
         e3nn.config('path_normalization', path_normalization)
         e3nn.config('gradient_normalization', gradient_normalization)
 
+        variables_local = params
+        if config_state is not None and not (
+            isinstance(params, dict) and 'config' in params
+        ):
+            variables_local = {'params': params, 'config': config_state}
+
         data_dict = _graph_to_data(graph, num_species=num_species)
         outputs = mace_module.apply(
-            params,
+            variables_local,
             data_dict,
             compute_force=compute_force,
             compute_stress=compute_stress,
@@ -430,6 +462,14 @@ def model(
     if initialize_seed is not None and train_graphs:
         example_graph = train_graphs[0]
         example_data = _graph_to_data(example_graph, num_species=num_species)
-        params = mace_module.init(jax.random.PRNGKey(initialize_seed), example_data)
+        variables = mace_module.init(jax.random.PRNGKey(initialize_seed), example_data)
+        if isinstance(variables, dict) or hasattr(variables, 'get'):
+            params = variables.get('params', variables)
+            config_state = variables.get('config')
+        else:
+            params = variables
 
-    return apply_fn, params, num_interactions
+    params_bundle = (
+        {'params': params, 'config': config_state} if config_state else params
+    )
+    return apply_fn, params_bundle, num_interactions

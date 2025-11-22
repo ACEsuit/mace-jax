@@ -70,7 +70,7 @@ class MACEEdgeForcesWrapper:
             if isinstance(tree, dict):
                 out = {}
                 for k, v in tree.items():
-                    next_in_meta = in_meta or k == 'meta'
+                    next_in_meta = in_meta or k in {'meta', 'config'}
                     out[k] = _strip_meta(v, next_in_meta)
                 return out
             if in_meta and isinstance(tree, str):

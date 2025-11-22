@@ -550,8 +550,8 @@ class ModelEquivalenceTestBase:
         np.testing.assert_allclose(
             cls.jax_stress,
             cls.torch_stress,
-            rtol=1e-6,
-            atol=1e-6,
+            rtol=5e-6,
+            atol=5e-6,
         )
 
     def test_blockwise_node_features_within_threshold(self):

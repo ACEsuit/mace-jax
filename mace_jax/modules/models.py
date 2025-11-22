@@ -102,6 +102,21 @@ class MACE(fnn.Module):
         pytree_node=False, default=None
     )
 
+    def __post_init__(self):
+        super().__post_init__()
+        consts = self.normalize2mom_consts or {'silu': 0.0, 'swish': 0.0}
+        cleaned: dict[str, float] = {}
+        for key, val in consts.items():
+            try:
+                scalar_val = float(np.asarray(val))
+            except Exception as exc:
+                raise ValueError(
+                    f'normalize2mom_consts for {key} must be a concrete float.'
+                ) from exc
+            register_normalize2mom_const(key, scalar_val)
+            cleaned[key] = scalar_val
+        object.__setattr__(self, '_normalize2mom_consts', cleaned)
+
     def setup(self) -> None:
         self._heads = tuple(self.heads) if self.heads is not None else ('Default',)
         correlation = _as_tuple(self.correlation, self.num_interactions)
@@ -130,29 +145,23 @@ class MACE(fnn.Module):
 
         # Normalize2mom constants originate from the Torch model (or fall back
         # to defaults) and are kept as scalar arrays for serialization.
-        consts = self.normalize2mom_consts or {'silu': 0.0, 'swish': 0.0}
-        const_arrays = {
-            key: jnp.asarray(float(val), dtype=jnp.float32)
-            for key, val in consts.items()
+        consts = getattr(self, '_normalize2mom_consts', None) or {
+            'silu': 0.0,
+            'swish': 0.0,
         }
-        # Store normalize2mom constants as a non-trainable collection so they
-        # are serialized with the bundle (mirrors Torch-derived values).
+        const_arrays = {
+            key: jnp.asarray(val, dtype=jnp.float32) for key, val in consts.items()
+        }
+        # Keep normalize2mom constants in a dedicated config collection so they
+        # travel with exported bundles but stay out of the trainable params.
         self.variable(
-            'constants',
+            'config',
             'normalize2mom_consts',
             lambda: const_arrays,
         )
         # Also seed the e3nn normalize2mom cache at runtime to enforce those
         # constants during forward passes (keeps Torch/JAX energy parity).
-        for key, val in const_arrays.items():
-            try:
-                register_normalize2mom_const(key, float(val))
-            except Exception as exc:
-                warnings.warn(
-                    f'Failed to register normalize2mom constant for {key}: {exc}',
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
+        # Registration happens in __post_init__ with concrete values.
 
         node_attr_irreps = Irreps([(self.num_elements, (0, 1))])
         scalar_mul = hidden_irreps.count(Irrep(0, 1))

@@ -734,7 +734,8 @@ def run_training(dry_run: bool = False) -> None:
             gradient_transform, steps_per_interval, max_num_intervals = (
                 gin_functions.optimizer()
             )
-        optimizer_state = gradient_transform.init(params)
+        params_for_opt, _ = gin_functions._split_config(params)
+        optimizer_state = gradient_transform.init(params_for_opt)
 
         num_params = tools.count_parameters(params)
         num_opt_params = tools.count_parameters(optimizer_state)
