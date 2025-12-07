@@ -12,6 +12,21 @@ from mace_jax.modules.embeddings import (
 )
 
 
+def _tf32_precision_in_use() -> bool:
+    """Return ``True`` when GPU matmuls run with TF32 precision."""
+
+    backend = jax.default_backend()
+    precision = jax.config.jax_default_matmul_precision
+    if backend != 'gpu':
+        return False
+
+    if precision is None:
+        return True  # default precision on GPU implies TF32
+
+    precision_str = str(precision).lower()
+    return precision_str in {'tensorfloat32', 'fastest'}
+
+
 class TestGenericJointEmbedding:
     """Compare the Flax joint embedding against the Torch reference."""
 
@@ -113,4 +128,10 @@ class TestGenericJointEmbedding:
         out_flax = flax_module.apply(variables, jnp.asarray(batch_np), features_jax)
         out_flax_np = np.asarray(out_flax)
 
-        np.testing.assert_allclose(out_flax_np, out_torch, rtol=1e-5, atol=1e-6)
+        rtol = 1e-5
+        atol = 1e-6
+        if _tf32_precision_in_use():
+            rtol = 2e-2
+            atol = 5e-4
+
+        np.testing.assert_allclose(out_flax_np, out_torch, rtol=rtol, atol=atol)
