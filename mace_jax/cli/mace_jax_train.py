@@ -271,6 +271,17 @@ def _normalize_optional_path(
     return str(Path(path_str))
 
 
+def _parse_batch_limit_option(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {'auto', 'none'}:
+            return None
+        return int(value)
+    return int(value)
+
+
 def _apply_run_options(args: argparse.Namespace) -> None:
     _bind_if_not_none('mace_jax.tools.gin_functions.logs.name', args.name)
     if args.log_dir is not None:
@@ -328,6 +339,12 @@ def _apply_dataset_options(args: argparse.Namespace) -> None:
     _bind_if_not_none(
         'mace_jax.tools.gin_datasets.datasets.forces_key', args.forces_key
     )
+    if getattr(args, 'batch_max_nodes', None) is not None:
+        limit = _parse_batch_limit_option(args.batch_max_nodes)
+        gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.n_node', limit)
+    if getattr(args, 'batch_max_edges', None) is not None:
+        limit = _parse_batch_limit_option(args.batch_max_edges)
+        gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.n_edge', limit)
 
 
 def _apply_training_controls(args: argparse.Namespace) -> None:

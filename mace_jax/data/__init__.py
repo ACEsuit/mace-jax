@@ -1,4 +1,11 @@
+from .hdf5_dataset import HDF5Dataset
 from .neighborhood import get_neighborhood
+from .streaming_loader import (
+    StreamingDatasetSpec,
+    StreamingGraphDataLoader,
+    get_hdf5_dataloader,
+    pack_graphs_greedy,
+)
 from .utils import (
     AtomicNumberTable,
     Configuration,
@@ -14,11 +21,18 @@ from .utils import (
     config_from_atoms,
     get_atomic_number_table_from_zs,
     graph_from_configuration,
-    load_from_hdf5,
+    iter_micro_batches,
     load_from_xyz,
     pad_graph_to_nearest_ceil_mantissa,
+    prepare_sharded_batch,
+    prepare_single_batch,
     random_train_valid_split,
+    replicate_to_local_devices,
+    split_device_outputs,
+    supports_multiprocessing_workers,
+    take_chunk,
     test_config_types,
+    unreplicate_from_local_devices,
 )
 
 __all__ = [
@@ -29,7 +43,6 @@ __all__ = [
     'compute_average_E0s_from_species',
     'config_from_atoms',
     'load_from_xyz',
-    'load_from_hdf5',
     'random_train_valid_split',
     'test_config_types',
     'graph_from_configuration',
@@ -42,4 +55,17 @@ __all__ = [
     'atomic_numbers_to_indices',
     'get_atomic_number_table_from_zs',
     'pad_graph_to_nearest_ceil_mantissa',
+    'replicate_to_local_devices',
+    'unreplicate_from_local_devices',
+    'prepare_single_batch',
+    'prepare_sharded_batch',
+    'split_device_outputs',
+    'supports_multiprocessing_workers',
+    'take_chunk',
+    'iter_micro_batches',
+    'HDF5Dataset',
+    'StreamingDatasetSpec',
+    'StreamingGraphDataLoader',
+    'get_hdf5_dataloader',
+    'pack_graphs_greedy',
 ]

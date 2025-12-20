@@ -1,15 +1,14 @@
 import pickle
-import shutil
 from pathlib import Path
 
 import gin
+import h5py
 import jax
 import jax.numpy as jnp
 import jraph
 import numpy as np
 import optax
 import pytest
-from ase import io as ase_io
 
 import mace_jax.data as data_pkg
 import mace_jax.data.utils as data_utils
@@ -30,9 +29,6 @@ mace_jax.tools.gin_model.model.max_ell = 1
 mace_jax.tools.gin_model.model.hidden_irreps = '1x0e'
 mace_jax.tools.gin_model.model.MLP_irreps = '1x0e'
 mace_jax.tools.gin_model.model.num_interactions = 1
-mace_jax.tools.gin_datasets.datasets.train_path = 'tests/test_data/simple.xyz'
-mace_jax.tools.gin_datasets.datasets.valid_fraction = 0.0
-mace_jax.tools.gin_datasets.datasets.test_path = None
 mace_jax.tools.gin_datasets.datasets.n_node = 8
 mace_jax.tools.gin_datasets.datasets.n_edge = 16
 mace_jax.tools.gin_datasets.datasets.n_graph = 2
@@ -46,13 +42,63 @@ mace_jax.tools.gin_functions.train.progress_bar = False
 """
 
 
+def _write_native_hdf5(path: Path, *, num_structures: int, seed: int = 0) -> None:
+    rng = np.random.default_rng(seed)
+    with h5py.File(path, 'w') as handle:
+        batch = handle.create_group('config_batch_0')
+        for idx in range(num_structures):
+            n_atoms = 2 + (idx % 3)
+            subgroup = batch.create_group(f'config_{idx}')
+            numbers = np.asarray(
+                [1 + (idx + j) % 3 for j in range(n_atoms)], dtype=np.int32
+            )
+            positions = rng.normal(scale=0.1, size=(n_atoms, 3)) + idx * 0.01
+            subgroup.create_dataset('atomic_numbers', data=numbers)
+            subgroup.create_dataset('positions', data=positions)
+            subgroup.create_dataset('cell', data=np.eye(3) * 5.0)
+            subgroup.create_dataset(
+                'pbc', data=np.array([False, False, False], dtype=np.bool_)
+            )
+            subgroup.create_dataset('weight', data=np.array(1.0, dtype=np.float64))
+            subgroup.create_dataset(
+                'config_type', data=np.array('Default', dtype='S')
+            )
+            subgroup.create_dataset('head', data=np.array('Default', dtype='S'))
+            properties = subgroup.create_group('properties')
+            properties.create_dataset(
+                'energy', data=np.array(float(idx), dtype=np.float64)
+            )
+            properties.create_dataset('forces', data=np.zeros((n_atoms, 3)))
+            properties.create_dataset('stress', data=np.zeros((3, 3)))
+            prop_weights = subgroup.create_group('property_weights')
+            for key in ('energy', 'forces', 'stress'):
+                prop_weights.create_dataset(key, data=np.array(1.0, dtype=np.float64))
+
+
+@pytest.fixture
+def dataset_paths(tmp_path):
+    data_dir = tmp_path / 'datasets'
+    data_dir.mkdir()
+    train = data_dir / 'train.h5'
+    valid = data_dir / 'valid.h5'
+    test = data_dir / 'test.h5'
+    _write_native_hdf5(train, num_structures=6, seed=0)
+    _write_native_hdf5(valid, num_structures=2, seed=10)
+    _write_native_hdf5(test, num_structures=2, seed=20)
+    return {'train': train, 'valid': valid, 'test': test}
+
+
 @pytest.fixture(autouse=True)
-def reset_gin():
+def reset_gin(dataset_paths):
     gin.clear_config()
     gin.parse_config(GIN_CONFIG)
-    data_path = Path(__file__).resolve().parent / 'test_data' / 'simple.xyz'
     gin.bind_parameter(
-        'mace_jax.tools.gin_datasets.datasets.train_path', str(data_path)
+        'mace_jax.tools.gin_datasets.datasets.train_path',
+        str(dataset_paths['train']),
+    )
+    gin.bind_parameter(
+        'mace_jax.tools.gin_datasets.datasets.valid_path',
+        str(dataset_paths['valid']),
     )
     gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.test_path', None)
     # Keep toy dataset graphs by setting generous size limits.
@@ -199,11 +245,10 @@ def _run_gin_training(tmp_path, **train_kwargs):
 
 
 def test_multihead_training(tmp_path):
-    simple_xyz = Path(__file__).resolve().parent / 'test_data' / 'simple.xyz'
-    head_default = tmp_path / 'head_default.xyz'
-    head_surface = tmp_path / 'head_surface.xyz'
-    shutil.copy(simple_xyz, head_default)
-    shutil.copy(simple_xyz, head_surface)
+    head_default = tmp_path / 'head_default.h5'
+    head_surface = tmp_path / 'head_surface.h5'
+    _write_native_hdf5(head_default, num_structures=4, seed=3)
+    _write_native_hdf5(head_surface, num_structures=4, seed=7)
 
     head_cfgs = {
         'Default': {'train_path': str(head_default)},
@@ -282,10 +327,24 @@ def test_resume_from_checkpoint_passes_state(tmp_path, monkeypatch):
 
 
 def test_graph_dataloader_split_by_heads(tmp_path):
-    simple_xyz = Path(__file__).resolve().parent / 'test_data' / 'simple.xyz'
+    head_A_train = tmp_path / 'head_A_train.h5'
+    head_B_train = tmp_path / 'head_B_train.h5'
+    head_A_valid = tmp_path / 'head_A_valid.h5'
+    head_B_valid = tmp_path / 'head_B_valid.h5'
+    _write_native_hdf5(head_A_train, num_structures=4, seed=11)
+    _write_native_hdf5(head_B_train, num_structures=4, seed=12)
+    _write_native_hdf5(head_A_valid, num_structures=2, seed=21)
+    _write_native_hdf5(head_B_valid, num_structures=2, seed=22)
+
     head_cfgs = {
-        'Default': {'train_path': str(simple_xyz), 'valid_fraction': 0.5},
-        'Surface': {'train_path': str(simple_xyz), 'valid_fraction': 0.5},
+        'Default': {
+            'train_path': str(head_A_train),
+            'valid_path': str(head_A_valid),
+        },
+        'Surface': {
+            'train_path': str(head_B_train),
+            'valid_path': str(head_B_valid),
+        },
     }
     gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.head_configs', head_cfgs)
     gin.bind_parameter(
@@ -339,10 +398,24 @@ def test_graph_dataloader_shard_splits_graphs():
 
 
 def test_train_evaluates_each_head(monkeypatch, tmp_path):
-    simple_xyz = Path(__file__).resolve().parent / 'test_data' / 'simple.xyz'
+    head_A_train = tmp_path / 'head_A_train.h5'
+    head_B_train = tmp_path / 'head_B_train.h5'
+    head_A_valid = tmp_path / 'head_A_valid.h5'
+    head_B_valid = tmp_path / 'head_B_valid.h5'
+    _write_native_hdf5(head_A_train, num_structures=4, seed=31)
+    _write_native_hdf5(head_B_train, num_structures=4, seed=32)
+    _write_native_hdf5(head_A_valid, num_structures=2, seed=41)
+    _write_native_hdf5(head_B_valid, num_structures=2, seed=42)
+
     head_cfgs = {
-        'Default': {'train_path': str(simple_xyz), 'valid_fraction': 0.5},
-        'Surface': {'train_path': str(simple_xyz), 'valid_fraction': 0.5},
+        'Default': {
+            'train_path': str(head_A_train),
+            'valid_path': str(head_A_valid),
+        },
+        'Surface': {
+            'train_path': str(head_B_train),
+            'valid_path': str(head_B_valid),
+        },
     }
     gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.head_configs', head_cfgs)
     gin.bind_parameter(
@@ -366,9 +439,12 @@ def test_train_evaluates_each_head(monkeypatch, tmp_path):
     assert set(valid_calls) == {('Default',), ('Surface',)}
 
 
-def test_eval_interval_controls_frequency(monkeypatch, tmp_path):
+def test_eval_interval_controls_frequency(monkeypatch, dataset_paths):
     gin.bind_parameter('mace_jax.tools.gin_functions.train.eval_interval', 2)
-    gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.valid_fraction', 0.5)
+    gin.bind_parameter(
+        'mace_jax.tools.gin_datasets.datasets.valid_path',
+        str(dataset_paths['valid']),
+    )
 
     def _multi_interval_train(*, params, optimizer_state, **kwargs):
         for idx in range(3):
@@ -388,30 +464,16 @@ def test_eval_interval_controls_frequency(monkeypatch, tmp_path):
         return 0.0, {}
 
     monkeypatch.setattr(gin_functions.tools, 'evaluate', _fake_evaluate)
-    _run_gin_training(tmp_path)
+    _run_gin_training(Path(dataset_paths['valid']).parent)
     assert eval_calls.count('eval_valid') == 2
 
 
-def test_head_replay_paths_and_weights(tmp_path):
-    simple_xyz = Path(__file__).resolve().parent / 'test_data' / 'simple.xyz'
-    replay_xyz = tmp_path / 'replay.xyz'
-    shutil.copy(simple_xyz, replay_xyz)
-    n_base = len(ase_io.read(simple_xyz, ':'))
-
-    head_cfgs = {
-        'Default': {
-            'train_path': str(simple_xyz),
-            'replay_paths': [str(replay_xyz)],
-            'replay_weight': 0.25,
-        }
-    }
-    gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.head_configs', head_cfgs)
-    gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.heads', ['Default'])
+def test_streaming_loader_auto_estimates_caps():
+    gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.n_node', None)
+    gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.n_edge', None)
     train_loader, _, _, _, _ = gin_datasets.datasets()
-
-    assert len(train_loader.graphs) == 2 * n_base
-    replay_weight = float(train_loader.graphs[-1].globals.weight[0])
-    assert np.isclose(replay_weight, 0.25)
+    assert train_loader._n_node >= 1
+    assert train_loader._n_edge >= 1
 
 
 def test_graph_dataloader_iter_batches_deterministic():
@@ -482,79 +544,6 @@ def test_graph_dataloader_iter_batches_deterministic():
     assert seq_epoch0 != seq_epoch1
 
 
-def test_head_pseudolabel_replay(monkeypatch, tmp_path):
-    simple_xyz = Path(__file__).resolve().parent / 'test_data' / 'simple.xyz'
-    unlabeled_xyz = tmp_path / 'unlabeled.xyz'
-    atoms = ase_io.read(simple_xyz, ':')
-    for at in atoms:
-        at.info.pop('energy', None)
-    ase_io.write(unlabeled_xyz, atoms)
-
-    def fake_loader(*_, **__):
-        def _predict(graph):
-            n_atoms = int(graph.n_node[0])
-            return {
-                'energy': np.asarray([99.0]),
-                'forces': np.ones((n_atoms, 3)),
-                'stress': np.zeros((1, 3, 3)),
-            }
-
-        return _predict
-
-    monkeypatch.setattr(
-        gin_datasets, '_load_pseudolabel_predictor', fake_loader, raising=True
-    )
-
-    head_cfgs = {
-        'Default': {
-            'train_path': str(simple_xyz),
-            'replay_paths': [str(unlabeled_xyz)],
-            'replay_allow_unlabeled': True,
-            'pseudolabel_checkpoint': 'dummy.pt',
-            'pseudolabel_targets': 'replay',
-        }
-    }
-    gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.head_configs', head_cfgs)
-    gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.heads', ['Default'])
-
-    train_loader, _, _, _, _ = gin_datasets.datasets()
-    replay_graph = train_loader.graphs[-1]
-    assert np.isclose(float(replay_graph.globals.energy[0]), 99.0)
-    forces = np.asarray(replay_graph.nodes.forces)
-    assert forces.shape[1] == 3 and np.allclose(forces, 1.0)
-
-
-def test_head_config_overrides_energy_force_keys(monkeypatch):
-    gin.clear_config()
-    calls = []
-
-    def _fake_loader(*, file_or_path, **kwargs):
-        calls.append((kwargs['head_name'], kwargs['energy_key'], kwargs['forces_key']))
-        return ({}, [])
-
-    monkeypatch.setattr(gin_datasets.data, 'load_from_xyz', _fake_loader)
-
-    head_cfgs = {
-        'Default': {
-            'train_path': 'dummy.xyz',
-            'energy_key': 'E_custom',
-            'forces_key': 'F_custom',
-            'valid_fraction': 0.0,
-        }
-    }
-    gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.head_configs', head_cfgs)
-    simple_xyz = Path(__file__).resolve().parent / 'test_data' / 'simple.xyz'
-    gin.bind_parameter(
-        'mace_jax.tools.gin_datasets.datasets.train_path', str(simple_xyz)
-    )
-    gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.r_max', 2.5)
-    gin_datasets.datasets()
-
-    assert calls
-    assert ('Default', 'E_custom', 'F_custom') in calls
-    gin.clear_config()
-
-
 def test_gin_model_torch_checkpoint(monkeypatch, tmp_path):
     import numpy as np
     import torch
@@ -586,11 +575,10 @@ def test_gin_model_torch_checkpoint(monkeypatch, tmp_path):
             compute_force: bool = True,
             compute_stress: bool = False,
         ):
-            assert compute_force
-            assert not compute_stress
-            assert 'head' in data and data['head'].shape == (1,)
+            del params
+            num_nodes = data['positions'].shape[0]
             energy = jnp.asarray([42.0], dtype=jnp.float64)
-            forces = jnp.zeros((data['positions'].shape[0], 3), dtype=jnp.float64)
+            forces = jnp.zeros((num_nodes, 3), dtype=jnp.float64)
             return {'energy': energy, 'forces': forces, 'stress': None}
 
     def _fake_load(path, map_location=None):

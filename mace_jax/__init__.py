@@ -11,6 +11,14 @@ warnings.filterwarnings(
     module='e3nn.o3._wigner',
 )
 
+try:  # pragma: no cover - torch optional for some installs
+    from torch.serialization import add_safe_globals as _torch_add_safe_globals
+except ImportError:  # pragma: no cover
+    _torch_add_safe_globals = None
+
+if callable(_torch_add_safe_globals):  # pragma: no cover
+    _torch_add_safe_globals([slice])
+
 __all__ = [
     '__version__',
 ]

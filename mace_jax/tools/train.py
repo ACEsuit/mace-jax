@@ -81,27 +81,49 @@ def train(
 
     logging.info('Started training')
 
-    @partial(jax.pmap, in_axes=(None, 0), out_axes=0)
+    local_device_count = max(1, jax.local_device_count())
+
+    def _prepare_graph_for_devices(graph: jraph.GraphsTuple):
+        """Ensure ``graph`` has a leading axis matching local device count."""
+
+        if local_device_count == 1:
+            if graph.n_node.ndim == 1:
+                return jax.tree_util.tree_map(lambda x: x[None, ...], graph)
+            return graph
+
+        if graph.n_node.ndim == 1:
+            return data.prepare_sharded_batch(graph, local_device_count)
+
+        if graph.n_node.shape[0] != local_device_count:
+            raise ValueError(
+                'Expected microbatches with leading axis equal to the number of local '
+                f'devices ({local_device_count}), got axis size {graph.n_node.shape[0]}.'
+            )
+        return graph
+
+    @partial(jax.pmap, in_axes=(None, 0), out_axes=None, axis_name='devices')
     # @partial(jax.vmap, in_axes=(None, 0), out_axes=0)
     def grad_fn(params, graph: jraph.GraphsTuple):
         # graph is assumed to be padded by jraph.pad_with_graphs
         mask = jraph.get_graph_padding_mask(graph)  # [n_graphs,]
-        loss, grad = jax.value_and_grad(
-            lambda params: jnp.sum(jnp.where(mask, total_loss_fn(params, graph), 0.0))
-        )(params)
-        return jnp.sum(mask), loss, grad
+
+        def _loss_fn(trainable):
+            return jnp.sum(jnp.where(mask, total_loss_fn(trainable, graph), 0.0))
+
+        loss, grad = jax.value_and_grad(_loss_fn)(params)
+        loss = jax.lax.psum(loss, 'devices')
+        grad = jax.tree_util.tree_map(lambda g: jax.lax.psum(g, 'devices'), grad)
+        num_graphs = jax.lax.psum(jnp.sum(mask), 'devices')
+        return num_graphs, loss, grad
 
     # jit-of-pmap is not recommended but so far it seems faster
     @jax.jit
     def update_fn(
         params, optimizer_state, ema_params, num_updates: int, graph: jraph.GraphsTuple
     ) -> tuple[float, Any, Any]:
-        if graph.n_node.ndim == 1:
-            graph = jax.tree_util.tree_map(lambda x: x[None, ...], graph)
-
         n, loss, grad = grad_fn(params, graph)
-        loss = jnp.sum(loss) / jnp.sum(n)
-        grad = jax.tree_util.tree_map(lambda x: jnp.sum(x, axis=0) / jnp.sum(n), grad)
+        loss = loss / n
+        grad = jax.tree_util.tree_map(lambda x: x / n, grad)
 
         if max_grad_norm is not None:
             grad_norm = jnp.sqrt(
@@ -194,6 +216,7 @@ def train(
         )
         for _ in p_bar:
             graph = _next_batch()
+            graph = _prepare_graph_for_devices(graph)
             num_updates += 1
             start_time = time.time()
             loss, params, optimizer_state, ema_params = update_fn(

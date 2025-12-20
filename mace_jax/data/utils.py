@@ -1,14 +1,15 @@
+import itertools
 import logging
+import multiprocessing as mp
 import random
 from collections import OrderedDict, defaultdict, namedtuple
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from random import shuffle
 from typing import IO, NamedTuple, Optional, Union
 
 import ase.data
 import ase.io
-import h5py
 import jax
 import jax.numpy as jnp
 import jraph
@@ -204,115 +205,6 @@ def load_from_xyz(
         for atoms in atoms_list
     ]
     return atomic_energies_dict, configs
-
-
-def _unpack_hdf5_value(value):
-    if isinstance(value, bytes):
-        value = value.decode('utf-8')
-    if isinstance(value, str) and value == 'None':
-        return None
-    return value
-
-
-def _load_hdf5_properties(group, key):
-    if key not in group:
-        return None
-    return _unpack_hdf5_value(group[key][()])
-
-
-def load_from_hdf5(
-    file_path: str,
-    config_type_weights: dict = None,
-    energy_key: str = 'energy',
-    forces_key: str = 'forces',
-    stress_key: str = 'stress',
-    prefactor_stress: float = 1.0,
-    remap_stress: np.ndarray = None,
-    head_name: str | None = None,
-    num_configs: int | None = None,
-    no_data_ok: bool = False,
-) -> tuple[dict[int, float], Configurations]:
-    if config_type_weights is None:
-        config_type_weights = DEFAULT_CONFIG_TYPE_WEIGHTS
-
-    configs: list[Configuration] = []
-
-    with h5py.File(file_path, 'r') as handle:
-        batch_names = sorted(
-            (name for name in handle.keys() if name.startswith('config_batch_')),
-            key=lambda name: int(name.rsplit('_', 1)[-1]),
-        )
-        for batch_name in batch_names:
-            batch = handle[batch_name]
-            config_names = sorted(
-                batch.keys(), key=lambda name: int(name.rsplit('_', 1)[-1])
-            )
-            for config_name in config_names:
-                subgroup = batch[config_name]
-                atomic_numbers = np.asarray(subgroup['atomic_numbers'][()], dtype=int)
-                positions = np.asarray(subgroup['positions'][()], dtype=float)
-
-                props = subgroup['properties']
-                energy = _load_hdf5_properties(props, energy_key)
-                if energy is not None:
-                    energy = float(np.asarray(energy).reshape(-1)[0])
-
-                forces = _load_hdf5_properties(props, forces_key)
-                if forces is not None:
-                    forces = np.asarray(forces, dtype=float).reshape(-1, 3)
-
-                stress = _load_hdf5_properties(props, stress_key)
-                if stress is not None:
-                    stress = np.asarray(stress, dtype=float).reshape(3, 3)
-                    stress = prefactor_stress * stress
-                    if remap_stress is not None:
-                        remap = np.asarray(remap_stress)
-                        stress = stress.flatten()[remap].reshape(3, 3)
-
-                if (
-                    not no_data_ok
-                    and energy is None
-                    and forces is None
-                    and stress is None
-                ):
-                    continue
-
-                cell = np.asarray(subgroup['cell'][()], dtype=float)
-                pbc = tuple(bool(x) for x in subgroup['pbc'][()])
-                config_type = _unpack_hdf5_value(subgroup['config_type'][()])
-                stored_weight = _unpack_hdf5_value(subgroup['weight'][()])
-                if stored_weight is not None:
-                    weight = float(stored_weight)
-                else:
-                    weight = config_type_weights.get(config_type, 1.0)
-
-                head_value = head_name
-                if head_value is None and 'head' in subgroup:
-                    head_value = _unpack_hdf5_value(subgroup['head'][()])
-                if head_value is None:
-                    head_value = 'Default'
-
-                configs.append(
-                    Configuration(
-                        atomic_numbers=atomic_numbers,
-                        positions=positions,
-                        energy=energy,
-                        forces=forces,
-                        stress=stress,
-                        cell=cell,
-                        pbc=pbc,
-                        weight=weight,
-                        config_type=config_type,
-                        head=head_value,
-                    )
-                )
-
-                if num_configs is not None and len(configs) >= num_configs:
-                    break
-            if num_configs is not None and len(configs) >= num_configs:
-                break
-
-    return {}, configs
 
 
 class AtomicNumberTable:
@@ -698,6 +590,271 @@ class ParallelLoader:
                 )
             except StopIteration:
                 return
+
+
+def _none_leaf(value):
+    return value is None
+
+
+def replicate_to_local_devices(tree):
+    """Broadcast a pytree so the leading axis matches local device count."""
+    device_count = jax.local_device_count()
+    if device_count <= 1:
+        return tree
+
+    def _replicate(leaf):
+        if leaf is None:
+            return None
+        arr = jnp.asarray(leaf)
+        return jnp.broadcast_to(arr, (device_count,) + arr.shape)
+
+    return jax.tree_util.tree_map(_replicate, tree, is_leaf=_none_leaf)
+
+
+def unreplicate_from_local_devices(tree):
+    """Strip a replicated leading axis (if present) from a pytree."""
+    device_count = jax.local_device_count()
+    if device_count <= 1:
+        return tree
+
+    host = jax.device_get(tree)
+    if isinstance(host, (list, tuple)) and len(host) == device_count:
+        return jax.tree_util.tree_map(lambda x: x[0], host, is_leaf=_none_leaf)
+
+    def _maybe_collapse(leaf):
+        if leaf is None:
+            return None
+        arr = np.asarray(leaf)
+        if arr.ndim == 0 or arr.shape[0] != device_count:
+            return leaf
+        first = arr[0]
+        if np.all(arr == first):
+            return first
+        return leaf
+
+    return jax.tree_util.tree_map(_maybe_collapse, host, is_leaf=_none_leaf)
+
+
+def prepare_single_batch(graph):
+    """Cast a batched graph to device arrays, keeping None leaves."""
+
+    def _to_device_array(x):
+        if x is None:
+            return None
+        return jnp.asarray(x)
+
+    return jax.tree_util.tree_map(_to_device_array, graph, is_leaf=_none_leaf)
+
+
+def split_graphs_for_devices(graph, num_devices: int) -> list[jraph.GraphsTuple]:
+    def _pad_graphs_to_multiple(graph, multiple):
+        if multiple <= 1:
+            return graph
+        total = int(graph.n_node.shape[0])
+        remainder = total % multiple
+        if remainder == 0:
+            return graph
+        pad_graphs = multiple - remainder
+        pad_n_node = np.concatenate(
+            [np.asarray(graph.n_node), np.zeros(pad_graphs, dtype=np.int32)]
+        )
+        pad_n_edge = np.concatenate(
+            [np.asarray(graph.n_edge), np.zeros(pad_graphs, dtype=np.int32)]
+        )
+
+        globals_attr = graph.globals
+        if globals_attr is None:
+            globals_dict = None
+        elif hasattr(globals_attr, 'items'):
+            globals_dict = globals_attr.__class__()
+            for key, value in globals_attr.items():
+                pad_shape = (pad_graphs,) + value.shape[1:]
+                pad_vals = np.zeros(pad_shape, dtype=value.dtype)
+                globals_dict[key] = np.concatenate([value, pad_vals], axis=0)
+        else:
+            pad_shape = (pad_graphs,) + globals_attr.shape[1:]
+            pad_vals = np.zeros(pad_shape, dtype=globals_attr.dtype)
+            globals_dict = np.concatenate([globals_attr, pad_vals], axis=0)
+
+        return graph._replace(
+            globals=globals_dict,
+            n_node=pad_n_node,
+            n_edge=pad_n_edge,
+        )
+
+    graph = _pad_graphs_to_multiple(graph, num_devices)
+    total_graphs = int(graph.n_node.shape[0])
+    if total_graphs % num_devices != 0:
+        raise ValueError(
+            'For multi-device execution, batch size must be divisible by the number of devices.'
+        )
+    per_device = total_graphs // num_devices
+    return [_slice_graph(graph, i * per_device, per_device) for i in range(num_devices)]
+
+
+def prepare_sharded_batch(graph, num_devices: int):
+    """Prepare a micro-batch for ``jax.pmap`` execution."""
+
+    def _ensure_graphs_tuple(item):
+        if isinstance(item, jraph.GraphsTuple):
+            return item
+        if isinstance(item, Sequence) and not isinstance(item, (bytes, str)):
+            return item[0] if len(item) == 1 else jraph.batch_np(item)
+        raise TypeError('Expected a GraphsTuple or sequence of GraphsTuples.')
+
+    device_batches = []
+    if isinstance(graph, Sequence) and not isinstance(graph, jraph.GraphsTuple):
+        filtered = [g for g in graph if g is not None]
+        if len(filtered) != num_devices:
+            raise ValueError(
+                f'Expected {num_devices} micro-batches for multi-device execution, got {len(filtered)}.'
+            )
+        for item in filtered:
+            device_batches.append(prepare_single_batch(_ensure_graphs_tuple(item)))
+    else:
+        chunks = split_graphs_for_devices(graph, num_devices)
+        for chunk in chunks:
+            device_batches.append(prepare_single_batch(_ensure_graphs_tuple(chunk)))
+
+    def _stack_or_none(*values):
+        first = values[0]
+        if first is None:
+            return None
+        return jnp.stack(values)
+
+    return jax.tree_util.tree_map(_stack_or_none, *device_batches, is_leaf=_none_leaf)
+
+
+_MP_WORKERS_SUPPORTED: bool | None = None
+
+
+def supports_multiprocessing_workers() -> bool:
+    """Return True if this environment can create ``multiprocessing`` locks."""
+    global _MP_WORKERS_SUPPORTED
+    if _MP_WORKERS_SUPPORTED is not None:
+        return _MP_WORKERS_SUPPORTED
+
+    try:
+        ctx = mp.get_context('spawn')
+        lock = ctx.Lock()
+        lock.acquire()
+        lock.release()
+    except (OSError, PermissionError):
+        _MP_WORKERS_SUPPORTED = False
+    else:
+        _MP_WORKERS_SUPPORTED = True
+    return _MP_WORKERS_SUPPORTED
+
+
+def stack_or_none(chunks):
+    """Concatenate numpy arrays unless the list is empty."""
+    if not chunks:
+        return None
+    return np.concatenate(chunks, axis=0)
+
+
+def split_device_outputs(tree, num_devices: int):
+    """Slice a replicated pytree into per-device host arrays."""
+    host_tree = jax.tree_util.tree_map(
+        lambda x: None if x is None else np.asarray(x),
+        tree,
+        is_leaf=lambda leaf: leaf is None,
+    )
+    slices = []
+    for idx in range(num_devices):
+        slices.append(
+            jax.tree_util.tree_map(
+                lambda x: None if x is None else x[idx],
+                host_tree,
+                is_leaf=lambda leaf: leaf is None,
+            )
+        )
+    return slices
+
+
+def iter_micro_batches(loader):
+    """Flatten a loader that may emit lists of micro-batches."""
+    for item in loader:
+        if item is None:
+            continue
+        if isinstance(item, list):
+            for sub in item:
+                if sub is not None:
+                    yield sub
+        else:
+            yield item
+
+
+def take_chunk(iterator, size: int):
+    """Collect up to ``size`` items from an iterator."""
+    return list(itertools.islice(iterator, size))
+
+
+def batched_iterator(
+    iterator,
+    size: int,
+    *,
+    remainder_action: Callable | None = None,
+    drop_remainder: bool = True,
+):
+    """Yield fixed-size chunks from ``iterator``."""
+    if size <= 0:
+        raise ValueError('Chunk size must be positive.')
+    while True:
+        chunk = take_chunk(iterator, size)
+        if len(chunk) < size:
+            if chunk and remainder_action is not None:
+                remainder_action(len(chunk), size)
+            if chunk and not drop_remainder:
+                yield chunk
+            break
+        yield chunk
+
+
+def _slice_graph(graph: jraph.GraphsTuple, start_graph: int, count: int):
+    start_graph = int(start_graph)
+    count = int(count)
+    n_node = np.asarray(graph.n_node)
+    n_edge = np.asarray(graph.n_edge)
+
+    graph_slice = slice(start_graph, start_graph + count)
+    node_start = int(n_node[:start_graph].sum())
+    node_end = int(node_start + n_node[graph_slice].sum())
+    edge_start = int(n_edge[:start_graph].sum())
+    edge_end = int(edge_start + n_edge[graph_slice].sum())
+
+    nodes = graph.nodes.__class__()
+    for key, value in graph.nodes.items():
+        nodes[key] = value[node_start:node_end]
+
+    edges = graph.edges.__class__()
+    for key, value in graph.edges.items():
+        edges[key] = value[edge_start:edge_end]
+
+    senders = graph.senders[edge_start:edge_end] - node_start
+    receivers = graph.receivers[edge_start:edge_end] - node_start
+
+    globals_attr = graph.globals
+    if globals_attr is None:
+        globals_dict = None
+    elif hasattr(globals_attr, 'items'):
+        globals_dict = globals_attr.__class__()
+        for key, value in globals_attr.items():
+            globals_dict[key] = value[graph_slice]
+    else:
+        globals_dict = globals_attr[graph_slice]
+    n_node_slice = graph.n_node[graph_slice]
+    n_edge_slice = graph.n_edge[graph_slice]
+
+    return jraph.GraphsTuple(
+        nodes=nodes,
+        edges=edges,
+        senders=senders,
+        receivers=receivers,
+        globals=globals_dict,
+        n_node=n_node_slice,
+        n_edge=n_edge_slice,
+    )
 
 
 def pad_graph_to_nearest_ceil_mantissa(

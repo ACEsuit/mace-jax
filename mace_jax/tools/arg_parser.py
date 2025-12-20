@@ -192,6 +192,26 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
         help='Key used to read forces from datasets.',
     )
     parser.add_argument(
+        '--batch-max-nodes',
+        '--batch_max_nodes',
+        type=str,
+        default=None,
+        help=(
+            "Maximum number of atoms allowed in a padded batch. "
+            "Pass 'auto' or 'None' to request automatic sizing."
+        ),
+    )
+    parser.add_argument(
+        '--batch-max-edges',
+        '--batch_max_edges',
+        type=str,
+        default=None,
+        help=(
+            "Maximum number of edges allowed in a padded batch. "
+            "Pass 'auto' or 'None' to request automatic sizing."
+        ),
+    )
+    parser.add_argument(
         '--r-max',
         type=float,
         help=(
