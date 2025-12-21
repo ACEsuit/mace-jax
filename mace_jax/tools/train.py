@@ -248,7 +248,7 @@ def train(
                 logging.info('Compiled function `update_fn` for args:')
                 logging.info(f'- n_node={graph.n_node} total={graph.n_node.sum()}')
                 logging.info(f'- n_edge={graph.n_edge} total={graph.n_edge.sum()}')
-                logging.info(f'Outout: loss= {loss:.3f}')
+                logging.info(f'Output: loss= {loss:.3f}')
                 logging.info(
                     f'Compilation time: {time.time() - start_time:.3f}s, cache size: {last_cache_size}'
                 )
@@ -375,14 +375,15 @@ def evaluate(
         p_bar.set_postfix({'n': num_graphs})
 
         if ref_graph.globals.energy is not None:
+            atom_counts = jnp.maximum(ref_graph.n_node, 1)
             delta_es_list.append(ref_graph.globals.energy - pred_graph.globals.energy)
             es_list.append(ref_graph.globals.energy)
 
             delta_es_per_atom_list.append(
                 (ref_graph.globals.energy - pred_graph.globals.energy)
-                / ref_graph.n_node
+                / atom_counts
             )
-            es_per_atom_list.append(ref_graph.globals.energy / ref_graph.n_node)
+            es_per_atom_list.append(ref_graph.globals.energy / atom_counts)
 
         if ref_graph.nodes.forces is not None:
             delta_fs_list.append(ref_graph.nodes.forces - pred_graph.nodes.forces)

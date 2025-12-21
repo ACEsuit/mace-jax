@@ -75,7 +75,9 @@ class SphericalHarmonics(fnn.Module):
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
         """Compute spherical harmonics for input vectors x [*, 3]."""
         if self.normalize:
-            x = x / (jnp.linalg.norm(x, axis=-1, keepdims=True) + 1e-9)
+            lengths_sq = jnp.sum(jnp.square(x), axis=-1, keepdims=True)
+            safe_norm = jnp.sqrt(jnp.maximum(lengths_sq, 1e-18))
+            x = x / safe_norm
 
         sh = spherical_harmonics(
             self._irreps_out, x, normalize=False, normalization='component'
