@@ -58,7 +58,7 @@ def train(
     train_loader: data.GraphDataLoader,  # device parallel done on the (optional) extra dimension
     gradient_transform: Any,
     optimizer_state: dict[str, Any],
-    steps_per_interval: int,
+    steps_per_interval: int | None,
     ema_decay: float | None = None,
     progress_bar: bool = True,
     swa_config: SWAConfig | None = None,
@@ -200,6 +200,15 @@ def train(
                     batch_iter = iter(epoch_batches)
                     return next(batch_iter)
 
+            effective_steps = steps_per_interval
+            if effective_steps is None:
+                effective_steps = len(epoch_batches)
+            if effective_steps <= 0:
+                raise ValueError(
+                    'steps_per_interval must be positive when set explicitly; '
+                    "use None/'auto' to consume every batch exactly once per epoch."
+                )
+
         else:
             legacy_iter = _legacy_interval_loader()
             setter = getattr(train_loader, 'set_epoch', None)
@@ -209,8 +218,15 @@ def train(
             def _next_batch():
                 return next(legacy_iter)
 
+            effective_steps = steps_per_interval
+            if effective_steps is None or effective_steps <= 0:
+                raise ValueError(
+                    'steps_per_interval must be specified and positive when the '
+                    'training loader does not expose iter_batches().'
+                )
+
         p_bar = tqdm.tqdm(
-            range(steps_per_interval),
+            range(effective_steps),
             desc=f'Epoch {epoch + 1}',
             disable=not (progress_bar and is_primary),
         )

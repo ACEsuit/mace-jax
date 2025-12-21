@@ -355,9 +355,12 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
         '--steps_per_interval',
         '--steps-per-epoch',
         '--steps_per_epoch',
-        type=int,
+        type=str,
         default=None,
-        help='Number of optimizer steps per evaluation interval (epoch).',
+        help=(
+            "Number of optimizer steps per evaluation interval (epoch). "
+            "Pass 'auto' or 'None' to use every batch exactly once per epoch."
+        ),
     )
     parser.add_argument(
         '--max-num-intervals',

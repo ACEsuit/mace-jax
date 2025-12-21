@@ -2,12 +2,8 @@ import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Tuple
-
 import gin
 import numpy as np
-from tqdm import tqdm
-
 from mace_jax import data
 from mace_jax.data.streaming_loader import StreamingDatasetSpec
 
@@ -18,91 +14,6 @@ def _ensure_list(value) -> list[str]:
     if isinstance(value, (list, tuple)):
         return [str(v) for v in value]
     return [str(value)]
-
-
-def _load_configs_from_path(
-    path: str,
-    *,
-    config_type_weights: dict,
-    energy_key: str,
-    forces_key: str,
-    prefactor_stress: float,
-    remap_stress: np.ndarray | None,
-    head_name: str,
-    num_configs: int | None,
-    extract_atomic_energies: bool,
-    allow_unlabeled: bool,
-):
-    loader_kwargs = dict(
-        config_type_weights=config_type_weights,
-        energy_key=energy_key,
-        forces_key=forces_key,
-        prefactor_stress=prefactor_stress,
-        remap_stress=remap_stress,
-        head_name=head_name,
-        num_configs=num_configs,
-    )
-    lower_path = path.lower()
-    if lower_path.endswith(('.h5', '.hdf5')):
-        return _load_native_hdf5_configs(
-            path,
-            config_type_weights=config_type_weights,
-            energy_key=energy_key,
-            forces_key=forces_key,
-            prefactor_stress=prefactor_stress,
-            remap_stress=remap_stress,
-            head_name=head_name,
-            no_data_ok=allow_unlabeled,
-            num_configs=num_configs,
-        )
-    return data.load_from_xyz(
-        file_or_path=path,
-        extract_atomic_energies=extract_atomic_energies,
-        no_data_ok=allow_unlabeled,
-        **loader_kwargs,
-    )
-
-
-def _load_native_hdf5_configs(
-    path: str,
-    *,
-    config_type_weights: dict,
-    energy_key: str,
-    forces_key: str,
-    prefactor_stress: float,
-    remap_stress: np.ndarray | None,
-    head_name: str,
-    no_data_ok: bool,
-    num_configs: int | None = None,
-):
-    configs: list[data.Configuration] = []
-    dataset = data.HDF5Dataset(path)
-    try:
-        for idx in range(len(dataset)):
-            atoms = dataset[idx]
-            cfg = data.config_from_atoms(
-                atoms,
-                energy_key=energy_key,
-                forces_key=forces_key,
-                stress_key='stress',
-                config_type_weights=config_type_weights,
-                prefactor_stress=prefactor_stress,
-                remap_stress=remap_stress,
-                head_name=head_name,
-            )
-            if (
-                not no_data_ok
-                and cfg.energy is None
-                and cfg.forces is None
-                and cfg.stress is None
-            ):
-                continue
-            configs.append(cfg)
-            if num_configs is not None and len(configs) >= num_configs:
-                break
-    finally:
-        dataset.close()
-    return {}, configs
 
 
 @dataclass
@@ -400,10 +311,11 @@ def _build_streaming_train_loader(
     loader.atomic_energies = atomic_energies
     loader.total_graphs = total_graphs
     loader.streaming = True
+    loader.z_table = z_table
     return loader, atomic_energies_dict, r_max
 
 
-def _collect_eval_configs(
+def _collect_eval_streaming_specs(
     *,
     head_names: Sequence[str],
     head_configs: dict[str, dict] | None,
@@ -415,9 +327,43 @@ def _collect_eval_configs(
     forces_key: str,
     prefactor_stress: float,
     remap_stress: np.ndarray | None,
-) -> tuple[list[data.Configuration], list[data.Configuration]]:
-    valid_configs: list[data.Configuration] = []
-    test_configs: list[data.Configuration] = []
+) -> tuple[list[StreamingDatasetSpec], list[StreamingDatasetSpec]]:
+    if test_num not in (None, 0):
+        raise ValueError('test_num is not supported with streaming evaluation datasets.')
+
+    valid_specs: list[StreamingDatasetSpec] = []
+    test_specs: list[StreamingDatasetSpec] = []
+
+    def _append_specs(
+        collection: list[StreamingDatasetSpec],
+        *,
+        head_name: str,
+        paths: Sequence[str],
+        head_ct_weights,
+        head_energy_key,
+        head_forces_key,
+        head_prefactor_stress,
+        head_remap_stress,
+        label: str,
+    ):
+        for expanded in _expand_hdf5_inputs(paths):
+            collection.append(
+                StreamingDatasetSpec(
+                    path=expanded,
+                    head_name=head_name,
+                    config_type_weights=head_ct_weights,
+                    energy_key=head_energy_key,
+                    forces_key=head_forces_key,
+                    prefactor_stress=head_prefactor_stress,
+                    remap_stress=head_remap_stress,
+                )
+            )
+            logging.info(
+                "Prepared streaming %s dataset for head '%s' from '%s'",
+                label,
+                head_name,
+                expanded,
+            )
 
     if head_configs:
         for head_name in head_names:
@@ -429,126 +375,105 @@ def _collect_eval_configs(
             head_remap_stress = head_cfg.get('remap_stress', remap_stress)
 
             head_valid_path = head_cfg.get('valid_path', valid_path)
-            if head_valid_path is not None:
-                _, head_valid = _load_configs_from_path(
-                    head_valid_path,
-                    config_type_weights=head_ct_weights,
-                    energy_key=head_energy_key,
-                    forces_key=head_forces_key,
-                    prefactor_stress=head_prefactor_stress,
-                    remap_stress=head_remap_stress,
+            if head_valid_path:
+                _append_specs(
+                    valid_specs,
                     head_name=head_name,
-                    num_configs=None,
-                    extract_atomic_energies=False,
-                    allow_unlabeled=False,
+                    paths=_ensure_list(head_valid_path),
+                    head_ct_weights=head_ct_weights,
+                    head_energy_key=head_energy_key,
+                    head_forces_key=head_forces_key,
+                    head_prefactor_stress=head_prefactor_stress,
+                    head_remap_stress=head_remap_stress,
+                    label='validation',
                 )
-                logging.info(
-                    "Loaded %s validation configurations for head '%s' from '%s'",
-                    len(head_valid),
-                    head_name,
-                    head_valid_path,
-                )
-                valid_configs.extend(head_valid)
 
             head_test_path = head_cfg.get('test_path', test_path)
             head_test_num = head_cfg.get('test_num', test_num)
-            if head_test_path is not None:
-                _, head_test = _load_configs_from_path(
-                    head_test_path,
-                    config_type_weights=head_ct_weights,
-                    energy_key=head_energy_key,
-                    forces_key=head_forces_key,
-                    prefactor_stress=head_prefactor_stress,
-                    remap_stress=head_remap_stress,
+            if head_test_num not in (None, 0):
+                raise ValueError(
+                    f"Head '{head_name}' specifies test_num which is not supported with streaming evaluation datasets."
+                )
+            if head_test_path:
+                _append_specs(
+                    test_specs,
                     head_name=head_name,
-                    num_configs=head_test_num,
-                    extract_atomic_energies=False,
-                    allow_unlabeled=False,
+                    paths=_ensure_list(head_test_path),
+                    head_ct_weights=head_ct_weights,
+                    head_energy_key=head_energy_key,
+                    head_forces_key=head_forces_key,
+                    head_prefactor_stress=head_prefactor_stress,
+                    head_remap_stress=head_remap_stress,
+                    label='test',
                 )
-                logging.info(
-                    "Loaded %s test configurations for head '%s' from '%s'",
-                    len(head_test),
-                    head_name,
-                    head_test_path,
-                )
-                test_configs.extend(head_test)
     else:
-        if valid_path is not None:
-            _, valid_configs = _load_configs_from_path(
-                valid_path,
-                config_type_weights=config_type_weights,
-                energy_key=energy_key,
-                forces_key=forces_key,
-                prefactor_stress=prefactor_stress,
-                remap_stress=remap_stress,
+        if valid_path:
+            _append_specs(
+                valid_specs,
                 head_name=head_names[0],
-                num_configs=None,
-                extract_atomic_energies=False,
-                allow_unlabeled=False,
+                paths=_ensure_list(valid_path),
+                head_ct_weights=config_type_weights,
+                head_energy_key=energy_key,
+                head_forces_key=forces_key,
+                head_prefactor_stress=prefactor_stress,
+                head_remap_stress=remap_stress,
+                label='validation',
             )
-            logging.info(
-                "Loaded %s validation configurations from '%s'",
-                len(valid_configs),
-                valid_path,
-            )
-        if test_path is not None:
-            _, test_configs = _load_configs_from_path(
-                test_path,
-                config_type_weights=config_type_weights,
-                energy_key=energy_key,
-                forces_key=forces_key,
-                prefactor_stress=prefactor_stress,
-                remap_stress=remap_stress,
+        if test_path:
+            _append_specs(
+                test_specs,
                 head_name=head_names[0],
-                num_configs=test_num,
-                extract_atomic_energies=False,
-                allow_unlabeled=False,
+                paths=_ensure_list(test_path),
+                head_ct_weights=config_type_weights,
+                head_energy_key=energy_key,
+                head_forces_key=forces_key,
+                head_prefactor_stress=prefactor_stress,
+                head_remap_stress=remap_stress,
+                label='test',
             )
-            logging.info(
-                "Loaded %s test configurations from '%s'",
-                len(test_configs),
-                test_path,
-            )
 
-    return valid_configs, test_configs
+    return valid_specs, test_specs
 
 
-def _graph_loader_from_configs(
-    configs: list[data.Configuration],
+def _build_eval_streaming_loader(
+    dataset_specs: Sequence[StreamingDatasetSpec],
     *,
     r_max: float,
-    head_to_index: dict[str, int],
     n_node: int,
     n_edge: int,
     n_graph: int,
-    min_n_node: int,
-    min_n_edge: int,
-    min_n_graph: int,
-    n_mantissa_bits: int,
-    shuffle: bool,
-    head_names: Sequence[str],
-):
-    if not configs:
-        graphs: list = []
+    head_to_index: dict[str, int],
+    base_z_table: data.AtomicNumberTable | None,
+) -> data.StreamingGraphDataLoader | None:
+    if not dataset_specs:
+        return None
+    if base_z_table is None:
+        atomic_numbers = _unique_atomic_numbers_from_hdf5([spec.path for spec in dataset_specs])
+        z_table = data.AtomicNumberTable(atomic_numbers)
     else:
-        graphs = [
-            data.graph_from_configuration(
-                cfg, cutoff=r_max, head_to_index=head_to_index
-            )
-            for cfg in tqdm(configs)
-        ]
-    return data.GraphDataLoader(
-        graphs=graphs,
+        z_table = base_z_table
+    datasets = [data.HDF5Dataset(spec.path, mode='r') for spec in dataset_specs]
+    loader = data.StreamingGraphDataLoader(
+        datasets=datasets,
+        dataset_specs=dataset_specs,
+        z_table=z_table,
+        r_max=r_max,
         n_node=n_node,
         n_edge=n_edge,
-        n_graph=n_graph,
-        min_n_node=min_n_node,
-        min_n_edge=min_n_edge,
-        min_n_graph=min_n_graph,
-        n_mantissa_bits=n_mantissa_bits,
-        shuffle=shuffle,
-        heads=head_names,
+        head_to_index=head_to_index,
+        shuffle=False,
+        seed=None,
+        niggli_reduce=False,
+        max_batches=None,
+        prefetch_batches=None,
+        num_workers=0,
+        graph_multiple=n_graph,
     )
+    loader.graphs = None
+    loader.total_graphs = sum(len(ds) for ds in datasets)
+    loader.streaming = True
+    loader.z_table = z_table
+    return loader
 
 
 @gin.configurable
@@ -608,7 +533,7 @@ def datasets(
         prefactor_stress=prefactor_stress,
         remap_stress=remap_stress,
     )
-    valid_configs, test_configs = _collect_eval_configs(
+    valid_specs, test_specs = _collect_eval_streaming_specs(
         head_names=head_names,
         head_configs=head_configs,
         valid_path=valid_path,
@@ -641,33 +566,24 @@ def datasets(
     if effective_n_node is None or effective_n_edge is None:
         raise ValueError('Unable to determine batch size limits for evaluation loaders.')
 
-    valid_loader = _graph_loader_from_configs(
-        valid_configs,
+    base_z_table = getattr(train_loader, 'z_table', None)
+    valid_loader = _build_eval_streaming_loader(
+        valid_specs,
         r_max=r_max,
-        head_to_index=head_to_index,
         n_node=effective_n_node,
         n_edge=effective_n_edge,
         n_graph=n_graph,
-        min_n_node=min_n_node,
-        min_n_edge=min_n_edge,
-        min_n_graph=min_n_graph,
-        n_mantissa_bits=n_mantissa_bits,
-        shuffle=False,
-        head_names=head_names,
+        head_to_index=head_to_index,
+        base_z_table=base_z_table,
     )
-    test_loader = _graph_loader_from_configs(
-        test_configs,
+    test_loader = _build_eval_streaming_loader(
+        test_specs,
         r_max=r_max,
-        head_to_index=head_to_index,
         n_node=effective_n_node,
         n_edge=effective_n_edge,
         n_graph=n_graph,
-        min_n_node=min_n_node,
-        min_n_edge=min_n_edge,
-        min_n_graph=min_n_graph,
-        n_mantissa_bits=n_mantissa_bits,
-        shuffle=False,
-        head_names=head_names,
+        head_to_index=head_to_index,
+        base_z_table=base_z_table,
     )
 
     logging.info(
@@ -675,9 +591,7 @@ def datasets(
         getattr(train_loader, 'total_graphs', 'unknown'),
         len(dataset_specs),
     )
-    logging.info(
-        'Validation graphs: %s | Test graphs: %s',
-        len(valid_loader.graphs),
-        len(test_loader.graphs),
-    )
+    valid_count = getattr(valid_loader, 'total_graphs', 0) if valid_loader else 0
+    test_count = getattr(test_loader, 'total_graphs', 0) if test_loader else 0
+    logging.info('Validation graphs: %s | Test graphs: %s', valid_count, test_count)
     return train_loader, valid_loader, test_loader, atomic_energies_dict, r_max

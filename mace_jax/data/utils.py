@@ -68,6 +68,24 @@ def random_train_valid_split(
     )
 
 
+def _normalize_stress(stress: np.ndarray | None) -> np.ndarray | None:
+    """Convert various stress layouts into a 3x3 matrix."""
+    if stress is None:
+        return None
+    arr = np.asarray(stress)
+    if arr.shape == (3, 3):
+        return arr
+    flat = arr.reshape(-1)
+    if flat.size == 6:
+        xx, yy, zz, yz, xz, xy = flat
+        return np.array([[xx, xy, xz], [xy, yy, yz], [xz, yz, zz]])
+    if flat.size == 9:
+        return flat.reshape(3, 3)
+    raise ValueError(
+        f'Unsupported stress shape {arr.shape}; expected 3x3 or Voigt-like entries.'
+    )
+
+
 def config_from_atoms(
     atoms: ase.Atoms,
     energy_key='energy',
@@ -89,15 +107,13 @@ def config_from_atoms(
         energy = np.array(0.0)
 
     if stress is not None:
-        stress = prefactor_stress * stress
+        stress = prefactor_stress * _normalize_stress(stress)
 
         if remap_stress is not None:
             remap_stress = np.asarray(remap_stress)
             assert remap_stress.shape == (3, 3)
             assert remap_stress.dtype.kind == 'i'
             stress = stress.flatten()[remap_stress]
-
-        assert stress.shape == (3, 3)
 
         # TODO(mario): fix this
         # make it traceless? because it seems that our formula is not valid for the trace

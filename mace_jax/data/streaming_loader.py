@@ -210,6 +210,10 @@ class StreamingGraphDataLoader:
         self._graph_multiple = max(int(graph_multiple or 1), 1)
         self._pack_info: dict | None = None
         self._history: list[tuple[int, int]] = []
+        # Attach optional metadata for downstream consumers.
+        self.graphs = getattr(self, 'graphs', None)
+        self.streaming = True
+        self.total_graphs = getattr(self, 'total_graphs', None)
 
         if n_node is None or n_edge is None:
             est_nodes, est_edges = _estimate_caps(
@@ -491,6 +495,37 @@ class StreamingGraphDataLoader:
             heads=head_names or None,
         )
 
+    def split_by_heads(self) -> dict[str, 'StreamingGraphDataLoader']:
+        if len(self._head_to_index) <= 1:
+            return {}
+        grouped: dict[str, list[StreamingDatasetSpec]] = {}
+        for spec in self._dataset_specs:
+            grouped.setdefault(spec.head_name, []).append(spec)
+        result: dict[str, StreamingGraphDataLoader] = {}
+        for head_name, specs in grouped.items():
+            datasets = [HDF5Dataset(spec.path, mode='r') for spec in specs]
+            loader = StreamingGraphDataLoader(
+                datasets=datasets,
+                dataset_specs=specs,
+                z_table=self._z_table,
+                r_max=self._cutoff,
+                n_node=self._n_node,
+                n_edge=self._n_edge,
+                head_to_index={head_name: self._head_to_index[head_name]},
+                shuffle=self._shuffle,
+                seed=self._seed,
+                niggli_reduce=self._niggli_reduce,
+                max_batches=self._max_batches,
+                prefetch_batches=self._prefetch_batches,
+                num_workers=self._num_workers,
+                graph_multiple=self._graph_multiple,
+            )
+            loader.graphs = getattr(self, 'graphs', None)
+            loader.streaming = getattr(self, 'streaming', True)
+            loader.total_graphs = getattr(self, 'total_graphs', None)
+            result[head_name] = loader
+        return result
+
 
 def pack_graphs_greedy(
     *,
@@ -566,11 +601,23 @@ def pack_graphs_greedy(
         max_single_edges,
     ) = _scan()
 
+    # Ensure the pad sizes satisfy both the observed maxima and the requested
+    # caps so that jraph.pad_with_graphs never receives underestimates when
+    # batch packing decisions change between the scanning and packing passes.
+    min_nodes_cap = (
+        int(max_nodes_per_batch) if max_nodes_per_batch is not None else None
+    )
+    min_edges_cap = int(max_edges_per_batch)
+    pad_nodes = max(pad_nodes, (min_nodes_cap or 0) + 1)
+    pad_edges = max(pad_edges, min_edges_cap + 1)
+
     graph_multiple = max(int(graph_multiple or 1), 1)
     if graph_multiple > 1:
         pad_graphs = (
             (pad_graphs + graph_multiple - 1) // graph_multiple
         ) * graph_multiple
+    pad_graphs = max(pad_graphs, graph_multiple + 1)
+    pad_graphs += graph_multiple  # keep slack for the final padding graph
 
     def _empty_graph_like(graph: jraph.GraphsTuple) -> jraph.GraphsTuple:
         def _zero_nodes(arr):

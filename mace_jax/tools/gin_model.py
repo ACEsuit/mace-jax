@@ -149,6 +149,26 @@ def model(
     torch_param_dtype: str | None = None,
     **kwargs,
 ):
+    z_table = kwargs.get('z_table', None)
+    if z_table is not None:
+        max_z = max(z_table.zs)
+        required_species = max_z + 1
+        if num_species is None:
+            logging.info(
+                'num_species not specified; inferring %s from dataset (max atomic number %s)',
+                required_species,
+                max_z,
+            )
+            num_species = required_species
+        elif num_species <= max_z:
+            logging.warning(
+                'num_species=%s too small for dataset (max atomic number %s); expanding to %s',
+                num_species,
+                max_z,
+                required_species,
+            )
+            num_species = required_species
+
     if torch_checkpoint is not None:
         import torch
         from mace.tools.scripts_utils import extract_config_mace_model
@@ -267,13 +287,37 @@ def model(
         )
         return apply_fn, params_bundle, torch_num_interactions
 
-    if train_graphs is None:
-        z_table = None
+    passed_z_table = kwargs.pop('z_table', None)
+    z_table = passed_z_table
+    if z_table is None:
+        if train_graphs is None:
+            z_table = None
+        else:
+            z_table = data.get_atomic_number_table_from_zs(
+                z for graph in train_graphs for z in graph.nodes.species
+            )
     else:
-        z_table = data.get_atomic_number_table_from_zs(
-            z for graph in train_graphs for z in graph.nodes.species
-        )
+        logging.info('Using provided z_table.')
     logging.info(f'z_table= {z_table}')
+
+    if z_table is not None:
+        max_z = max(z_table.zs)
+        required_species = max_z + 1
+        if num_species is None or num_species <= max_z:
+            if num_species is None:
+                logging.info(
+                    'num_species not specified; inferring %s from dataset (max atomic number %s)',
+                    required_species,
+                    max_z,
+                )
+            else:
+                logging.warning(
+                    'num_species=%s too small for dataset (max atomic number %s); expanding to %s',
+                    num_species,
+                    max_z,
+                    required_species,
+                )
+            num_species = required_species
 
     if avg_num_neighbors == 'average':
         avg_num_neighbors = tools.compute_avg_num_neighbors(train_graphs)

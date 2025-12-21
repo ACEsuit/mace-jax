@@ -92,88 +92,91 @@ def configure_gin(args: argparse.Namespace, remaining: list[str]) -> None:
 
 def apply_cli_overrides(args: argparse.Namespace) -> None:
     """Bind gin parameters based on CLI overrides."""
-    _apply_run_options(args)
-    _prepare_foundation_checkpoint(args)
-    _apply_dataset_options(args)
-    _apply_swa_options(args)
-    _apply_wandb_options(args)
-    _maybe_adjust_multihead_defaults(args)
-    _apply_loss_options(args)
-    _apply_training_controls(args)
-    _apply_optimizer_options(args)
-    if args.checkpoint_dir:
-        gin.bind_parameter(
-            'mace_jax.tools.gin_functions.train.checkpoint_dir',
-            str(Path(args.checkpoint_dir)),
-        )
-    if args.checkpoint_every is not None:
-        gin.bind_parameter(
-            'mace_jax.tools.gin_functions.train.checkpoint_every',
-            args.checkpoint_every,
-        )
-    if args.checkpoint_keep is not None:
-        gin.bind_parameter(
-            'mace_jax.tools.gin_functions.train.checkpoint_keep', args.checkpoint_keep
-        )
-    if args.resume_from:
-        gin.bind_parameter(
-            'mace_jax.tools.gin_functions.train.resume_from',
-            str(Path(args.resume_from)),
-        )
-    if args.torch_checkpoint:
-        gin.bind_parameter(
-            'mace_jax.tools.gin_model.model.torch_checkpoint',
-            str(Path(args.torch_checkpoint)),
-        )
-    if args.torch_head:
-        gin.bind_parameter(
-            'mace_jax.tools.gin_model.model.torch_head',
-            args.torch_head,
-        )
-    if args.torch_param_dtype:
-        gin.bind_parameter(
-            'mace_jax.tools.gin_model.model.torch_param_dtype',
-            args.torch_param_dtype,
-        )
-    if args.r_max is not None:
-        gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.r_max', args.r_max)
-        gin.bind_parameter('mace_jax.tools.gin_model.model.r_max', args.r_max)
-
-    head_configs_data = None
-    if getattr(args, 'head_config', None):
-        head_configs_data = _load_head_configs(Path(args.head_config))
-    if getattr(args, 'heads_config', None):
-        inline_configs = _parse_heads_literal(args.heads_config)
-        if head_configs_data:
-            raise ValueError(
-                'Specify either --head-config or --heads-config, not both.'
+    unlock_cm = getattr(gin, 'unlock_config', None)
+    context = unlock_cm() if callable(unlock_cm) else contextlib.nullcontext()
+    with context:
+        _apply_run_options(args)
+        _prepare_foundation_checkpoint(args)
+        _apply_dataset_options(args)
+        _apply_swa_options(args)
+        _apply_wandb_options(args)
+        _maybe_adjust_multihead_defaults(args)
+        _apply_loss_options(args)
+        _apply_training_controls(args)
+        _apply_optimizer_options(args)
+        if args.checkpoint_dir:
+            gin.bind_parameter(
+                'mace_jax.tools.gin_functions.train.checkpoint_dir',
+                str(Path(args.checkpoint_dir)),
             )
-        head_configs_data = inline_configs
-    head_configs_data = _inject_pt_head_config(head_configs_data, args)
-    if head_configs_data:
-        gin.bind_parameter(
-            'mace_jax.tools.gin_datasets.datasets.head_configs', head_configs_data
-        )
+        if args.checkpoint_every is not None:
+            gin.bind_parameter(
+                'mace_jax.tools.gin_functions.train.checkpoint_every',
+                args.checkpoint_every,
+            )
+        if args.checkpoint_keep is not None:
+            gin.bind_parameter(
+                'mace_jax.tools.gin_functions.train.checkpoint_keep', args.checkpoint_keep
+            )
+        if args.resume_from:
+            gin.bind_parameter(
+                'mace_jax.tools.gin_functions.train.resume_from',
+                str(Path(args.resume_from)),
+            )
+        if args.torch_checkpoint:
+            gin.bind_parameter(
+                'mace_jax.tools.gin_model.model.torch_checkpoint',
+                str(Path(args.torch_checkpoint)),
+            )
+        if args.torch_head:
+            gin.bind_parameter(
+                'mace_jax.tools.gin_model.model.torch_head',
+                args.torch_head,
+            )
+        if args.torch_param_dtype:
+            gin.bind_parameter(
+                'mace_jax.tools.gin_model.model.torch_param_dtype',
+                args.torch_param_dtype,
+            )
+        if args.r_max is not None:
+            gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.r_max', args.r_max)
+            gin.bind_parameter('mace_jax.tools.gin_model.model.r_max', args.r_max)
 
-    heads_list = None
-    if head_configs_data:
-        configs_keys = list(head_configs_data.keys())
-        if getattr(args, 'heads', None):
-            explicit = list(args.heads)
-            for key in configs_keys:
-                if key not in explicit:
-                    explicit.append(key)
-            heads_list = explicit
-        else:
-            heads_list = configs_keys
-    elif getattr(args, 'heads', None):
-        heads_list = list(args.heads)
+        head_configs_data = None
+        if getattr(args, 'head_config', None):
+            head_configs_data = _load_head_configs(Path(args.head_config))
+        if getattr(args, 'heads_config', None):
+            inline_configs = _parse_heads_literal(args.heads_config)
+            if head_configs_data:
+                raise ValueError(
+                    'Specify either --head-config or --heads-config, not both.'
+                )
+            head_configs_data = inline_configs
+        head_configs_data = _inject_pt_head_config(head_configs_data, args)
+        if head_configs_data:
+            gin.bind_parameter(
+                'mace_jax.tools.gin_datasets.datasets.head_configs', head_configs_data
+            )
 
-    if heads_list:
-        gin.bind_parameter(
-            'mace_jax.tools.gin_datasets.datasets.heads', tuple(heads_list)
-        )
-        gin.bind_parameter('mace_jax.tools.gin_model.model.heads', tuple(heads_list))
+        heads_list = None
+        if head_configs_data:
+            configs_keys = list(head_configs_data.keys())
+            if getattr(args, 'heads', None):
+                explicit = list(args.heads)
+                for key in configs_keys:
+                    if key not in explicit:
+                        explicit.append(key)
+                heads_list = explicit
+            else:
+                heads_list = configs_keys
+        elif getattr(args, 'heads', None):
+            heads_list = list(args.heads)
+
+        if heads_list:
+            gin.bind_parameter(
+                'mace_jax.tools.gin_datasets.datasets.heads', tuple(heads_list)
+            )
+            gin.bind_parameter('mace_jax.tools.gin_model.model.heads', tuple(heads_list))
 
 
 def _load_head_configs(path: Path) -> dict[str, dict]:
@@ -282,6 +285,17 @@ def _parse_batch_limit_option(value):
     return int(value)
 
 
+def _parse_steps_per_interval_option(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {'auto', 'none'}:
+            return None
+        return int(value)
+    return int(value)
+
+
 def _apply_run_options(args: argparse.Namespace) -> None:
     _bind_if_not_none('mace_jax.tools.gin_functions.logs.name', args.name)
     if args.log_dir is not None:
@@ -349,9 +363,10 @@ def _apply_dataset_options(args: argparse.Namespace) -> None:
 
 def _apply_training_controls(args: argparse.Namespace) -> None:
     if args.steps_per_interval is not None:
+        steps = _parse_steps_per_interval_option(args.steps_per_interval)
         gin.bind_parameter(
             'mace_jax.tools.gin_functions.optimizer.steps_per_interval',
-            args.steps_per_interval,
+            steps,
         )
     if args.max_num_intervals is not None:
         gin.bind_parameter(
@@ -745,12 +760,7 @@ def run_training(dry_run: bool = False) -> None:
                 'Auto-setting steps_per_interval to %s based on training loader length.',
                 auto_steps,
             )
-            gin.bind_parameter(
-                'mace_jax.tools.gin_functions.optimizer.steps_per_interval', auto_steps
-            )
-            gradient_transform, steps_per_interval, max_num_intervals = (
-                gin_functions.optimizer()
-            )
+            steps_per_interval = auto_steps
         params_for_opt, _ = gin_functions._split_config(params)
         optimizer_state = gradient_transform.init(params_for_opt)
 
@@ -766,7 +776,10 @@ def run_training(dry_run: bool = False) -> None:
                     return 0
                 graphs = getattr(loader, 'graphs', None)
                 if graphs is None:
-                    return 0
+                    total = getattr(loader, 'total_graphs', None)
+                    if total is None:
+                        return 0
+                    return int(total)
                 return len(graphs)
 
             dataset_info = {
