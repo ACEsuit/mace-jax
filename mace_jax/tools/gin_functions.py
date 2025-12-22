@@ -7,6 +7,7 @@ import time
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 import gin
 import jax
@@ -554,7 +555,9 @@ def train(
             )
         with resume_path.open('rb') as f:
             resume_state = pickle.load(f)
-        params = resume_state.get('params', _attach_config(trainable_params, static_config))
+        params = resume_state.get(
+            'params', _attach_config(trainable_params, static_config)
+        )
         trainable_params, static_config = _split_config(params)
         optimizer_state = resume_state.get('optimizer_state', optimizer_state)
         lowest_loss = resume_state.get('lowest_loss', lowest_loss)

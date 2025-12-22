@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import re
+from pathlib import Path
 
 import h5py
 import numpy as np
@@ -104,7 +104,9 @@ class HDF5Dataset:
     def _read_entry(self, index: int) -> Atoms:
         batch_name, config_name = self._index[index]
         group = self._handle[batch_name][config_name]
-        atomic_numbers = np.asarray(group['atomic_numbers']).astype(np.int32, copy=False)
+        atomic_numbers = np.asarray(group['atomic_numbers']).astype(
+            np.int32, copy=False
+        )
         positions = np.asarray(group['positions'])
         cell = _decode_field(group['cell'][()])
         if cell is None:

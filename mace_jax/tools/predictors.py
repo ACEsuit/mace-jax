@@ -1,14 +1,14 @@
 import warnings
-from typing import Callable, Dict
+from collections.abc import Callable
 
 import jax.numpy as jnp
 import jraph
 
 
 def predict_energy_forces_stress(
-    model: Callable[[jraph.GraphsTuple], Dict[str, jnp.ndarray]],
+    model: Callable[[jraph.GraphsTuple], dict[str, jnp.ndarray]],
     graph: jraph.GraphsTuple,
-) -> Dict[str, jnp.ndarray]:
+) -> dict[str, jnp.ndarray]:
     """Compatibility wrapper returning ``model(graph)``.
 
     The previous Haiku-based implementation required explicit gradients with

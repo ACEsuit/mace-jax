@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import ast
 import atexit
+import contextlib
 import json
 import logging
 import shutil
@@ -116,7 +117,8 @@ def apply_cli_overrides(args: argparse.Namespace) -> None:
             )
         if args.checkpoint_keep is not None:
             gin.bind_parameter(
-                'mace_jax.tools.gin_functions.train.checkpoint_keep', args.checkpoint_keep
+                'mace_jax.tools.gin_functions.train.checkpoint_keep',
+                args.checkpoint_keep,
             )
         if args.resume_from:
             gin.bind_parameter(
@@ -176,7 +178,9 @@ def apply_cli_overrides(args: argparse.Namespace) -> None:
             gin.bind_parameter(
                 'mace_jax.tools.gin_datasets.datasets.heads', tuple(heads_list)
             )
-            gin.bind_parameter('mace_jax.tools.gin_model.model.heads', tuple(heads_list))
+            gin.bind_parameter(
+                'mace_jax.tools.gin_model.model.heads', tuple(heads_list)
+            )
 
 
 def _load_head_configs(path: Path) -> dict[str, dict]:

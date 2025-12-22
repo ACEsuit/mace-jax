@@ -197,7 +197,7 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help=(
-            "Maximum number of atoms allowed in a padded batch. "
+            'Maximum number of atoms allowed in a padded batch. '
             "Pass 'auto' or 'None' to request automatic sizing."
         ),
     )
@@ -207,7 +207,7 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help=(
-            "Maximum number of edges allowed in a padded batch. "
+            'Maximum number of edges allowed in a padded batch. '
             "Pass 'auto' or 'None' to request automatic sizing."
         ),
     )
@@ -358,7 +358,7 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help=(
-            "Number of optimizer steps per evaluation interval (epoch). "
+            'Number of optimizer steps per evaluation interval (epoch). '
             "Pass 'auto' or 'None' to use every batch exactly once per epoch."
         ),
     )

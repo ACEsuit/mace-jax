@@ -6,7 +6,7 @@ from collections import OrderedDict, defaultdict, namedtuple
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from random import shuffle
-from typing import IO, NamedTuple, Optional, Union
+from typing import IO, NamedTuple
 
 import ase.data
 import ase.io

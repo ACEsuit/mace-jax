@@ -1,4 +1,4 @@
-from typing import Any, Optional
+from typing import Any
 
 import jax.nn as jnn
 import jax.numpy as jnp

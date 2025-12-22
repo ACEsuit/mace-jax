@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import multiprocessing as mp
 import threading
-from dataclasses import dataclass, replace
 from collections.abc import Iterable, Iterator, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
 from queue import Queue
 
@@ -164,10 +164,8 @@ def _estimate_caps(
                 continue
             nodes = int(graph.n_node.sum())
             edges = int(graph.n_edge.sum())
-            if nodes > max_nodes:
-                max_nodes = nodes
-            if edges > max_edges:
-                max_edges = edges
+            max_nodes = max(max_nodes, nodes)
+            max_edges = max(max_edges, edges)
     return max_nodes, max_edges
 
 
@@ -197,9 +195,7 @@ class StreamingGraphDataLoader:
         self._datasets = list(datasets)
         base_paths = [Path(ds.filename) for ds in self._datasets]
         if dataset_specs is None:
-            dataset_specs = [
-                StreamingDatasetSpec(path=path) for path in base_paths
-            ]
+            dataset_specs = [StreamingDatasetSpec(path=path) for path in base_paths]
         if len(dataset_specs) != len(self._datasets):
             raise ValueError(
                 'dataset_specs must match datasets length '
@@ -537,7 +533,7 @@ class StreamingGraphDataLoader:
             heads=head_names or None,
         )
 
-    def split_by_heads(self) -> dict[str, 'StreamingGraphDataLoader']:
+    def split_by_heads(self) -> dict[str, StreamingGraphDataLoader]:
         if len(self._head_to_index) <= 1:
             return {}
         grouped: dict[str, list[StreamingDatasetSpec]] = {}
@@ -721,12 +717,8 @@ def pack_graphs_greedy(
                 return None
             return np.zeros_like(value)
 
-        nodes = graph.nodes.__class__(
-            *(_zero_nodes(value) for value in graph.nodes)
-        )
-        edges = graph.edges.__class__(
-            *(_zero_edges(value) for value in graph.edges)
-        )
+        nodes = graph.nodes.__class__(*(_zero_nodes(value) for value in graph.nodes))
+        edges = graph.edges.__class__(*(_zero_edges(value) for value in graph.edges))
         globals_dict = graph.globals.__class__(
             *(_zero_globals(value) for value in graph.globals)
         )

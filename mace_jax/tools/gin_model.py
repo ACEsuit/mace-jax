@@ -69,14 +69,6 @@ def _graph_to_data(
     senders = jnp.asarray(graph.senders, dtype=jnp.int32)
     receivers = jnp.asarray(graph.receivers, dtype=jnp.int32)
 
-    # Graph-level mask: True for real graphs, False for padding.
-    n_node = jnp.asarray(graph.n_node, dtype=jnp.int32)
-    padding_mask = jraph.get_graph_padding_mask(graph)
-    graph_mask = jnp.where(
-        jnp.all(n_node > 0),
-        jnp.ones_like(n_node, dtype=bool),
-        padding_mask,
-    )
     # Per-node mask derived from graph_mask.
     node_mask = jraph.get_node_padding_mask(graph).astype(positions.dtype)
 
@@ -170,10 +162,10 @@ def model(
             num_species = required_species
 
     if torch_checkpoint is not None:
-        import torch
-        from mace.tools.scripts_utils import extract_config_mace_model
+        import torch  # noqa: PLC0415
+        from mace.tools.scripts_utils import extract_config_mace_model  # noqa: PLC0415
 
-        from mace_jax.cli import mace_torch2jax
+        from mace_jax.cli import mace_torch2jax  # noqa: PLC0415
 
         checkpoint_path = Path(torch_checkpoint)
         if not checkpoint_path.exists():

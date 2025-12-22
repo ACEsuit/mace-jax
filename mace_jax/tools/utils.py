@@ -2,7 +2,7 @@ import json
 import logging
 import os
 import sys
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any
 
 import e3nn_jax as e3nn
 import jax
@@ -139,9 +139,9 @@ def safe_norm(x: jnp.ndarray, axis: int = None, keepdims=False) -> jnp.ndarray:
 
 
 def compute_mean_std_atomic_inter_energy(
-    graphs: List[jraph.GraphsTuple],
+    graphs: list[jraph.GraphsTuple],
     atomic_energies: np.ndarray,
-) -> Tuple[float, float]:
+) -> tuple[float, float]:
     # atomic_energies = torch.from_numpy(atomic_energies)
 
     # atom_energy_list = []
@@ -166,9 +166,9 @@ def compute_mean_std_atomic_inter_energy(
 
 
 def compute_mean_rms_energy_forces(
-    graphs: List[jraph.GraphsTuple],
+    graphs: list[jraph.GraphsTuple],
     atomic_energies: np.ndarray,
-) -> Tuple[float, float]:
+) -> tuple[float, float]:
     # mean, _ = compute_mean_std_atomic_inter_energy(data_loader, atomic_energies)
 
     # atomic_energies = torch.from_numpy(atomic_energies)
@@ -183,7 +183,7 @@ def compute_mean_rms_energy_forces(
     raise NotImplementedError
 
 
-def compute_avg_num_neighbors(graphs: List[jraph.GraphsTuple]) -> float:
+def compute_avg_num_neighbors(graphs: list[jraph.GraphsTuple]) -> float:
     num_neighbors = []
 
     for graph in graphs:
@@ -193,7 +193,7 @@ def compute_avg_num_neighbors(graphs: List[jraph.GraphsTuple]) -> float:
     return np.mean(np.concatenate(num_neighbors)).item()
 
 
-def compute_avg_min_neighbor_distance(graphs: List[jraph.GraphsTuple]) -> float:
+def compute_avg_min_neighbor_distance(graphs: list[jraph.GraphsTuple]) -> float:
     min_neighbor_distances = []
 
     for graph in graphs:
@@ -223,9 +223,9 @@ def get_edge_vectors(
     senders: np.ndarray,  # [n_edges]
     receivers: np.ndarray,  # [n_edges]
     shifts: np.ndarray,  # [n_edges, 3]
-    cell: Optional[np.ndarray],  # [n_graph, 3, 3]
+    cell: np.ndarray | None,  # [n_graph, 3, 3]
     n_edge: np.ndarray,  # [n_graph]
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray]:
     """Compute the positions of the sender and receiver nodes of each edge.
 
     This function assumes that the shift is done to the sender node.
@@ -268,7 +268,7 @@ def get_edge_relative_vectors(
     senders: np.ndarray,  # [n_edges]
     receivers: np.ndarray,  # [n_edges]
     shifts: np.ndarray,  # [n_edges, 3]
-    cell: Optional[np.ndarray],  # [n_graph, 3, 3]
+    cell: np.ndarray | None,  # [n_graph, 3, 3]
     n_edge: np.ndarray,  # [n_graph]
 ) -> np.ndarray:
     vectors_senders, vectors_receivers = get_edge_vectors(
@@ -309,10 +309,10 @@ def compute_c(delta: np.ndarray, eta: float) -> float:
 
 
 def setup_logger(
-    level: Union[int, str] = logging.INFO,
-    filename: Optional[str] = None,
-    directory: Optional[str] = None,
-    name: Optional[str] = None,
+    level: int | str = logging.INFO,
+    filename: str | None = None,
+    directory: str | None = None,
+    name: str | None = None,
 ):
     logger = logging.getLogger()
     logger.setLevel(level)
@@ -356,7 +356,7 @@ class MetricsLogger:
         self.filename = filename
         self.path = os.path.join(self.directory, self.filename)
 
-    def log(self, d: Dict[str, Any]) -> None:
+    def log(self, d: dict[str, Any]) -> None:
         logging.debug(f'Saving info: {self.path}')
         os.makedirs(name=self.directory, exist_ok=True)
         with open(self.path, mode='a', encoding='utf-8') as f:

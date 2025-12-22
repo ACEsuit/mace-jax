@@ -123,8 +123,8 @@ def _wigner_nj(
 
 
 def U_matrix_real(
-    irreps_in: Union[str, Irreps],
-    irreps_out: Union[str, Irreps],
+    irreps_in: str | Irreps,
+    irreps_out: str | Irreps,
     correlation: int,
     normalization: str = 'component',
     filter_ir_mid=None,

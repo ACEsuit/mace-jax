@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Optional
-
 import gin
 import jax.numpy as jnp
 import jraph

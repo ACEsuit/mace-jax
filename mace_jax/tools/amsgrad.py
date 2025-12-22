@@ -58,7 +58,7 @@ def scale_by_amsgrad(
     b2: float = 0.999,
     eps: float = 1e-8,
     eps_root: float = 0.0,
-    mu_dtype: Optional[Any] = None,
+    mu_dtype: Any | None = None,
 ) -> optax.GradientTransformation:
     """Rescale updates according to the AMSGrad algorithm.
     References:

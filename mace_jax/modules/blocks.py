@@ -1,6 +1,5 @@
 import abc
 from collections.abc import Callable, Sequence
-from typing import Optional, Union
 
 import flax.linen as fnn
 import jax
@@ -9,7 +8,6 @@ import numpy as np
 from e3nn_jax import Irrep, Irreps, IrrepsArray
 
 from mace_jax.adapters.e3nn import nn
-from mace_jax.adapters.e3nn.math import register_normalize2mom_const
 from mace_jax.adapters.flax.torch import (
     auto_import_from_torch_flax,
     register_flax_module,
