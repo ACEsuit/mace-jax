@@ -190,11 +190,10 @@ def get_outputs(
 
         forces = -grad_pos
         virials = -grad_disp
-        raw_volume = jnp.abs(jnp.linalg.det(cell.reshape(-1, 3, 3))).reshape(-1, 1, 1)
-        volume = jnp.where(raw_volume > 1e-12, raw_volume, jnp.ones_like(raw_volume))
+        volume = jnp.abs(jnp.linalg.det(cell.reshape(-1, 3, 3))).reshape(-1, 1, 1)
         stress = -virials / volume
         stress = jnp.where(
-            (raw_volume > 1e-12) & (jnp.abs(stress) < 1e10),
+            jnp.abs(stress) < 1e10,
             stress,
             jnp.zeros_like(stress),
         )
@@ -285,10 +284,8 @@ def get_edge_vectors_and_lengths(
     # edge vectors
     vectors = positions[receiver] - positions[sender] + shifts  # [n_edges, 3]
 
-    # lengths (keep last dim) with epsilon clamping to avoid zero-length edges
-    lengths_sq = jnp.sum(vectors**2, axis=-1, keepdims=True)
-    eps_val = jnp.asarray(eps, dtype=vectors.dtype)
-    lengths = jnp.sqrt(jnp.maximum(lengths_sq, eps_val**2))
+    # lengths (keep last dim)
+    lengths = jnp.linalg.norm(vectors, axis=-1, keepdims=True)  # [n_edges, 1]
 
     if normalize:
         vectors = vectors / (lengths + eps)
