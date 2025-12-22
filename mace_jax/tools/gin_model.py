@@ -469,7 +469,71 @@ def model(
         ):
             variables_local = {'params': params, 'config': config_state}
 
-        data_dict = _graph_to_data(graph, num_species=num_species)
+        graph_mask = jraph.get_graph_padding_mask(graph).astype(default_dtype())
+        graph_mask_bool = graph_mask > 0.0
+        node_mask = jraph.get_node_padding_mask(graph).astype(default_dtype())
+        node_mask_bool = node_mask > 0.0
+        edge_mask = jraph.get_edge_padding_mask(graph).astype(default_dtype())
+        edge_mask_bool = edge_mask > 0.0
+
+        def _sanitize(array, mask, expand_dims=0):
+            if array is None:
+                return None
+            if array.shape[0] == 0:
+                return array
+            fill = jnp.broadcast_to(array[:1], array.shape)
+            if expand_dims > 0:
+                broadcast_mask = mask.reshape(mask.shape + (1,) * expand_dims)
+            else:
+                broadcast_mask = mask
+            return jnp.where(broadcast_mask, array, fill)
+
+        sanitized_nodes = graph.nodes.__class__(
+            positions=_sanitize(graph.nodes.positions, node_mask_bool, expand_dims=1),
+            forces=_sanitize(graph.nodes.forces, node_mask_bool, expand_dims=1)
+            if getattr(graph.nodes, 'forces', None) is not None
+            else None,
+            species=_sanitize(graph.nodes.species, node_mask_bool),
+        )
+        sanitized_edges = graph.edges.__class__(
+            shifts=_sanitize(graph.edges.shifts, edge_mask_bool, expand_dims=1),
+            unit_shifts=_sanitize(
+                graph.edges.unit_shifts, edge_mask_bool, expand_dims=1
+            )
+            if getattr(graph.edges, 'unit_shifts', None) is not None
+            else None,
+        )
+        sanitized_globals = graph.globals.__class__(
+            cell=_sanitize(graph.globals.cell, graph_mask_bool, expand_dims=2)
+            if getattr(graph.globals, 'cell', None) is not None
+            else None,
+            energy=_sanitize(graph.globals.energy, graph_mask_bool)
+            if getattr(graph.globals, 'energy', None) is not None
+            else None,
+            stress=_sanitize(graph.globals.stress, graph_mask_bool, expand_dims=2)
+            if getattr(graph.globals, 'stress', None) is not None
+            else None,
+            weight=graph.globals.weight,
+            head=_sanitize(graph.globals.head, graph_mask_bool)
+            if getattr(graph.globals, 'head', None) is not None
+            else None,
+            virials=_sanitize(graph.globals.virials, graph_mask_bool, expand_dims=2)
+            if getattr(graph.globals, 'virials', None) is not None
+            else None,
+            dipole=_sanitize(graph.globals.dipole, graph_mask_bool, expand_dims=1)
+            if getattr(graph.globals, 'dipole', None) is not None
+            else None,
+            polarizability=_sanitize(
+                graph.globals.polarizability, graph_mask_bool, expand_dims=2
+            )
+            if getattr(graph.globals, 'polarizability', None) is not None
+            else None,
+        )
+        sanitized_graph = graph._replace(
+            nodes=sanitized_nodes, edges=sanitized_edges, globals=sanitized_globals
+        )
+
+        data_dict = _graph_to_data(sanitized_graph, num_species=num_species)
         outputs = mace_module.apply(
             variables_local,
             data_dict,
@@ -478,22 +542,20 @@ def model(
         )
 
         # Apply optional rescaling consistent with the historical Haiku version.
-        graph_mask = jraph.get_graph_padding_mask(graph).astype(outputs['energy'].dtype)
-        node_mask = jraph.get_node_padding_mask(graph).astype(outputs['energy'].dtype)
-
-        num_nodes = graph.n_node.astype(outputs['energy'].dtype)
+        num_nodes = graph.n_node.astype(default_dtype())
         energy = outputs['energy']
-        energy = std * energy + mean * num_nodes
-        energy = energy * graph_mask
+        if energy is not None:
+            energy = std * jnp.nan_to_num(energy) + mean * num_nodes
+            energy = energy * graph_mask
 
         forces = outputs['forces']
         if forces is not None:
-            forces = std * forces
+            forces = std * jnp.nan_to_num(forces)
             forces = forces * node_mask[:, None]
 
         stress = outputs['stress']
         if stress is not None:
-            stress = std * stress
+            stress = std * jnp.nan_to_num(stress)
             stress = stress * graph_mask[:, None, None]
 
         return {

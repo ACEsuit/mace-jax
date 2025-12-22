@@ -52,6 +52,18 @@ class SWAConfig:
         return num_snapshots >= self.min_snapshots_for_eval
 
 
+def _sanitize_grads(grads):
+    """Replace NaNs/inf/float0 leaves to keep the optimizer stable."""
+
+    def _sanitize(leaf):
+        arr = jnp.asarray(leaf)
+        if 'float0' in str(arr.dtype):
+            arr = jnp.zeros_like(arr, dtype=jnp.float32)
+        return jnp.nan_to_num(arr)
+
+    return jax.tree_util.tree_map(_sanitize, grads)
+
+
 def train(
     params: Any,
     total_loss_fn: Callable,  # loss_fn(params, graph) -> [num_graphs]
@@ -106,6 +118,14 @@ def train(
     def grad_fn(params, graph: jraph.GraphsTuple):
         # graph is assumed to be padded by jraph.pad_with_graphs
         mask = jraph.get_graph_padding_mask(graph)  # [n_graphs,]
+        if mask.ndim == graph.n_node.ndim:
+            non_empty = jnp.asarray(graph.n_node > 0, dtype=mask.dtype)
+            mask = mask * non_empty
+        weights = getattr(graph.globals, 'weight', None)
+        if weights is not None:
+            weight_mask = jnp.asarray(weights > 0, dtype=mask.dtype)
+            if weight_mask.shape == mask.shape:
+                mask = mask * weight_mask
 
         def _loss_fn(trainable):
             return jnp.sum(jnp.where(mask, total_loss_fn(trainable, graph), 0.0))
@@ -124,6 +144,7 @@ def train(
         n, loss, grad = grad_fn(params, graph)
         loss = loss / n
         grad = jax.tree_util.tree_map(lambda x: x / n, grad)
+        grad = _sanitize_grads(grad)
 
         if max_grad_norm is not None:
             grad_norm = jnp.sqrt(
@@ -179,8 +200,7 @@ def train(
 
     def _legacy_interval_loader():
         while True:
-            for graph in train_loader:
-                yield graph
+            yield from train_loader
 
     initial_eval = eval_params
     if schedule_free_eval_fn is not None:
@@ -346,13 +366,19 @@ def evaluate(
         if last_cache_size is not None and last_cache_size != predictor._cache_size():
             last_cache_size = predictor._cache_size()
 
-            logging.info('Compiled function `predictor` for args:')
-            logging.info(f'- n_node={ref_graph.n_node} total={ref_graph.n_node.sum()}')
-            logging.info(f'- n_edge={ref_graph.n_edge} total={ref_graph.n_edge.sum()}')
-            logging.info(f'cache size: {last_cache_size}')
+            logging.info('Compiled function `predictor`.')
+            logging.info(f'-> cache size: {last_cache_size}')
 
         ref_graph = jraph.unpad_with_graphs(ref_graph)
         pred_graph = jraph.unpad_with_graphs(pred_graph)
+        valid_mask = np.asarray(ref_graph.n_node > 0)
+        weights = getattr(ref_graph.globals, 'weight', None)
+        if weights is not None:
+            valid_mask = valid_mask & (np.asarray(weights) > 0)
+        if not valid_mask.any():
+            continue
+        num_graphs += int(valid_mask.sum())
+        atom_counts = jnp.maximum(ref_graph.n_node, 1.0)
 
         pred_outputs = {
             'energy': pred_graph.globals.energy,
@@ -371,28 +397,28 @@ def evaluate(
 
         loss = jnp.sum(loss_fn(ref_graph, pred_outputs))
         total_loss += float(loss)
-        num_graphs += len(ref_graph.n_edge)
         p_bar.set_postfix({'n': num_graphs})
 
         if ref_graph.globals.energy is not None:
-            delta_es_list.append(ref_graph.globals.energy - pred_graph.globals.energy)
-            es_list.append(ref_graph.globals.energy)
+            ref_energy = jnp.asarray(ref_graph.globals.energy)
+            pred_energy = jnp.asarray(pred_graph.globals.energy)
+            delta_e = ref_energy - pred_energy
+            delta_es_list.append(np.asarray(delta_e)[valid_mask])
+            es_list.append(np.asarray(ref_energy)[valid_mask])
 
-            delta_es_per_atom_list.append(
-                (ref_graph.globals.energy - pred_graph.globals.energy)
-                / ref_graph.n_node
-            )
-            es_per_atom_list.append(ref_graph.globals.energy / ref_graph.n_node)
+            per_atom_delta = delta_e / atom_counts
+            delta_es_per_atom_list.append(np.asarray(per_atom_delta)[valid_mask])
+            per_atom_energy = ref_energy / atom_counts
+            es_per_atom_list.append(np.asarray(per_atom_energy)[valid_mask])
 
         if ref_graph.nodes.forces is not None:
             delta_fs_list.append(ref_graph.nodes.forces - pred_graph.nodes.forces)
             fs_list.append(ref_graph.nodes.forces)
 
         if ref_graph.globals.stress is not None:
-            delta_stress_list.append(
-                ref_graph.globals.stress - pred_graph.globals.stress
-            )
-            stress_list.append(ref_graph.globals.stress)
+            delta_stress = ref_graph.globals.stress - pred_graph.globals.stress
+            delta_stress_list.append(np.asarray(delta_stress)[valid_mask])
+            stress_list.append(np.asarray(ref_graph.globals.stress)[valid_mask])
 
         if (
             hasattr(ref_graph.globals, 'virials')
@@ -400,10 +426,13 @@ def evaluate(
             and pred_graph.globals.virials is not None
         ):
             delta_virials = ref_graph.globals.virials - pred_graph.globals.virials
-            virials_list.append(ref_graph.globals.virials)
-            atom_counts = jnp.maximum(ref_graph.n_node, 1)[:, None, None]
-            delta_virials_list.append(delta_virials)
-            delta_virials_per_atom_list.append(delta_virials / atom_counts)
+            virials_list.append(np.asarray(ref_graph.globals.virials)[valid_mask])
+            per_graph_atoms = atom_counts[:, None, None]
+            delta_virials_list.append(np.asarray(delta_virials)[valid_mask])
+            delta_virials_per_atom = delta_virials / per_graph_atoms
+            delta_virials_per_atom_list.append(
+                np.asarray(delta_virials_per_atom)[valid_mask]
+            )
 
         if (
             hasattr(ref_graph.globals, 'dipole')
@@ -411,10 +440,13 @@ def evaluate(
             and pred_graph.globals.dipole is not None
         ):
             delta_mus = ref_graph.globals.dipole - pred_graph.globals.dipole
-            dipoles_list.append(ref_graph.globals.dipole)
-            atom_counts = jnp.maximum(ref_graph.n_node, 1)[:, None]
-            delta_dipoles_list.append(delta_mus)
-            delta_dipoles_per_atom_list.append(delta_mus / atom_counts)
+            dipoles_list.append(np.asarray(ref_graph.globals.dipole)[valid_mask])
+            per_graph_atoms = atom_counts[:, None]
+            delta_dipoles_list.append(np.asarray(delta_mus)[valid_mask])
+            delta_dipoles_per_atom = delta_mus / per_graph_atoms
+            delta_dipoles_per_atom_list.append(
+                np.asarray(delta_dipoles_per_atom)[valid_mask]
+            )
 
         if (
             hasattr(ref_graph.globals, 'polarizability')
@@ -424,9 +456,12 @@ def evaluate(
             delta_polar = (
                 ref_graph.globals.polarizability - pred_graph.globals.polarizability
             )
-            atom_counts = jnp.maximum(ref_graph.n_node, 1)[:, None, None]
-            delta_polar_list.append(delta_polar)
-            delta_polar_per_atom_list.append(delta_polar / atom_counts)
+            per_graph_atoms = atom_counts[:, None, None]
+            delta_polar_list.append(np.asarray(delta_polar)[valid_mask])
+            delta_polar_per_atom = delta_polar / per_graph_atoms
+            delta_polar_per_atom_list.append(
+                np.asarray(delta_polar_per_atom)[valid_mask]
+            )
 
     if num_graphs == 0:
         logging.warning(f'No graphs in data_loader ! Returning 0.0 for {name}')

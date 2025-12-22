@@ -181,6 +181,10 @@ def _compute_streaming_stats(
                 z_table=z_table,
                 head_to_index=head_to_index,
             )
+            weight = getattr(graph.globals, 'weight', None)
+            if weight is not None:
+                if float(np.asarray(weight).reshape(-1)[0]) <= 0.0:
+                    continue
             species = np.asarray(graph.nodes.species)
             counts = np.bincount(species, minlength=num_species).astype(np.float64)
             ata += np.outer(counts, counts)

@@ -14,7 +14,16 @@ def _safe_divide(x, y):
 
 
 def _graph_mask(graph: jraph.GraphsTuple) -> jnp.ndarray:
-    return jraph.get_graph_padding_mask(graph).astype(jnp.float32)
+    mask = jraph.get_graph_padding_mask(graph).astype(jnp.float32)
+    if mask.shape == graph.n_node.shape:
+        non_empty = jnp.asarray(graph.n_node > 0, dtype=jnp.float32)
+        mask = mask * non_empty
+    weights = getattr(graph.globals, 'weight', None)
+    if weights is not None:
+        weight_mask = jnp.asarray(weights > 0, dtype=jnp.float32)
+        if weight_mask.shape == mask.shape:
+            mask = mask * weight_mask
+    return mask
 
 
 def _node_mask(graph: jraph.GraphsTuple) -> jnp.ndarray:
@@ -72,11 +81,14 @@ def _broadcast_to_nodes(
 def mean_squared_error_energy(
     graph: jraph.GraphsTuple, energy_pred: jnp.ndarray
 ) -> jnp.ndarray:
+    mask = _graph_mask(graph)
+    mask_bool = mask > 0.0
     energy_ref = jnp.asarray(graph.globals.energy)
     diff = energy_ref - jnp.asarray(energy_pred)
+    diff = jnp.where(mask_bool, diff, 0.0)
     per_atom = _safe_divide(diff, _num_atoms(graph))
     loss = _graph_attribute(graph, 'weight', 1.0) * per_atom**2
-    return loss * _graph_mask(graph)
+    return loss * mask
 
 
 def weighted_mean_squared_error_energy(
@@ -90,13 +102,16 @@ def weighted_mean_squared_error_energy(
 def weighted_mean_absolute_error_energy(
     graph: jraph.GraphsTuple, energy_pred: jnp.ndarray
 ) -> jnp.ndarray:
+    mask = _graph_mask(graph)
+    mask_bool = mask > 0.0
     energy_ref = jnp.asarray(graph.globals.energy)
     diff = jnp.abs(energy_ref - jnp.asarray(energy_pred))
+    diff = jnp.where(mask_bool, diff, 0.0)
     per_atom = _safe_divide(diff, _num_atoms(graph))
     weight = _graph_attribute(graph, 'weight', 1.0)
     energy_weight = _graph_attribute(graph, 'energy_weight', 1.0, dtype=per_atom.dtype)
     loss = weight * energy_weight * per_atom
-    return loss * _graph_mask(graph)
+    return loss * mask
 
 
 def mean_squared_error_forces(
@@ -107,8 +122,9 @@ def mean_squared_error_forces(
     forces_ref = jnp.asarray(graph.nodes.forces)
     forces_pred = jnp.asarray(forces_pred)
     node_mask = _node_mask(graph)[:, None]
-    diff = (forces_ref - forces_pred) * node_mask
-    diff_sq = jnp.mean(diff**2, axis=-1)
+    mask_bool = node_mask > 0.0
+    diff = jnp.where(mask_bool, forces_ref - forces_pred, 0.0)
+    diff_sq = jnp.mean(jnp.square(diff), axis=-1)
 
     per_graph_weight = _graph_attribute(graph, 'weight', 1.0, dtype=diff_sq.dtype)
     per_node_weight = _broadcast_to_nodes(graph, per_graph_weight)
@@ -127,7 +143,8 @@ def mean_normed_error_forces(
     forces_ref = jnp.asarray(graph.nodes.forces)
     forces_pred = jnp.asarray(forces_pred)
     node_mask = _node_mask(graph)[:, None]
-    diff = (forces_ref - forces_pred) * node_mask
+    mask_bool = node_mask > 0.0
+    diff = jnp.where(mask_bool, forces_ref - forces_pred, 0.0)
     diff_norm = jnp.linalg.norm(diff, axis=-1)
 
     per_graph_weight = _graph_attribute(graph, 'weight', 1.0, dtype=diff_norm.dtype)
@@ -142,52 +159,66 @@ def mean_normed_error_forces(
 def weighted_mean_squared_stress(
     graph: jraph.GraphsTuple, stress_pred: jnp.ndarray
 ) -> jnp.ndarray:
+    mask = _graph_mask(graph)
+    mask_bool = mask[:, None, None] > 0.0
     stress_ref = _graph_tensor(
         graph, 'stress', default_shape=(3, 3), dtype=jnp.asarray(stress_pred).dtype
     )
     stress_pred = jnp.asarray(stress_pred)
-    diff_sq = jnp.mean(jnp.square(stress_ref - stress_pred), axis=(1, 2))
+    diff = stress_ref - stress_pred
+    diff = jnp.where(mask_bool, diff, 0.0)
+    diff_sq = jnp.mean(jnp.square(diff), axis=(1, 2))
     weight = _graph_attribute(graph, 'weight', 1.0, dtype=diff_sq.dtype)
     stress_weight = _graph_attribute(graph, 'stress_weight', 1.0, dtype=diff_sq.dtype)
     loss = weight * stress_weight * diff_sq
-    return loss * _graph_mask(graph)
+    return loss * mask
 
 
 def weighted_mean_squared_virials(
     graph: jraph.GraphsTuple, virials_pred: jnp.ndarray
 ) -> jnp.ndarray:
+    mask = _graph_mask(graph)
+    mask_bool = mask[:, None, None] > 0.0
     virials_ref = _graph_tensor(
         graph, 'virials', default_shape=(3, 3), dtype=jnp.asarray(virials_pred).dtype
     )
     virials_pred = jnp.asarray(virials_pred)
     num_atoms = _num_atoms(graph)[:, None, None]
-    per_atom_diff = _safe_divide(virials_ref - virials_pred, num_atoms)
+    diff = virials_ref - virials_pred
+    diff = jnp.where(mask_bool, diff, 0.0)
+    per_atom_diff = _safe_divide(diff, num_atoms)
     diff_sq = jnp.mean(jnp.square(per_atom_diff), axis=(1, 2))
     weight = _graph_attribute(graph, 'weight', 1.0, dtype=diff_sq.dtype)
     virials_weight = _graph_attribute(graph, 'virials_weight', 1.0, dtype=diff_sq.dtype)
     loss = weight * virials_weight * diff_sq
-    return loss * _graph_mask(graph)
+    return loss * mask
 
 
 def weighted_mean_squared_error_dipole(
     graph: jraph.GraphsTuple, dipole_pred: jnp.ndarray
 ) -> jnp.ndarray:
+    mask = _graph_mask(graph)
+    mask_bool = mask[:, None] > 0.0
     dipole_ref = _graph_tensor(
         graph, 'dipole', default_shape=(3,), dtype=jnp.asarray(dipole_pred).dtype
     )
     dipole_pred = jnp.asarray(dipole_pred)
     num_atoms = _num_atoms(graph)[:, None]
-    per_atom_diff = _safe_divide(dipole_ref - dipole_pred, num_atoms)
+    diff = dipole_ref - dipole_pred
+    diff = jnp.where(mask_bool, diff, 0.0)
+    per_atom_diff = _safe_divide(diff, num_atoms)
     diff_sq = jnp.mean(jnp.square(per_atom_diff), axis=-1)
     weight = _graph_attribute(graph, 'weight', 1.0, dtype=diff_sq.dtype)
     dipole_weight = _graph_attribute(graph, 'dipole_weight', 1.0, dtype=diff_sq.dtype)
     loss = weight * dipole_weight * diff_sq
-    return loss * _graph_mask(graph)
+    return loss * mask
 
 
 def weighted_mean_squared_error_polarizability(
     graph: jraph.GraphsTuple, polarizability_pred: jnp.ndarray
 ) -> jnp.ndarray:
+    mask = _graph_mask(graph)
+    mask_bool = mask[:, None, None] > 0.0
     polar_ref = _graph_tensor(
         graph,
         'polarizability',
@@ -196,14 +227,16 @@ def weighted_mean_squared_error_polarizability(
     )
     polarizability_pred = jnp.asarray(polarizability_pred)
     num_atoms = _num_atoms(graph)[:, None, None]
-    per_atom_diff = _safe_divide(polar_ref - polarizability_pred, num_atoms)
+    diff = polar_ref - polarizability_pred
+    diff = jnp.where(mask_bool, diff, 0.0)
+    per_atom_diff = _safe_divide(diff, num_atoms)
     diff_sq = jnp.mean(jnp.square(per_atom_diff), axis=(1, 2))
     weight = _graph_attribute(graph, 'weight', 1.0, dtype=diff_sq.dtype)
     polar_weight = _graph_attribute(
         graph, 'polarizability_weight', 1.0, dtype=diff_sq.dtype
     )
     loss = weight * polar_weight * diff_sq
-    return loss * _graph_mask(graph)
+    return loss * mask
 
 
 def conditional_mse_forces(
@@ -214,7 +247,8 @@ def conditional_mse_forces(
     forces_ref = jnp.asarray(graph.nodes.forces)
     forces_pred = jnp.asarray(forces_pred)
     node_mask = _node_mask(graph)[:, None]
-    diff = (forces_ref - forces_pred) * node_mask
+    mask_bool = node_mask > 0.0
+    diff = jnp.where(mask_bool, forces_ref - forces_pred, 0.0)
 
     norm_forces = jnp.linalg.norm(forces_ref * node_mask, axis=-1)
     factors = jnp.array([1.0, 0.7, 0.4, 0.1], dtype=forces_ref.dtype)
@@ -251,7 +285,8 @@ def conditional_huber_forces(
     forces_ref = jnp.asarray(graph.nodes.forces)
     forces_pred = jnp.asarray(forces_pred)
     node_mask = _node_mask(graph)[:, None]
-    diff = (forces_ref - forces_pred) * node_mask
+    mask_bool = node_mask > 0.0
+    diff = jnp.where(mask_bool, forces_ref - forces_pred, 0.0)
 
     norm_forces = jnp.linalg.norm(forces_ref * node_mask, axis=-1)
     factors = jnp.array([1.0, 0.7, 0.4, 0.1], dtype=forces_ref.dtype) * huber_delta
