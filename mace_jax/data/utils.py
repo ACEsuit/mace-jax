@@ -320,6 +320,8 @@ def compute_average_E0s_from_species(
 
 
 GraphNodes = namedtuple('Nodes', ['positions', 'forces', 'species'])
+# Multiprocessing pickle support expects the class to be exported under its __name__.
+Nodes = GraphNodes
 
 
 class GraphEdges(NamedTuple):

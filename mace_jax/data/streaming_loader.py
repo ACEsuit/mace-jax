@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import multiprocessing as mp
 import threading
 from collections.abc import Iterable, Iterator, Sequence
@@ -12,6 +13,7 @@ from queue import Queue
 import jraph
 import numpy as np
 
+from ._batch_iterator import BatchIteratorWrapper
 from .hdf5_dataset import HDF5Dataset
 from .utils import (
     AtomicNumberTable,
@@ -23,10 +25,6 @@ from .utils import (
 _RESULT_DATA = 'data'
 _RESULT_DONE = 'done'
 _RESULT_ERROR = 'error'
-
-
-class _RepackRequired(RuntimeError):
-    """Internal signal indicating cached padding is insufficient."""
 
 
 @dataclass(frozen=True)
@@ -229,6 +227,8 @@ class StreamingGraphDataLoader:
         self.graphs = getattr(self, 'graphs', None)
         self.streaming = True
         self.total_graphs = getattr(self, 'total_graphs', None)
+        self.total_nodes = getattr(self, 'total_nodes', None)
+        self.total_edges = getattr(self, 'total_edges', None)
 
         if n_node is None or n_edge is None:
             est_nodes, est_edges = _estimate_caps(
@@ -383,28 +383,16 @@ class StreamingGraphDataLoader:
     def _pack(self, *, seed_override: int | None = None):
         graph_iter_fn = lambda: self._graph_iterator(seed_override=seed_override)
         reuse_info = getattr(self, '_pack_info', None)
-        try:
-            batches, info = pack_graphs_greedy(
-                graph_iter_fn=graph_iter_fn,
-                max_edges_per_batch=self._n_edge,
-                max_nodes_per_batch=self._n_node,
-                graph_multiple=self._graph_multiple,
-                fixed_pad_nodes=getattr(self, '_fixed_pad_nodes', None),
-                fixed_pad_edges=getattr(self, '_fixed_pad_edges', None),
-                fixed_pad_graphs=getattr(self, '_fixed_pad_graphs', None),
-                reuse_info=reuse_info,
-            )
-        except _RepackRequired:
-            batches, info = pack_graphs_greedy(
-                graph_iter_fn=graph_iter_fn,
-                max_edges_per_batch=self._n_edge,
-                max_nodes_per_batch=self._n_node,
-                graph_multiple=self._graph_multiple,
-                fixed_pad_nodes=getattr(self, '_fixed_pad_nodes', None),
-                fixed_pad_edges=getattr(self, '_fixed_pad_edges', None),
-                fixed_pad_graphs=getattr(self, '_fixed_pad_graphs', None),
-                reuse_info=None,
-            )
+        batches, info = pack_graphs_greedy(
+            graph_iter_fn=graph_iter_fn,
+            max_edges_per_batch=self._n_edge,
+            max_nodes_per_batch=self._n_node,
+            graph_multiple=self._graph_multiple,
+            fixed_pad_nodes=getattr(self, '_fixed_pad_nodes', None),
+            fixed_pad_edges=getattr(self, '_fixed_pad_edges', None),
+            fixed_pad_graphs=getattr(self, '_fixed_pad_graphs', None),
+            reuse_info=reuse_info,
+        )
         self._fixed_pad_nodes = info.get('pad_nodes')
         self._fixed_pad_edges = info.get('pad_edges')
         self._fixed_pad_graphs = info.get('pad_graphs')
@@ -453,7 +441,7 @@ class StreamingGraphDataLoader:
         seed: int | None,
         process_count: int,
         process_index: int,
-    ) -> tuple[jraph.GraphsTuple, ...]:
+    ) -> Iterator[jraph.GraphsTuple]:
         self.set_epoch(epoch)
         batches_iter, _ = self._pack(seed_override=seed)
 
@@ -470,19 +458,42 @@ class StreamingGraphDataLoader:
 
         limited_iter = _limited(batches_iter)
         if process_count > 1:
-            filtered = (
-                batch
-                for idx, batch in enumerate(limited_iter)
-                if idx % process_count == process_index
-            )
+
+            def _filtered():
+                graphs_count = 0
+                batches_count = 0
+                try:
+                    for idx, batch in enumerate(limited_iter):
+                        if idx % process_count != process_index:
+                            continue
+                        graphs_count += int(
+                            np.asarray(jraph.get_graph_padding_mask(batch)).sum()
+                        )
+                        batches_count += 1
+                        yield batch
+                finally:
+                    self._history.append((graphs_count, batches_count))
+
+            iterator = _filtered()
         else:
-            filtered = limited_iter
-        batches = tuple(filtered)
-        graphs = sum(
-            int(np.asarray(jraph.get_graph_padding_mask(b)).sum()) for b in batches
-        )
-        self._history.append((graphs, len(batches)))
-        return batches
+
+            def _single():
+                graphs_count = 0
+                batches_count = 0
+                try:
+                    for batch in limited_iter:
+                        graphs_count += int(
+                            np.asarray(jraph.get_graph_padding_mask(batch)).sum()
+                        )
+                        batches_count += 1
+                        yield batch
+                finally:
+                    self._history.append((graphs_count, batches_count))
+
+            iterator = _single()
+
+        total_batches_hint = int(self._pack_info.get('total_batches') or 0)
+        return BatchIteratorWrapper(iterator, total_batches_hint)
 
     def __len__(self):
         if self._pack_info and self._pack_info.get('total_batches') is not None:
@@ -507,8 +518,19 @@ class StreamingGraphDataLoader:
             dataset.close()
 
     def approx_length(self) -> int:
-        """Compatibility shim matching ``GraphDataLoader``."""
-        return len(self)
+        """Estimate number of batches without forcing a prepass."""
+        if self.total_graphs is None:
+            return max(1, len(self))
+        nodes_cap = max(1, self._n_node)
+        edges_cap = max(1, self._n_edge)
+        approx = 0
+        if self.total_nodes:
+            approx = max(approx, math.ceil(self.total_nodes / nodes_cap))
+        if self.total_edges:
+            approx = max(approx, math.ceil(self.total_edges / edges_cap))
+        if approx == 0:
+            approx = math.ceil(self.total_graphs / max(1, self._graph_multiple))
+        return max(1, approx)
 
     def subset(self, i):
         """Approximate GraphDataLoader.subset using cached initialization graphs."""
@@ -579,124 +601,50 @@ def pack_graphs_greedy(
     def _make_iter():
         return iter(graph_iter_fn())
 
-    def _scan():
-        current_len = edge_sum = node_sum = 0
-        max_graphs = max_total_nodes = max_total_edges = 0
-        dropped = batches = 0
-        graphs_seen = kept = 0
-        max_single_nodes = max_single_edges = 0
-        for g in _make_iter():
-            g_edges = int(g.n_edge.sum())
-            g_nodes = int(g.n_node.sum())
-            graphs_seen += 1
-            max_single_nodes = max(max_single_nodes, g_nodes)
-            max_single_edges = max(max_single_edges, g_edges)
-            if g_edges > max_edges_per_batch or (
-                max_nodes_per_batch is not None and g_nodes > max_nodes_per_batch
-            ):
-                dropped += 1
-                continue
-            kept += 1
-            would_edges = edge_sum + g_edges
-            would_nodes = node_sum + g_nodes
-            if current_len and (
-                would_edges > max_edges_per_batch
-                or (
-                    max_nodes_per_batch is not None
-                    and would_nodes > max_nodes_per_batch
-                )
-            ):
-                max_graphs = max(max_graphs, current_len)
-                max_total_nodes = max(max_total_nodes, node_sum)
-                max_total_edges = max(max_total_edges, edge_sum)
-                batches += 1
-                current_len = edge_sum = node_sum = 0
-            current_len += 1
-            edge_sum += g_edges
-            node_sum += g_nodes
-        if current_len:
-            max_graphs = max(max_graphs, current_len)
-            max_total_nodes = max(max_total_nodes, node_sum)
-            max_total_edges = max(max_total_edges, edge_sum)
-            batches += 1
-        return (
-            max_graphs + 1 if max_graphs else 1,
-            max_total_nodes + 1 if max_total_nodes else 1,
-            max_total_edges + 1 if max_total_edges else 1,
-            dropped,
-            batches,
-            graphs_seen,
-            kept,
-            max_single_nodes,
-            max_single_edges,
+    nodes_cap = (
+        int(max_nodes_per_batch)
+        if max_nodes_per_batch is not None
+        else int(fixed_pad_nodes)
+        if fixed_pad_nodes is not None
+        else None
+    )
+    if nodes_cap is None and reuse_info and reuse_info.get('pad_nodes'):
+        nodes_cap = int(reuse_info['pad_nodes'])
+    if nodes_cap is None:
+        raise ValueError(
+            'max_nodes_per_batch must be specified when packing without a preliminary scan.'
         )
-
-    (
-        pad_graphs,
-        pad_nodes,
-        pad_edges,
-        dropped,
-        total_batches,
-        graphs_seen,
-        kept,
-        max_single_nodes,
-        max_single_edges,
-    ) = (0, 0, 0, 0, 0, 0, 0, 0, 0)
+    edges_cap = int(max_edges_per_batch)
+    if fixed_pad_edges is not None:
+        edges_cap = max(edges_cap, int(fixed_pad_edges))
+    if reuse_info and reuse_info.get('pad_edges'):
+        edges_cap = max(edges_cap, int(reuse_info['pad_edges']))
 
     graph_multiple = max(int(graph_multiple or 1), 1)
-    reuse_pad_sizes = reuse_info is not None
-    if reuse_pad_sizes:
-        pad_graphs = int(reuse_info.get('pad_graphs') or 0)
-        pad_nodes = int(reuse_info.get('pad_nodes') or 0)
-        pad_edges = int(reuse_info.get('pad_edges') or 0)
-        if pad_graphs <= 0 or pad_nodes <= 0 or pad_edges <= 0:
-            raise _RepackRequired('Cached padding metadata incomplete.')
-        pad_graphs = max(pad_graphs, graph_multiple + 1)
-    else:
-        (
-            pad_graphs,
-            pad_nodes,
-            pad_edges,
-            dropped,
-            total_batches,
-            graphs_seen,
-            kept,
-            max_single_nodes,
-            max_single_edges,
-        ) = _scan()
+    pad_graphs = None
+    if fixed_pad_graphs is not None:
+        pad_graphs = int(fixed_pad_graphs)
+    elif reuse_info and reuse_info.get('pad_graphs'):
+        pad_graphs = int(reuse_info['pad_graphs'])
+    if pad_graphs is None:
+        pad_graphs = graph_multiple + 1
+    if graph_multiple > 1:
+        pad_graphs = (
+            (pad_graphs + graph_multiple - 1) // graph_multiple
+        ) * graph_multiple
+    pad_graphs = max(pad_graphs, graph_multiple + 1)
+    pad_graphs += graph_multiple
 
-        # Ensure the pad sizes satisfy both the observed maxima and the requested
-        # caps so that jraph.pad_with_graphs never receives underestimates when
-        # batch packing decisions change between the scanning and packing passes.
-        min_nodes_cap = (
-            int(max_nodes_per_batch) if max_nodes_per_batch is not None else None
-        )
-        min_edges_cap = int(max_edges_per_batch)
-        pad_nodes = max(pad_nodes, (min_nodes_cap or 0) + 1)
-        pad_edges = max(pad_edges, min_edges_cap + 1)
-        if fixed_pad_nodes is not None:
-            pad_nodes = max(pad_nodes, int(fixed_pad_nodes))
-        if fixed_pad_edges is not None:
-            pad_edges = max(pad_edges, int(fixed_pad_edges))
-
-        if graph_multiple > 1:
-            pad_graphs = (
-                (pad_graphs + graph_multiple - 1) // graph_multiple
-            ) * graph_multiple
-        pad_graphs = max(pad_graphs, graph_multiple + 1)
-        pad_graphs += graph_multiple  # keep slack for the final padding graph
-        if fixed_pad_graphs is not None:
-            pad_graphs = max(pad_graphs, int(fixed_pad_graphs))
-    info_init = dict(
-        dropped=dropped,
-        total_batches=total_batches,
+    info = dict(
+        dropped=0,
+        total_batches=0,
         pad_graphs=pad_graphs,
-        pad_nodes=pad_nodes,
-        pad_edges=pad_edges,
-        graphs_seen=graphs_seen,
-        kept_graphs=kept,
-        max_single_nodes=max_single_nodes,
-        max_single_edges=max_single_edges,
+        pad_nodes=nodes_cap,
+        pad_edges=edges_cap,
+        graphs_seen=0,
+        kept_graphs=0,
+        max_single_nodes=0,
+        max_single_edges=0,
     )
 
     def _empty_graph_like(graph: jraph.GraphsTuple) -> jraph.GraphsTuple:
@@ -744,140 +692,58 @@ def pack_graphs_greedy(
         for _ in range(graph_multiple - remainder):
             graphs.append(dummy)
 
+    graph_cap = max(pad_graphs - graph_multiple, 1)
+
+    def _emit_batch(batch_graphs: list[jraph.GraphsTuple]):
+        nonlocal info
+        if not batch_graphs:
+            return None
+        _pad_graph_list(batch_graphs)
+        batched = jraph.batch_np(batch_graphs)
+        result = jraph.pad_with_graphs(
+            batched,
+            n_node=nodes_cap,
+            n_edge=edges_cap,
+            n_graph=pad_graphs,
+        )
+        info['total_batches'] += 1
+        return result
+
     def _iter():
         current: list[jraph.GraphsTuple] = []
         edge_sum = node_sum = 0
         for g in _make_iter():
             g_edges = int(g.n_edge.sum())
             g_nodes = int(g.n_node.sum())
-            if g_edges > max_edges_per_batch or (
-                max_nodes_per_batch is not None and g_nodes > max_nodes_per_batch
-            ):
+            info['graphs_seen'] += 1
+            info['max_single_nodes'] = max(info['max_single_nodes'], g_nodes)
+            info['max_single_edges'] = max(info['max_single_edges'], g_edges)
+            if g_edges > max_edges_per_batch or g_nodes > nodes_cap:
+                info['dropped'] += 1
                 continue
+            info['kept_graphs'] += 1
             would_edges = edge_sum + g_edges
             would_nodes = node_sum + g_nodes
+            would_graphs = len(current) + 1
             if current and (
                 would_edges > max_edges_per_batch
-                or (
-                    max_nodes_per_batch is not None
-                    and would_nodes > max_nodes_per_batch
-                )
+                or would_nodes > nodes_cap
+                or would_graphs > graph_cap
             ):
-                _pad_graph_list(current)
-                batched = jraph.batch_np(current)
-                yield jraph.pad_with_graphs(
-                    batched,
-                    n_node=pad_nodes,
-                    n_edge=pad_edges,
-                    n_graph=pad_graphs,
-                )
+                emitted = _emit_batch(current)
+                if emitted is not None:
+                    yield emitted
                 current = []
                 edge_sum = node_sum = 0
             current.append(g)
             edge_sum += g_edges
             node_sum += g_nodes
         if current:
-            _pad_graph_list(current)
-            batched = jraph.batch_np(current)
-            yield jraph.pad_with_graphs(
-                batched,
-                n_node=pad_nodes,
-                n_edge=pad_edges,
-                n_graph=pad_graphs,
-            )
+            emitted = _emit_batch(current)
+            if emitted is not None:
+                yield emitted
 
-    if not reuse_pad_sizes:
-        return _iter(), info_init
-
-    info = dict(reuse_info or {})
-    info.setdefault('pad_graphs', pad_graphs)
-    info.setdefault('pad_nodes', pad_nodes)
-    info.setdefault('pad_edges', pad_edges)
-
-    def _iter_reuse():
-        current: list[jraph.GraphsTuple] = []
-        edge_sum = node_sum = 0
-        stats = dict(
-            graphs_seen=0,
-            kept_graphs=0,
-            dropped=0,
-            total_batches=0,
-            max_single_nodes=0,
-            max_single_edges=0,
-            max_graphs=0,
-        )
-
-        def _emit_current():
-            nonlocal current, edge_sum, node_sum
-            if not current:
-                return None
-            _pad_graph_list(current)
-            batched = jraph.batch_np(current)
-            nodes_required = int(batched.n_node.sum())
-            edges_required = int(batched.n_edge.sum())
-            graphs_required = len(current)
-            if pad_nodes <= nodes_required or pad_edges <= edges_required:
-                raise _RepackRequired('Cached pad_nodes/edges insufficient.')
-            if pad_graphs <= graphs_required:
-                raise _RepackRequired('Cached pad_graphs insufficient.')
-            result = jraph.pad_with_graphs(
-                batched,
-                n_node=pad_nodes,
-                n_edge=pad_edges,
-                n_graph=pad_graphs,
-            )
-            stats['total_batches'] += 1
-            stats['max_graphs'] = max(stats['max_graphs'], graphs_required)
-            current = []
-            edge_sum = node_sum = 0
-            return result
-
-        for g in _make_iter():
-            g_edges = int(g.n_edge.sum())
-            g_nodes = int(g.n_node.sum())
-            stats['graphs_seen'] += 1
-            stats['max_single_nodes'] = max(stats['max_single_nodes'], g_nodes)
-            stats['max_single_edges'] = max(stats['max_single_edges'], g_edges)
-            if g_edges > max_edges_per_batch or (
-                max_nodes_per_batch is not None and g_nodes > max_nodes_per_batch
-            ):
-                stats['dropped'] += 1
-                continue
-            stats['kept_graphs'] += 1
-            would_edges = edge_sum + g_edges
-            would_nodes = node_sum + g_nodes
-            if current and (
-                would_edges > max_edges_per_batch
-                or (
-                    max_nodes_per_batch is not None
-                    and would_nodes > max_nodes_per_batch
-                )
-            ):
-                emitted = _emit_current()
-                if emitted is not None:
-                    yield emitted
-            current.append(g)
-            edge_sum += g_edges
-            node_sum += g_nodes
-        emitted = _emit_current()
-        if emitted is not None:
-            yield emitted
-        info.clear()
-        info.update(
-            dict(
-                dropped=stats['dropped'],
-                total_batches=stats['total_batches'],
-                pad_graphs=pad_graphs,
-                pad_nodes=pad_nodes,
-                pad_edges=pad_edges,
-                graphs_seen=stats['graphs_seen'],
-                kept_graphs=stats['kept_graphs'],
-                max_single_nodes=stats['max_single_nodes'],
-                max_single_edges=stats['max_single_edges'],
-            )
-        )
-
-    return _iter_reuse(), info
+    return _iter(), info
 
 
 def get_hdf5_dataloader(

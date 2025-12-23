@@ -215,16 +215,13 @@ def train(
             def _next_batch():
                 return next(epoch_batches_iter)
 
-            if steps_per_interval is not None and steps_per_interval > 0:
-                if steps_per_interval != available_steps:
-                    raise ValueError(
-                        f'steps_per_interval ({steps_per_interval}) must equal available batches '
-                        f'({available_steps}) when using iter_batches().'
-                    )
-            effective_steps = available_steps
-            if effective_steps <= 0:
+            effective_steps = steps_per_interval
+            if effective_steps is None:
+                effective_steps = available_steps
+            if effective_steps is None or effective_steps <= 0:
                 raise ValueError(
-                    'iter_batches() produced no data; reduce process_count or provide more data.'
+                    'iter_batches() produced no data and steps_per_interval was not provided; '
+                    'reduce process_count or provide more data.'
                 )
 
         else:
@@ -266,6 +263,13 @@ def train(
                 logging.info(
                     f'Compilation time: {time.time() - start_time:.3f}s, cache size: {last_cache_size}'
                 )
+
+        if supports_iter_batches:
+            while True:
+                try:
+                    next(epoch_batches_iter)
+                except StopIteration:
+                    break
 
         eval_params = ema_params
         if swa_state is not None and swa_config is not None:

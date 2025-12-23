@@ -1,6 +1,7 @@
 import hashlib
 import json
 import logging
+import math
 import pickle
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -34,6 +35,9 @@ class _StreamingStats:
     min_distance_sum: float
     min_distance_count: int
     total_graphs: int
+    total_nodes: int
+    total_edges: int
+    max_graphs_per_batch: int
 
 
 def _graph_has_positive_weight(graph) -> bool:
@@ -129,6 +133,9 @@ def _spec_fingerprint(
     r_max: float,
     atomic_numbers: Sequence[int],
     head_to_index: dict[str, int] | None = None,
+    node_cap: int | None = None,
+    edge_cap: int | None = None,
+    graph_multiple: int | None = None,
 ) -> str:
     head_index = 0
     if head_to_index is not None and spec.head_name in head_to_index:
@@ -150,6 +157,9 @@ def _spec_fingerprint(
         'path': str(Path(spec.path)),
         'r_max': float(r_max),
         'atomic_numbers': [int(z) for z in atomic_numbers],
+        'node_cap': int(node_cap) if node_cap is not None else None,
+        'edge_cap': int(edge_cap) if edge_cap is not None else None,
+        'graph_multiple': int(graph_multiple) if graph_multiple is not None else None,
     }
     encoded = json.dumps(payload, sort_keys=True)
     return hashlib.sha256(encoded.encode('utf-8')).hexdigest()
@@ -164,6 +174,9 @@ def _stats_to_payload(stats: _StreamingStats) -> dict:
         'min_distance_sum': stats.min_distance_sum,
         'min_distance_count': stats.min_distance_count,
         'total_graphs': stats.total_graphs,
+        'total_nodes': stats.total_nodes,
+        'total_edges': stats.total_edges,
+        'max_graphs_per_batch': stats.max_graphs_per_batch,
     }
 
 
@@ -177,6 +190,9 @@ def _stats_from_payload(payload: dict) -> _StreamingStats:
         min_distance_sum=payload['min_distance_sum'],
         min_distance_count=payload['min_distance_count'],
         total_graphs=payload['total_graphs'],
+        total_nodes=payload.get('total_nodes', 0),
+        total_edges=payload.get('total_edges', 0),
+        max_graphs_per_batch=payload.get('max_graphs_per_batch', 0),
     )
 
 
@@ -359,6 +375,9 @@ def _compute_streaming_stats(
     r_max: float,
     head_to_index: dict[str, int],
     sample_limit: int,
+    node_cap: int,
+    edge_cap: int,
+    graph_multiple: int,
 ) -> _StreamingStats:
     dataset = data.HDF5Dataset(dataset_path)
     sample_graphs: list = []
@@ -370,6 +389,13 @@ def _compute_streaming_stats(
     min_distance_sum = 0.0
     min_distance_count = 0
     total_graphs = 0
+    total_nodes = 0
+    total_edges = 0
+    batch_graph_cap = max(int(graph_multiple or 1), 1)
+    max_graphs_per_batch = 0
+    current_graphs = 0
+    current_nodes = 0
+    current_edges = 0
     dataset_len = len(dataset)
     progress = None
     try:
@@ -392,6 +418,8 @@ def _compute_streaming_stats(
             )
             if not _graph_has_positive_weight(graph):
                 continue
+            g_nodes = int(graph.n_node.sum())
+            g_edges = int(graph.n_edge.sum())
             species = np.asarray(graph.nodes.species)
             counts = np.bincount(species, minlength=num_species).astype(np.float64)
             ata += np.outer(counts, counts)
@@ -417,6 +445,18 @@ def _compute_streaming_stats(
             if len(sample_graphs) < sample_limit:
                 sample_graphs.append(graph)
             total_graphs += 1
+            total_nodes += g_nodes
+            total_edges += g_edges
+            would_nodes = current_nodes + g_nodes
+            would_edges = current_edges + g_edges
+            if current_graphs and (
+                would_nodes > node_cap or would_edges > edge_cap
+            ):
+                max_graphs_per_batch = max(max_graphs_per_batch, current_graphs)
+                current_graphs = current_nodes = current_edges = 0
+            current_graphs += 1
+            current_nodes += g_nodes
+            current_edges += g_edges
     finally:
         if progress is not None:
             progress.close()
@@ -424,6 +464,9 @@ def _compute_streaming_stats(
 
     if total_graphs == 0:
         raise ValueError(f"No graphs found in '{dataset_path}'.")
+
+    if current_graphs:
+        max_graphs_per_batch = max(max_graphs_per_batch, current_graphs)
 
     return _StreamingStats(
         sample_graphs=sample_graphs,
@@ -434,6 +477,9 @@ def _compute_streaming_stats(
         min_distance_sum=min_distance_sum,
         min_distance_count=min_distance_count,
         total_graphs=total_graphs,
+        total_nodes=total_nodes,
+        total_edges=total_edges,
+        max_graphs_per_batch=max_graphs_per_batch,
     )
 
 
@@ -445,6 +491,9 @@ def _load_or_compute_streaming_stats(
     head_to_index: dict[str, int],
     atomic_numbers: Sequence[int],
     sample_limit: int,
+    node_cap: int,
+    edge_cap: int,
+    graph_multiple: int,
 ) -> _StreamingStats:
     dataset_path = Path(spec.path)
     fingerprint = _spec_fingerprint(
@@ -452,6 +501,9 @@ def _load_or_compute_streaming_stats(
         r_max=r_max,
         atomic_numbers=atomic_numbers,
         head_to_index=head_to_index,
+        node_cap=node_cap,
+        edge_cap=edge_cap,
+        graph_multiple=graph_multiple,
     )
     cached = _load_cached_streaming_stats(dataset_path, fingerprint)
     if cached is not None:
@@ -465,6 +517,9 @@ def _load_or_compute_streaming_stats(
         r_max=r_max,
         head_to_index=head_to_index,
         sample_limit=sample_limit,
+        node_cap=node_cap,
+        edge_cap=edge_cap,
+        graph_multiple=graph_multiple,
     )
     if sample_limit >= 0 and stats.sample_graphs is not None:
         stats.sample_graphs = stats.sample_graphs[:sample_limit]
@@ -509,8 +564,11 @@ def _build_streaming_train_loader(
     min_distance_sum = 0.0
     min_distance_count = 0
     total_graphs = 0
+    total_nodes = 0
+    total_edges = 0
     sample_graphs: list = []
     sample_cap = 32
+    max_graphs_per_batch = 0
 
     for spec in dataset_specs:
         stats = _load_or_compute_streaming_stats(
@@ -520,6 +578,9 @@ def _build_streaming_train_loader(
             head_to_index=head_to_index,
             atomic_numbers=atomic_numbers,
             sample_limit=sample_cap,
+            node_cap=n_node,
+            edge_cap=n_edge,
+            graph_multiple=n_graph,
         )
         remaining = max(sample_cap - len(sample_graphs), 0)
         if remaining:
@@ -544,6 +605,9 @@ def _build_streaming_train_loader(
         min_distance_sum += stats.min_distance_sum
         min_distance_count += stats.min_distance_count
         total_graphs += stats.total_graphs
+        total_nodes += stats.total_nodes
+        total_edges += stats.total_edges
+        max_graphs_per_batch = max(max_graphs_per_batch, stats.max_graphs_per_batch)
 
     if not sample_graphs:
         raise ValueError('Unable to build initialization graphs from training data.')
@@ -581,6 +645,11 @@ def _build_streaming_train_loader(
                 'Using atomic energies from statistics file %s', statistics_metadata_path
             )
 
+    pad_graphs_estimate = max(max_graphs_per_batch, 1)
+    if n_graph > 1:
+        pad_graphs_estimate = math.ceil(pad_graphs_estimate / n_graph) * n_graph
+    pad_graphs_estimate = max(pad_graphs_estimate + n_graph, n_graph + 1)
+
     datasets = [data.HDF5Dataset(spec.path, mode='r') for spec in dataset_specs]
     loader = data.StreamingGraphDataLoader(
         datasets=datasets,
@@ -604,8 +673,13 @@ def _build_streaming_train_loader(
     loader.avg_r_min = avg_min_distance
     loader.atomic_energies = atomic_energies
     loader.total_graphs = total_graphs
+    loader.total_nodes = total_nodes
+    loader.total_edges = total_edges
     loader.streaming = True
     loader.z_table = z_table
+    loader._fixed_pad_nodes = n_node
+    loader._fixed_pad_edges = n_edge
+    loader._fixed_pad_graphs = pad_graphs_estimate
     return loader, atomic_energies_dict, r_max
 
 
@@ -740,6 +814,7 @@ def _build_eval_streaming_loader(
     n_graph: int,
     head_to_index: dict[str, int],
     base_z_table: data.AtomicNumberTable | None,
+    num_workers: int = 0,
 ) -> data.StreamingGraphDataLoader | None:
     if not dataset_specs:
         return None
@@ -750,6 +825,32 @@ def _build_eval_streaming_loader(
         z_table = data.AtomicNumberTable(atomic_numbers)
     else:
         z_table = base_z_table
+    atomic_numbers = [int(z) for z in z_table.zs]
+    total_nodes = 0
+    total_edges = 0
+    total_graphs = 0
+    max_graphs_per_batch = 0
+    for spec in dataset_specs:
+        stats = _load_or_compute_streaming_stats(
+            spec,
+            r_max=r_max,
+            z_table=z_table,
+            head_to_index=head_to_index,
+            atomic_numbers=atomic_numbers,
+            sample_limit=0,
+            node_cap=n_node,
+            edge_cap=n_edge,
+            graph_multiple=n_graph,
+        )
+        total_nodes += stats.total_nodes
+        total_edges += stats.total_edges
+        total_graphs += stats.total_graphs
+        max_graphs_per_batch = max(max_graphs_per_batch, stats.max_graphs_per_batch)
+    pad_graphs_estimate = max(max_graphs_per_batch, 1)
+    if n_graph > 1:
+        pad_graphs_estimate = math.ceil(pad_graphs_estimate / n_graph) * n_graph
+    pad_graphs_estimate = max(pad_graphs_estimate + n_graph, n_graph + 1)
+
     datasets = [data.HDF5Dataset(spec.path, mode='r') for spec in dataset_specs]
     loader = data.StreamingGraphDataLoader(
         datasets=datasets,
@@ -764,13 +865,20 @@ def _build_eval_streaming_loader(
         niggli_reduce=False,
         max_batches=None,
         prefetch_batches=None,
-        num_workers=0,
+        num_workers=int(num_workers or 0),
         graph_multiple=n_graph,
     )
     loader.graphs = None
-    loader.total_graphs = sum(len(ds) for ds in datasets)
+    loader.total_graphs = total_graphs or sum(len(ds) for ds in datasets)
+    if total_nodes:
+        loader.total_nodes = total_nodes
+    if total_edges:
+        loader.total_edges = total_edges
     loader.streaming = True
     loader.z_table = z_table
+    loader._fixed_pad_nodes = n_node
+    loader._fixed_pad_edges = n_edge
+    loader._fixed_pad_graphs = pad_graphs_estimate
     return loader
 
 
@@ -877,6 +985,7 @@ def datasets(
         n_graph=n_graph,
         head_to_index=head_to_index,
         base_z_table=base_z_table,
+        num_workers=stream_train_workers,
     )
     test_loader = _build_eval_streaming_loader(
         test_specs,
@@ -886,6 +995,7 @@ def datasets(
         n_graph=n_graph,
         head_to_index=head_to_index,
         base_z_table=base_z_table,
+        num_workers=stream_train_workers,
     )
     logging.info(
         'Streaming training graphs: %s from %s files',
