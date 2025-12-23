@@ -2,8 +2,11 @@ import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+
 import gin
 import numpy as np
+from tqdm.auto import tqdm
+
 from mace_jax import data
 from mace_jax.data.streaming_loader import StreamingDatasetSpec
 
@@ -133,7 +136,14 @@ def _unique_atomic_numbers_from_hdf5(paths: Sequence[Path]) -> list[int]:
     numbers: set[int] = set()
     for path in paths:
         with data.HDF5Dataset(path, mode='r') as dataset:
-            for idx in range(len(dataset)):
+            dataset_len = len(dataset)
+            iterator = tqdm(
+                range(dataset_len),
+                desc=f'Extracting atomic species ({path.name})',
+                disable=dataset_len < 1024,
+                leave=False,
+            )
+            for idx in iterator:
                 atoms = dataset[idx]
                 numbers.update(int(z) for z in atoms.get_atomic_numbers())
     if not numbers:
@@ -239,12 +249,17 @@ def _build_streaming_train_loader(
     head_to_index: dict[str, int],
     stream_prefetch: int | None,
     stream_workers: int,
+    atomic_numbers_override: Sequence[int] | None = None,
+    atomic_energies_override: dict[int, float] | str | None = None,
 ) -> tuple[data.StreamingGraphDataLoader, dict[int, float], float]:
     if not dataset_specs:
         raise ValueError('No streaming datasets were provided.')
-    atomic_numbers = _unique_atomic_numbers_from_hdf5(
-        [spec.path for spec in dataset_specs]
-    )
+    if atomic_numbers_override:
+        atomic_numbers = [int(z) for z in atomic_numbers_override]
+    else:
+        atomic_numbers = _unique_atomic_numbers_from_hdf5(
+            [spec.path for spec in dataset_specs]
+        )
     z_table = data.AtomicNumberTable(atomic_numbers)
     num_species = len(z_table)
 
@@ -290,6 +305,25 @@ def _build_streaming_train_loader(
     atomic_energies_dict = {
         z_table.index_to_z(i): float(atomic_energies[i]) for i in range(num_species)
     }
+    if isinstance(atomic_energies_override, str):
+        if atomic_energies_override.lower() == 'average':
+            atomic_energies_override = None
+        else:
+            raise ValueError(
+                f'Unsupported atomic_energies_override string: {atomic_energies_override}'
+            )
+    if isinstance(atomic_energies_override, dict):
+        override_dict = {int(k): float(v) for k, v in atomic_energies_override.items()}
+        missing = [z for z in atomic_numbers if z not in override_dict]
+        if missing:
+            raise ValueError(
+                f'atomic_energies_override missing entries for atomic numbers: {missing}'
+            )
+        atomic_energies_dict = {z: override_dict[z] for z in atomic_numbers}
+        atomic_energies = np.array(
+            [atomic_energies_dict[z_table.index_to_z(i)] for i in range(num_species)],
+            dtype=np.float64,
+        )
 
     datasets = [data.HDF5Dataset(spec.path, mode='r') for spec in dataset_specs]
     loader = data.StreamingGraphDataLoader(
@@ -333,7 +367,9 @@ def _collect_eval_streaming_specs(
     remap_stress: np.ndarray | None,
 ) -> tuple[list[StreamingDatasetSpec], list[StreamingDatasetSpec]]:
     if test_num not in (None, 0):
-        raise ValueError('test_num is not supported with streaming evaluation datasets.')
+        raise ValueError(
+            'test_num is not supported with streaming evaluation datasets.'
+        )
 
     valid_specs: list[StreamingDatasetSpec] = []
     test_specs: list[StreamingDatasetSpec] = []
@@ -452,7 +488,9 @@ def _build_eval_streaming_loader(
     if not dataset_specs:
         return None
     if base_z_table is None:
-        atomic_numbers = _unique_atomic_numbers_from_hdf5([spec.path for spec in dataset_specs])
+        atomic_numbers = _unique_atomic_numbers_from_hdf5(
+            [spec.path for spec in dataset_specs]
+        )
         z_table = data.AtomicNumberTable(atomic_numbers)
     else:
         z_table = base_z_table
@@ -508,6 +546,8 @@ def datasets(
     head_configs: dict[str, dict] | None = None,
     stream_train_prefetch: int | None = None,
     stream_train_workers: int = 0,
+    atomic_numbers: Sequence[int] | None = None,
+    atomic_energies_override: dict[int, float] | str | None = None,
 ) -> tuple[
     data.StreamingGraphDataLoader,
     data.GraphDataLoader,
@@ -560,6 +600,8 @@ def datasets(
         head_to_index=head_to_index,
         stream_prefetch=stream_train_prefetch,
         stream_workers=stream_train_workers,
+        atomic_numbers_override=atomic_numbers,
+        atomic_energies_override=atomic_energies_override,
     )
     effective_n_node = n_node
     effective_n_edge = n_edge
@@ -568,7 +610,9 @@ def datasets(
     if effective_n_edge is None:
         effective_n_edge = getattr(train_loader, '_n_edge', None)
     if effective_n_node is None or effective_n_edge is None:
-        raise ValueError('Unable to determine batch size limits for evaluation loaders.')
+        raise ValueError(
+            'Unable to determine batch size limits for evaluation loaders.'
+        )
 
     base_z_table = getattr(train_loader, 'z_table', None)
     valid_loader = _build_eval_streaming_loader(
@@ -589,7 +633,6 @@ def datasets(
         head_to_index=head_to_index,
         base_z_table=base_z_table,
     )
-
     logging.info(
         'Streaming training graphs: %s from %s files',
         getattr(train_loader, 'total_graphs', 'unknown'),

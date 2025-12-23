@@ -262,6 +262,40 @@ def _parse_heads_literal(literal: str) -> dict[str, dict]:
     return normalized
 
 
+def _load_statistics_file(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f'Failed to parse statistics file {path}') from exc
+    if not isinstance(data, dict):
+        raise ValueError(f'Statistics file {path} must contain a dict.')
+    return data
+
+
+def _parse_e0s_argument(value: str | None):
+    if value is None:
+        return None
+    lowered = value.lower()
+    if lowered == 'average':
+        return 'average'
+    candidate = Path(value)
+    if candidate.exists():
+        try:
+            data = json.loads(candidate.read_text(encoding='utf-8'))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f'Failed to parse JSON E0s file {candidate}') from exc
+        if not isinstance(data, dict):
+            raise ValueError(f'E0s file {candidate} must contain a dict.')
+        return {int(k): float(v) for k, v in data.items()}
+    try:
+        literal = ast.literal_eval(value)
+    except (ValueError, SyntaxError) as exc:
+        raise ValueError(f'Failed to parse --E0s literal {value!r}') from exc
+    if not isinstance(literal, dict):
+        raise ValueError('--E0s literal must evaluate to a dict of Z->energy.')
+    return {int(k): float(v) for k, v in literal.items()}
+
+
 def _bind_if_not_none(param: str, value, *, transform=None) -> None:
     if value is None:
         return
@@ -331,6 +365,13 @@ def _apply_run_options(args: argparse.Namespace) -> None:
 
 
 def _apply_dataset_options(args: argparse.Namespace) -> None:
+    stats_data = None
+    if getattr(args, 'statistics_file', None):
+        stats_path = Path(args.statistics_file)
+        if not stats_path.exists():
+            raise FileNotFoundError(f'Statistics file {stats_path} not found.')
+        stats_data = _load_statistics_file(stats_path)
+
     if args.train_path:
         gin.bind_parameter(
             'mace_jax.tools.gin_datasets.datasets.train_path',
@@ -357,6 +398,60 @@ def _apply_dataset_options(args: argparse.Namespace) -> None:
     _bind_if_not_none(
         'mace_jax.tools.gin_datasets.datasets.forces_key', args.forces_key
     )
+    atomic_numbers_source = None
+    if getattr(args, 'atomic_numbers', None):
+        atomic_numbers_source = tuple(int(z) for z in args.atomic_numbers)
+    elif stats_data and 'atomic_numbers' in stats_data:
+        atomic_numbers_source = tuple(int(z) for z in stats_data['atomic_numbers'])
+    if atomic_numbers_source:
+        gin.bind_parameter(
+            'mace_jax.tools.gin_datasets.datasets.atomic_numbers',
+            atomic_numbers_source,
+        )
+        gin.bind_parameter(
+            'mace_jax.tools.gin_model.model.atomic_numbers',
+            atomic_numbers_source,
+        )
+    e0_override = None
+    if getattr(args, 'E0s', None):
+        e0_override = _parse_e0s_argument(args.E0s)
+    elif stats_data and 'atomic_energies' in stats_data:
+        value = stats_data['atomic_energies']
+        if isinstance(value, str):
+            e0_override = _parse_e0s_argument(value)
+        elif isinstance(value, dict):
+            e0_override = {int(k): float(v) for k, v in value.items()}
+    if e0_override:
+        gin.bind_parameter(
+            'mace_jax.tools.gin_datasets.datasets.atomic_energies_override',
+            e0_override,
+        )
+        gin.bind_parameter(
+            'mace_jax.tools.gin_model.model.atomic_energies',
+            e0_override,
+        )
+    if stats_data:
+        if (
+            'avg_num_neighbors' in stats_data
+            and stats_data['avg_num_neighbors'] is not None
+        ):
+            gin.bind_parameter(
+                'mace_jax.tools.gin_model.model.avg_num_neighbors',
+                float(stats_data['avg_num_neighbors']),
+            )
+        if 'mean' in stats_data and 'std' in stats_data:
+            gin.bind_parameter(
+                'mace_jax.tools.gin_model.constant_scaling.mean',
+                float(stats_data['mean']),
+            )
+            gin.bind_parameter(
+                'mace_jax.tools.gin_model.constant_scaling.std',
+                float(stats_data['std']),
+            )
+            gin.bind_parameter(
+                'mace_jax.tools.gin_model.model.scaling',
+                gin_model.constant_scaling,
+            )
     if getattr(args, 'batch_max_nodes', None) is not None:
         limit = _parse_batch_limit_option(args.batch_max_nodes)
         gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.n_node', limit)

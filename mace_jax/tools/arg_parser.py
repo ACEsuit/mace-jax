@@ -178,6 +178,31 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
         help='Number of configs sampled for the test set.',
     )
     parser.add_argument(
+        '--atomic-numbers',
+        '--atomic_numbers',
+        dest='atomic_numbers',
+        nargs='+',
+        type=int,
+        default=None,
+        help='Override atomic numbers (binds both datasets.atomic_numbers and model.atomic_numbers).',
+    )
+    parser.add_argument(
+        '--E0s',
+        dest='E0s',
+        default=None,
+        help=(
+            'Isolated atomic energies. Accepts "average", a JSON file path, or a dict literal '
+            '(binds datasets.atomic_energies_override and model.atomic_energies).'
+        ),
+    )
+    parser.add_argument(
+        '--statistics-file',
+        '--statistics_file',
+        dest='statistics_file',
+        default=None,
+        help='Path to a statistics JSON file (populates atomic numbers, E0s, scaling, neighbors).',
+    )
+    parser.add_argument(
         '--energy-key',
         '--energy_key',
         type=str,
