@@ -272,12 +272,25 @@ def _load_statistics_file(path: Path) -> dict:
     return data
 
 
+def _parse_e0s_literal(value: str) -> dict[int, float]:
+    try:
+        literal = ast.literal_eval(value)
+    except (ValueError, SyntaxError) as exc:
+        raise ValueError(f'Failed to parse --E0s literal {value!r}') from exc
+    if not isinstance(literal, dict):
+        raise ValueError('--E0s literal must evaluate to a dict of Z->energy.')
+    return {int(k): float(v) for k, v in literal.items()}
+
+
 def _parse_e0s_argument(value: str | None):
     if value is None:
         return None
-    lowered = value.lower()
+    stripped = value.strip()
+    lowered = stripped.lower()
     if lowered == 'average':
         return 'average'
+    if stripped.startswith('{') or stripped.startswith('['):
+        return _parse_e0s_literal(value)
     candidate = Path(value)
     if candidate.exists():
         try:
@@ -287,13 +300,7 @@ def _parse_e0s_argument(value: str | None):
         if not isinstance(data, dict):
             raise ValueError(f'E0s file {candidate} must contain a dict.')
         return {int(k): float(v) for k, v in data.items()}
-    try:
-        literal = ast.literal_eval(value)
-    except (ValueError, SyntaxError) as exc:
-        raise ValueError(f'Failed to parse --E0s literal {value!r}') from exc
-    if not isinstance(literal, dict):
-        raise ValueError('--E0s literal must evaluate to a dict of Z->energy.')
-    return {int(k): float(v) for k, v in literal.items()}
+    return _parse_e0s_literal(value)
 
 
 def _bind_if_not_none(param: str, value, *, transform=None) -> None:
@@ -366,11 +373,17 @@ def _apply_run_options(args: argparse.Namespace) -> None:
 
 def _apply_dataset_options(args: argparse.Namespace) -> None:
     stats_data = None
+    stats_path: Path | None = None
     if getattr(args, 'statistics_file', None):
         stats_path = Path(args.statistics_file)
         if not stats_path.exists():
             raise FileNotFoundError(f'Statistics file {stats_path} not found.')
         stats_data = _load_statistics_file(stats_path)
+        logging.info('Loaded dataset statistics from %s', stats_path)
+        gin.bind_parameter(
+            'mace_jax.tools.gin_datasets.datasets.statistics_metadata_path',
+            str(stats_path),
+        )
 
     if args.train_path:
         gin.bind_parameter(
@@ -402,7 +415,20 @@ def _apply_dataset_options(args: argparse.Namespace) -> None:
     if getattr(args, 'atomic_numbers', None):
         atomic_numbers_source = tuple(int(z) for z in args.atomic_numbers)
     elif stats_data and 'atomic_numbers' in stats_data:
-        atomic_numbers_source = tuple(int(z) for z in stats_data['atomic_numbers'])
+        stats_atomic_numbers = stats_data['atomic_numbers']
+        if isinstance(stats_atomic_numbers, str):
+            try:
+                parsed = ast.literal_eval(stats_atomic_numbers)
+            except (ValueError, SyntaxError) as exc:
+                raise ValueError(
+                    'Failed to parse atomic_numbers entry from statistics file.'
+                ) from exc
+            stats_atomic_numbers = parsed
+        atomic_numbers_source = tuple(int(z) for z in stats_atomic_numbers)
+        if stats_path:
+            logging.info(
+                'Using atomic numbers from statistics file %s', stats_path
+            )
     if atomic_numbers_source:
         gin.bind_parameter(
             'mace_jax.tools.gin_datasets.datasets.atomic_numbers',
@@ -421,6 +447,8 @@ def _apply_dataset_options(args: argparse.Namespace) -> None:
             e0_override = _parse_e0s_argument(value)
         elif isinstance(value, dict):
             e0_override = {int(k): float(v) for k, v in value.items()}
+        if e0_override and stats_path:
+            logging.info('Using E0s from statistics file %s', stats_path)
     if e0_override:
         gin.bind_parameter(
             'mace_jax.tools.gin_datasets.datasets.atomic_energies_override',

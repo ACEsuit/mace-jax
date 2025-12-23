@@ -1,4 +1,7 @@
+import hashlib
+import json
 import logging
+import pickle
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,6 +12,8 @@ from tqdm.auto import tqdm
 
 from mace_jax import data
 from mace_jax.data.streaming_loader import StreamingDatasetSpec
+
+_STREAMING_STATS_CACHE_VERSION = 1
 
 
 def _ensure_list(value) -> list[str]:
@@ -29,6 +34,201 @@ class _StreamingStats:
     min_distance_sum: float
     min_distance_count: int
     total_graphs: int
+
+
+def _graph_has_positive_weight(graph) -> bool:
+    weight = getattr(graph.globals, 'weight', None)
+    if weight is None:
+        return True
+    value = np.asarray(weight).reshape(-1)[0]
+    return float(value) > 0.0
+
+
+def _graph_from_dataset_entry(
+    dataset,
+    idx: int,
+    *,
+    spec: StreamingDatasetSpec,
+    z_table: data.AtomicNumberTable,
+    r_max: float,
+    head_to_index: dict[str, int],
+):
+    atoms = dataset[idx]
+    conf = data.config_from_atoms(
+        atoms,
+        energy_key=spec.energy_key,
+        forces_key=spec.forces_key,
+        stress_key=spec.stress_key,
+        config_type_weights=spec.config_type_weights,
+        prefactor_stress=spec.prefactor_stress,
+        remap_stress=spec.remap_stress,
+        head_name=spec.head_name,
+    )
+    if spec.weight != 1.0:
+        conf.weight *= float(spec.weight)
+    return data.graph_from_configuration(
+        conf,
+        cutoff=r_max,
+        z_table=z_table,
+        head_to_index=head_to_index,
+    )
+
+
+def _gather_sample_graphs(
+    dataset_path: Path,
+    *,
+    spec: StreamingDatasetSpec,
+    z_table: data.AtomicNumberTable,
+    r_max: float,
+    head_to_index: dict[str, int],
+    sample_limit: int,
+) -> list:
+    if sample_limit <= 0:
+        return []
+    graphs: list = []
+    dataset = data.HDF5Dataset(dataset_path)
+    try:
+        for idx in range(len(dataset)):
+            graph = _graph_from_dataset_entry(
+                dataset,
+                idx,
+                spec=spec,
+                z_table=z_table,
+                r_max=r_max,
+                head_to_index=head_to_index,
+            )
+            if not _graph_has_positive_weight(graph):
+                continue
+            graphs.append(graph)
+            if len(graphs) >= sample_limit:
+                break
+    finally:
+        dataset.close()
+    return graphs
+
+
+def _stats_cache_path(dataset_path: Path) -> Path:
+    suffix = dataset_path.suffix + '.streamstats.pkl'
+    return dataset_path.with_suffix(suffix)
+
+
+def _dataset_signature(dataset_path: Path) -> dict[str, float]:
+    stat = dataset_path.stat()
+    return {'size': stat.st_size, 'mtime': stat.st_mtime}
+
+
+def _normalized_config_type_weights(weights: dict | None) -> dict | None:
+    if not weights:
+        return None
+    return {str(key): float(value) for key, value in sorted(weights.items())}
+
+
+def _spec_fingerprint(
+    spec: StreamingDatasetSpec,
+    *,
+    r_max: float,
+    atomic_numbers: Sequence[int],
+    head_to_index: dict[str, int] | None = None,
+) -> str:
+    head_index = 0
+    if head_to_index is not None and spec.head_name in head_to_index:
+        head_index = int(head_to_index[spec.head_name])
+    payload = {
+        'head_name': spec.head_name,
+        'head_index': head_index,
+        'energy_key': spec.energy_key,
+        'forces_key': spec.forces_key,
+        'stress_key': spec.stress_key,
+        'prefactor_stress': float(spec.prefactor_stress),
+        'weight': float(spec.weight),
+        'config_type_weights': _normalized_config_type_weights(
+            spec.config_type_weights
+        ),
+        'remap_stress': spec.remap_stress.tolist()
+        if spec.remap_stress is not None
+        else None,
+        'path': str(Path(spec.path)),
+        'r_max': float(r_max),
+        'atomic_numbers': [int(z) for z in atomic_numbers],
+    }
+    encoded = json.dumps(payload, sort_keys=True)
+    return hashlib.sha256(encoded.encode('utf-8')).hexdigest()
+
+
+def _stats_to_payload(stats: _StreamingStats) -> dict:
+    return {
+        'ata': stats.ata,
+        'atb': stats.atb,
+        'neighbor_sum': stats.neighbor_sum,
+        'neighbor_count': stats.neighbor_count,
+        'min_distance_sum': stats.min_distance_sum,
+        'min_distance_count': stats.min_distance_count,
+        'total_graphs': stats.total_graphs,
+    }
+
+
+def _stats_from_payload(payload: dict) -> _StreamingStats:
+    return _StreamingStats(
+        sample_graphs=[],
+        ata=payload['ata'],
+        atb=payload['atb'],
+        neighbor_sum=payload['neighbor_sum'],
+        neighbor_count=payload['neighbor_count'],
+        min_distance_sum=payload['min_distance_sum'],
+        min_distance_count=payload['min_distance_count'],
+        total_graphs=payload['total_graphs'],
+    )
+
+
+def _load_cached_streaming_stats(
+    dataset_path: Path, fingerprint: str
+) -> _StreamingStats | None:
+    cache_path = _stats_cache_path(dataset_path)
+    if not cache_path.exists():
+        return None
+    try:
+        with cache_path.open('rb') as fh:
+            payload = pickle.load(fh)
+    except Exception as exc:  # pragma: no cover - cache corruption is unexpected
+        logging.warning(
+            'Failed to load streaming stats cache %s: %s', cache_path, exc
+        )
+        return None
+    if payload.get('version') != _STREAMING_STATS_CACHE_VERSION:
+        return None
+    dataset_sig = payload.get('dataset_signature')
+    if dataset_sig != _dataset_signature(dataset_path):
+        return None
+    if payload.get('spec_fingerprint') != fingerprint:
+        return None
+    stats_payload = payload.get('stats')
+    if not stats_payload:
+        return None
+    logging.info('Loaded cached streaming stats from %s', cache_path)
+    return _stats_from_payload(stats_payload)
+
+
+def _store_cached_streaming_stats(
+    dataset_path: Path,
+    fingerprint: str,
+    stats: _StreamingStats,
+) -> None:
+    cache_path = _stats_cache_path(dataset_path)
+    payload = {
+        'version': _STREAMING_STATS_CACHE_VERSION,
+        'dataset_signature': _dataset_signature(dataset_path),
+        'spec_fingerprint': fingerprint,
+        'stats': _stats_to_payload(stats),
+    }
+    try:
+        with cache_path.open('wb') as fh:
+            pickle.dump(payload, fh)
+    except OSError as exc:  # pragma: no cover - filesystem failure
+        logging.warning(
+            'Failed to write streaming stats cache %s: %s', cache_path, exc
+        )
+        return
+    logging.debug('Cached streaming stats to %s', cache_path)
 
 
 def _expand_hdf5_inputs(paths: Sequence[str]) -> list[Path]:
@@ -182,29 +382,16 @@ def _compute_streaming_stats(
             )
             iterator = progress
         for idx in iterator:
-            atoms = dataset[idx]
-            conf = data.config_from_atoms(
-                atoms,
-                energy_key=spec.energy_key,
-                forces_key=spec.forces_key,
-                stress_key=spec.stress_key,
-                config_type_weights=spec.config_type_weights,
-                prefactor_stress=spec.prefactor_stress,
-                remap_stress=spec.remap_stress,
-                head_name=spec.head_name,
-            )
-            if spec.weight != 1.0:
-                conf.weight *= float(spec.weight)
-            graph = data.graph_from_configuration(
-                conf,
-                cutoff=r_max,
+            graph = _graph_from_dataset_entry(
+                dataset,
+                idx,
+                spec=spec,
                 z_table=z_table,
+                r_max=r_max,
                 head_to_index=head_to_index,
             )
-            weight = getattr(graph.globals, 'weight', None)
-            if weight is not None:
-                if float(np.asarray(weight).reshape(-1)[0]) <= 0.0:
-                    continue
+            if not _graph_has_positive_weight(graph):
+                continue
             species = np.asarray(graph.nodes.species)
             counts = np.bincount(species, minlength=num_species).astype(np.float64)
             ata += np.outer(counts, counts)
@@ -250,6 +437,41 @@ def _compute_streaming_stats(
     )
 
 
+def _load_or_compute_streaming_stats(
+    spec: StreamingDatasetSpec,
+    *,
+    r_max: float,
+    z_table: data.AtomicNumberTable,
+    head_to_index: dict[str, int],
+    atomic_numbers: Sequence[int],
+    sample_limit: int,
+) -> _StreamingStats:
+    dataset_path = Path(spec.path)
+    fingerprint = _spec_fingerprint(
+        spec,
+        r_max=r_max,
+        atomic_numbers=atomic_numbers,
+        head_to_index=head_to_index,
+    )
+    cached = _load_cached_streaming_stats(dataset_path, fingerprint)
+    if cached is not None:
+        if sample_limit >= 0 and cached.sample_graphs is not None:
+            cached.sample_graphs = cached.sample_graphs[:sample_limit]
+        return cached
+    stats = _compute_streaming_stats(
+        dataset_path,
+        spec=spec,
+        z_table=z_table,
+        r_max=r_max,
+        head_to_index=head_to_index,
+        sample_limit=sample_limit,
+    )
+    if sample_limit >= 0 and stats.sample_graphs is not None:
+        stats.sample_graphs = stats.sample_graphs[:sample_limit]
+    _store_cached_streaming_stats(dataset_path, fingerprint, stats)
+    return stats
+
+
 def _build_streaming_train_loader(
     *,
     dataset_specs: Sequence[StreamingDatasetSpec],
@@ -263,6 +485,7 @@ def _build_streaming_train_loader(
     stream_workers: int,
     atomic_numbers_override: Sequence[int] | None = None,
     atomic_energies_override: dict[int, float] | str | None = None,
+    statistics_metadata_path: str | None = None,
 ) -> tuple[data.StreamingGraphDataLoader, dict[int, float], float]:
     if not dataset_specs:
         raise ValueError('No streaming datasets were provided.')
@@ -271,6 +494,10 @@ def _build_streaming_train_loader(
     else:
         atomic_numbers = _unique_atomic_numbers_from_hdf5(
             [spec.path for spec in dataset_specs]
+        )
+    if atomic_numbers_override and statistics_metadata_path:
+        logging.info(
+            'Using atomic numbers from statistics file %s', statistics_metadata_path
         )
     z_table = data.AtomicNumberTable(atomic_numbers)
     num_species = len(z_table)
@@ -286,17 +513,30 @@ def _build_streaming_train_loader(
     sample_cap = 32
 
     for spec in dataset_specs:
-        remaining = max(sample_cap - len(sample_graphs), 0)
-        stats = _compute_streaming_stats(
-            spec.path,
-            spec=spec,
-            z_table=z_table,
+        stats = _load_or_compute_streaming_stats(
+            spec,
             r_max=r_max,
+            z_table=z_table,
             head_to_index=head_to_index,
-            sample_limit=remaining if remaining else 0,
+            atomic_numbers=atomic_numbers,
+            sample_limit=sample_cap,
         )
+        remaining = max(sample_cap - len(sample_graphs), 0)
         if remaining:
-            sample_graphs.extend(stats.sample_graphs[:remaining])
+            if stats.sample_graphs:
+                sample_graphs.extend(stats.sample_graphs[:remaining])
+                remaining = max(sample_cap - len(sample_graphs), 0)
+            if remaining:
+                extra_graphs = _gather_sample_graphs(
+                    Path(spec.path),
+                    spec=spec,
+                    z_table=z_table,
+                    r_max=r_max,
+                    head_to_index=head_to_index,
+                    sample_limit=remaining,
+                )
+                if extra_graphs:
+                    sample_graphs.extend(extra_graphs[:remaining])
         ata += stats.ata
         atb += stats.atb
         neighbor_sum += stats.neighbor_sum
@@ -336,6 +576,10 @@ def _build_streaming_train_loader(
             [atomic_energies_dict[z_table.index_to_z(i)] for i in range(num_species)],
             dtype=np.float64,
         )
+        if statistics_metadata_path:
+            logging.info(
+                'Using atomic energies from statistics file %s', statistics_metadata_path
+            )
 
     datasets = [data.HDF5Dataset(spec.path, mode='r') for spec in dataset_specs]
     loader = data.StreamingGraphDataLoader(
@@ -556,6 +800,7 @@ def datasets(
     stream_train_workers: int = 0,
     atomic_numbers: Sequence[int] | None = None,
     atomic_energies_override: dict[int, float] | str | None = None,
+    statistics_metadata_path: str | None = None,
 ) -> tuple[
     data.StreamingGraphDataLoader,
     data.GraphDataLoader,
@@ -610,6 +855,7 @@ def datasets(
         stream_workers=stream_train_workers,
         atomic_numbers_override=atomic_numbers,
         atomic_energies_override=atomic_energies_override,
+        statistics_metadata_path=statistics_metadata_path,
     )
     effective_n_node = n_node
     effective_n_edge = n_edge
