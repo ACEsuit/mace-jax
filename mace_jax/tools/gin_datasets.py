@@ -170,8 +170,18 @@ def _compute_streaming_stats(
     min_distance_sum = 0.0
     min_distance_count = 0
     total_graphs = 0
+    dataset_len = len(dataset)
+    progress = None
     try:
-        for idx in range(len(dataset)):
+        iterator = range(dataset_len)
+        if dataset_len >= 1024:
+            progress = tqdm(
+                iterator,
+                desc=f'Computing streaming stats ({dataset_path.name})',
+                leave=False,
+            )
+            iterator = progress
+        for idx in iterator:
             atoms = dataset[idx]
             conf = data.config_from_atoms(
                 atoms,
@@ -221,6 +231,8 @@ def _compute_streaming_stats(
                 sample_graphs.append(graph)
             total_graphs += 1
     finally:
+        if progress is not None:
+            progress.close()
         dataset.close()
 
     if total_graphs == 0:
