@@ -190,13 +190,14 @@ def train(
             process_count=process_count,
             process_index=process_index,
         )
-        batches = tuple(iterator)
-        if not batches:
-            raise ValueError(
-                'No batches available for process '
-                f'{process_index}/{process_count}. Reduce process count or provide more data.'
-            )
-        return batches
+        total_batches = getattr(iterator, 'total_batches_hint', 0)
+        if not total_batches:
+            if steps_per_interval is None or steps_per_interval <= 0:
+                raise ValueError(
+                    'Provide steps_per_interval when total_batches_hint is unavailable.'
+                )
+            return iterator, steps_per_interval
+        return iterator, total_batches
 
     def _legacy_interval_loader():
         while True:
@@ -209,24 +210,21 @@ def train(
 
     for epoch in itertools.count(start_interval):
         if supports_iter_batches:
-            epoch_batches = _epoch_batches(epoch)
-            batch_iter = iter(epoch_batches)
+            epoch_batches_iter, available_steps = _epoch_batches(epoch)
 
             def _next_batch():
-                nonlocal batch_iter
-                try:
-                    return next(batch_iter)
-                except StopIteration:
-                    batch_iter = iter(epoch_batches)
-                    return next(batch_iter)
+                return next(epoch_batches_iter)
 
-            effective_steps = steps_per_interval
-            if effective_steps is None:
-                effective_steps = len(epoch_batches)
+            if steps_per_interval is not None and steps_per_interval > 0:
+                if steps_per_interval != available_steps:
+                    raise ValueError(
+                        f'steps_per_interval ({steps_per_interval}) must equal available batches '
+                        f'({available_steps}) when using iter_batches().'
+                    )
+            effective_steps = available_steps
             if effective_steps <= 0:
                 raise ValueError(
-                    'steps_per_interval must be positive when set explicitly; '
-                    "use None/'auto' to consume every batch exactly once per epoch."
+                    'iter_batches() produced no data; reduce process_count or provide more data.'
                 )
 
         else:
@@ -265,10 +263,6 @@ def train(
             if last_cache_size != update_fn._cache_size():
                 last_cache_size = update_fn._cache_size()
 
-                logging.info('Compiled function `update_fn` for args:')
-                logging.info(f'- n_node={graph.n_node} total={graph.n_node.sum()}')
-                logging.info(f'- n_edge={graph.n_edge} total={graph.n_edge.sum()}')
-                logging.info(f'Outout: loss= {loss:.3f}')
                 logging.info(
                     f'Compilation time: {time.time() - start_time:.3f}s, cache size: {last_cache_size}'
                 )
