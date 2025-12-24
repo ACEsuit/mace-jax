@@ -13,7 +13,6 @@ from queue import Queue
 import jraph
 import numpy as np
 
-from ._batch_iterator import BatchIteratorWrapper
 from .hdf5_dataset import HDF5Dataset
 from .utils import (
     AtomicNumberTable,
@@ -25,6 +24,18 @@ from .utils import (
 _RESULT_DATA = 'data'
 _RESULT_DONE = 'done'
 _RESULT_ERROR = 'error'
+
+
+class BatchIteratorWrapper:
+    def __init__(self, iterator, total_batches_hint: int):
+        self._iterator = iterator
+        self.total_batches_hint = int(total_batches_hint or 0)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return next(self._iterator)
 
 
 @dataclass(frozen=True)
