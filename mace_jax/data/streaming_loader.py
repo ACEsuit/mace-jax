@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import multiprocessing as mp
 import threading
+import time
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -226,8 +228,12 @@ class StreamingGraphDataLoader:
         self._epoch = 0
         self._niggli_reduce = bool(niggli_reduce)
         self._max_batches = max_batches
-        self._prefetch_batches = max(int(prefetch_batches or 0), 0)
-        self._num_workers = max(int(num_workers or 0), 0)
+        prefetched = prefetch_batches
+        worker_count = int(num_workers or 0)
+        if prefetched is None:
+            prefetched = worker_count
+        self._prefetch_batches = max(int(prefetched or 0), 0)
+        self._num_workers = max(worker_count, 0)
         self._graph_multiple = max(int(graph_multiple or 1), 1)
         self._pack_info: dict | None = None
         self._history: list[tuple[int, int]] = []

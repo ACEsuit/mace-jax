@@ -1,9 +1,11 @@
 import dataclasses
 import itertools
 import logging
+import threading
 import time
 from collections.abc import Callable
 from functools import partial
+from queue import Queue
 from typing import Any
 
 import gin
@@ -62,6 +64,46 @@ def _sanitize_grads(grads):
         return jnp.nan_to_num(arr)
 
     return jax.tree_util.tree_map(_sanitize, grads)
+
+
+def _prefetch_iterator(iterator, capacity: int):
+    if capacity is None or capacity <= 0:
+        return iterator
+    queue: Queue = Queue(maxsize=capacity)
+    sentinel = object()
+    total_hint = getattr(iterator, 'total_batches_hint', 0)
+
+    def _producer():
+        try:
+            for item in iterator:
+                queue.put(item)
+        finally:
+            queue.put(sentinel)
+
+    threading.Thread(target=_producer, daemon=True).start()
+
+    class _Prefetched:
+        def __init__(self):
+            self._done = False
+            self.total_batches_hint = total_hint
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            if self._done:
+                raise StopIteration
+            wait_start = time.time()
+            item = queue.get()
+            wait = time.time() - wait_start
+            if wait > 0:
+                logging.info('Prefetch queue waited %.3fs for next batch', wait)
+            if item is sentinel:
+                self._done = True
+                raise StopIteration
+            return item
+
+    return _Prefetched()
 
 
 def train(
@@ -190,6 +232,8 @@ def train(
             process_count=process_count,
             process_index=process_index,
         )
+        prefetch_cap = getattr(train_loader, '_prefetch_batches', None)
+        iterator = _prefetch_iterator(iterator, int(prefetch_cap or 0))
         total_batches = getattr(iterator, 'total_batches_hint', 0)
         if not total_batches:
             if steps_per_interval is None or steps_per_interval <= 0:
@@ -215,13 +259,16 @@ def train(
             def _next_batch():
                 return next(epoch_batches_iter)
 
-            effective_steps = steps_per_interval
-            if effective_steps is None:
-                effective_steps = available_steps
-            if effective_steps is None or effective_steps <= 0:
+            effective_steps = available_steps
+            if effective_steps <= 0:
                 raise ValueError(
-                    'iter_batches() produced no data and steps_per_interval was not provided; '
-                    'reduce process_count or provide more data.'
+                    'iter_batches() produced no data; reduce process_count or provide more data.'
+                )
+            if steps_per_interval not in (None, effective_steps):
+                logging.warning(
+                    'Ignoring steps_per_interval=%s in favor of total_batches=%s when using iter_batches().',
+                    steps_per_interval,
+                    effective_steps,
                 )
 
         else:
@@ -263,13 +310,6 @@ def train(
                 logging.info(
                     f'Compilation time: {time.time() - start_time:.3f}s, cache size: {last_cache_size}'
                 )
-
-        if supports_iter_batches:
-            while True:
-                try:
-                    next(epoch_batches_iter)
-                except StopIteration:
-                    break
 
         eval_params = ema_params
         if swa_state is not None and swa_config is not None:
