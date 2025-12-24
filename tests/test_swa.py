@@ -64,6 +64,9 @@ class _SequentialGraphLoader:
         self._index = (self._index + 1) % len(self._targets)
         return graph
 
+    def approx_length(self):
+        return max(1, len(self._targets))
+
 
 def _scalar_loss_fn(params, graph: jraph.GraphsTuple) -> jnp.ndarray:
     """Simple squared error loss between the parameter and per-graph target."""
@@ -87,7 +90,6 @@ def _run_jax_swa(targets, learning_rate, swa_cfg):
         train_loader=loader,
         gradient_transform=gradient_transform,
         optimizer_state=optimizer_state,
-        steps_per_interval=1,
         progress_bar=False,
         swa_config=swa_cfg,
     )

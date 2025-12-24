@@ -93,15 +93,11 @@ def main() -> None:
         help='Training seed forwarded to the CLI.',
     )
     parser.add_argument(
-        '--steps-per-interval',
-        type=int,
-        default=1,
-        help='Number of optimizer steps before evaluating (epoch size).',
-    )
-    parser.add_argument(
+        '--max-epochs',
         '--max-intervals',
         type=int,
         default=1,
+        dest='max_epochs',
         help='Stop after this many evaluation intervals.',
     )
     parser.add_argument(
@@ -158,8 +154,7 @@ def main() -> None:
         f'mace_jax.tools.gin_datasets.datasets.valid_path={_optional_path(args.valid_path, ensure_exists=True, label="validation dataset")}',
         f'mace_jax.tools.gin_datasets.datasets.test_path={_optional_path(args.test_path, ensure_exists=True, label="test dataset")}',
         f'mace_jax.tools.gin_functions.flags.seed={args.seed}',
-        f'mace_jax.tools.gin_functions.optimizer.steps_per_interval={args.steps_per_interval}',
-        f'mace_jax.tools.gin_functions.optimizer.max_num_intervals={args.max_intervals}',
+        f'mace_jax.tools.gin_functions.optimizer.max_epochs={args.max_epochs}',
     ]
 
     def _format_batch_limit(value: str | None) -> str | None:

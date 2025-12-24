@@ -48,8 +48,7 @@ loss.stress_weight = 0.0
 
 optimizer.algorithm = @amsgrad  # @adam is slightly worse
 optimizer.lr = 0.01
-optimizer.steps_per_interval = 1024
-optimizer.max_num_intervals = 100
+optimizer.max_epochs = 100
 # optimizer.weight_decay = 5e-7
 # optimizer.scheduler = @piecewise_constant_schedule
 # piecewise_constant_schedule.boundaries_and_scales = {

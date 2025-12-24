@@ -463,7 +463,8 @@ class StreamingGraphDataLoader:
         process_index: int,
     ) -> Iterator[jraph.GraphsTuple]:
         self.set_epoch(epoch)
-        batches_iter, _ = self._pack(seed_override=seed)
+        previous_info = getattr(self, '_pack_info', None)
+        batches_iter, info = self._pack(seed_override=seed)
 
         def _limited(iterable):
             if self._max_batches is None:
@@ -512,7 +513,9 @@ class StreamingGraphDataLoader:
 
             iterator = _single()
 
-        total_batches_hint = int(self._pack_info.get('total_batches') or 0)
+        total_batches_hint = int(info.get('total_batches') or 0)
+        if total_batches_hint <= 0 and previous_info:
+            total_batches_hint = int(previous_info.get('total_batches') or 0)
         return BatchIteratorWrapper(iterator, total_batches_hint)
 
     def __len__(self):

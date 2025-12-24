@@ -45,6 +45,9 @@ class _Loader:
         self._index = (self._index + 1) % len(self._targets)
         return graph
 
+    def approx_length(self):
+        return max(1, len(self._targets))
+
 
 def _loss_fn(params, graph: jraph.GraphsTuple) -> jnp.ndarray:
     diff = params['w'][0] - graph.globals['target'][0]
@@ -63,7 +66,6 @@ def _run_training(targets, *, steps, learning_rate=0.3, **train_kwargs):
         train_loader=loader,
         gradient_transform=gradient_transform,
         optimizer_state=optimizer_state,
-        steps_per_interval=1,
         progress_bar=False,
         **train_kwargs,
     )
@@ -142,7 +144,6 @@ def test_schedule_free_eval_fn_overrides_eval_params():
         train_loader=loader,
         gradient_transform=gradient_transform,
         optimizer_state=optimizer_state,
-        steps_per_interval=1,
         progress_bar=False,
         schedule_free_eval_fn=_eval_fn,
     )

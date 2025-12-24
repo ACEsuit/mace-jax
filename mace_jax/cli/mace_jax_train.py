@@ -330,16 +330,6 @@ def _parse_batch_limit_option(value):
     return int(value)
 
 
-def _parse_steps_per_interval_option(value):
-    if value is None:
-        return None
-    if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in {'auto', 'none'}:
-            return None
-        return int(value)
-    return int(value)
-
 
 def _apply_run_options(args: argparse.Namespace) -> None:
     _bind_if_not_none('mace_jax.tools.gin_functions.logs.name', args.name)
@@ -489,16 +479,10 @@ def _apply_dataset_options(args: argparse.Namespace) -> None:
 
 
 def _apply_training_controls(args: argparse.Namespace) -> None:
-    if args.steps_per_interval is not None:
-        steps = _parse_steps_per_interval_option(args.steps_per_interval)
+    if args.max_epochs is not None:
         gin.bind_parameter(
-            'mace_jax.tools.gin_functions.optimizer.steps_per_interval',
-            steps,
-        )
-    if args.max_num_intervals is not None:
-        gin.bind_parameter(
-            'mace_jax.tools.gin_functions.optimizer.max_num_intervals',
-            args.max_num_intervals,
+            'mace_jax.tools.gin_functions.optimizer.max_epochs',
+            args.max_epochs,
         )
     _bind_if_not_none(
         'mace_jax.tools.gin_functions.train.max_grad_norm', args.clip_grad
@@ -878,16 +862,14 @@ def run_training(dry_run: bool = False) -> None:
             logging.info('Checks enabled; exiting after sanity verification.')
             return
 
-        gradient_transform, steps_per_interval, max_num_intervals = (
-            gin_functions.optimizer()
+        interval_length = max(1, int(train_loader.approx_length()))
+        logging.info(
+            'Estimated %s batches per epoch from the training loader.',
+            interval_length,
         )
-        if not steps_per_interval or steps_per_interval <= 0:
-            auto_steps = train_loader.approx_length()
-            logging.info(
-                'Auto-setting steps_per_interval to %s based on training loader length.',
-                auto_steps,
-            )
-            steps_per_interval = auto_steps
+        gradient_transform, max_epochs = gin_functions.optimizer(
+            interval_length=interval_length
+        )
         params_for_opt, _ = gin_functions._split_config(params)
         optimizer_state = gradient_transform.init(params_for_opt)
 
@@ -926,8 +908,7 @@ def run_training(dry_run: bool = False) -> None:
             valid_loader=valid_loader,
             test_loader=test_loader,
             gradient_transform=gradient_transform,
-            max_num_intervals=max_num_intervals,
-            steps_per_interval=steps_per_interval,
+            max_epochs=max_epochs,
             logger=logger,
             directory=directory,
             tag=tag,

@@ -376,25 +376,16 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
         help='Number of evaluations without improvement before plateau scheduler steps.',
     )
     parser.add_argument(
-        '--steps-per-interval',
-        '--steps_per_interval',
-        '--steps-per-epoch',
-        '--steps_per_epoch',
-        type=str,
-        default=None,
-        help=(
-            'Number of optimizer steps per evaluation interval (epoch). '
-            "Pass 'auto' or 'None' to use every batch exactly once per epoch."
-        ),
-    )
-    parser.add_argument(
-        '--max-num-intervals',
-        '--max_num_intervals',
+        '--max-epochs',
+        '--max_epochs',
         '--max-num-epochs',
         '--max_num_epochs',
+        '--max-num-intervals',
+        '--max_num_intervals',
+        dest='max_epochs',
         type=int,
         default=None,
-        help='Maximum number of intervals/epochs before stopping.',
+        help='Maximum number of training epochs before stopping.',
     )
     parser.add_argument(
         '--patience',

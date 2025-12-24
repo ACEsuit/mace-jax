@@ -639,8 +639,6 @@ def test_cli_sets_runtime_and_training_controls(tmp_path):
             '0.5',
             '--eval-interval',
             '2',
-            '--steps-per-interval',
-            '3',
             '--max-num-intervals',
             '7',
             '--patience',
@@ -682,12 +680,7 @@ def test_cli_sets_runtime_and_training_controls(tmp_path):
     )
     assert gin.query_parameter('mace_jax.tools.gin_functions.train.ema_decay') == 0.99
     assert (
-        gin.query_parameter('mace_jax.tools.gin_functions.optimizer.steps_per_interval')
-        == 3
-    )
-    assert (
-        gin.query_parameter('mace_jax.tools.gin_functions.optimizer.max_num_intervals')
-        == 7
+        gin.query_parameter('mace_jax.tools.gin_functions.optimizer.max_epochs') == 7
     )
     assert gin.query_parameter('mace_jax.tools.gin_functions.train.patience') == 4
     assert gin.query_parameter(

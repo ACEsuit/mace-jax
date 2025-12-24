@@ -108,7 +108,6 @@ def train(
     train_loader: data.GraphDataLoader,  # device parallel done on the (optional) extra dimension
     gradient_transform: Any,
     optimizer_state: dict[str, Any],
-    steps_per_interval: int | None,
     ema_decay: float | None = None,
     progress_bar: bool = True,
     swa_config: SWAConfig | None = None,
@@ -220,6 +219,7 @@ def train(
     is_primary = process_index == 0
     process_count = getattr(jax, 'process_count', lambda: 1)()
     supports_iter_batches = hasattr(train_loader, 'iter_batches')
+    legacy_steps_cache: int | None = None
 
     def _epoch_batches(epoch: int):
         iterator = train_loader.iter_batches(
@@ -232,16 +232,45 @@ def train(
         iterator = _prefetch_iterator(iterator, int(prefetch_cap or 0))
         total_batches = getattr(iterator, 'total_batches_hint', 0)
         if not total_batches:
-            if steps_per_interval is None or steps_per_interval <= 0:
-                raise ValueError(
-                    'Provide steps_per_interval when total_batches_hint is unavailable.'
-                )
-            return iterator, steps_per_interval
+            approx_length = getattr(train_loader, 'approx_length', None)
+            if callable(approx_length):
+                try:
+                    total_batches = int(approx_length())
+                except Exception:  # pragma: no cover - defensive fallback
+                    total_batches = 0
+        if not total_batches:
+            raise ValueError(
+                'Training loader did not provide a total batch count; ensure it '
+                'implements iter_batches() with a total_batches_hint or approx_length().'
+            )
         return iterator, total_batches
 
     def _legacy_interval_loader():
         while True:
             yield from train_loader
+
+    def _legacy_effective_steps():
+        nonlocal legacy_steps_cache
+        if legacy_steps_cache is not None:
+            return legacy_steps_cache
+        approx_length = getattr(train_loader, 'approx_length', None)
+        if callable(approx_length):
+            value = int(approx_length())
+            if value > 0:
+                legacy_steps_cache = value
+                return legacy_steps_cache
+        length = None
+        try:
+            length = int(len(train_loader))  # type: ignore[arg-type]
+        except Exception:  # pragma: no cover - length optional
+            length = None
+        if length is None or length <= 0:
+            raise ValueError(
+                'Unable to determine number of batches for the training loader; provide '
+                'a loader with iter_batches() support or implement approx_length().'
+            )
+        legacy_steps_cache = length
+        return legacy_steps_cache
 
     initial_eval = eval_params
     if schedule_free_eval_fn is not None:
@@ -255,12 +284,6 @@ def train(
             if effective_steps <= 0:
                 raise ValueError(
                     'iter_batches() produced no data; reduce process_count or provide more data.'
-                )
-            if steps_per_interval not in (None, effective_steps):
-                logging.warning(
-                    'Ignoring steps_per_interval=%s in favor of total_batches=%s when using iter_batches().',
-                    steps_per_interval,
-                    effective_steps,
                 )
             p_bar = tqdm.tqdm(
                 total=effective_steps,
@@ -302,12 +325,7 @@ def train(
             def _next_batch():
                 return next(legacy_iter)
 
-            effective_steps = steps_per_interval
-            if effective_steps is None or effective_steps <= 0:
-                raise ValueError(
-                    'steps_per_interval must be specified and positive when the '
-                    'training loader does not expose iter_batches().'
-                )
+            effective_steps = _legacy_effective_steps()
 
             p_bar = tqdm.tqdm(
                 range(effective_steps),

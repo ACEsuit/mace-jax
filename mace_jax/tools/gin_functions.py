@@ -286,7 +286,7 @@ def checks(
 @gin.configurable
 def exponential_decay(
     lr: float,
-    steps_per_interval: int,
+    interval_length: int | None = None,
     *,
     transition_steps: float = 0.0,
     decay_rate: float = 0.5,
@@ -294,11 +294,12 @@ def exponential_decay(
     staircase: bool = True,
     end_value: float | None = None,
 ):
+    step_scale = int(interval_length) if interval_length and interval_length > 0 else 1
     return optax.exponential_decay(
         init_value=lr,
-        transition_steps=transition_steps * steps_per_interval,
+        transition_steps=int(transition_steps * step_scale),
         decay_rate=decay_rate,
-        transition_begin=transition_begin * steps_per_interval,
+        transition_begin=int(transition_begin * step_scale),
         staircase=staircase,
         end_value=end_value,
     )
@@ -306,26 +307,27 @@ def exponential_decay(
 
 @gin.configurable
 def piecewise_constant_schedule(
-    lr: float, steps_per_interval: int, *, boundaries_and_scales: dict[float, float]
+    lr: float,
+    interval_length: int | None = None,
+    *,
+    boundaries_and_scales: dict[float, float],
 ):
-    boundaries_and_scales = {
-        boundary * steps_per_interval: scale
-        for boundary, scale in boundaries_and_scales.items()
-    }
+    step_scale = int(interval_length) if interval_length and interval_length > 0 else 1
+    scaled = {boundary * step_scale: scale for boundary, scale in boundaries_and_scales.items()}
     return optax.piecewise_constant_schedule(
-        init_value=lr, boundaries_and_scales=boundaries_and_scales
+        init_value=lr, boundaries_and_scales=scaled
     )
 
 
 @gin.register
-def constant_schedule(lr, steps_per_interval):
+def constant_schedule(lr, interval_length=None):
     return optax.constant_schedule(lr)
 
 
 @gin.configurable
 def reduce_on_plateau(
     lr: float,
-    steps_per_interval: int,
+    interval_length: int | None = None,
     *,
     factor: float = 0.8,
     patience: int = 10,
@@ -370,8 +372,8 @@ gin.register('sgd')(optax.identity)
 
 @gin.configurable
 def optimizer(
-    steps_per_interval: int,
-    max_num_intervals: int,
+    max_epochs: int,
+    interval_length: int | None = None,
     weight_decay=0.0,
     lr=0.01,
     algorithm: Callable = optax.scale_by_adam,
@@ -393,14 +395,14 @@ def optimizer(
         assert any(any(('symmetric_contraction' in ki) for ki in k) for k in params)
         return tools.unflatten_dict(mask)
 
-    schedule = scheduler(lr, steps_per_interval)
+    step_scale = int(interval_length) if interval_length and interval_length > 0 else 1
+    schedule = scheduler(lr, step_scale)
     if (
         stage_two_lr is not None
         and stage_two_interval is not None
-        and steps_per_interval is not None
         and stage_two_interval >= 0
     ):
-        boundary_step = stage_two_interval * steps_per_interval
+        boundary_step = int(stage_two_interval * step_scale)
         stage_schedule = optax.constant_schedule(stage_two_lr)
         schedule = optax.join_schedules(
             schedules=[schedule, stage_schedule],
@@ -445,11 +447,7 @@ def optimizer(
         )
         setattr(gradient_chain, 'schedule_free_eval_fn', schedule_free_eval_params)
 
-    return (
-        gradient_chain,
-        steps_per_interval,
-        max_num_intervals,
-    )
+    return gradient_chain, max_epochs
 
 
 def _masked_additive_weight_decay(
@@ -483,8 +481,7 @@ def train(
     valid_loader,
     test_loader,
     gradient_transform,
-    max_num_intervals: int,
-    steps_per_interval: int,
+    max_epochs: int,
     logger,
     directory,
     tag,
@@ -683,7 +680,6 @@ def train(
         train_loader=train_loader,
         gradient_transform=gradient_transform,
         optimizer_state=optimizer_state,
-        steps_per_interval=steps_per_interval,
         ema_decay=ema_decay,
         max_grad_norm=max_grad_norm,
         start_interval=start_interval,
@@ -699,7 +695,7 @@ def train(
         if helper is not None:
             helper.restart_timer()
 
-        last_epoch = max_num_intervals is not None and epoch >= max_num_intervals
+        last_epoch = max_epochs is not None and epoch >= max_epochs
 
         if is_primary:
             with open(f'{directory}/{tag}.pkl', 'wb') as f:

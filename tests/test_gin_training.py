@@ -36,8 +36,7 @@ mace_jax.tools.gin_datasets.datasets.min_n_graph = 2
 mace_jax.tools.gin_datasets.datasets.r_max = 2.5
 
 mace_jax.tools.gin_functions.flags.seed = 0
-mace_jax.tools.gin_functions.optimizer.steps_per_interval = 1
-mace_jax.tools.gin_functions.optimizer.max_num_intervals = 1
+mace_jax.tools.gin_functions.optimizer.max_epochs = 1
 mace_jax.tools.gin_functions.train.progress_bar = False
 """
 
@@ -208,10 +207,10 @@ def _run_gin_training(tmp_path, **train_kwargs):
     if gin_functions.checks(predictor, params, train_loader):
         pytest.skip('Sanity checks failed')
 
-    gradient_transform, steps_per_interval, max_num_intervals = (
-        gin_functions.optimizer()
+    approx_batches = max(1, int(train_loader.approx_length()))
+    gradient_transform, max_epochs = gin_functions.optimizer(
+        interval_length=approx_batches
     )
-    assert steps_per_interval == 1
 
     params_for_opt, _ = gin_functions._split_config(params)
     optimizer_state = gradient_transform.init(params_for_opt)
@@ -228,8 +227,7 @@ def _run_gin_training(tmp_path, **train_kwargs):
         valid_loader=valid_loader,
         test_loader=test_loader,
         gradient_transform=gradient_transform,
-        max_num_intervals=max_num_intervals,
-        steps_per_interval=steps_per_interval,
+        max_epochs=max_epochs,
         logger=logger,
         directory=directory,
         tag=tag,
