@@ -93,11 +93,7 @@ def _prefetch_iterator(iterator, capacity: int):
         def __next__(self):
             if self._done:
                 raise StopIteration
-            wait_start = time.time()
             item = queue.get()
-            wait = time.time() - wait_start
-            if wait > 0:
-                logging.info('Prefetch queue waited %.3fs for next batch', wait)
             if item is sentinel:
                 self._done = True
                 raise StopIteration
@@ -380,10 +376,30 @@ def evaluate(
 
     start_time = time.time()
 
+    process_index = getattr(jax, 'process_index', lambda: 0)()
+    process_count = getattr(jax, 'process_count', lambda: 1)()
+    supports_iter_batches = hasattr(data_loader, 'iter_batches')
+
+    if supports_iter_batches:
+        iterator = data_loader.iter_batches(
+            epoch=0,
+            seed=None,
+            process_count=process_count,
+            process_index=process_index,
+        )
+        total_hint = getattr(iterator, 'total_batches_hint', 0)
+    else:
+        iterator = iter(data_loader)
+        total_hint = 0
+
+    eval_iterator = _prefetch_iterator(
+        iterator, int(getattr(data_loader, '_prefetch_batches', 0) or 0)
+    )
+
     p_bar = tqdm.tqdm(
-        data_loader,
+        eval_iterator,
         desc=name,
-        total=data_loader.approx_length(),
+        total=total_hint or data_loader.approx_length(),
         disable=not progress_bar,
     )
 

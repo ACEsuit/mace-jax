@@ -537,7 +537,9 @@ def train(
         if loader is None:
             return None
         if process_count > 1:
-            return loader.shard(process_count, process_index)
+            shard_fn = getattr(loader, 'shard', None)
+            if callable(shard_fn):
+                return shard_fn(process_count, process_index)
         return loader
 
     def _resolve_checkpoint_dir() -> Path:
@@ -640,8 +642,6 @@ def train(
         return loader
 
     def _enumerate_eval_targets(loader, head_loaders, epoch):
-        if process_count > 1 and not is_primary:
-            return []
         if not _loader_has_graphs(loader):
             return []
         if head_loaders:
@@ -708,33 +708,29 @@ def train(
 
         def eval_and_print(loader, mode: str, *, head_name: str | None = None):
             eval_mode = mode if head_name is None else f'{mode}:{head_name}'
-            loss_ = None
-            metrics_: dict[str, Any] = {}
-            if is_primary or process_count == 1:
-                loss_, metrics_ = tools.evaluate(
-                    predictor=predictor_with_config,
-                    params=eval_params,
-                    loss_fn=loss_fn,
-                    data_loader=loader,
-                    name=eval_mode,
-                )
-                metrics_['mode'] = mode
-                if head_name is not None:
-                    metrics_['head'] = head_name
-                metrics_['interval'] = epoch
-                metrics_['epoch'] = epoch
-                if is_primary:
-                    logger.log(metrics_)
+            if loader is None:
+                return
+            loss_, metrics_ = tools.evaluate(
+                predictor=predictor_with_config,
+                params=eval_params,
+                loss_fn=loss_fn,
+                data_loader=loader,
+                name=eval_mode,
+            )
+            metrics_['mode'] = mode
+            if head_name is not None:
+                metrics_['head'] = head_name
+            metrics_['interval'] = epoch
+            metrics_['epoch'] = epoch
+            if is_primary:
+                logger.log(metrics_)
 
-                def _maybe_float(value):
-                    if isinstance(value, numbers.Number):
-                        return float(value)
-                    if (
-                        isinstance(value, (np.ndarray, jnp.ndarray))
-                        and value.shape == ()
-                    ):
-                        return float(np.asarray(value))
-                    return None
+            def _maybe_float(value):
+                if isinstance(value, numbers.Number):
+                    return float(value)
+                if isinstance(value, (np.ndarray, jnp.ndarray)) and value.shape == ():
+                    return float(np.asarray(value))
+                return None
 
                 stress_rmse_key = (
                     'rmse_stress'
@@ -840,11 +836,7 @@ def train(
 
         evaluate_now = _should_run_eval(epoch, last_epoch)
 
-        if (
-            (eval_train or last_epoch)
-            and evaluate_now
-            and (is_primary or process_count == 1)
-        ):
+        if (eval_train or last_epoch) and evaluate_now:
             if isinstance(eval_train, (int, float)):
                 subset_loader = train_loader.subset(eval_train)
                 subset_loader = _prepare_loader_for_eval(subset_loader, epoch)
@@ -858,7 +850,6 @@ def train(
             (eval_test or last_epoch)
             and _loader_has_graphs(test_loader)
             and evaluate_now
-            and (is_primary or process_count == 1)
         ):
             for head_name, loader in _enumerate_eval_targets(
                 test_loader, test_head_loaders, epoch
@@ -874,7 +865,7 @@ def train(
                     loader, 'eval_valid', head_name=head_name
                 )
 
-        if last_valid_loss is not None:
+        if last_valid_loss is not None and is_primary:
             if last_valid_loss >= lowest_loss:
                 patience_counter += 1
                 if patience is not None and patience_counter >= patience:
