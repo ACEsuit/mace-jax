@@ -677,8 +677,8 @@ def _build_streaming_train_loader(
     loader.total_edges = total_edges
     loader.streaming = True
     loader.z_table = z_table
-    loader._fixed_pad_nodes = n_node
-    loader._fixed_pad_edges = n_edge
+    loader._fixed_pad_nodes = loader._n_node if n_node is None else int(n_node)
+    loader._fixed_pad_edges = loader._n_edge if n_edge is None else int(n_edge)
     loader._fixed_pad_graphs = pad_graphs_estimate
     return loader, atomic_energies_dict, r_max
 
@@ -876,8 +876,8 @@ def _build_eval_streaming_loader(
         loader.total_edges = total_edges
     loader.streaming = True
     loader.z_table = z_table
-    loader._fixed_pad_nodes = n_node
-    loader._fixed_pad_edges = n_edge
+    loader._fixed_pad_nodes = loader._n_node if n_node is None else int(n_node)
+    loader._fixed_pad_edges = loader._n_edge if n_edge is None else int(n_edge)
     loader._fixed_pad_graphs = pad_graphs_estimate
     return loader
 

@@ -410,9 +410,12 @@ class StreamingGraphDataLoader:
             fixed_pad_graphs=getattr(self, '_fixed_pad_graphs', None),
             reuse_info=reuse_info,
         )
-        self._fixed_pad_nodes = info.get('pad_nodes')
-        self._fixed_pad_edges = info.get('pad_edges')
-        self._fixed_pad_graphs = info.get('pad_graphs')
+        if self._fixed_pad_nodes is None:
+            self._fixed_pad_nodes = info.get('pad_nodes')
+        if self._fixed_pad_edges is None:
+            self._fixed_pad_edges = info.get('pad_edges')
+        if self._fixed_pad_graphs is None:
+            self._fixed_pad_graphs = info.get('pad_graphs')
         self._pack_info = info
         return batches, info
 

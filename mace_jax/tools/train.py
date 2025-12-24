@@ -251,10 +251,6 @@ def train(
     for epoch in itertools.count(start_interval):
         if supports_iter_batches:
             epoch_batches_iter, available_steps = _epoch_batches(epoch)
-
-            def _next_batch():
-                return next(epoch_batches_iter)
-
             effective_steps = available_steps
             if effective_steps <= 0:
                 raise ValueError(
@@ -265,6 +261,36 @@ def train(
                     'Ignoring steps_per_interval=%s in favor of total_batches=%s when using iter_batches().',
                     steps_per_interval,
                     effective_steps,
+                )
+            p_bar = tqdm.tqdm(
+                total=effective_steps,
+                desc=f'Epoch {epoch + 1}',
+                disable=not (progress_bar and is_primary),
+            )
+            batches_in_epoch = 0
+            for graph in epoch_batches_iter:
+                graph = _prepare_graph_for_devices(graph)
+                num_updates += 1
+                start_time = time.time()
+                loss, params, optimizer_state, ema_params = update_fn(
+                    params, optimizer_state, ema_params, num_updates, graph
+                )
+                loss = float(loss)
+                if is_primary:
+                    p_bar.set_postfix({'loss': f'{loss:7.3f}'})
+                p_bar.update(1)
+
+                if last_cache_size != update_fn._cache_size():
+                    last_cache_size = update_fn._cache_size()
+
+                    logging.info(
+                        f'Compilation time: {time.time() - start_time:.3f}s, cache size: {last_cache_size}'
+                    )
+                batches_in_epoch += 1
+            p_bar.close()
+            if batches_in_epoch <= 0:
+                raise ValueError(
+                    'iter_batches() produced no data; reduce process_count or provide more data.'
                 )
 
         else:
@@ -283,29 +309,29 @@ def train(
                     'training loader does not expose iter_batches().'
                 )
 
-        p_bar = tqdm.tqdm(
-            range(effective_steps),
-            desc=f'Epoch {epoch + 1}',
-            disable=not (progress_bar and is_primary),
-        )
-        for _ in p_bar:
-            graph = _next_batch()
-            graph = _prepare_graph_for_devices(graph)
-            num_updates += 1
-            start_time = time.time()
-            loss, params, optimizer_state, ema_params = update_fn(
-                params, optimizer_state, ema_params, num_updates, graph
+            p_bar = tqdm.tqdm(
+                range(effective_steps),
+                desc=f'Epoch {epoch + 1}',
+                disable=not (progress_bar and is_primary),
             )
-            loss = float(loss)
-            if is_primary:
-                p_bar.set_postfix({'loss': f'{loss:7.3f}'})
-
-            if last_cache_size != update_fn._cache_size():
-                last_cache_size = update_fn._cache_size()
-
-                logging.info(
-                    f'Compilation time: {time.time() - start_time:.3f}s, cache size: {last_cache_size}'
+            for _ in p_bar:
+                graph = _next_batch()
+                graph = _prepare_graph_for_devices(graph)
+                num_updates += 1
+                start_time = time.time()
+                loss, params, optimizer_state, ema_params = update_fn(
+                    params, optimizer_state, ema_params, num_updates, graph
                 )
+                loss = float(loss)
+                if is_primary:
+                    p_bar.set_postfix({'loss': f'{loss:7.3f}'})
+
+                if last_cache_size != update_fn._cache_size():
+                    last_cache_size = update_fn._cache_size()
+
+                    logging.info(
+                        f'Compilation time: {time.time() - start_time:.3f}s, cache size: {last_cache_size}'
+                    )
 
         eval_params = ema_params
         if swa_state is not None and swa_config is not None:
