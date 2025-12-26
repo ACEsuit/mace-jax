@@ -377,6 +377,9 @@ class StreamingGraphDataLoader:
                     raise RuntimeError(f'Graph worker {payload_a} failed: {payload_b}')
                 seq_id = payload_a
                 graph = payload_b
+                if self._shuffle:
+                    yield graph
+                    continue
                 if seq_id == next_seq:
                     yield graph
                     next_seq += 1
