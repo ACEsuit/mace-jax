@@ -206,9 +206,7 @@ def _load_cached_streaming_stats(
         with cache_path.open('rb') as fh:
             payload = pickle.load(fh)
     except Exception as exc:  # pragma: no cover - cache corruption is unexpected
-        logging.warning(
-            'Failed to load streaming stats cache %s: %s', cache_path, exc
-        )
+        logging.warning('Failed to load streaming stats cache %s: %s', cache_path, exc)
         return None
     if payload.get('version') != _STREAMING_STATS_CACHE_VERSION:
         return None
@@ -240,9 +238,7 @@ def _store_cached_streaming_stats(
         with cache_path.open('wb') as fh:
             pickle.dump(payload, fh)
     except OSError as exc:  # pragma: no cover - filesystem failure
-        logging.warning(
-            'Failed to write streaming stats cache %s: %s', cache_path, exc
-        )
+        logging.warning('Failed to write streaming stats cache %s: %s', cache_path, exc)
         return
     logging.debug('Cached streaming stats to %s', cache_path)
 
@@ -449,9 +445,7 @@ def _compute_streaming_stats(
             total_edges += g_edges
             would_nodes = current_nodes + g_nodes
             would_edges = current_edges + g_edges
-            if current_graphs and (
-                would_nodes > node_cap or would_edges > edge_cap
-            ):
+            if current_graphs and (would_nodes > node_cap or would_edges > edge_cap):
                 max_graphs_per_batch = max(max_graphs_per_batch, current_graphs)
                 current_graphs = current_nodes = current_edges = 0
             current_graphs += 1
@@ -642,7 +636,8 @@ def _build_streaming_train_loader(
         )
         if statistics_metadata_path:
             logging.info(
-                'Using atomic energies from statistics file %s', statistics_metadata_path
+                'Using atomic energies from statistics file %s',
+                statistics_metadata_path,
             )
 
     pad_graphs_estimate = max(max_graphs_per_batch, 1)
@@ -815,70 +810,33 @@ def _build_eval_streaming_loader(
     head_to_index: dict[str, int],
     base_z_table: data.AtomicNumberTable | None,
     num_workers: int = 0,
+    seed: int = 0,
+    stream_prefetch: int | None = None,
+    template_loader: data.StreamingGraphDataLoader | None = None,
 ) -> data.StreamingGraphDataLoader | None:
     if not dataset_specs:
         return None
-    if base_z_table is None:
-        atomic_numbers = _unique_atomic_numbers_from_hdf5(
-            [spec.path for spec in dataset_specs]
-        )
-        z_table = data.AtomicNumberTable(atomic_numbers)
-    else:
-        z_table = base_z_table
-    atomic_numbers = [int(z) for z in z_table.zs]
-    total_nodes = 0
-    total_edges = 0
-    total_graphs = 0
-    max_graphs_per_batch = 0
-    for spec in dataset_specs:
-        stats = _load_or_compute_streaming_stats(
-            spec,
-            r_max=r_max,
-            z_table=z_table,
-            head_to_index=head_to_index,
-            atomic_numbers=atomic_numbers,
-            sample_limit=0,
-            node_cap=n_node,
-            edge_cap=n_edge,
-            graph_multiple=n_graph,
-        )
-        total_nodes += stats.total_nodes
-        total_edges += stats.total_edges
-        total_graphs += stats.total_graphs
-        max_graphs_per_batch = max(max_graphs_per_batch, stats.max_graphs_per_batch)
-    pad_graphs_estimate = max(max_graphs_per_batch, 1)
-    if n_graph > 1:
-        pad_graphs_estimate = math.ceil(pad_graphs_estimate / n_graph) * n_graph
-    pad_graphs_estimate = max(pad_graphs_estimate + n_graph, n_graph + 1)
+    atomic_numbers_override: Sequence[int] | None = None
+    atomic_energies_override: dict[int, float] | str | None = None
+    if template_loader is not None:
+        atomic_numbers_override = getattr(template_loader, 'atomic_numbers', None)
+        atomic_energies_override = getattr(template_loader, 'atomic_energies', None)
+    if atomic_numbers_override is None and base_z_table is not None:
+        atomic_numbers_override = [int(z) for z in base_z_table.zs]
 
-    datasets = [data.HDF5Dataset(spec.path, mode='r') for spec in dataset_specs]
-    loader = data.StreamingGraphDataLoader(
-        datasets=datasets,
+    loader, _, _ = _build_streaming_train_loader(
         dataset_specs=dataset_specs,
-        z_table=z_table,
         r_max=r_max,
         n_node=n_node,
         n_edge=n_edge,
+        n_graph=n_graph,
+        seed=int(seed),
         head_to_index=head_to_index,
-        shuffle=False,
-        seed=None,
-        niggli_reduce=False,
-        max_batches=None,
-        prefetch_batches=None,
-        num_workers=int(num_workers or 0),
-        graph_multiple=n_graph,
+        stream_prefetch=stream_prefetch,
+        stream_workers=num_workers,
+        atomic_numbers_override=atomic_numbers_override,
+        atomic_energies_override=atomic_energies_override,
     )
-    loader.graphs = None
-    loader.total_graphs = total_graphs or sum(len(ds) for ds in datasets)
-    if total_nodes:
-        loader.total_nodes = total_nodes
-    if total_edges:
-        loader.total_edges = total_edges
-    loader.streaming = True
-    loader.z_table = z_table
-    loader._fixed_pad_nodes = loader._n_node if n_node is None else int(n_node)
-    loader._fixed_pad_edges = loader._n_edge if n_edge is None else int(n_edge)
-    loader._fixed_pad_graphs = pad_graphs_estimate
     return loader
 
 
@@ -986,6 +944,9 @@ def datasets(
         head_to_index=head_to_index,
         base_z_table=base_z_table,
         num_workers=stream_train_workers,
+        seed=seed,
+        stream_prefetch=stream_train_prefetch,
+        template_loader=train_loader,
     )
     test_loader = _build_eval_streaming_loader(
         test_specs,
@@ -996,6 +957,9 @@ def datasets(
         head_to_index=head_to_index,
         base_z_table=base_z_table,
         num_workers=stream_train_workers,
+        seed=seed,
+        stream_prefetch=stream_train_prefetch,
+        template_loader=train_loader,
     )
     logging.info(
         'Streaming training graphs: %s from %s files',

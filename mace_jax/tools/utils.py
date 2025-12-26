@@ -300,10 +300,6 @@ def compute_rel_rmse(delta: np.ndarray, target_val: np.ndarray) -> float:
     return np.sqrt(np.mean(np.square(delta))).item() / (target_norm + 1e-30)
 
 
-def compute_q95(delta: np.ndarray) -> float:
-    return np.percentile(np.abs(delta), q=95)
-
-
 def compute_c(delta: np.ndarray, eta: float) -> float:
     return np.mean(np.abs(delta) < eta).item()
 
