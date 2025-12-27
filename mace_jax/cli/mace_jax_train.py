@@ -48,6 +48,7 @@ _LOSS_FACTORIES = {
     'dipole': modules.WeightedEnergyForcesDipoleLoss,
     'energy_forces_dipole': modules.WeightedEnergyForcesDipoleLoss,
     'l1l2': modules.WeightedEnergyForcesL1L2Loss,
+    'l1l2energyforces': modules.WeightedEnergyForcesL1L2Loss,
 }
 
 _FOUNDATION_TEMP_DIRS: list[Path] = []
@@ -330,7 +331,6 @@ def _parse_batch_limit_option(value):
     return int(value)
 
 
-
 def _apply_run_options(args: argparse.Namespace) -> None:
     _bind_if_not_none('mace_jax.tools.gin_functions.logs.name', args.name)
     if args.log_dir is not None:
@@ -416,9 +416,7 @@ def _apply_dataset_options(args: argparse.Namespace) -> None:
             stats_atomic_numbers = parsed
         atomic_numbers_source = tuple(int(z) for z in stats_atomic_numbers)
         if stats_path:
-            logging.info(
-                'Using atomic numbers from statistics file %s', stats_path
-            )
+            logging.info('Using atomic numbers from statistics file %s', stats_path)
     if atomic_numbers_source:
         gin.bind_parameter(
             'mace_jax.tools.gin_datasets.datasets.atomic_numbers',
@@ -678,6 +676,10 @@ def _apply_loss_options(args: argparse.Namespace) -> None:
     gin.bind_parameter('loss.loss_cls', factory)
     for param_name, value in configured_weights.items():
         gin.bind_parameter(f'loss.{param_name}', value)
+    if args.log_errors is None and loss_choice in ('l1l2', 'l1l2energyforces'):
+        gin.bind_parameter(
+            'mace_jax.tools.gin_functions.train.log_errors', 'PerAtomMAE'
+        )
 
 
 def _collect_swa_loss_kwargs(args: argparse.Namespace) -> dict[str, float] | None:
@@ -854,8 +856,18 @@ def run_training(dry_run: bool = False) -> None:
 
         params = gin_functions.reload(params)
 
+        loss_fn = gin_functions.loss()
+        forces_weight = getattr(loss_fn, 'forces_weight', 0.0)
+        stress_weight = getattr(loss_fn, 'stress_weight', 0.0)
+        compute_force = bool(float(forces_weight) != 0.0)
+        compute_stress = bool(float(stress_weight) != 0.0)
         predictor = jax.jit(
-            lambda w, g: model_fn(w, g, compute_force=True, compute_stress=True)
+            lambda w, g: model_fn(
+                w,
+                g,
+                compute_force=compute_force,
+                compute_stress=compute_stress,
+            )
         )
 
         if gin_functions.checks(predictor, params, train_loader):

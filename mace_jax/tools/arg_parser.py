@@ -457,7 +457,7 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
             'DipolePolarRMSE',
             'EnergyDipoleRMSE',
         ],
-        default=None,
+        default='PerAtomRMSE',
         help='Select which error summary to log each interval.',
     )
     parser.add_argument(
@@ -498,6 +498,7 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
             'dipole',
             'energy_forces_dipole',
             'l1l2',
+            'l1l2energyforces',
         ],
         default=None,
         help='Select loss function (mirrors Torch CLI choices).',

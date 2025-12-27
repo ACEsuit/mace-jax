@@ -1,10 +1,10 @@
 import hashlib
 import json
 import logging
-import math
 import pickle
 from collections.abc import Sequence
 from dataclasses import dataclass
+from glob import glob
 from pathlib import Path
 
 import gin
@@ -27,6 +27,14 @@ def _ensure_list(value) -> list[str]:
 
 @dataclass
 class _StreamingStats:
+    batch_assignments: list[list[int]]
+    n_nodes: int
+    n_edges: int
+    n_graphs: int
+
+
+@dataclass
+class _StreamingMetadata:
     sample_graphs: list
     ata: np.ndarray
     atb: np.ndarray
@@ -37,7 +45,6 @@ class _StreamingStats:
     total_graphs: int
     total_nodes: int
     total_edges: int
-    max_graphs_per_batch: int
 
 
 def _graph_has_positive_weight(graph) -> bool:
@@ -111,6 +118,37 @@ def _gather_sample_graphs(
     return graphs
 
 
+def _extend_sample_graphs(
+    sample_graphs: list,
+    *,
+    sample_limit: int,
+    metadata: _StreamingMetadata | None,
+    dataset_path: Path,
+    spec: StreamingDatasetSpec,
+    z_table: data.AtomicNumberTable,
+    r_max: float,
+    head_to_index: dict[str, int],
+) -> None:
+    remaining = max(sample_limit - len(sample_graphs), 0)
+    if not remaining:
+        return
+    if metadata and metadata.sample_graphs:
+        sample_graphs.extend(metadata.sample_graphs[:remaining])
+        remaining = max(sample_limit - len(sample_graphs), 0)
+    if not remaining:
+        return
+    extra_graphs = _gather_sample_graphs(
+        dataset_path,
+        spec=spec,
+        z_table=z_table,
+        r_max=r_max,
+        head_to_index=head_to_index,
+        sample_limit=remaining,
+    )
+    if extra_graphs:
+        sample_graphs.extend(extra_graphs[:remaining])
+
+
 def _stats_cache_path(dataset_path: Path) -> Path:
     suffix = dataset_path.suffix + '.streamstats.pkl'
     return dataset_path.with_suffix(suffix)
@@ -133,9 +171,7 @@ def _spec_fingerprint(
     r_max: float,
     atomic_numbers: Sequence[int],
     head_to_index: dict[str, int] | None = None,
-    node_cap: int | None = None,
     edge_cap: int | None = None,
-    graph_multiple: int | None = None,
 ) -> str:
     head_index = 0
     if head_to_index is not None and spec.head_name in head_to_index:
@@ -157,9 +193,7 @@ def _spec_fingerprint(
         'path': str(Path(spec.path)),
         'r_max': float(r_max),
         'atomic_numbers': [int(z) for z in atomic_numbers],
-        'node_cap': int(node_cap) if node_cap is not None else None,
         'edge_cap': int(edge_cap) if edge_cap is not None else None,
-        'graph_multiple': int(graph_multiple) if graph_multiple is not None else None,
     }
     encoded = json.dumps(payload, sort_keys=True)
     return hashlib.sha256(encoded.encode('utf-8')).hexdigest()
@@ -167,32 +201,19 @@ def _spec_fingerprint(
 
 def _stats_to_payload(stats: _StreamingStats) -> dict:
     return {
-        'ata': stats.ata,
-        'atb': stats.atb,
-        'neighbor_sum': stats.neighbor_sum,
-        'neighbor_count': stats.neighbor_count,
-        'min_distance_sum': stats.min_distance_sum,
-        'min_distance_count': stats.min_distance_count,
-        'total_graphs': stats.total_graphs,
-        'total_nodes': stats.total_nodes,
-        'total_edges': stats.total_edges,
-        'max_graphs_per_batch': stats.max_graphs_per_batch,
+        'batch_assignments': stats.batch_assignments,
+        'n_nodes': stats.n_nodes,
+        'n_edges': stats.n_edges,
+        'n_graphs': stats.n_graphs,
     }
 
 
 def _stats_from_payload(payload: dict) -> _StreamingStats:
     return _StreamingStats(
-        sample_graphs=[],
-        ata=payload['ata'],
-        atb=payload['atb'],
-        neighbor_sum=payload['neighbor_sum'],
-        neighbor_count=payload['neighbor_count'],
-        min_distance_sum=payload['min_distance_sum'],
-        min_distance_count=payload['min_distance_count'],
-        total_graphs=payload['total_graphs'],
-        total_nodes=payload.get('total_nodes', 0),
-        total_edges=payload.get('total_edges', 0),
-        max_graphs_per_batch=payload.get('max_graphs_per_batch', 0),
+        batch_assignments=payload['batch_assignments'],
+        n_nodes=payload['n_nodes'],
+        n_edges=payload['n_edges'],
+        n_graphs=payload['n_graphs'],
     )
 
 
@@ -246,22 +267,31 @@ def _store_cached_streaming_stats(
 def _expand_hdf5_inputs(paths: Sequence[str]) -> list[Path]:
     expanded: list[Path] = []
     for raw in paths:
-        candidate = Path(raw)
-        if candidate.is_dir():
-            files = sorted(
-                p for p in candidate.iterdir() if p.suffix.lower() in ('.h5', '.hdf5')
-            )
-            if not files:
-                raise ValueError(
-                    f"No HDF5 files found in directory '{candidate.resolve()}'."
+        if any(ch in raw for ch in '*?[]'):
+            matches = [Path(p) for p in sorted(glob(raw))]
+            if not matches:
+                raise ValueError(f"No HDF5 files matched pattern '{raw}'.")
+            candidates = matches
+        else:
+            candidates = [Path(raw)]
+        for candidate in candidates:
+            if candidate.is_dir():
+                files = sorted(
+                    p
+                    for p in candidate.iterdir()
+                    if p.suffix.lower() in ('.h5', '.hdf5')
                 )
-            expanded.extend(files)
-            continue
-        if candidate.suffix.lower() not in ('.h5', '.hdf5'):
-            raise ValueError(
-                f"Path '{candidate.resolve()}' is not an HDF5 file or directory."
-            )
-        expanded.append(candidate)
+                if not files:
+                    raise ValueError(
+                        f"No HDF5 files found in directory '{candidate.resolve()}'."
+                    )
+                expanded.extend(files)
+                continue
+            if candidate.suffix.lower() not in ('.h5', '.hdf5'):
+                raise ValueError(
+                    f"Path '{candidate.resolve()}' is not an HDF5 file or directory."
+                )
+            expanded.append(candidate)
     if not expanded:
         raise ValueError('No HDF5 files were provided for streaming.')
     return expanded
@@ -282,6 +312,41 @@ def _ensure_streaming_head_options(head_name: str, head_cfg: dict) -> None:
         if head_cfg.get(key) not in (None, [], {}):
             raise ValueError(
                 f"Head '{head_name}' option '{key}' is not supported with streaming training."
+            )
+
+
+def _append_streaming_specs(
+    collection: list[StreamingDatasetSpec],
+    *,
+    head_name: str,
+    paths: Sequence[str],
+    config_type_weights: dict | None,
+    energy_key: str,
+    forces_key: str,
+    prefactor_stress: float,
+    remap_stress: np.ndarray | None,
+    weight: float = 1.0,
+    log_label: str | None = None,
+) -> None:
+    for expanded in _expand_hdf5_inputs(paths):
+        collection.append(
+            StreamingDatasetSpec(
+                path=expanded,
+                head_name=head_name,
+                config_type_weights=config_type_weights,
+                energy_key=energy_key,
+                forces_key=forces_key,
+                prefactor_stress=prefactor_stress,
+                remap_stress=remap_stress,
+                weight=float(weight),
+            )
+        )
+        if log_label:
+            logging.info(
+                "Prepared streaming %s dataset for head '%s' from '%s'",
+                log_label,
+                head_name,
+                expanded,
             )
 
 
@@ -306,41 +371,33 @@ def _collect_streaming_specs(
                 raise ValueError(
                     f"Head '{head_name}' does not define a train_path and no global train_path was provided."
                 )
-            head_ct_weights = head_cfg.get('config_type_weights', config_type_weights)
-            head_energy_key = head_cfg.get('energy_key', energy_key)
-            head_forces_key = head_cfg.get('forces_key', forces_key)
-            head_prefactor_stress = head_cfg.get('prefactor_stress', prefactor_stress)
-            head_remap_stress = head_cfg.get('remap_stress', remap_stress)
-            head_weight = float(head_cfg.get('weight', 1.0))
-            for expanded in _expand_hdf5_inputs(head_paths):
-                specs.append(
-                    StreamingDatasetSpec(
-                        path=expanded,
-                        head_name=head_name,
-                        config_type_weights=head_ct_weights,
-                        energy_key=head_energy_key,
-                        forces_key=head_forces_key,
-                        prefactor_stress=head_prefactor_stress,
-                        remap_stress=head_remap_stress,
-                        weight=head_weight,
-                    )
-                )
+            _append_streaming_specs(
+                specs,
+                head_name=head_name,
+                paths=head_paths,
+                config_type_weights=head_cfg.get(
+                    'config_type_weights', config_type_weights
+                ),
+                energy_key=head_cfg.get('energy_key', energy_key),
+                forces_key=head_cfg.get('forces_key', forces_key),
+                prefactor_stress=head_cfg.get('prefactor_stress', prefactor_stress),
+                remap_stress=head_cfg.get('remap_stress', remap_stress),
+                weight=head_cfg.get('weight', 1.0),
+            )
     else:
         base_paths = _ensure_list(train_path)
         if not base_paths:
             raise ValueError('train_path must be provided for streaming training.')
-        for expanded in _expand_hdf5_inputs(base_paths):
-            specs.append(
-                StreamingDatasetSpec(
-                    path=expanded,
-                    head_name=head_names[0],
-                    config_type_weights=config_type_weights,
-                    energy_key=energy_key,
-                    forces_key=forces_key,
-                    prefactor_stress=prefactor_stress,
-                    remap_stress=remap_stress,
-                )
-            )
+        _append_streaming_specs(
+            specs,
+            head_name=head_names[0],
+            paths=base_paths,
+            config_type_weights=config_type_weights,
+            energy_key=energy_key,
+            forces_key=forces_key,
+            prefactor_stress=prefactor_stress,
+            remap_stress=remap_stress,
+        )
     return specs
 
 
@@ -363,6 +420,39 @@ def _unique_atomic_numbers_from_hdf5(paths: Sequence[Path]) -> list[int]:
     return sorted(numbers)
 
 
+def _pack_streaming_batches(
+    graph_sizes: list[tuple[int, int, int]],
+    edge_cap: int,
+    node_cap: int | None = None,
+) -> list[list[int]]:
+    if not graph_sizes:
+        return []
+    order = sorted(graph_sizes, key=lambda item: item[2], reverse=True)
+    batches: list[dict[str, object]] = []
+    for graph_idx, nodes, edges in order:
+        placed = False
+        for batch in batches:
+            edge_sum = batch['edge_sum']
+            node_sum = batch['node_sum']
+            if edge_sum + edges <= edge_cap and (
+                node_cap is None or node_sum + nodes <= node_cap
+            ):
+                batch['edge_sum'] = edge_sum + edges
+                batch['node_sum'] = node_sum + nodes
+                batch['graphs'].append(graph_idx)
+                placed = True
+                break
+        if not placed:
+            batches.append(
+                {
+                    'edge_sum': edges,
+                    'node_sum': nodes,
+                    'graphs': [graph_idx],
+                }
+            )
+    return [batch['graphs'] for batch in batches]
+
+
 def _compute_streaming_stats(
     dataset_path: Path,
     *,
@@ -371,10 +461,9 @@ def _compute_streaming_stats(
     r_max: float,
     head_to_index: dict[str, int],
     sample_limit: int,
-    node_cap: int,
     edge_cap: int,
-    graph_multiple: int,
-) -> _StreamingStats:
+    collect_metadata: bool,
+) -> tuple[_StreamingStats, _StreamingMetadata | None]:
     dataset = data.HDF5Dataset(dataset_path)
     sample_graphs: list = []
     num_species = len(z_table)
@@ -387,11 +476,9 @@ def _compute_streaming_stats(
     total_graphs = 0
     total_nodes = 0
     total_edges = 0
-    batch_graph_cap = max(int(graph_multiple or 1), 1)
-    max_graphs_per_batch = 0
-    current_graphs = 0
-    current_nodes = 0
-    current_edges = 0
+    max_graph_edges = 0
+    max_graph_nodes = 0
+    graph_sizes: list[tuple[int, int, int]] = []
     dataset_len = len(dataset)
     progress = None
     try:
@@ -416,41 +503,37 @@ def _compute_streaming_stats(
                 continue
             g_nodes = int(graph.n_node.sum())
             g_edges = int(graph.n_edge.sum())
-            species = np.asarray(graph.nodes.species)
-            counts = np.bincount(species, minlength=num_species).astype(np.float64)
-            ata += np.outer(counts, counts)
-            energy = getattr(graph.globals, 'energy', None)
-            if energy is not None:
-                energy_value = float(np.asarray(energy).reshape(-1)[0])
-                atb += counts * energy_value
-            receivers = np.asarray(graph.receivers)
-            if receivers.size:
-                _, per_counts = np.unique(receivers, return_counts=True)
-                neighbor_sum += per_counts.sum()
-                neighbor_count += per_counts.size
-            senders = np.asarray(graph.senders)
-            if senders.size and receivers.size:
-                positions = np.asarray(graph.nodes.positions)
-                shifts = np.asarray(graph.edges.shifts)
-                recv_pos = positions[receivers]
-                vectors = positions[senders] + shifts - recv_pos
-                lengths = np.linalg.norm(vectors, axis=-1)
-                if lengths.size:
-                    min_distance_sum += float(lengths.min())
-                    min_distance_count += 1
+            if collect_metadata:
+                species = np.asarray(graph.nodes.species)
+                counts = np.bincount(species, minlength=num_species).astype(np.float64)
+                ata += np.outer(counts, counts)
+                energy = getattr(graph.globals, 'energy', None)
+                if energy is not None:
+                    energy_value = float(np.asarray(energy).reshape(-1)[0])
+                    atb += counts * energy_value
+                receivers = np.asarray(graph.receivers)
+                if receivers.size:
+                    _, per_counts = np.unique(receivers, return_counts=True)
+                    neighbor_sum += per_counts.sum()
+                    neighbor_count += per_counts.size
+                senders = np.asarray(graph.senders)
+                if senders.size and receivers.size:
+                    positions = np.asarray(graph.nodes.positions)
+                    shifts = np.asarray(graph.edges.shifts)
+                    recv_pos = positions[receivers]
+                    vectors = positions[senders] + shifts - recv_pos
+                    lengths = np.linalg.norm(vectors, axis=-1)
+                    if lengths.size:
+                        min_distance_sum += float(lengths.min())
+                        min_distance_count += 1
             if len(sample_graphs) < sample_limit:
                 sample_graphs.append(graph)
             total_graphs += 1
             total_nodes += g_nodes
             total_edges += g_edges
-            would_nodes = current_nodes + g_nodes
-            would_edges = current_edges + g_edges
-            if current_graphs and (would_nodes > node_cap or would_edges > edge_cap):
-                max_graphs_per_batch = max(max_graphs_per_batch, current_graphs)
-                current_graphs = current_nodes = current_edges = 0
-            current_graphs += 1
-            current_nodes += g_nodes
-            current_edges += g_edges
+            max_graph_edges = max(max_graph_edges, g_edges)
+            max_graph_nodes = max(max_graph_nodes, g_nodes)
+            graph_sizes.append((idx, g_nodes, g_edges))
     finally:
         if progress is not None:
             progress.close()
@@ -459,22 +542,69 @@ def _compute_streaming_stats(
     if total_graphs == 0:
         raise ValueError(f"No graphs found in '{dataset_path}'.")
 
-    if current_graphs:
-        max_graphs_per_batch = max(max_graphs_per_batch, current_graphs)
+    if max_graph_edges > edge_cap:
+        logging.warning(
+            'Requested max edges per batch (%s) is below the largest graph (%s) '
+            'in %s. Raising the limit to fit.',
+            edge_cap,
+            max_graph_edges,
+            dataset_path.name,
+        )
+        edge_cap = max_graph_edges
 
-    return _StreamingStats(
-        sample_graphs=sample_graphs,
-        ata=ata,
-        atb=atb,
-        neighbor_sum=neighbor_sum,
-        neighbor_count=neighbor_count,
-        min_distance_sum=min_distance_sum,
-        min_distance_count=min_distance_count,
-        total_graphs=total_graphs,
-        total_nodes=total_nodes,
-        total_edges=total_edges,
-        max_graphs_per_batch=max_graphs_per_batch,
+    batch_assignments = _pack_streaming_batches(graph_sizes, edge_cap)
+    nodes_by_index = {idx: nodes for idx, nodes, _ in graph_sizes}
+    node_sums = [sum(nodes_by_index[i] for i in batch) for batch in batch_assignments]
+    if node_sums:
+        node_target = int(np.ceil(np.percentile(node_sums, 80)))
+    else:
+        node_target = max_graph_nodes
+    if node_target < max_graph_nodes:
+        logging.warning(
+            'Typical node target (%s) is below the largest graph (%s) in %s. '
+            'Raising to fit.',
+            node_target,
+            max_graph_nodes,
+            dataset_path.name,
+        )
+        node_target = max_graph_nodes
+    if node_sums:
+        max_nodes_per_batch = max(node_sums)
+        if node_target < max_nodes_per_batch:
+            batch_assignments = _pack_streaming_batches(
+                graph_sizes, edge_cap, node_target
+            )
+
+    max_nodes_per_batch = 0
+    max_graphs_per_batch = 0
+    for batch in batch_assignments:
+        nodes_sum = sum(nodes_by_index[i] for i in batch)
+        max_nodes_per_batch = max(max_nodes_per_batch, nodes_sum)
+        graphs_count = len(batch)
+        max_graphs_per_batch = max(max_graphs_per_batch, graphs_count)
+    n_nodes = max(max_nodes_per_batch + 1, 2)
+    n_graphs = max(max_graphs_per_batch + 1, 2)
+    stats = _StreamingStats(
+        batch_assignments=batch_assignments,
+        n_nodes=n_nodes,
+        n_edges=edge_cap,
+        n_graphs=n_graphs,
     )
+    metadata = None
+    if collect_metadata:
+        metadata = _StreamingMetadata(
+            sample_graphs=sample_graphs,
+            ata=ata,
+            atb=atb,
+            neighbor_sum=neighbor_sum,
+            neighbor_count=neighbor_count,
+            min_distance_sum=min_distance_sum,
+            min_distance_count=min_distance_count,
+            total_graphs=total_graphs,
+            total_nodes=total_nodes,
+            total_edges=total_edges,
+        )
+    return stats, metadata
 
 
 def _load_or_compute_streaming_stats(
@@ -485,47 +615,51 @@ def _load_or_compute_streaming_stats(
     head_to_index: dict[str, int],
     atomic_numbers: Sequence[int],
     sample_limit: int,
-    node_cap: int,
     edge_cap: int,
-    graph_multiple: int,
-) -> _StreamingStats:
+    collect_metadata: bool,
+) -> tuple[_StreamingStats, _StreamingMetadata | None]:
     dataset_path = Path(spec.path)
     fingerprint = _spec_fingerprint(
         spec,
         r_max=r_max,
         atomic_numbers=atomic_numbers,
         head_to_index=head_to_index,
-        node_cap=node_cap,
         edge_cap=edge_cap,
-        graph_multiple=graph_multiple,
     )
     cached = _load_cached_streaming_stats(dataset_path, fingerprint)
-    if cached is not None:
-        if sample_limit >= 0 and cached.sample_graphs is not None:
-            cached.sample_graphs = cached.sample_graphs[:sample_limit]
-        return cached
-    stats = _compute_streaming_stats(
+    if cached is None:
+        stats, metadata = _compute_streaming_stats(
+            dataset_path,
+            spec=spec,
+            z_table=z_table,
+            r_max=r_max,
+            head_to_index=head_to_index,
+            sample_limit=sample_limit,
+            edge_cap=edge_cap,
+            collect_metadata=collect_metadata,
+        )
+        _store_cached_streaming_stats(dataset_path, fingerprint, stats)
+        return stats, metadata
+    if not collect_metadata:
+        return cached, None
+    _, metadata = _compute_streaming_stats(
         dataset_path,
         spec=spec,
         z_table=z_table,
         r_max=r_max,
         head_to_index=head_to_index,
         sample_limit=sample_limit,
-        node_cap=node_cap,
         edge_cap=edge_cap,
-        graph_multiple=graph_multiple,
+        collect_metadata=True,
     )
-    if sample_limit >= 0 and stats.sample_graphs is not None:
-        stats.sample_graphs = stats.sample_graphs[:sample_limit]
-    _store_cached_streaming_stats(dataset_path, fingerprint, stats)
-    return stats
+    return cached, metadata
 
 
 def _build_streaming_train_loader(
     *,
     dataset_specs: Sequence[StreamingDatasetSpec],
     r_max: float,
-    n_node: int,
+    n_node: int | None,
     n_edge: int,
     n_graph: int,
     seed: int,
@@ -557,51 +691,47 @@ def _build_streaming_train_loader(
     neighbor_count = 0
     min_distance_sum = 0.0
     min_distance_count = 0
-    total_graphs = 0
-    total_nodes = 0
-    total_edges = 0
     sample_graphs: list = []
     sample_cap = 32
-    max_graphs_per_batch = 0
+    batch_assignments: list[list[list[int]]] = []
+    n_nodes = 0
+    n_edges = 0
+    n_graphs = 0
+
+    collect_metadata = not isinstance(atomic_energies_override, dict)
 
     for spec in dataset_specs:
-        stats = _load_or_compute_streaming_stats(
+        stats, metadata = _load_or_compute_streaming_stats(
             spec,
             r_max=r_max,
             z_table=z_table,
             head_to_index=head_to_index,
             atomic_numbers=atomic_numbers,
             sample_limit=sample_cap,
-            node_cap=n_node,
             edge_cap=n_edge,
-            graph_multiple=n_graph,
+            collect_metadata=collect_metadata,
         )
-        remaining = max(sample_cap - len(sample_graphs), 0)
-        if remaining:
-            if stats.sample_graphs:
-                sample_graphs.extend(stats.sample_graphs[:remaining])
-                remaining = max(sample_cap - len(sample_graphs), 0)
-            if remaining:
-                extra_graphs = _gather_sample_graphs(
-                    Path(spec.path),
-                    spec=spec,
-                    z_table=z_table,
-                    r_max=r_max,
-                    head_to_index=head_to_index,
-                    sample_limit=remaining,
-                )
-                if extra_graphs:
-                    sample_graphs.extend(extra_graphs[:remaining])
-        ata += stats.ata
-        atb += stats.atb
-        neighbor_sum += stats.neighbor_sum
-        neighbor_count += stats.neighbor_count
-        min_distance_sum += stats.min_distance_sum
-        min_distance_count += stats.min_distance_count
-        total_graphs += stats.total_graphs
-        total_nodes += stats.total_nodes
-        total_edges += stats.total_edges
-        max_graphs_per_batch = max(max_graphs_per_batch, stats.max_graphs_per_batch)
+        batch_assignments.append(stats.batch_assignments)
+        n_nodes = max(n_nodes, int(stats.n_nodes))
+        n_edges = max(n_edges, int(stats.n_edges))
+        n_graphs = max(n_graphs, int(stats.n_graphs))
+        _extend_sample_graphs(
+            sample_graphs,
+            sample_limit=sample_cap,
+            metadata=metadata,
+            dataset_path=Path(spec.path),
+            spec=spec,
+            z_table=z_table,
+            r_max=r_max,
+            head_to_index=head_to_index,
+        )
+        if metadata:
+            ata += metadata.ata
+            atb += metadata.atb
+            neighbor_sum += metadata.neighbor_sum
+            neighbor_count += metadata.neighbor_count
+            min_distance_sum += metadata.min_distance_sum
+            min_distance_count += metadata.min_distance_count
 
     if not sample_graphs:
         raise ValueError('Unable to build initialization graphs from training data.')
@@ -610,11 +740,14 @@ def _build_streaming_train_loader(
     avg_min_distance = (
         min_distance_sum / min_distance_count if min_distance_count else 0.0
     )
-    regularizer = 1e-8 * np.eye(num_species)
-    atomic_energies = np.linalg.solve(ata + regularizer, atb)
-    atomic_energies_dict = {
-        z_table.index_to_z(i): float(atomic_energies[i]) for i in range(num_species)
-    }
+    atomic_energies_dict: dict[int, float] = {}
+    atomic_energies = np.zeros((num_species,), dtype=np.float64)
+    if collect_metadata and np.any(atb):
+        regularizer = 1e-8 * np.eye(num_species)
+        atomic_energies = np.linalg.solve(ata + regularizer, atb)
+        atomic_energies_dict = {
+            z_table.index_to_z(i): float(atomic_energies[i]) for i in range(num_species)
+        }
     if isinstance(atomic_energies_override, str):
         if atomic_energies_override.lower() == 'average':
             atomic_energies_override = None
@@ -639,11 +772,22 @@ def _build_streaming_train_loader(
                 'Using atomic energies from statistics file %s',
                 statistics_metadata_path,
             )
+    elif not atomic_energies_dict:
+        atomic_energies_dict = data.compute_average_E0s(sample_graphs, z_table)
+        atomic_energies = np.array(
+            [
+                atomic_energies_dict.get(z_table.index_to_z(i), 0.0)
+                for i in range(num_species)
+            ],
+            dtype=np.float64,
+        )
 
-    pad_graphs_estimate = max(max_graphs_per_batch, 1)
-    if n_graph > 1:
-        pad_graphs_estimate = math.ceil(pad_graphs_estimate / n_graph) * n_graph
-    pad_graphs_estimate = max(pad_graphs_estimate + n_graph, n_graph + 1)
+    if n_edges <= 0:
+        n_edges = int(n_edge)
+    if n_nodes <= 0:
+        n_nodes = 2
+    if n_graphs <= 0:
+        n_graphs = 2
 
     datasets = [data.HDF5Dataset(spec.path, mode='r') for spec in dataset_specs]
     loader = data.StreamingGraphDataLoader(
@@ -651,8 +795,8 @@ def _build_streaming_train_loader(
         dataset_specs=dataset_specs,
         z_table=z_table,
         r_max=r_max,
-        n_node=n_node,
-        n_edge=n_edge,
+        n_node=n_nodes,
+        n_edge=n_edges,
         head_to_index=head_to_index,
         shuffle=True,
         seed=seed,
@@ -660,21 +804,24 @@ def _build_streaming_train_loader(
         max_batches=None,
         prefetch_batches=None if stream_prefetch is None else int(stream_prefetch),
         num_workers=int(stream_workers or 0),
-        graph_multiple=n_graph,
+        batch_assignments=batch_assignments,
+        pad_graphs=n_graphs,
     )
     loader.graphs = sample_graphs
     loader.atomic_numbers = tuple(atomic_numbers)
     loader.avg_num_neighbors = avg_neighbors
     loader.avg_r_min = avg_min_distance
     loader.atomic_energies = atomic_energies
-    loader.total_graphs = total_graphs
-    loader.total_nodes = total_nodes
-    loader.total_edges = total_edges
+    loader.total_graphs = sum(
+        len(batch) for batches in batch_assignments for batch in batches
+    )
+    loader.total_nodes = None
+    loader.total_edges = None
     loader.streaming = True
     loader.z_table = z_table
-    loader._fixed_pad_nodes = loader._n_node if n_node is None else int(n_node)
-    loader._fixed_pad_edges = loader._n_edge if n_edge is None else int(n_edge)
-    loader._fixed_pad_graphs = pad_graphs_estimate
+    loader._fixed_pad_nodes = int(n_nodes)
+    loader._fixed_pad_edges = int(n_edges)
+    loader._fixed_pad_graphs = int(n_graphs)
     return loader, atomic_energies_dict, r_max
 
 
@@ -699,37 +846,6 @@ def _collect_eval_streaming_specs(
     valid_specs: list[StreamingDatasetSpec] = []
     test_specs: list[StreamingDatasetSpec] = []
 
-    def _append_specs(
-        collection: list[StreamingDatasetSpec],
-        *,
-        head_name: str,
-        paths: Sequence[str],
-        head_ct_weights,
-        head_energy_key,
-        head_forces_key,
-        head_prefactor_stress,
-        head_remap_stress,
-        label: str,
-    ):
-        for expanded in _expand_hdf5_inputs(paths):
-            collection.append(
-                StreamingDatasetSpec(
-                    path=expanded,
-                    head_name=head_name,
-                    config_type_weights=head_ct_weights,
-                    energy_key=head_energy_key,
-                    forces_key=head_forces_key,
-                    prefactor_stress=head_prefactor_stress,
-                    remap_stress=head_remap_stress,
-                )
-            )
-            logging.info(
-                "Prepared streaming %s dataset for head '%s' from '%s'",
-                label,
-                head_name,
-                expanded,
-            )
-
     if head_configs:
         for head_name in head_names:
             head_cfg = head_configs.get(head_name, {})
@@ -741,16 +857,16 @@ def _collect_eval_streaming_specs(
 
             head_valid_path = head_cfg.get('valid_path', valid_path)
             if head_valid_path:
-                _append_specs(
+                _append_streaming_specs(
                     valid_specs,
                     head_name=head_name,
                     paths=_ensure_list(head_valid_path),
-                    head_ct_weights=head_ct_weights,
-                    head_energy_key=head_energy_key,
-                    head_forces_key=head_forces_key,
-                    head_prefactor_stress=head_prefactor_stress,
-                    head_remap_stress=head_remap_stress,
-                    label='validation',
+                    config_type_weights=head_ct_weights,
+                    energy_key=head_energy_key,
+                    forces_key=head_forces_key,
+                    prefactor_stress=head_prefactor_stress,
+                    remap_stress=head_remap_stress,
+                    log_label='validation',
                 )
 
             head_test_path = head_cfg.get('test_path', test_path)
@@ -760,41 +876,41 @@ def _collect_eval_streaming_specs(
                     f"Head '{head_name}' specifies test_num which is not supported with streaming evaluation datasets."
                 )
             if head_test_path:
-                _append_specs(
+                _append_streaming_specs(
                     test_specs,
                     head_name=head_name,
                     paths=_ensure_list(head_test_path),
-                    head_ct_weights=head_ct_weights,
-                    head_energy_key=head_energy_key,
-                    head_forces_key=head_forces_key,
-                    head_prefactor_stress=head_prefactor_stress,
-                    head_remap_stress=head_remap_stress,
-                    label='test',
+                    config_type_weights=head_ct_weights,
+                    energy_key=head_energy_key,
+                    forces_key=head_forces_key,
+                    prefactor_stress=head_prefactor_stress,
+                    remap_stress=head_remap_stress,
+                    log_label='test',
                 )
     else:
         if valid_path:
-            _append_specs(
+            _append_streaming_specs(
                 valid_specs,
                 head_name=head_names[0],
                 paths=_ensure_list(valid_path),
-                head_ct_weights=config_type_weights,
-                head_energy_key=energy_key,
-                head_forces_key=forces_key,
-                head_prefactor_stress=prefactor_stress,
-                head_remap_stress=remap_stress,
-                label='validation',
+                config_type_weights=config_type_weights,
+                energy_key=energy_key,
+                forces_key=forces_key,
+                prefactor_stress=prefactor_stress,
+                remap_stress=remap_stress,
+                log_label='validation',
             )
         if test_path:
-            _append_specs(
+            _append_streaming_specs(
                 test_specs,
                 head_name=head_names[0],
                 paths=_ensure_list(test_path),
-                head_ct_weights=config_type_weights,
-                head_energy_key=energy_key,
-                head_forces_key=forces_key,
-                head_prefactor_stress=prefactor_stress,
-                head_remap_stress=remap_stress,
-                label='test',
+                config_type_weights=config_type_weights,
+                energy_key=energy_key,
+                forces_key=forces_key,
+                prefactor_stress=prefactor_stress,
+                remap_stress=remap_stress,
+                log_label='test',
             )
 
     return valid_specs, test_specs
@@ -855,7 +971,7 @@ def datasets(
     seed: int = 1234,
     energy_key: str = 'energy',
     forces_key: str = 'forces',
-    n_node: int = 1,
+    n_node: int | None = None,
     n_edge: int = 1,
     n_graph: int = 1,
     prefactor_stress: float = 1.0,
@@ -885,6 +1001,12 @@ def datasets(
         raise ValueError(
             'valid_fraction and valid_num are not supported; provide explicit validation files.'
         )
+    if n_node is not None:
+        raise ValueError(
+            'n_node is not supported with streaming datasets; configure n_edge only.'
+        )
+    if n_edge is None:
+        raise ValueError('n_edge must be provided for streaming datasets.')
 
     dataset_specs = _collect_streaming_specs(
         head_names=head_names,
@@ -923,10 +1045,10 @@ def datasets(
         atomic_energies_override=atomic_energies_override,
         statistics_metadata_path=statistics_metadata_path,
     )
-    effective_n_node = n_node
-    effective_n_edge = n_edge
+    effective_n_node = getattr(train_loader, '_fixed_pad_nodes', None)
     if effective_n_node is None:
         effective_n_node = getattr(train_loader, '_n_node', None)
+    effective_n_edge = getattr(train_loader, '_fixed_pad_edges', None)
     if effective_n_edge is None:
         effective_n_edge = getattr(train_loader, '_n_edge', None)
     if effective_n_node is None or effective_n_edge is None:

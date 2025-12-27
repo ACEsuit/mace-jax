@@ -471,7 +471,14 @@ class GraphDataLoader:
         if isinstance(i, list):
             graphs = [graphs[j] for j in i]
         if isinstance(i, float):
-            graphs = graphs[: int(len(graphs) * i)]
+            count = int(len(graphs) * i)
+            logging.info(
+                'Subset fraction=%s cached=%s selected=%s',
+                i,
+                len(graphs),
+                count,
+            )
+            graphs = graphs[:count]
 
         return self._spawn_loader(graphs, heads=self.heads, shuffle=self.shuffle)
 
@@ -720,19 +727,68 @@ def prepare_sharded_batch(graph, num_devices: int):
             return item[0] if len(item) == 1 else jraph.batch_np(item)
         raise TypeError('Expected a GraphsTuple or sequence of GraphsTuples.')
 
-    device_batches = []
+    def _pad_device_batches(device_graphs, targets=None):
+        if not device_graphs:
+            return device_graphs
+        graph_counts = [int(np.asarray(g.n_node).shape[0]) for g in device_graphs]
+        nodes_per_device = [int(np.sum(np.asarray(g.n_node))) for g in device_graphs]
+        edges_per_device = [int(np.sum(np.asarray(g.n_edge))) for g in device_graphs]
+        if (
+            len(set(nodes_per_device)) == 1
+            and len(set(edges_per_device)) == 1
+            and len(set(graph_counts)) == 1
+        ):
+            return device_graphs
+        if targets is None:
+            max_nodes = max(nodes_per_device)
+            max_edges = max(edges_per_device)
+            max_graphs = max(graph_counts)
+            target_n_node = max(max_nodes + 1, 1)
+            target_n_edge = max_edges
+            target_n_graph = max(2, max_graphs + 1)
+        else:
+            target_n_node, target_n_edge, target_n_graph = targets
+        padded = []
+        for g in device_graphs:
+            if (
+                int(np.sum(np.asarray(g.n_node))) < target_n_node
+                or int(np.sum(np.asarray(g.n_edge))) < target_n_edge
+                or int(np.asarray(g.n_node).shape[0]) < target_n_graph
+            ):
+                g = jraph.pad_with_graphs(
+                    g,
+                    n_node=target_n_node,
+                    n_edge=target_n_edge,
+                    n_graph=target_n_graph,
+                )
+            padded.append(g)
+        return padded
+
+    fixed_targets = None
+    if isinstance(graph, jraph.GraphsTuple):
+        total_nodes = int(np.sum(np.asarray(graph.n_node)))
+        total_edges = int(np.sum(np.asarray(graph.n_edge)))
+        fixed_targets = (max(total_nodes + 1, 1), total_edges, None)
+
     if isinstance(graph, Sequence) and not isinstance(graph, jraph.GraphsTuple):
         filtered = [g for g in graph if g is not None]
         if len(filtered) != num_devices:
             raise ValueError(
                 f'Expected {num_devices} micro-batches for multi-device execution, got {len(filtered)}.'
             )
-        for item in filtered:
-            device_batches.append(prepare_single_batch(_ensure_graphs_tuple(item)))
+        device_graphs = [_ensure_graphs_tuple(item) for item in filtered]
     else:
-        chunks = split_graphs_for_devices(graph, num_devices)
-        for chunk in chunks:
-            device_batches.append(prepare_single_batch(_ensure_graphs_tuple(chunk)))
+        device_graphs = split_graphs_for_devices(graph, num_devices)
+
+    if fixed_targets is not None:
+        per_device_graphs = int(np.asarray(device_graphs[0].n_node).shape[0])
+        fixed_targets = (
+            fixed_targets[0],
+            fixed_targets[1],
+            max(2, per_device_graphs + 1),
+        )
+    device_graphs = _pad_device_batches(device_graphs, targets=fixed_targets)
+    device_batches = [prepare_single_batch(g) for g in device_graphs]
 
     def _stack_or_none(*values):
         first = values[0]
@@ -841,13 +897,14 @@ def _slice_graph(graph: jraph.GraphsTuple, start_graph: int, count: int):
     edge_start = int(n_edge[:start_graph].sum())
     edge_end = int(edge_start + n_edge[graph_slice].sum())
 
-    nodes = graph.nodes.__class__()
-    for key, value in graph.nodes.items():
-        nodes[key] = value[node_start:node_end]
+    def _slice_tree(tree, slc):
+        return jax.tree_util.tree_map(
+            lambda x: None if x is None else x[slc],
+            tree,
+        )
 
-    edges = graph.edges.__class__()
-    for key, value in graph.edges.items():
-        edges[key] = value[edge_start:edge_end]
+    nodes = _slice_tree(graph.nodes, slice(node_start, node_end))
+    edges = _slice_tree(graph.edges, slice(edge_start, edge_end))
 
     senders = graph.senders[edge_start:edge_end] - node_start
     receivers = graph.receivers[edge_start:edge_end] - node_start
@@ -855,12 +912,8 @@ def _slice_graph(graph: jraph.GraphsTuple, start_graph: int, count: int):
     globals_attr = graph.globals
     if globals_attr is None:
         globals_dict = None
-    elif hasattr(globals_attr, 'items'):
-        globals_dict = globals_attr.__class__()
-        for key, value in globals_attr.items():
-            globals_dict[key] = value[graph_slice]
     else:
-        globals_dict = globals_attr[graph_slice]
+        globals_dict = _slice_tree(globals_attr, graph_slice)
     n_node_slice = graph.n_node[graph_slice]
     n_edge_slice = graph.n_edge[graph_slice]
 

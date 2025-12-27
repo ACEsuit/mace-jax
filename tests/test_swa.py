@@ -65,7 +65,7 @@ class _SequentialGraphLoader:
         return graph
 
     def approx_length(self):
-        return max(1, len(self._targets))
+        return 1
 
 
 def _scalar_loss_fn(params, graph: jraph.GraphsTuple) -> jnp.ndarray:

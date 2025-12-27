@@ -4,7 +4,7 @@ import logging
 import math
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from functools import partial
 from queue import Queue
 from typing import Any
@@ -103,6 +103,30 @@ def _prefetch_iterator(iterator, capacity: int):
     return _Prefetched()
 
 
+def _group_batches(iterator, group_size: int, total_hint: int = 0):
+    if group_size <= 1:
+        return iterator
+
+    class _Grouped:
+        def __init__(self):
+            self._iter = iter(iterator)
+            self.total_batches_hint = total_hint
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            chunk = []
+            for _ in range(group_size):
+                try:
+                    chunk.append(next(self._iter))
+                except StopIteration:
+                    raise StopIteration
+            return chunk
+
+    return _Grouped()
+
+
 @dataclasses.dataclass
 class _MetricAccumulator:
     count: float = 0.0
@@ -154,17 +178,23 @@ def _metric_stats(delta, target, mask):
     }
 
 
-def _compute_eval_batch_metrics(
-    loss_fn, graph, pred_graph, pred_outputs, mask_override=None
-):
-    graph_mask = jraph.get_graph_padding_mask(graph).astype(jnp.float32)
-    if graph_mask.shape == graph.n_node.shape:
+def _graph_mask(graph: jraph.GraphsTuple) -> jnp.ndarray:
+    mask = jraph.get_graph_padding_mask(graph).astype(jnp.float32)
+    if mask.shape == graph.n_node.shape:
         non_empty = jnp.asarray(graph.n_node > 0, dtype=jnp.float32)
-        graph_mask = graph_mask * non_empty
+        mask = mask * non_empty
     weights = getattr(graph.globals, 'weight', None)
     if weights is not None:
         weights_arr = jnp.asarray(weights)
-        graph_mask = graph_mask * (weights_arr > 0).astype(jnp.float32)
+        if weights_arr.shape == mask.shape:
+            mask = mask * (weights_arr > 0).astype(jnp.float32)
+    return mask
+
+
+def _compute_eval_batch_metrics(
+    loss_fn, graph, pred_graph, pred_outputs, mask_override=None
+):
+    graph_mask = _graph_mask(graph)
     if mask_override is not None:
         override = jnp.asarray(mask_override, dtype=jnp.float32)
         graph_mask = graph_mask * override
@@ -293,6 +323,46 @@ def _make_eval_batch_metrics(loss_fn):
     return jax.jit(_batch)
 
 
+def _apply_metric_stats(
+    aux: dict[str, Any],
+    stats: dict[str, float] | None,
+    *,
+    mae_key: str | None = None,
+    rel_mae_key: str | None = None,
+    rmse_key: str | None = None,
+    rel_rmse_key: str | None = None,
+) -> None:
+    if not stats:
+        return
+    if mae_key:
+        aux[mae_key] = stats['mae']
+    if rel_mae_key:
+        aux[rel_mae_key] = stats['rel_mae']
+    if rmse_key:
+        aux[rmse_key] = stats['rmse']
+    if rel_rmse_key:
+        aux[rel_rmse_key] = stats['rel_rmse']
+
+
+def _padding_amounts(graph) -> tuple[int, int, int, int, int, int]:
+    if isinstance(graph, Sequence) and not isinstance(graph, jraph.GraphsTuple):
+        totals = [0, 0, 0, 0, 0, 0]
+        for item in graph:
+            values = _padding_amounts(item)
+            totals = [left + right for left, right in zip(totals, values)]
+        return tuple(totals)
+    node_ref = getattr(graph.nodes, 'positions', None)
+    if node_ref is None:
+        node_ref = graph.nodes[0]
+    node_cap = int(np.asarray(node_ref).shape[0])
+    edge_cap = int(np.asarray(graph.senders).shape[0])
+    graph_cap = int(np.asarray(graph.n_node).shape[0])
+    pad_nodes = int(np.asarray(jraph.get_number_of_padding_with_graphs_nodes(graph)))
+    pad_edges = int(np.asarray(jraph.get_number_of_padding_with_graphs_edges(graph)))
+    pad_graphs = int(np.asarray(jraph.get_number_of_padding_with_graphs_graphs(graph)))
+    return node_cap, edge_cap, graph_cap, pad_nodes, pad_edges, pad_graphs
+
+
 def train(
     params: Any,
     total_loss_fn: Callable,  # loss_fn(params, graph) -> [num_graphs]
@@ -307,6 +377,8 @@ def train(
     *,
     start_interval: int = 0,
     data_seed: int | None = None,
+    lr_scale_by_graphs: bool = True,
+    lr_reference_graphs: int | None = None,
 ):
     """
     for interval, params, optimizer_state, ema_params in train(...):
@@ -331,6 +403,9 @@ def train(
                 return jax.tree_util.tree_map(lambda x: x[None, ...], graph)
             return graph
 
+        if isinstance(graph, Sequence) and not isinstance(graph, jraph.GraphsTuple):
+            return data.prepare_sharded_batch(graph, local_device_count)
+
         if graph.n_node.ndim == 1:
             return data.prepare_sharded_batch(graph, local_device_count)
 
@@ -345,15 +420,7 @@ def train(
     # @partial(jax.vmap, in_axes=(None, 0), out_axes=0)
     def grad_fn(params, graph: jraph.GraphsTuple):
         # graph is assumed to be padded by jraph.pad_with_graphs
-        mask = jraph.get_graph_padding_mask(graph)  # [n_graphs,]
-        if mask.ndim == graph.n_node.ndim:
-            non_empty = jnp.asarray(graph.n_node > 0, dtype=mask.dtype)
-            mask = mask * non_empty
-        weights = getattr(graph.globals, 'weight', None)
-        if weights is not None:
-            weight_mask = jnp.asarray(weights > 0, dtype=mask.dtype)
-            if weight_mask.shape == mask.shape:
-                mask = mask * weight_mask
+        mask = _graph_mask(graph)
 
         def _loss_fn(trainable):
             return jnp.sum(jnp.where(mask, total_loss_fn(trainable, graph), 0.0))
@@ -372,6 +439,9 @@ def train(
         n, loss, grad = grad_fn(params, graph)
         loss = loss / n
         grad = jax.tree_util.tree_map(lambda x: x / n, grad)
+        if lr_reference is not None:
+            scale = n / lr_reference
+            grad = jax.tree_util.tree_map(lambda g: g * scale, grad)
         grad = _sanitize_grads(grad)
 
         if max_grad_norm is not None:
@@ -394,8 +464,32 @@ def train(
             ema_params = params
         return loss, params, optimizer_state, ema_params
 
-    last_cache_size = update_fn._cache_size()
-    logged_compile_count = 0
+    process_index = getattr(jax, 'process_index', lambda: 0)()
+    is_primary = process_index == 0
+    process_count = getattr(jax, 'process_count', lambda: 1)()
+    supports_iter_batches = hasattr(train_loader, 'iter_batches')
+    legacy_steps_cache: int | None = None
+    lr_reference = None
+    if lr_scale_by_graphs:
+        if lr_reference_graphs is not None:
+            lr_reference = float(lr_reference_graphs)
+        else:
+            total_graphs = getattr(train_loader, 'total_graphs', None)
+            pack_info = getattr(train_loader, '_pack_info', None)
+            total_batches = None
+            if isinstance(pack_info, dict):
+                total_batches = pack_info.get('total_batches')
+            if total_graphs and total_batches:
+                avg_graphs = float(total_graphs) / float(total_batches)
+                lr_reference = avg_graphs * max(1, local_device_count)
+            if lr_reference is None:
+                pad_graphs = getattr(train_loader, '_fixed_pad_graphs', None)
+                if pad_graphs is None:
+                    pad_graphs = getattr(train_loader, 'n_graph', None)
+                if pad_graphs is not None:
+                    lr_reference = float(
+                        max(int(pad_graphs) - 1, 1) * max(1, local_device_count)
+                    )
 
     def _swa_average(current_avg, new_tree, new_count: int):
         if current_avg is None:
@@ -407,12 +501,6 @@ def train(
             new_tree,
         )
 
-    process_index = getattr(jax, 'process_index', lambda: 0)()
-    is_primary = process_index == 0
-    process_count = getattr(jax, 'process_count', lambda: 1)()
-    supports_iter_batches = hasattr(train_loader, 'iter_batches')
-    legacy_steps_cache: int | None = None
-
     def _epoch_batches(epoch: int):
         iterator = train_loader.iter_batches(
             epoch=epoch,
@@ -420,8 +508,6 @@ def train(
             process_count=process_count,
             process_index=process_index,
         )
-        prefetch_cap = getattr(train_loader, '_prefetch_batches', None)
-        iterator = _prefetch_iterator(iterator, int(prefetch_cap or 0))
         total_batches = getattr(iterator, 'total_batches_hint', 0)
         if not total_batches:
             approx_length = getattr(train_loader, 'approx_length', None)
@@ -435,6 +521,11 @@ def train(
                 'Training loader did not provide a total batch count; ensure it '
                 'implements iter_batches() with a total_batches_hint or approx_length().'
             )
+        if local_device_count > 1:
+            total_batches = total_batches // local_device_count
+            iterator = _group_batches(iterator, local_device_count, total_batches)
+        prefetch_cap = getattr(train_loader, '_prefetch_batches', None)
+        iterator = _prefetch_iterator(iterator, int(prefetch_cap or 0))
         return iterator, total_batches
 
     def _legacy_interval_loader():
@@ -464,84 +555,84 @@ def train(
         legacy_steps_cache = length
         return legacy_steps_cache
 
+    def _iter_epoch_batches(epoch: int):
+        if supports_iter_batches:
+            return _epoch_batches(epoch)
+        setter = getattr(train_loader, 'set_epoch', None)
+        if callable(setter):
+            setter(epoch)
+        legacy_iter = _legacy_interval_loader()
+        total_steps = _legacy_effective_steps()
+        if local_device_count > 1:
+            total_steps = total_steps // local_device_count
+            legacy_iter = _group_batches(legacy_iter, local_device_count, total_steps)
+
+        def _iter():
+            for _ in range(total_steps):
+                yield next(legacy_iter)
+
+        return _iter(), total_steps
+
     initial_eval = eval_params
     if schedule_free_eval_fn is not None:
         initial_eval = schedule_free_eval_fn(optimizer_state, params)
     yield start_interval, params, optimizer_state, initial_eval
 
     for epoch in itertools.count(start_interval):
-        if supports_iter_batches:
-            epoch_batches_iter, available_steps = _epoch_batches(epoch)
-            effective_steps = available_steps
-            if effective_steps <= 0:
-                raise ValueError(
-                    'iter_batches() produced no data; reduce process_count or provide more data.'
-                )
-            p_bar = tqdm.tqdm(
-                total=effective_steps,
-                desc=f'Epoch {epoch + 1}',
-                disable=not (progress_bar and is_primary),
+        epoch_batches_iter, effective_steps = _iter_epoch_batches(epoch)
+        if effective_steps <= 0:
+            raise ValueError(
+                'iter_batches() produced no data; reduce process_count or provide more data.'
             )
-            batches_in_epoch = 0
-            for graph in epoch_batches_iter:
-                graph = _prepare_graph_for_devices(graph)
-                num_updates += 1
-                start_time = time.time()
-                loss, params, optimizer_state, ema_params = update_fn(
-                    params, optimizer_state, ema_params, num_updates, graph
-                )
-                loss = float(loss)
-                if is_primary:
-                    p_bar.set_postfix({'loss': f'{loss:7.3f}'})
-                p_bar.update(1)
-
-                if last_cache_size != update_fn._cache_size():
-                    last_cache_size = update_fn._cache_size()
-
-                    logging.info(
-                        f'Compilation time: {time.time() - start_time:.3f}s, cache size: {last_cache_size}'
-                    )
-                batches_in_epoch += 1
-            p_bar.close()
-            if batches_in_epoch <= 0:
-                raise ValueError(
-                    'iter_batches() produced no data; reduce process_count or provide more data.'
-                )
-
-        else:
-            legacy_iter = _legacy_interval_loader()
-            setter = getattr(train_loader, 'set_epoch', None)
-            if callable(setter):
-                setter(epoch)
-
-            def _next_batch():
-                return next(legacy_iter)
-
-            effective_steps = _legacy_effective_steps()
-
-            p_bar = tqdm.tqdm(
-                range(effective_steps),
-                desc=f'Epoch {epoch + 1}',
-                disable=not (progress_bar and is_primary),
+        p_bar = tqdm.tqdm(
+            total=effective_steps,
+            desc=f'Epoch {epoch + 1}',
+            disable=not (progress_bar and is_primary),
+        )
+        batches_in_epoch = 0
+        padding_stats = {
+            'pad_nodes': 0,
+            'node_cap': 0,
+            'pad_edges': 0,
+            'edge_cap': 0,
+            'pad_graphs': 0,
+            'graph_cap': 0,
+        }
+        for graph in epoch_batches_iter:
+            node_cap, edge_cap, graph_cap, pad_nodes, pad_edges, pad_graphs = (
+                _padding_amounts(graph)
             )
-            for _ in p_bar:
-                graph = _next_batch()
-                graph = _prepare_graph_for_devices(graph)
-                num_updates += 1
-                start_time = time.time()
-                loss, params, optimizer_state, ema_params = update_fn(
-                    params, optimizer_state, ema_params, num_updates, graph
-                )
-                loss = float(loss)
-                if is_primary:
-                    p_bar.set_postfix({'loss': f'{loss:7.3f}'})
-
-                if last_cache_size != update_fn._cache_size():
-                    last_cache_size = update_fn._cache_size()
-
-                    logging.info(
-                        f'Compilation time: {time.time() - start_time:.3f}s, cache size: {last_cache_size}'
-                    )
+            padding_stats['node_cap'] += node_cap
+            padding_stats['edge_cap'] += edge_cap
+            padding_stats['graph_cap'] += graph_cap
+            padding_stats['pad_nodes'] += pad_nodes
+            padding_stats['pad_edges'] += pad_edges
+            padding_stats['pad_graphs'] += pad_graphs
+            graph = _prepare_graph_for_devices(graph)
+            num_updates += 1
+            num_updates_value = jnp.asarray(num_updates, dtype=jnp.int32)
+            start_time = time.time()
+            loss, params, optimizer_state, ema_params = update_fn(
+                params, optimizer_state, ema_params, num_updates_value, graph
+            )
+            loss = float(loss)
+            if is_primary:
+                p_bar.set_postfix({'loss': f'{loss:7.3f}'})
+            p_bar.update(1)
+            batches_in_epoch += 1
+        p_bar.close()
+        if is_primary and padding_stats['node_cap'] > 0:
+            logging.debug(
+                'Epoch %s padding: nodes=%.6f%% edges=%.6f%% graphs=%.2f%%',
+                epoch + 1,
+                100.0 * padding_stats['pad_nodes'] / padding_stats['node_cap'],
+                100.0 * padding_stats['pad_edges'] / padding_stats['edge_cap'],
+                100.0 * padding_stats['pad_graphs'] / padding_stats['graph_cap'],
+            )
+        if batches_in_epoch <= 0:
+            raise ValueError(
+                'iter_batches() produced no data; reduce process_count or provide more data.'
+            )
 
         eval_params = ema_params
         if swa_state is not None and swa_config is not None:
@@ -599,13 +690,14 @@ def evaluate(
     }
     batch_metrics_fn = _make_eval_batch_metrics(loss_fn)
 
-    cache_support = hasattr(predictor, '_cache_size')
-    if cache_support:
-        last_cache_size = predictor._cache_size()
-    else:
-        last_cache_size = None
-
-    start_time = time.time()
+    padding_stats = {
+        'pad_nodes': 0,
+        'node_cap': 0,
+        'pad_edges': 0,
+        'edge_cap': 0,
+        'pad_graphs': 0,
+        'graph_cap': 0,
+    }
 
     process_index = getattr(jax, 'process_index', lambda: 0)()
     process_count = getattr(jax, 'process_count', lambda: 1)()
@@ -623,18 +715,17 @@ def evaluate(
         iterator = iter(data_loader)
         total_hint = 0
 
-    eval_iterator = _prefetch_iterator(
-        iterator, int(getattr(data_loader, '_prefetch_batches', 0) or 0)
-    )
-
-    p_bar = tqdm.tqdm(
-        eval_iterator,
-        desc=name,
-        total=total_hint or data_loader.approx_length(),
-        disable=not progress_bar,
-    )
-
-    for ref_graph in p_bar:
+    def _process_batch(ref_graph: jraph.GraphsTuple, *, p_bar=None) -> None:
+        nonlocal total_loss, num_graphs
+        node_cap, edge_cap, graph_cap, pad_nodes, pad_edges, pad_graphs = (
+            _padding_amounts(ref_graph)
+        )
+        padding_stats['node_cap'] += node_cap
+        padding_stats['edge_cap'] += edge_cap
+        padding_stats['graph_cap'] += graph_cap
+        padding_stats['pad_nodes'] += pad_nodes
+        padding_stats['pad_edges'] += pad_edges
+        padding_stats['pad_graphs'] += pad_graphs
         output = predictor(params, ref_graph)
         nodes = ref_graph.nodes
         if output.get('forces') is not None:
@@ -650,21 +741,9 @@ def evaluate(
         )
         pred_graph = ref_graph._replace(nodes=nodes, globals=globals_attr)
 
-        if last_cache_size is not None and last_cache_size != predictor._cache_size():
-            last_cache_size = predictor._cache_size()
-
-            logging.info('Compiled function `predictor`.')
-            logging.info(f'-> cache size: {last_cache_size}')
-
-        graph_mask = np.asarray(jraph.get_graph_padding_mask(ref_graph))
-        if graph_mask.shape == ref_graph.n_node.shape:
-            non_empty = np.asarray(ref_graph.n_node > 0)
-            graph_mask = graph_mask & non_empty
-        weights = getattr(ref_graph.globals, 'weight', None)
-        if weights is not None:
-            graph_mask = graph_mask & (np.asarray(weights) > 0)
+        graph_mask = np.asarray(_graph_mask(ref_graph))
         if not graph_mask.any():
-            continue
+            return
         device_graph_mask = jnp.asarray(graph_mask, dtype=jnp.float32)
 
         pred_outputs = {
@@ -706,11 +785,37 @@ def evaluate(
         metric_accumulators['polar_per_atom'].update(
             batch_metrics.get('polar_per_atom')
         )
-        p_bar.set_postfix({'n': int(num_graphs)})
+        if p_bar is not None:
+            p_bar.set_postfix({'n': int(num_graphs)})
+
+    start_time = time.time()
+
+    eval_iterator = _prefetch_iterator(
+        iterator, int(getattr(data_loader, '_prefetch_batches', 0) or 0)
+    )
+
+    p_bar = tqdm.tqdm(
+        eval_iterator,
+        desc=name,
+        total=total_hint or data_loader.approx_length(),
+        disable=not progress_bar,
+    )
+
+    for ref_graph in p_bar:
+        _process_batch(ref_graph, p_bar=p_bar)
 
     if num_graphs <= 0:
         logging.warning(f'No graphs in data_loader ! Returning 0.0 for {name}')
         return 0.0, {}
+
+    if padding_stats['node_cap'] > 0:
+        logging.debug(
+            '%s padding: nodes=%.6f%% edges=%.6f%% graphs=%.2f%%',
+            name,
+            100.0 * padding_stats['pad_nodes'] / padding_stats['node_cap'],
+            100.0 * padding_stats['pad_edges'] / padding_stats['edge_cap'],
+            100.0 * padding_stats['pad_graphs'] / padding_stats['graph_cap'],
+        )
 
     avg_loss = total_loss / num_graphs
 
@@ -752,63 +857,49 @@ def evaluate(
         'rmse_polarizability_per_atom': None,
     }
 
-    energy_stats = metric_accumulators['energy'].finalize()
-    if energy_stats:
-        aux['mae_e'] = energy_stats['mae']
-        aux['rel_mae_e'] = energy_stats['rel_mae']
-        aux['rmse_e'] = energy_stats['rmse']
-        aux['rel_rmse_e'] = energy_stats['rel_rmse']
-    energy_pa_stats = metric_accumulators['energy_per_atom'].finalize()
-    if energy_pa_stats:
-        aux['mae_e_per_atom'] = energy_pa_stats['mae']
-        aux['rel_mae_e_per_atom'] = energy_pa_stats['rel_mae']
-        aux['rmse_e_per_atom'] = energy_pa_stats['rmse']
-        aux['rel_rmse_e_per_atom'] = energy_pa_stats['rel_rmse']
-
-    force_stats = metric_accumulators['forces'].finalize()
-    if force_stats:
-        aux['mae_f'] = force_stats['mae']
-        aux['rel_mae_f'] = force_stats['rel_mae']
-        aux['rmse_f'] = force_stats['rmse']
-        aux['rel_rmse_f'] = force_stats['rel_rmse']
-
-    stress_stats = metric_accumulators['stress'].finalize()
-    if stress_stats:
-        aux['mae_s'] = stress_stats['mae']
-        aux['rel_mae_s'] = stress_stats['rel_mae']
-        aux['rmse_s'] = stress_stats['rmse']
-        aux['rel_rmse_s'] = stress_stats['rel_rmse']
+    metric_map = [
+        ('energy', 'mae_e', 'rel_mae_e', 'rmse_e', 'rel_rmse_e'),
+        (
+            'energy_per_atom',
+            'mae_e_per_atom',
+            'rel_mae_e_per_atom',
+            'rmse_e_per_atom',
+            'rel_rmse_e_per_atom',
+        ),
+        ('forces', 'mae_f', 'rel_mae_f', 'rmse_f', 'rel_rmse_f'),
+        ('stress', 'mae_s', 'rel_mae_s', 'rmse_s', 'rel_rmse_s'),
+        ('virials', 'mae_virials', None, 'rmse_virials', None),
+        ('virials_per_atom', None, None, 'rmse_virials_per_atom', None),
+        ('dipole', 'mae_mu', 'rel_mae_mu', 'rmse_mu', 'rel_rmse_mu'),
+        ('dipole_per_atom', 'mae_mu_per_atom', None, 'rmse_mu_per_atom', None),
+        (
+            'polar',
+            'mae_polarizability',
+            None,
+            'rmse_polarizability',
+            None,
+        ),
+        (
+            'polar_per_atom',
+            'mae_polarizability_per_atom',
+            None,
+            'rmse_polarizability_per_atom',
+            None,
+        ),
+    ]
+    for key, mae_key, rel_mae_key, rmse_key, rel_rmse_key in metric_map:
+        _apply_metric_stats(
+            aux,
+            metric_accumulators[key].finalize(),
+            mae_key=mae_key,
+            rel_mae_key=rel_mae_key,
+            rmse_key=rmse_key,
+            rel_rmse_key=rel_rmse_key,
+        )
+    if aux['mae_s'] is not None:
         aux['mae_stress'] = aux['mae_s']
         aux['rel_mae_stress'] = aux['rel_mae_s']
         aux['rmse_stress'] = aux['rmse_s']
         aux['rel_rmse_stress'] = aux['rel_rmse_s']
-
-    virial_stats = metric_accumulators['virials'].finalize()
-    if virial_stats:
-        aux['mae_virials'] = virial_stats['mae']
-        aux['rmse_virials'] = virial_stats['rmse']
-    virial_pa_stats = metric_accumulators['virials_per_atom'].finalize()
-    if virial_pa_stats:
-        aux['rmse_virials_per_atom'] = virial_pa_stats['rmse']
-
-    dipole_stats = metric_accumulators['dipole'].finalize()
-    if dipole_stats:
-        aux['mae_mu'] = dipole_stats['mae']
-        aux['rel_mae_mu'] = dipole_stats['rel_mae']
-        aux['rmse_mu'] = dipole_stats['rmse']
-        aux['rel_rmse_mu'] = dipole_stats['rel_rmse']
-    dipole_pa_stats = metric_accumulators['dipole_per_atom'].finalize()
-    if dipole_pa_stats:
-        aux['mae_mu_per_atom'] = dipole_pa_stats['mae']
-        aux['rmse_mu_per_atom'] = dipole_pa_stats['rmse']
-
-    polar_stats = metric_accumulators['polar'].finalize()
-    if polar_stats:
-        aux['mae_polarizability'] = polar_stats['mae']
-        aux['rmse_polarizability'] = polar_stats['rmse']
-    polar_pa_stats = metric_accumulators['polar_per_atom'].finalize()
-    if polar_pa_stats:
-        aux['mae_polarizability_per_atom'] = polar_pa_stats['mae']
-        aux['rmse_polarizability_per_atom'] = polar_pa_stats['rmse']
 
     return avg_loss, aux

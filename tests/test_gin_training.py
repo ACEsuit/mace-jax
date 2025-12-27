@@ -29,10 +29,7 @@ mace_jax.tools.gin_model.model.max_ell = 1
 mace_jax.tools.gin_model.model.hidden_irreps = '1x0e'
 mace_jax.tools.gin_model.model.MLP_irreps = '1x0e'
 mace_jax.tools.gin_model.model.num_interactions = 1
-mace_jax.tools.gin_datasets.datasets.n_node = 8
 mace_jax.tools.gin_datasets.datasets.n_edge = 16
-mace_jax.tools.gin_datasets.datasets.n_graph = 2
-mace_jax.tools.gin_datasets.datasets.min_n_graph = 2
 mace_jax.tools.gin_datasets.datasets.r_max = 2.5
 
 mace_jax.tools.gin_functions.flags.seed = 0
@@ -101,9 +98,7 @@ def reset_gin(dataset_paths):
     )
     gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.test_path', None)
     # Keep toy dataset graphs by setting generous size limits.
-    gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.n_node', 64)
     gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.n_edge', 128)
-    gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.min_n_graph', 1)
     gin.bind_parameter('mace_jax.tools.gin_model.model.num_species', 64)
     yield
     gin.clear_config()
@@ -164,8 +159,8 @@ def patch_mace_module(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def patch_optimizer(monkeypatch):
-    def _optimizer():
-        return optax.identity(), 1, 1
+    def _optimizer(*args, **kwargs):
+        return optax.identity(), 1
 
     monkeypatch.setattr(gin_functions, 'optimizer', _optimizer)
     yield
@@ -452,7 +447,7 @@ def test_eval_interval_controls_frequency(monkeypatch, dataset_paths):
     monkeypatch.setattr(
         gin_functions,
         'optimizer',
-        lambda: (optax.identity(), 1, 2),
+        lambda *args, **kwargs: (optax.identity(), 1),
     )
 
     eval_calls = []
@@ -467,11 +462,54 @@ def test_eval_interval_controls_frequency(monkeypatch, dataset_paths):
 
 
 def test_streaming_loader_auto_estimates_caps():
-    gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.n_node', None)
-    gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.n_edge', None)
+    gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.n_edge', 16)
     train_loader, _, _, _, _ = gin_datasets.datasets()
     assert train_loader._n_node >= 1
     assert train_loader._n_edge >= 1
+
+
+def test_streaming_loader_preserves_order_without_shuffle(dataset_paths):
+    dataset_path = Path(dataset_paths['train'])
+    spec = data_pkg.StreamingDatasetSpec(path=dataset_path)
+    atomic_numbers = gin_datasets._unique_atomic_numbers_from_hdf5([dataset_path])
+    z_table = data_pkg.AtomicNumberTable(atomic_numbers)
+    head_to_index = {'Default': 0}
+    stats, _ = gin_datasets._compute_streaming_stats(
+        dataset_path,
+        spec=spec,
+        z_table=z_table,
+        r_max=2.5,
+        head_to_index=head_to_index,
+        sample_limit=0,
+        edge_cap=16,
+        collect_metadata=False,
+    )
+    dataset = data_pkg.HDF5Dataset(dataset_path, mode='r')
+    num_graphs = len(dataset)
+    try:
+        loader = data_pkg.StreamingGraphDataLoader(
+            datasets=[dataset],
+            dataset_specs=[spec],
+            z_table=z_table,
+            r_max=2.5,
+            n_node=stats.n_nodes,
+            n_edge=stats.n_edges,
+            head_to_index=head_to_index,
+            shuffle=False,
+            seed=0,
+            num_workers=0,
+            batch_assignments=[stats.batch_assignments],
+            pad_graphs=stats.n_graphs,
+        )
+        energies = []
+        for batch in loader:
+            mask = np.asarray(jraph.get_graph_padding_mask(batch))
+            batch_energy = np.asarray(batch.globals.energy).reshape(-1)
+            energies.extend(batch_energy[mask].tolist())
+    finally:
+        dataset.close()
+
+    assert energies == list(range(num_graphs))
 
 
 def test_graph_dataloader_iter_batches_deterministic():

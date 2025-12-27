@@ -10,7 +10,10 @@ from e3nn_jax import Irrep, Irreps
 from flax import linen as fnn
 from flax import struct
 
-from mace_jax.adapters.e3nn.math import register_normalize2mom_const
+from mace_jax.adapters.e3nn.math import (
+    estimate_normalize2mom_const,
+    register_normalize2mom_const,
+)
 from mace_jax.adapters.e3nn.o3 import SphericalHarmonics
 from mace_jax.adapters.flax.torch import auto_import_from_torch_flax
 from mace_jax.modules.embeddings import GenericJointEmbedding
@@ -104,7 +107,18 @@ class MACE(fnn.Module):
 
     def __post_init__(self):
         super().__post_init__()
-        consts = self.normalize2mom_consts or {'silu': 0.0, 'swish': 0.0}
+        consts = self.normalize2mom_consts
+        if consts is None:
+            silu_value = estimate_normalize2mom_const('silu')
+            consts = {'silu': silu_value, 'swish': silu_value}
+        else:
+            consts = dict(consts)
+            if 'silu' not in consts:
+                silu_value = estimate_normalize2mom_const('silu')
+                consts['silu'] = silu_value
+                consts.setdefault('swish', silu_value)
+            if 'swish' not in consts:
+                consts['swish'] = consts['silu']
         cleaned: dict[str, float] = {}
         for key, val in consts.items():
             try:
@@ -145,10 +159,10 @@ class MACE(fnn.Module):
 
         # Normalize2mom constants originate from the Torch model (or fall back
         # to defaults) and are kept as scalar arrays for serialization.
-        consts = getattr(self, '_normalize2mom_consts', None) or {
-            'silu': 0.0,
-            'swish': 0.0,
-        }
+        consts = getattr(self, '_normalize2mom_consts', None)
+        if consts is None:
+            silu_value = estimate_normalize2mom_const('silu')
+            consts = {'silu': silu_value, 'swish': silu_value}
         const_arrays = {
             key: jnp.asarray(val, dtype=jnp.float32) for key, val in consts.items()
         }

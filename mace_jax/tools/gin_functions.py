@@ -68,6 +68,87 @@ def _attach_config(trainable, config):
     return {'params': trainable, 'config': config}
 
 
+def _maybe_float(value):
+    if isinstance(value, numbers.Number):
+        return float(value)
+    if isinstance(value, (np.ndarray, jnp.ndarray)) and value.shape == ():
+        return float(np.asarray(value))
+    return None
+
+
+def _select_metrics_for_logging(
+    metrics: Mapping[str, Any], log_errors: str | None
+) -> list[str]:
+    stress_rmse_key = (
+        'rmse_stress'
+        if metrics.get('rmse_stress') is not None
+        else 'rmse_virials_per_atom'
+    )
+    stress_mae_key = (
+        'mae_stress' if metrics.get('mae_stress') is not None else 'mae_virials'
+    )
+    log_selection = {
+        'PerAtomRMSE': ['rmse_e_per_atom', 'rmse_f', stress_rmse_key],
+        'rel_PerAtomRMSE': [
+            'rmse_e_per_atom',
+            'rel_rmse_f',
+            'rel_rmse_stress',
+        ],
+        'TotalRMSE': ['rmse_e', 'rmse_f', stress_rmse_key],
+        'PerAtomMAE': ['mae_e_per_atom', 'mae_f', stress_mae_key],
+        'rel_PerAtomMAE': ['mae_e_per_atom', 'rel_mae_f', 'rel_mae_stress'],
+        'TotalMAE': ['mae_e', 'mae_f', stress_mae_key],
+        'PerAtomRMSEstressvirials': [
+            'rmse_e_per_atom',
+            'rmse_f',
+            stress_rmse_key,
+        ],
+        'PerAtomMAEstressvirials': [
+            'mae_e_per_atom',
+            'mae_f',
+            stress_mae_key,
+        ],
+        'DipoleRMSE': ['rmse_mu_per_atom'],
+        'DipolePolarRMSE': [
+            'rmse_mu_per_atom',
+            'rmse_polarizability_per_atom',
+        ],
+        'EnergyDipoleRMSE': [
+            'rmse_e_per_atom',
+            'rmse_f',
+            'rmse_mu_per_atom',
+        ],
+    }
+    return log_selection.get(log_errors or 'PerAtomRMSE', log_selection['PerAtomRMSE'])
+
+
+def _format_metric_value(metrics: Mapping[str, Any], key: str | None) -> str:
+    if not key:
+        return 'N/A'
+    value = metrics.get(key, None)
+    if value is None:
+        return 'N/A'
+    maybe_value = _maybe_float(value)
+    if maybe_value is not None:
+        value = maybe_value
+    elif not isinstance(value, numbers.Number):
+        return 'N/A'
+    if key.startswith('rel_'):
+        return f'{100 * value:.1f}%'
+    lower_key = key.lower()
+    if 'mu' in lower_key:
+        return f'{1e3 * value:.1f} mDebye'
+    if 'polarizability' in lower_key:
+        return f'{1e3 * value:.1f} me Å^2 / V'
+    if 'virials' in lower_key or 'stress' in lower_key or lower_key.endswith('_s'):
+        return f'{1e3 * value:.1f} meV/Å³'
+    if lower_key.endswith('_f'):
+        return f'{1e3 * value:.1f} meV/Å'
+    if '_e' in key:
+        return f'{1e3 * value:.1f} meV'
+    return f'{value:.4e}'
+
+
 def _instantiate_loss(loss_cls, overrides: dict):
     target = loss_cls.__init__ if inspect.isclass(loss_cls) else loss_cls
     try:
@@ -503,12 +584,18 @@ def train(
     checkpoint_keep: int | None = 1,
     resume_from: str | None = None,
     data_seed: int | None = None,
+    lr_scale_by_graphs: bool = True,
+    lr_reference_graphs: int | None = None,
     **kwargs,
 ):
     trainable_params, static_config = _split_config(params)
     lowest_loss = np.inf
     patience_counter = 0
     loss_fn = loss()
+    if log_errors is None and isinstance(
+        loss_fn, modules.WeightedEnergyForcesL1L2Loss
+    ):
+        log_errors = 'PerAtomMAE'
     start_time = time.perf_counter()
     total_time_per_interval = []
     eval_time_per_interval = []
@@ -671,10 +758,16 @@ def train(
             return True
         return current_epoch % eval_interval == 0
 
-    with_config = lambda p: _attach_config(p, static_config)
-    predictor_with_config = lambda p, g: predictor(with_config(p), g)
+    def with_config(params_):
+        return _attach_config(params_, static_config)
+
+    def predictor_with_config(params_, graph_):
+        return predictor(with_config(params_), graph_)
 
     stop_after_epoch = False
+    if not isinstance(eval_train, bool):
+        raise ValueError('eval_train must be a boolean.')
+
     for epoch, trainable_params, optimizer_state, eval_params in tools.train(
         params=trainable_params,
         total_loss_fn=lambda params, graph: loss_fn(
@@ -688,10 +781,12 @@ def train(
         start_interval=start_interval,
         schedule_free_eval_fn=schedule_free_eval_fn,
         data_seed=data_seed,
+        lr_scale_by_graphs=lr_scale_by_graphs,
+        lr_reference_graphs=lr_reference_graphs,
         **kwargs,
     ):
         stop_after_epoch = False
-        total_time_per_interval += [time.perf_counter() - start_time]
+        total_time_per_interval.append(time.perf_counter() - start_time)
         start_time = time.perf_counter()
 
         helper = _get_profile_helper(log_warning=False)
@@ -724,87 +819,10 @@ def train(
             if is_primary:
                 logger.log(metrics_)
 
-            def _maybe_float(value):
-                if isinstance(value, numbers.Number):
-                    return float(value)
-                if isinstance(value, (np.ndarray, jnp.ndarray)) and value.shape == ():
-                    return float(np.asarray(value))
-                return None
-
-            stress_rmse_key = (
-                'rmse_stress'
-                if metrics_.get('rmse_stress') is not None
-                else 'rmse_virials_per_atom'
-            )
-            stress_mae_key = (
-                'mae_stress'
-                if metrics_.get('mae_stress') is not None
-                else 'mae_virials'
-            )
-            log_selection = {
-                'PerAtomRMSE': ['rmse_e_per_atom', 'rmse_f', stress_rmse_key],
-                'rel_PerAtomRMSE': [
-                    'rmse_e_per_atom',
-                    'rel_rmse_f',
-                    'rel_rmse_stress',
-                ],
-                'TotalRMSE': ['rmse_e', 'rmse_f', stress_rmse_key],
-                'PerAtomMAE': ['mae_e_per_atom', 'mae_f', stress_mae_key],
-                'rel_PerAtomMAE': ['mae_e_per_atom', 'rel_mae_f', 'rel_mae_stress'],
-                'TotalMAE': ['mae_e', 'mae_f', stress_mae_key],
-                'PerAtomRMSEstressvirials': [
-                    'rmse_e_per_atom',
-                    'rmse_f',
-                    stress_rmse_key,
-                ],
-                'PerAtomMAEstressvirials': [
-                    'mae_e_per_atom',
-                    'mae_f',
-                    stress_mae_key,
-                ],
-                'DipoleRMSE': ['rmse_mu_per_atom'],
-                'DipolePolarRMSE': [
-                    'rmse_mu_per_atom',
-                    'rmse_polarizability_per_atom',
-                ],
-                'EnergyDipoleRMSE': [
-                    'rmse_e_per_atom',
-                    'rmse_f',
-                    'rmse_mu_per_atom',
-                ],
-            }
-            selected_metrics = log_selection.get(
-                log_errors or 'PerAtomRMSE',
-                log_selection['PerAtomRMSE'],
-            )
-
-            def _(key: str | None):
-                if not key:
-                    return 'N/A'
-                v = metrics_.get(key, None)
-                if v is None:
-                    return 'N/A'
-                if key.startswith('rel_'):
-                    return f'{100 * v:.1f}%'
-                lower_key = key.lower()
-                if 'mu' in lower_key:
-                    return f'{1e3 * v:.1f} mDebye'
-                if 'polarizability' in lower_key:
-                    return f'{1e3 * v:.1f} me Å^2 / V'
-                if (
-                    'virials' in lower_key
-                    or 'stress' in lower_key
-                    or lower_key.endswith('_s')
-                ):
-                    return f'{1e3 * v:.1f} meV/Å³'
-                if lower_key.endswith('_f'):
-                    return f'{1e3 * v:.1f} meV/Å'
-                if '_e' in key:
-                    return f'{1e3 * v:.1f} meV'
-                return f'{v:.4e}'
-
+            selected_metrics = _select_metrics_for_logging(metrics_, log_errors)
             metrics_blob = ', '.join(
-                f'{metric}={_(metric)}' for metric in selected_metrics
+                f'{metric}={_format_metric_value(metrics_, metric)}'
+                for metric in selected_metrics
             )
             _log_info(
                 f'Epoch {epoch}: {eval_mode}: '
@@ -835,15 +853,8 @@ def train(
 
         evaluate_now = _should_run_eval(epoch, last_epoch)
 
-        if (eval_train or last_epoch) and evaluate_now:
-            if isinstance(eval_train, (int, float)):
-                subset_loader = train_loader.subset(eval_train)
-                subset_loader = _prepare_loader_for_eval(subset_loader, epoch)
-                eval_and_print(subset_loader, 'eval_train')
-            else:
-                eval_and_print(
-                    _prepare_loader_for_eval(train_loader, epoch), 'eval_train'
-                )
+        if eval_train and last_epoch:
+            eval_and_print(_prepare_loader_for_eval(train_loader, epoch), 'eval_train')
 
         if (
             (eval_test or last_epoch)
@@ -891,7 +902,7 @@ def train(
             patience_counter = 0
             stage_two_active = True
 
-        eval_time_per_interval += [time.perf_counter() - start_time]
+        eval_time_per_interval.append(time.perf_counter() - start_time)
         avg_time_per_interval = np.mean(total_time_per_interval[-3:])
         avg_eval_time_per_interval = np.mean(eval_time_per_interval[-3:])
 

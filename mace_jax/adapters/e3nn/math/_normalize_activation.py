@@ -5,6 +5,7 @@ from functools import partial
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 # Mirrors the Torch ``normalize2mom.cst`` cache keyed by activation identity.
 _CONST_OVERRIDES: dict[str, float] = {}
@@ -149,3 +150,24 @@ def normalize2mom(
         _REGISTERED_FUNCTIONS.setdefault(identifier, []).append(_normalized)
 
     return _normalized
+
+
+def estimate_normalize2mom_const(
+    identifier: str | Callable,
+    *,
+    seed: int = 0,
+    samples: int = 1_000_000,
+) -> float:
+    """Estimate normalize2mom constants using NumPy (safe outside JAX tracing)."""
+    key = _activation_key(identifier) if callable(identifier) else identifier
+    if key is None:
+        raise ValueError('Unable to determine normalize2mom identifier.')
+    key = str(key).lower()
+    if key not in {'silu', 'swish'}:
+        raise ValueError(f'Unsupported normalize2mom identifier: {key}')
+
+    rng = np.random.default_rng(seed)
+    values = rng.normal(size=samples).astype(np.float32)
+    silu = values / (1.0 + np.exp(-values))
+    const = float(np.mean(silu * silu) ** -0.5)
+    return const
