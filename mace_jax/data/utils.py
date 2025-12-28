@@ -104,10 +104,20 @@ def config_from_atoms(
         config_type_weights = DEFAULT_CONFIG_TYPE_WEIGHTS
 
     energy = atoms.info.get(energy_key, None)  # eV
-    stress = atoms.info.get(stress_key, None)  # eV / Ang^3
-
+    if energy is None:
+        try:
+            energy = atoms.get_potential_energy()
+        except Exception:
+            energy = None
     if energy is None:
         energy = np.array(0.0)
+
+    stress = atoms.info.get(stress_key, None)  # eV / Ang^3
+    if stress is None:
+        try:
+            stress = atoms.get_stress()
+        except Exception:
+            stress = None
 
     if stress is not None:
         stress = prefactor_stress * _normalize_stress(stress)
@@ -126,6 +136,11 @@ def config_from_atoms(
     # pressure = None
 
     forces = atoms.arrays.get(forces_key, None)  # eV / Ang
+    if forces is None:
+        try:
+            forces = atoms.get_forces()
+        except Exception:
+            forces = None
     virials = atoms.info.get(virials_key, None)
     if virials is not None:
         virials = _normalize_stress(virials)

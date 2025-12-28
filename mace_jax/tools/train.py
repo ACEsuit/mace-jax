@@ -936,6 +936,19 @@ def evaluate(
         device_graph = _prepare_graph_for_devices(ref_graph)
         batch_metrics = _eval_step(params, device_graph)
         batch_metrics = data.unreplicate_from_local_devices(batch_metrics)
+        def _squeeze(value):
+            if value is None:
+                return None
+            arr = np.asarray(value)
+            if arr.ndim == 0:
+                return value
+            if arr.shape[0] == 1:
+                return arr[0]
+            return value
+
+        batch_metrics = jax.tree_util.tree_map(
+            _squeeze, batch_metrics, is_leaf=lambda x: x is None
+        )
         total_loss += float(batch_metrics['loss'])
         num_graphs += float(batch_metrics['graph_count'])
         metric_accumulators['energy'].update(batch_metrics.get('energy'))
