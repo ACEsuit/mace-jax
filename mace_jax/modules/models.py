@@ -161,6 +161,8 @@ class MACE(fnn.Module):
             if self.num_interactions == 1
             else hidden_irreps
         )
+        # MACE (torch) collapses to the first irrep when num_interactions == 1,
+        # so mirror that here to keep product/readout shapes and imports aligned.
 
         # Normalize2mom constants originate from the Torch model (or fall back
         # to defaults) and are kept as scalar arrays for serialization.
