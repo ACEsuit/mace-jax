@@ -95,6 +95,9 @@ def config_from_atoms(
     prefactor_stress: float = 1.0,
     remap_stress: np.ndarray = None,
     head_name: str | None = None,
+    virials_key: str = 'virials',
+    dipole_key: str = 'dipole',
+    polarizability_key: str = 'polarizability',
 ) -> Configuration:
     """Convert ase.Atoms to Configuration"""
     if config_type_weights is None:
@@ -123,6 +126,15 @@ def config_from_atoms(
     # pressure = None
 
     forces = atoms.arrays.get(forces_key, None)  # eV / Ang
+    virials = atoms.info.get(virials_key, None)
+    if virials is not None:
+        virials = _normalize_stress(virials)
+    dipole = atoms.info.get(dipole_key, None)
+    if dipole is not None:
+        dipole = np.asarray(dipole)
+    polarizability = atoms.info.get(polarizability_key, None)
+    if polarizability is not None:
+        polarizability = np.asarray(polarizability)
     atomic_numbers = np.array(
         [ase.data.atomic_numbers[symbol] for symbol in atoms.symbols]
     )
@@ -138,6 +150,9 @@ def config_from_atoms(
         energy=energy,
         forces=forces,
         stress=stress,
+        virials=virials,
+        dipole=dipole,
+        polarizability=polarizability,
         weight=weight,
         config_type=config_type,
         pbc=pbc,
@@ -162,6 +177,9 @@ def load_from_xyz(
     energy_key: str = 'energy',
     forces_key: str = 'forces',
     stress_key: str = 'stress',
+    virials_key: str = 'virials',
+    dipole_key: str = 'dipole',
+    polarizability_key: str = 'polarizability',
     extract_atomic_energies: bool = False,
     num_configs: int = None,
     prefactor_stress: float = 1.0,
@@ -210,13 +228,16 @@ def load_from_xyz(
     configs = [
         config_from_atoms(
             atoms,
-            energy_key,
-            forces_key,
-            stress_key,
-            config_type_weights,
-            prefactor_stress,
-            remap_stress,
+            energy_key=energy_key,
+            forces_key=forces_key,
+            stress_key=stress_key,
+            config_type_weights=config_type_weights,
+            prefactor_stress=prefactor_stress,
+            remap_stress=remap_stress,
             head_name=head_name,
+            virials_key=virials_key,
+            dipole_key=dipole_key,
+            polarizability_key=polarizability_key,
         )
         for atoms in atoms_list
     ]
@@ -317,6 +338,39 @@ def compute_average_E0s_from_species(
         )
         E0s = np.zeros(num_species)
     return E0s
+
+
+def save_configurations_as_HDF5(configurations: Configurations, _, h5_file) -> None:
+    grp = h5_file.create_group('config_batch_0')
+    for j, config in enumerate(configurations):
+        subgroup = grp.create_group(f'config_{j}')
+        subgroup['atomic_numbers'] = write_value(config.atomic_numbers)
+        subgroup['positions'] = write_value(config.positions)
+        subgroup['cell'] = write_value(config.cell)
+        subgroup['pbc'] = write_value(config.pbc)
+        subgroup['weight'] = write_value(config.weight)
+        subgroup['config_type'] = write_value(config.config_type)
+        if config.head is not None:
+            subgroup['head'] = write_value(config.head)
+        properties_subgrp = subgroup.create_group('properties')
+        if config.energy is not None:
+            properties_subgrp['energy'] = write_value(config.energy)
+        if config.forces is not None:
+            properties_subgrp['forces'] = write_value(config.forces)
+        if config.stress is not None:
+            properties_subgrp['stress'] = write_value(config.stress)
+        if config.virials is not None:
+            properties_subgrp['virials'] = write_value(config.virials)
+        if config.dipole is not None:
+            properties_subgrp['dipole'] = write_value(config.dipole)
+        if config.polarizability is not None:
+            properties_subgrp['polarizability'] = write_value(
+                config.polarizability
+            )
+
+
+def write_value(value):
+    return value if value is not None else 'None'
 
 
 GraphNodes = namedtuple('Nodes', ['positions', 'forces', 'species'])

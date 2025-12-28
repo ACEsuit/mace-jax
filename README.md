@@ -29,6 +29,44 @@ python setup.py develop
 
 After installation, the following convenience commands are available:
 
+### Streaming HDF5 loader (mace-jax specific)
+
+MACE‑JAX compiles the model with **fixed batch shapes**, so it cannot accept
+variable‑sized batches on the fly. To make this efficient, the streaming loader
+precomputes **batch assignments** once and then reuses them for every epoch. This is
+the key difference from Torch MACE and is why streaming HDF5 datasets are the
+recommended format for larger runs.
+
+The only sizing knob you must provide is `n_edge` (also exposed as `--batch-max-edges`
+or `n_edge` in gin). `n_node` is **not** supported for streaming datasets; it is
+derived automatically from the assigned batches.
+
+How `n_edge` is used:
+
+- **Edge cap / graph feasibility:** Each graph’s edge count is checked against the
+  configured `n_edge` limit. If a graph exceeds the limit, the loader raises the cap
+  and logs a warning so all graphs fit.
+- **Batch packing (knapsack‑like):** The loader builds batches by packing graphs so
+  their **total edges** fit under the `n_edge` cap. This is a near‑optimal greedy
+  packing step that minimizes padding while remaining fast.
+- **Derived node/graph caps:** After batches are fixed, the loader computes the
+  **maximum** total nodes and graphs needed across those batches. These become the
+  fixed `n_node`/`n_graph` pads used for JAX compilation.
+- **Persisted assignments:** The batch assignments and the derived
+  `n_nodes/n_edges/n_graphs` caps are stored in the streaming stats. Train/valid/test
+  each get their own stats so loaders can be reused independently.
+- **Shuffling:** When `shuffle=True`, the loader shuffles **batches**, not individual
+  graphs. When `shuffle=False`, graphs are yielded in original order by inverting the
+  precomputed batch mapping.
+
+In short, `n_edge` controls memory and compilation shape: it is the fixed edge budget
+per batch. The loader packs graphs to stay under this budget, computes the node/graph
+padding needed, and then reuses these fixed shapes for every epoch.
+
+Streaming datasets accept a single HDF5 file, a directory of `.h5/.hdf5` files, or a
+glob pattern. The loader expands all matching files and builds the batch assignments
+across the combined dataset.
+
 #### `mace-jax-train`
 
 Runs training driven by gin-config files. Example:
@@ -58,7 +96,10 @@ Additional convenience flags let you adjust common gin settings directly from th
 - `--torch-head NAME`: select a specific head from the imported Torch model.
 - `--torch-param-dtype {float32,float64}`: override the dtype used for imported parameters.
 - `--train-path/--valid-path/--test-path`: point datasets to new files without editing the gin config.
+- `--statistics-file PATH`: reuse `statistics.json` from preprocessing (sets atomic numbers,
+  E0s, scaling mean/std, and average neighbor count).
 - `--r-max VALUE`: synchronise the cutoff used in both dataset construction and model definition.
+  For streaming datasets, `--batch-max-edges` (or `n_edge` in gin) sets the edge cap.
 
 For instance, fine-tuning a Torch foundation model against a new dataset can be done with:
 
@@ -112,7 +153,7 @@ mace-jax-train configs/finetune.gin \
   process with deterministic per-epoch shuffles, and only writes logs/checkpoints from
   rank 0. Environment variables such as `JAX_PROCESS_COUNT`, `JAX_PROCESS_INDEX` or
   Slurm launch variables can also be used; they override the CLI defaults automatically.
-  A typical 2-host launch (one process per host) looks like:
+A typical 2-host launch (one process per host) looks like:
 
   ```sh
   JAX_PROCESS_COUNT=2 \
@@ -123,6 +164,26 @@ mace-jax-train configs/finetune.gin \
     --coordinator-address host0 \
     --coordinator-port 12345
   ```
+
+#### `mace-jax-prepare-data`
+
+Converts one or more XYZ files into MACE-style streaming HDF5 files and (optionally)
+computes dataset statistics. The outputs are written to `<h5_prefix>/train`,
+`<h5_prefix>/val`, and `<h5_prefix>/test`, plus `statistics.json` when requested.
+
+```sh
+mace-jax-prepare-data \
+  --train_file data/train.xyz \
+  --valid_file data/valid.xyz \
+  --h5_prefix data/hdf5/ \
+  --r_max 5.0 \
+  --compute_statistics \
+  --atomic_numbers "[1, 6, 8]" \
+  --E0s "average"
+```
+
+Pass the resulting `statistics.json` to training via `mace-jax-train --statistics-file`
+to reuse the computed scaling and average neighbor counts.
 
 #### `mace-jax-train-plot`
 

@@ -1,4 +1,5 @@
 from .amsgrad import scale_by_amsgrad
+from .arg_parser import build_preprocess_arg_parser
 from .device import (
     configure_torch_runtime,
     get_torch_device,
@@ -34,6 +35,7 @@ from .utils import (
 
 __all__ = [
     'scale_by_amsgrad',
+    'build_preprocess_arg_parser',
     'compute_avg_min_neighbor_distance',
     'compute_avg_num_neighbors',
     'compute_c',

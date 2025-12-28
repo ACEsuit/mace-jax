@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 
 
 def build_cli_arg_parser() -> argparse.ArgumentParser:
@@ -755,3 +756,188 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
         default=None,
     )
     return parser
+
+
+def build_preprocess_arg_parser() -> argparse.ArgumentParser:
+    try:
+        import configargparse
+
+        parser = configargparse.ArgumentParser(
+            config_file_parser_class=configargparse.YAMLConfigFileParser,
+            formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        )
+        parser.add(
+            '--config',
+            type=str,
+            is_config_file=True,
+            help='config file to aggregate options',
+        )
+    except ImportError:
+        parser = argparse.ArgumentParser(
+            formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        )
+    parser.add_argument(
+        '--train_file',
+        help='Training set xyz file',
+        type=str,
+        default=None,
+        required=True,
+    )
+    parser.add_argument(
+        '--valid_file',
+        help='Validation set xyz file',
+        type=str,
+        default=None,
+        required=False,
+    )
+    cpu_count = os.cpu_count() or 1
+    parser.add_argument(
+        '--num_process',
+        help='Number of processes and output files to create.',
+        type=int,
+        default=max(1, int(cpu_count / 4)),
+    )
+    parser.add_argument(
+        '--valid_fraction',
+        help='Fraction of training set used for validation',
+        type=float,
+        default=0.1,
+        required=False,
+    )
+    parser.add_argument(
+        '--test_file',
+        help='Test set xyz file',
+        type=str,
+        default=None,
+        required=False,
+    )
+    parser.add_argument(
+        '--work_dir',
+        help='Directory for auxiliary outputs (e.g., split indices).',
+        type=str,
+        default='.',
+    )
+    parser.add_argument(
+        '--h5_prefix',
+        help='Prefix directory for output HDF5 files.',
+        type=str,
+        default='',
+    )
+    parser.add_argument('--r_max', help='distance cutoff (in Ang)', type=float, default=5.0)
+    parser.add_argument(
+        '--config_type_weights',
+        help='String of dictionary containing the weights for each config type',
+        type=str,
+        default='{"Default":1.0}',
+    )
+    parser.add_argument(
+        '--energy_key',
+        help='Key of reference energies in training xyz',
+        type=str,
+        default='energy',
+    )
+    parser.add_argument(
+        '--forces_key',
+        help='Key of reference forces in training xyz',
+        type=str,
+        default='forces',
+    )
+    parser.add_argument(
+        '--virials_key',
+        help='Key of reference virials in training xyz',
+        type=str,
+        default='virials',
+    )
+    parser.add_argument(
+        '--stress_key',
+        help='Key of reference stress in training xyz',
+        type=str,
+        default='stress',
+    )
+    parser.add_argument(
+        '--dipole_key',
+        help='Key of reference dipoles in training xyz',
+        type=str,
+        default='dipole',
+    )
+    parser.add_argument(
+        '--polarizability_key',
+        help='Key of polarizability in training xyz',
+        type=str,
+        default='polarizability',
+    )
+    parser.add_argument(
+        '--charges_key',
+        help='Key of atomic charges in training xyz',
+        type=str,
+        default='charges',
+    )
+    parser.add_argument(
+        '--atomic_numbers',
+        help='List of atomic numbers',
+        type=str,
+        default=None,
+        required=False,
+    )
+    parser.add_argument(
+        '--compute_statistics',
+        help='Compute statistics for the dataset',
+        action='store_true',
+        default=False,
+    )
+    parser.add_argument(
+        '--batch_size',
+        help='Batch size used while computing statistics',
+        type=int,
+        default=16,
+    )
+    parser.add_argument(
+        '--scaling',
+        help='Type of scaling to the output',
+        type=str,
+        default='rms_forces_scaling',
+        choices=['std_scaling', 'rms_forces_scaling', 'no_scaling'],
+    )
+    parser.add_argument(
+        '--E0s',
+        help='Dictionary of isolated atom energies',
+        type=str,
+        default=None,
+        required=False,
+    )
+    parser.add_argument(
+        '--shuffle',
+        help='Shuffle the training dataset',
+        type=str2bool,
+        default=True,
+    )
+    parser.add_argument(
+        '--seed',
+        help='Random seed for splitting training and validation sets',
+        type=int,
+        default=123,
+    )
+    parser.add_argument(
+        '--head_key',
+        help='Key of head in training xyz',
+        type=str,
+        default='head',
+    )
+    parser.add_argument(
+        '--heads',
+        help='Dict of heads: containing individual files and E0s',
+        type=str,
+        default=None,
+        required=False,
+    )
+    return parser
+
+
+def str2bool(value):
+    if isinstance(value, bool):
+        return value
+    if value.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    if value.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    raise argparse.ArgumentTypeError('Boolean value expected.')
