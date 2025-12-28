@@ -2,11 +2,11 @@
 
 These helpers build streaming loaders that emit fixed-shape batches. Fixed
 shapes are crucial for JAX/XLA: the model compiles per input shape, so varying
-`n_node`/`n_edge`/`n_graph` across batches would trigger repeated recompilation
-and slow training. The streaming stats pass scans datasets, packs graphs into
-batches that respect an `n_edge` budget, and derives padding caps so every batch
-shares the same shape. The resulting assignments are cached per split (train,
-valid, test) so loaders can reuse them without re-scanning the HDF5 files.
+batch sizes across steps would trigger repeated recompilation. The streaming
+stats pass scans datasets, packs graphs into batches that respect an `n_edge`
+budget, and derives padding caps so every batch shares the same shape. The
+resulting assignments are cached per split (train, valid, test) so loaders can
+reuse them without re-scanning the HDF5 files.
 """
 
 import hashlib
@@ -989,9 +989,7 @@ def _build_streaming_train_loader(
     *,
     dataset_specs: Sequence[StreamingDatasetSpec],
     r_max: float,
-    n_node: int | None,
     n_edge: int,
-    n_graph: int,
     seed: int,
     head_to_index: dict[str, int],
     stream_prefetch: int | None,
@@ -1005,9 +1003,7 @@ def _build_streaming_train_loader(
     Args:
         dataset_specs: Streaming dataset specs for training.
         r_max: Cutoff used for edge construction.
-        n_node: Optional node cap (derived when None).
         n_edge: Edge cap used for batch packing.
-        n_graph: Graph cap for padding.
         seed: Shuffle seed for streaming loader.
         head_to_index: Mapping from head names to indices.
         stream_prefetch: Prefetch batch count.
@@ -1154,7 +1150,6 @@ def _collect_eval_streaming_specs(
     head_configs: dict[str, dict] | None,
     valid_path: str | None,
     test_path: str | None,
-    test_num: int | None,
     config_type_weights: dict | None,
     energy_key: str,
     forces_key: str,
@@ -1168,7 +1163,6 @@ def _collect_eval_streaming_specs(
         head_configs: Optional per-head configuration overrides.
         valid_path: Default validation path.
         test_path: Default test path.
-        test_num: Unsupported for streaming evaluation (validated here).
         config_type_weights: Optional config-type weights.
         energy_key: Energy property key.
         forces_key: Forces property key.
@@ -1178,11 +1172,6 @@ def _collect_eval_streaming_specs(
     Returns:
         (valid_specs, test_specs) lists for streaming loaders.
     """
-    if test_num not in (None, 0):
-        raise ValueError(
-            'test_num is not supported with streaming evaluation datasets.'
-        )
-
     valid_specs: list[StreamingDatasetSpec] = []
     test_specs: list[StreamingDatasetSpec] = []
 
@@ -1210,7 +1199,7 @@ def _collect_eval_streaming_specs(
                 )
 
             head_test_path = head_cfg.get('test_path', test_path)
-            head_test_num = head_cfg.get('test_num', test_num)
+            head_test_num = head_cfg.get('test_num')
             if head_test_num not in (None, 0):
                 raise ValueError(
                     f"Head '{head_name}' specifies test_num which is not supported with streaming evaluation datasets."
@@ -1260,9 +1249,7 @@ def _build_eval_streaming_loader(
     dataset_specs: Sequence[StreamingDatasetSpec],
     *,
     r_max: float,
-    n_node: int,
     n_edge: int,
-    n_graph: int,
     head_to_index: dict[str, int],
     base_z_table: data.AtomicNumberTable | None,
     num_workers: int = 0,
@@ -1275,9 +1262,7 @@ def _build_eval_streaming_loader(
     Args:
         dataset_specs: Specs for the evaluation datasets.
         r_max: Cutoff used for edge construction.
-        n_node: Node cap for padding.
         n_edge: Edge cap for padding.
-        n_graph: Graph cap for padding.
         head_to_index: Mapping from head names to indices.
         base_z_table: Base atomic-number table from training (optional).
         num_workers: Worker process count.
@@ -1313,9 +1298,7 @@ def _build_eval_streaming_loader(
     loader, _, _ = _build_streaming_train_loader(
         dataset_specs=dataset_specs,
         r_max=r_max,
-        n_node=n_node,
         n_edge=n_edge,
-        n_graph=n_graph,
         seed=int(seed),
         head_to_index=head_to_index,
         stream_prefetch=stream_prefetch,
@@ -1332,18 +1315,12 @@ def datasets(
     r_max: float,
     train_path: str,
     config_type_weights: dict = None,
-    train_num: int = None,
     valid_path: str = None,
-    valid_fraction: float = None,
-    valid_num: int = None,
     test_path: str = None,
-    test_num: int = None,
     seed: int = 1234,
     energy_key: str = 'energy',
     forces_key: str = 'forces',
-    n_node: int | None = None,
     n_edge: int = 1,
-    n_graph: int = 1,
     prefactor_stress: float = 1.0,
     remap_stress: np.ndarray = None,
     heads: Sequence[str] = ('Default',),
@@ -1367,18 +1344,12 @@ def datasets(
         r_max: Cutoff used for neighbor construction.
         train_path: Training HDF5 path(s).
         config_type_weights: Optional per-config-type weights.
-        train_num: Unsupported for streaming datasets.
         valid_path: Validation HDF5 path(s).
-        valid_fraction: Unsupported for streaming datasets.
-        valid_num: Unsupported for streaming datasets.
         test_path: Test HDF5 path(s).
-        test_num: Unsupported for streaming datasets.
         seed: Shuffle seed for streaming loaders.
         energy_key: Energy property key.
         forces_key: Forces property key.
-        n_node: Unsupported for streaming datasets (derived from packing).
         n_edge: Edge cap for batch packing.
-        n_graph: Graph cap for padding.
         prefactor_stress: Scaling factor for stress.
         remap_stress: Optional stress remap indices.
         heads: Head names for multihead datasets.
@@ -1406,16 +1377,6 @@ def datasets(
     if local_device_count > 1 and effective_workers > 0:
         effective_workers *= int(local_device_count)
 
-    if train_num is not None:
-        raise ValueError('train_num is not supported with streaming datasets.')
-    if valid_fraction is not None or valid_num is not None:
-        raise ValueError(
-            'valid_fraction and valid_num are not supported; provide explicit validation files.'
-        )
-    if n_node is not None:
-        raise ValueError(
-            'n_node is not supported with streaming datasets; configure n_edge only.'
-        )
     if n_edge is None:
         raise ValueError('n_edge must be provided for streaming datasets.')
 
@@ -1434,7 +1395,6 @@ def datasets(
         head_configs=head_configs,
         valid_path=valid_path,
         test_path=test_path,
-        test_num=test_num,
         config_type_weights=config_type_weights,
         energy_key=energy_key,
         forces_key=forces_key,
@@ -1445,9 +1405,7 @@ def datasets(
     train_loader, atomic_energies_dict, r_max = _build_streaming_train_loader(
         dataset_specs=dataset_specs,
         r_max=r_max,
-        n_node=n_node,
         n_edge=n_edge,
-        n_graph=n_graph,
         seed=seed,
         head_to_index=head_to_index,
         stream_prefetch=stream_train_prefetch,
@@ -1456,13 +1414,10 @@ def datasets(
         atomic_energies_override=atomic_energies_override,
         statistics_metadata_path=statistics_metadata_path,
     )
-    effective_n_node = getattr(train_loader, '_fixed_pad_nodes', None)
-    if effective_n_node is None:
-        effective_n_node = getattr(train_loader, '_n_node', None)
     effective_n_edge = getattr(train_loader, '_fixed_pad_edges', None)
     if effective_n_edge is None:
         effective_n_edge = getattr(train_loader, '_n_edge', None)
-    if effective_n_node is None or effective_n_edge is None:
+    if effective_n_edge is None:
         raise ValueError(
             'Unable to determine batch size limits for evaluation loaders.'
         )
@@ -1471,9 +1426,7 @@ def datasets(
     valid_loader = _build_eval_streaming_loader(
         valid_specs,
         r_max=r_max,
-        n_node=effective_n_node,
         n_edge=effective_n_edge,
-        n_graph=n_graph,
         head_to_index=head_to_index,
         base_z_table=base_z_table,
         num_workers=effective_workers,
@@ -1484,9 +1437,7 @@ def datasets(
     test_loader = _build_eval_streaming_loader(
         test_specs,
         r_max=r_max,
-        n_node=effective_n_node,
         n_edge=effective_n_edge,
-        n_graph=n_graph,
         head_to_index=head_to_index,
         base_z_table=base_z_table,
         num_workers=effective_workers,

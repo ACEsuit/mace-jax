@@ -101,12 +101,6 @@ def main() -> None:
         help='Stop after this many evaluation intervals.',
     )
     parser.add_argument(
-        '--batch-max-nodes',
-        type=str,
-        default=None,
-        help="Maximum number of atoms per batch, or 'auto' for automatic sizing.",
-    )
-    parser.add_argument(
         '--batch-max-edges',
         type=str,
         default=None,
@@ -165,11 +159,6 @@ def main() -> None:
             return 'None'
         return str(int(value))
 
-    if args.batch_max_nodes is not None:
-        limit = _format_batch_limit(args.batch_max_nodes)
-        bindings.append(
-            f'mace_jax.tools.gin_datasets.datasets.n_node={limit}'
-        )
     if args.batch_max_edges is not None:
         limit = _format_batch_limit(args.batch_max_edges)
         bindings.append(

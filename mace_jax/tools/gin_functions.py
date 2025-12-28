@@ -266,7 +266,9 @@ def _required_targets_from_loss(loss_fn) -> set[str]:
     return required
 
 
-def _required_targets_from_log_errors(log_errors: str | None) -> tuple[set[str], list[tuple[str, set[str]]]]:
+def _required_targets_from_log_errors(
+    log_errors: str | None,
+) -> tuple[set[str], list[tuple[str, set[str]]]]:
     """Infer required targets based on log_errors configuration."""
     selection = log_errors or 'PerAtomRMSE'
     required: set[str] = set()
@@ -779,6 +781,7 @@ def optimizer(
     Returns:
         Tuple of (gradient_transformation, max_epochs).
     """
+
     def weight_decay_mask(params):
         """Build a tree mask selecting parameters to regularize."""
         params = tools.flatten_dict(params)
@@ -857,6 +860,7 @@ def _masked_additive_weight_decay(
     Returns:
         Optax GradientTransformation implementing additive weight decay.
     """
+
     def init_fn(params):
         """Initialize the weight-decay transformation state."""
         return ()
@@ -1413,6 +1417,7 @@ def parse_argv(argv: list[str]):
     This helper is used by CLI entry points to bind gin parameters from
     positional `.gin` files and `--key=value` overrides.
     """
+
     def gin_bind_parameter(key: str, value: str):
         """Bind a single key/value pair into the gin configuration."""
         # We need to guess if value is a string or not

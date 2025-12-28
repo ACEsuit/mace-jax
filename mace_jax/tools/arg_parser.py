@@ -158,27 +158,6 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
         default=None,
     )
     parser.add_argument(
-        '--valid-fraction',
-        '--valid_fraction',
-        type=float,
-        default=None,
-        help='Fraction of training configs used for validation.',
-    )
-    parser.add_argument(
-        '--valid-num',
-        '--valid_num',
-        type=int,
-        default=None,
-        help='Number of random configs reserved for validation.',
-    )
-    parser.add_argument(
-        '--test-num',
-        '--test_num',
-        type=int,
-        default=None,
-        help='Number of configs sampled for the test set.',
-    )
-    parser.add_argument(
         '--atomic-numbers',
         '--atomic_numbers',
         dest='atomic_numbers',
@@ -216,16 +195,6 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help='Key used to read forces from datasets.',
-    )
-    parser.add_argument(
-        '--batch-max-nodes',
-        '--batch_max_nodes',
-        type=str,
-        default=None,
-        help=(
-            'Maximum number of atoms allowed in a padded batch. '
-            "Pass 'auto' or 'None' to request automatic sizing."
-        ),
     )
     parser.add_argument(
         '--batch-max-edges',

@@ -57,6 +57,7 @@ class BatchIteratorWrapper:
 @dataclass(frozen=True)
 class StreamingDatasetSpec:
     """Configuration describing one HDF5 dataset stream."""
+
     path: Path
     head_name: str = 'Default'
     config_type_weights: dict[str, float] | None = None
@@ -1128,6 +1129,7 @@ def pack_graphs_greedy(
     Returns:
         Tuple of (batch_iterator, info_dict) with padding/packing statistics.
     """
+
     def _make_iter():
         """Instantiate a new graph iterator."""
         return iter(graph_iter_fn())

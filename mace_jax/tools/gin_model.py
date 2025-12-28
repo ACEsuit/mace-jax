@@ -313,7 +313,9 @@ def model(
         config['torch_model_class'] = torch_model.__class__.__name__
 
         logging.info('Converting Torch model to JAX representation')
-        jax_module, variables, _ = mace_jax_from_torch.convert_model(torch_model, config)
+        jax_module, variables, _ = mace_jax_from_torch.convert_model(
+            torch_model, config
+        )
 
         # Separate trainable params from config/state collections.
         config_state = None

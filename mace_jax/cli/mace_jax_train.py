@@ -396,11 +396,6 @@ def _apply_dataset_options(args: argparse.Namespace) -> None:
             _normalize_optional_path(args.test_path, allow_none=True),
         )
     _bind_if_not_none(
-        'mace_jax.tools.gin_datasets.datasets.valid_fraction', args.valid_fraction
-    )
-    _bind_if_not_none('mace_jax.tools.gin_datasets.datasets.valid_num', args.valid_num)
-    _bind_if_not_none('mace_jax.tools.gin_datasets.datasets.test_num', args.test_num)
-    _bind_if_not_none(
         'mace_jax.tools.gin_datasets.datasets.energy_key', args.energy_key
     )
     _bind_if_not_none(
@@ -473,9 +468,6 @@ def _apply_dataset_options(args: argparse.Namespace) -> None:
                 'mace_jax.tools.gin_model.model.scaling',
                 gin_model.constant_scaling,
             )
-    if getattr(args, 'batch_max_nodes', None) is not None:
-        limit = _parse_batch_limit_option(args.batch_max_nodes)
-        gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.n_node', limit)
     if getattr(args, 'batch_max_edges', None) is not None:
         limit = _parse_batch_limit_option(args.batch_max_edges)
         gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.n_edge', limit)
