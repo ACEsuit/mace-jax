@@ -589,7 +589,7 @@ def test_gin_model_torch_checkpoint(monkeypatch, tmp_path):
     except Exception:  # pragma: no cover - optional dependency path
         pytest.skip('cuequivariance_ops unavailable in this environment')
 
-    import mace_jax.cli.mace_torch2jax as torch2jax_mod
+    import mace_jax.cli.mace_jax_from_torch as jax_from_torch_mod
 
     ckpt = tmp_path / 'dummy.pt'
     ckpt.write_bytes(b'checkpoint')
@@ -635,7 +635,7 @@ def test_gin_model_torch_checkpoint(monkeypatch, tmp_path):
         return _DummyModule(), dummy_params, None
 
     monkeypatch.setattr(torch, 'load', _fake_load)
-    monkeypatch.setattr(torch2jax_mod, 'convert_model', _fake_convert)
+    monkeypatch.setattr(jax_from_torch_mod, 'convert_model', _fake_convert)
     monkeypatch.setattr(scripts_utils, 'extract_config_mace_model', _fake_extract)
 
     apply_fn, params, num_interactions = gin_model.model(

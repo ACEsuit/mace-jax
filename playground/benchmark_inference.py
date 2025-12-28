@@ -19,7 +19,7 @@ from mace.tools.multihead_tools import AtomicNumberTable
 from mace.tools.scripts_utils import extract_config_mace_model
 from mace.tools.torch_geometric.batch import Batch
 
-from mace_jax.cli.mace_torch2jax import convert_model
+from mace_jax.cli.mace_jax_from_torch import convert_model
 from mace_jax.modules.wrapper_ops import CuEquivarianceConfig
 from mace_jax.tools.device import configure_torch_runtime, get_torch_device
 

@@ -92,7 +92,7 @@ editing gin files.
 
 Additional convenience flags let you adjust common gin settings directly from the CLI:
 
-- `--torch-checkpoint PATH`: import parameters from a Torch checkpoint (converted on the fly via `mace-torch2jax` utilities).
+- `--torch-checkpoint PATH`: import parameters from a Torch checkpoint (converted on the fly via `mace-jax-from-torch` utilities).
 - `--torch-head NAME`: select a specific head from the imported Torch model.
 - `--torch-param-dtype {float32,float64}`: override the dtype used for imported parameters.
 - `--train-path/--valid-path/--test-path`: point datasets to new files without editing the gin config.
@@ -165,14 +165,14 @@ A typical 2-host launch (one process per host) looks like:
     --coordinator-port 12345
   ```
 
-#### `mace-jax-prepare-data`
+#### `mace-jax-preprocess`
 
 Converts one or more XYZ files into MACE-style streaming HDF5 files and (optionally)
 computes dataset statistics. The outputs are written to `<h5_prefix>/train`,
 `<h5_prefix>/val`, and `<h5_prefix>/test`, plus `statistics.json` when requested.
 
 ```sh
-mace-jax-prepare-data \
+mace-jax-preprocess \
   --train_file data/train.xyz \
   --valid_file data/valid.xyz \
   --h5_prefix data/hdf5/ \
@@ -205,12 +205,12 @@ mace-create-lammps-model checkpoints/model.pt --dtype float32 --output exported_
 
 Add `--head NAME` when exporting a multi-head model.
 
-#### `mace-torch2jax`
+#### `mace-jax-from-torch`
 
 Performs Torch→JAX parameter conversion and (optionally) prediction. To compute energies for the provided test structure:
 
 ```sh
-mace-torch2jax checkpoints/model.pt --predict tests/test_data/simple.xyz
+mace-jax-from-torch checkpoints/model.pt --predict tests/test_data/simple.xyz
 ```
 
 If `--output` is omitted the converted parameters are written to `<checkpoint>-jax.npz`.
@@ -218,7 +218,7 @@ If `--output` is omitted the converted parameters are written to `<checkpoint>-j
 You can try this with one of the released foundation models (downloaded automatically):
 
 ```sh
-mace-torch2jax --foundation mp --model-name small --predict tests/test_data/simple.xyz
+mace-jax-from-torch --foundation mp --model-name small --predict tests/test_data/simple.xyz
 ```
 
 All commands can be invoked via `python -m mace_jax.<module>` if preferred.

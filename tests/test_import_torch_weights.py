@@ -5,15 +5,15 @@ import types
 import jax.numpy as jnp
 import pytest
 
-from mace_jax.cli import mace_torch2jax as torch2jax
+from mace_jax.cli import mace_jax_from_torch as jax_from_torch
 
 
 def _patch_common(monkeypatch, jax_model):
-    monkeypatch.setattr(torch2jax, '_build_jax_model', lambda config: jax_model)
+    monkeypatch.setattr(jax_from_torch, '_build_jax_model', lambda config: jax_model)
     monkeypatch.setattr(
-        torch2jax, '_prepare_template_data', lambda config: {'dummy': 1}
+        jax_from_torch, '_prepare_template_data', lambda config: {'dummy': 1}
     )
-    monkeypatch.setattr(torch2jax.jax.random, 'PRNGKey', lambda seed: 0)
+    monkeypatch.setattr(jax_from_torch.jax.random, 'PRNGKey', lambda seed: 0)
 
 
 class _DummyJaxModel:
@@ -38,7 +38,7 @@ def test_convert_model_rejects_reduced_cg_mismatch(monkeypatch):
     torch_model = types.SimpleNamespace(use_reduced_cg=False)
 
     with pytest.raises(ValueError, match='use_reduced_cg'):
-        torch2jax.convert_model(torch_model, {})
+        jax_from_torch.convert_model(torch_model, {})
 
 
 def test_convert_model_detects_unimported_parameters(monkeypatch):
@@ -50,7 +50,7 @@ def test_convert_model_detects_unimported_parameters(monkeypatch):
     torch_model = types.SimpleNamespace(use_reduced_cg=True)
 
     with pytest.raises(ValueError, match='still NaN'):
-        torch2jax.convert_model(torch_model, {})
+        jax_from_torch.convert_model(torch_model, {})
 
 
 def test_convert_model_success(monkeypatch):
@@ -62,7 +62,7 @@ def test_convert_model_success(monkeypatch):
     _patch_common(monkeypatch, dummy_jax)
     torch_model = types.SimpleNamespace(use_reduced_cg=True)
 
-    model, variables, template = torch2jax.convert_model(torch_model, {'cfg': 1})
+    model, variables, template = jax_from_torch.convert_model(torch_model, {'cfg': 1})
 
     assert model is dummy_jax
     assert template == {'dummy': 1}

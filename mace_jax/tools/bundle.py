@@ -10,7 +10,7 @@ import jax
 from flax import core as flax_core
 from flax import serialization
 
-from mace_jax.cli import mace_torch2jax
+from mace_jax.cli import mace_jax_from_torch
 
 DEFAULT_CONFIG_NAME = 'config.json'
 DEFAULT_PARAMS_NAME = 'params.msgpack'
@@ -62,8 +62,8 @@ def load_model_bundle(
     if wrapper not in (None, '', 'mace'):
         raise ValueError('mace-jax only supports the built-in MACE wrapper.')
 
-    module = mace_torch2jax._build_jax_model(config)
-    template = mace_torch2jax._prepare_template_data(config)
+    module = mace_jax_from_torch._build_jax_model(config)
+    template = mace_jax_from_torch._prepare_template_data(config)
     variables = module.init(jax.random.PRNGKey(0), template)
     variables = serialization.from_bytes(variables, params_path.read_bytes())
     variables = flax_core.freeze(variables)

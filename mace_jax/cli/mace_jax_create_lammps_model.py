@@ -13,7 +13,7 @@ from mace.tools.scripts_utils import extract_config_mace_model
 
 from mace_jax.calculators.lammps_mliap_mace import create_lammps_mliap_calculator
 
-from .mace_torch2jax import convert_model
+from .mace_jax_from_torch import convert_model
 
 
 def parse_args() -> argparse.Namespace:

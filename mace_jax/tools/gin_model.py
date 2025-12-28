@@ -274,7 +274,7 @@ def model(
         import torch  # noqa: PLC0415
         from mace.tools.scripts_utils import extract_config_mace_model  # noqa: PLC0415
 
-        from mace_jax.cli import mace_torch2jax  # noqa: PLC0415
+        from mace_jax.cli import mace_jax_from_torch  # noqa: PLC0415
 
         checkpoint_path = Path(torch_checkpoint)
         if not checkpoint_path.exists():
@@ -313,7 +313,7 @@ def model(
         config['torch_model_class'] = torch_model.__class__.__name__
 
         logging.info('Converting Torch model to JAX representation')
-        jax_module, variables, _ = mace_torch2jax.convert_model(torch_model, config)
+        jax_module, variables, _ = mace_jax_from_torch.convert_model(torch_model, config)
 
         # Separate trainable params from config/state collections.
         config_state = None
