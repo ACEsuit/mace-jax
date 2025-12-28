@@ -110,14 +110,15 @@ def test_ema_eval_uses_smoothed_parameters():
     targets = [1.0, -0.5]
     ema_decay = 0.5
     learning_rate = 0.3
+    steps = len(targets)
     expected = _expected_ema(
-        _simulate_params(targets, learning_rate),
+        _simulate_params(targets * steps, learning_rate),
         ema_decay,
     )
 
     eval_param = _run_training(
         targets,
-        steps=len(targets),
+        steps=steps,
         learning_rate=learning_rate,
         ema_decay=ema_decay,
     )

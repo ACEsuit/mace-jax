@@ -5,11 +5,25 @@ import pytest
 import torch
 from e3nn import o3
 from e3nn_jax import Irreps
-from mace.modules.wrapper_ops import CuEquivarianceConfig, SymmetricContractionWrapper
 
 from mace_jax.adapters.cuequivariance.symmetric_contraction import SymmetricContraction
 from mace_jax.tools.device import configure_torch_runtime
 
+try:  # pragma: no cover - optional cue torch backend
+    from mace.modules.wrapper_ops import CuEquivarianceConfig, SymmetricContractionWrapper
+
+    _CUE_TORCH_AVAILABLE = True
+    _CUE_TORCH_IMPORT_ERROR = None
+except Exception as exc:  # pragma: no cover - import guard
+    CuEquivarianceConfig = None
+    SymmetricContractionWrapper = None
+    _CUE_TORCH_AVAILABLE = False
+    _CUE_TORCH_IMPORT_ERROR = exc
+
+pytestmark = pytest.mark.skipif(
+    not _CUE_TORCH_AVAILABLE,
+    reason=f'cuequivariance torch backend unavailable: {_CUE_TORCH_IMPORT_ERROR}',
+)
 
 def _jax_float_dtype() -> jnp.dtype:
     return jnp.asarray(0.0).dtype
@@ -83,6 +97,8 @@ def module_and_params():
 
 class TestSymmetricContractionImport:
     def test_forward_matches_cue_torch(self, module_and_params, torch_device):
+        if torch_device.type != 'cuda':
+            pytest.skip('cue-equivariance requires CUDA backend.')
         module, params = module_and_params
 
         torch_module = (

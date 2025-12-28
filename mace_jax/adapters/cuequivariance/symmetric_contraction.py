@@ -136,7 +136,10 @@ class SymmetricContraction(fnn.Module):
 
         if self.use_reduced_cg:
             self.projection = None
-            self.weight_basis_dim = self.weight_numel // self.mul
+            if projection is not None:
+                self.weight_basis_dim = int(np.asarray(projection).shape[1])
+            else:
+                self.weight_basis_dim = self.weight_numel // self.mul
         else:
             self.projection = jnp.asarray(projection)
             self.weight_basis_dim = self.projection.shape[0]

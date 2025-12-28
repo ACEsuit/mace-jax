@@ -26,13 +26,29 @@ except Exception as exc:  # pragma: no cover
     Batch = None
     _TORCH_MODEL_IMPORT_ERROR = exc
 
-pytestmark = pytest.mark.skipif(
-    _TORCH_MODEL_IMPORT_ERROR is not None,
-    reason=f'Unable to import Torch cuequivariance components: {_TORCH_MODEL_IMPORT_ERROR}',
-)
-
 from mace_jax import modules
 from mace_jax.tools.import_from_torch import import_from_torch
+
+
+def _torch_cuda_available() -> bool:
+    return torch.cuda.is_available() and torch.cuda.device_count() > 0
+
+
+_TORCH_CUDA_AVAILABLE = _torch_cuda_available()
+
+pytestmark = [
+    pytest.mark.skipif(
+        _TORCH_MODEL_IMPORT_ERROR is not None,
+        reason=(
+            'Unable to import Torch cuequivariance components: '
+            f'{_TORCH_MODEL_IMPORT_ERROR}'
+        ),
+    ),
+    pytest.mark.skipif(
+        not _TORCH_CUDA_AVAILABLE,
+        reason='CUDA not available for torch cuequivariance tests.',
+    ),
+]
 
 
 def _load_statistics(path: Path) -> dict:

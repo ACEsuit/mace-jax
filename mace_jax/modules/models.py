@@ -156,6 +156,11 @@ class MACE(fnn.Module):
         )
         self._hidden_irreps = hidden_irreps
         self._mlp_irreps = mlp_irreps
+        hidden_irreps_out = (
+            Irreps(str(hidden_irreps[0]))
+            if self.num_interactions == 1
+            else hidden_irreps
+        )
 
         # Normalize2mom constants originate from the Torch model (or fall back
         # to defaults) and are kept as scalar arrays for serialization.
@@ -262,7 +267,7 @@ class MACE(fnn.Module):
             edge_attrs_irreps=sh_irreps,
             edge_feats_irreps=edge_feats_irreps,
             target_irreps=interaction_irreps_first,
-            hidden_irreps=hidden_irreps,
+            hidden_irreps=hidden_irreps_out,
             avg_num_neighbors=self.avg_num_neighbors,
             radial_MLP=radial_mlp,
             cueq_config=self.cueq_config,
@@ -273,7 +278,7 @@ class MACE(fnn.Module):
         use_sc_first = 'Residual' in self.interaction_cls_first.__name__
         product_first = EquivariantProductBasisBlock(
             node_feats_irreps=interaction_first.target_irreps,
-            target_irreps=self.hidden_irreps,
+            target_irreps=hidden_irreps_out,
             correlation=self._correlation[0],
             num_elements=self.num_elements,
             use_sc=use_sc_first,
@@ -287,7 +292,7 @@ class MACE(fnn.Module):
         if not self.use_last_readout_only:
             readouts.append(
                 LinearReadoutBlock(
-                    hidden_irreps,
+                    hidden_irreps_out,
                     Irreps(f'{len(self._heads)}x0e'),
                     self.cueq_config,
                     name=f'readouts_{len(readouts)}',

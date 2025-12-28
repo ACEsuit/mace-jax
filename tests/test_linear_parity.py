@@ -11,18 +11,39 @@ import jax.numpy as jnp
 from e3nn import o3
 from e3nn_jax import Irreps, IrrepsArray
 
-from mace.modules.wrapper_ops import CuEquivarianceConfig as CuEquivarianceConfigTorch
-from mace.modules.wrapper_ops import Linear as TorchLinearWrapper
 from mace_jax.adapters.cuequivariance.linear import Linear as JaxLinear
 
 import cuequivariance as cue
-from cuequivariance_torch.operations.linear import Linear as CueLinearTorch
 from mace_jax.adapters.cuequivariance.utility import (
     ir_mul_to_mul_ir as cue_ir_mul_to_mul_ir,
 )
 from mace_jax.adapters.cuequivariance.utility import (
     mul_ir_to_ir_mul as cue_mul_ir_to_ir_mul,
 )
+
+try:
+    from mace.modules.wrapper_ops import CuEquivarianceConfig as CuEquivarianceConfigTorch
+    from mace.modules.wrapper_ops import Linear as TorchLinearWrapper
+    from cuequivariance_torch.operations.linear import Linear as CueLinearTorch
+
+    _CUE_TORCH_AVAILABLE = True
+    _CUE_TORCH_IMPORT_ERROR = None
+except Exception as exc:  # pragma: no cover - optional backend
+    CuEquivarianceConfigTorch = None
+    TorchLinearWrapper = None
+    CueLinearTorch = None
+    _CUE_TORCH_AVAILABLE = False
+    _CUE_TORCH_IMPORT_ERROR = exc
+
+
+def _torch_cuda_available() -> bool:
+    return torch.cuda.is_available() and torch.cuda.device_count() > 0
+
+
+def _require_cue_torch():
+    if not _CUE_TORCH_AVAILABLE:
+        pytest.skip(f'cuequivariance torch backend unavailable: {_CUE_TORCH_IMPORT_ERROR}')
+    return CuEquivarianceConfigTorch, TorchLinearWrapper, CueLinearTorch
 
 
 def _as_irreps_array(irreps: Irreps, array: jnp.ndarray) -> IrrepsArray:
@@ -109,6 +130,7 @@ class TestLinearParity:
 
     def test_linear_parity_torch_backends(self, simple_xyz_features):
         """JAX Linear should import weights from both e3nn and cue torch backends."""
+        CuEquivarianceConfigTorch, TorchLinearWrapper, _ = _require_cue_torch()
         irreps_in = o3.Irreps('1x0e + 1x1o')
         irreps_out = o3.Irreps('1x0e')
         features_np = simple_xyz_features.astype(np.float32)
@@ -137,6 +159,8 @@ class TestLinearParity:
         np.testing.assert_allclose(out_jax_arr, out_torch_e3nn, rtol=1e-6, atol=1e-6)
 
         # --- cue-backed torch backend (enable optimize_linear to trigger cue) ---
+        if not _torch_cuda_available():
+            return
         cue_cfg = CuEquivarianceConfigTorch(enabled=True, optimize_linear=True)
         try:
             torch_linear_cue = TorchLinearWrapper(
@@ -149,8 +173,11 @@ class TestLinearParity:
         except Exception as exc:
             pytest.skip(f'cuequivariance torch backend unavailable: {exc}')
 
-        with torch.no_grad():
-            out_torch_cue = torch_linear_cue(features_torch).cpu().numpy()
+        try:
+            with torch.no_grad():
+                out_torch_cue = torch_linear_cue(features_torch).cpu().numpy()
+        except NotImplementedError as exc:
+            pytest.skip(f'cuequivariance torch backend unavailable: {exc}')
 
         variables_cue = JaxLinear.import_from_torch(torch_linear_cue, variables)
         out_jax = jax_linear.apply(variables_cue, features_jax)
@@ -160,6 +187,7 @@ class TestLinearParity:
 
     def test_linear_parity_torch_backends_complex_irreps(self):
         """Parity on higher-dimensional irreps to mirror foundation-style setups."""
+        CuEquivarianceConfigTorch, TorchLinearWrapper, _ = _require_cue_torch()
         rng = np.random.default_rng(1234)
         irreps_in = o3.Irreps('16x0e + 16x1o + 10x2e + 6x3o')
         irreps_out = o3.Irreps('8x0e + 4x1o')
@@ -190,6 +218,8 @@ class TestLinearParity:
         np.testing.assert_allclose(out_jax_arr, out_torch_e3nn, rtol=1e-6, atol=1e-6)
 
         # --- cue-backed torch backend (enable optimize_linear to trigger cue) ---
+        if not _torch_cuda_available():
+            return
         cue_cfg = CuEquivarianceConfigTorch(enabled=True, optimize_linear=True)
         try:
             torch_linear_cue = TorchLinearWrapper(
@@ -202,8 +232,11 @@ class TestLinearParity:
         except Exception as exc:
             pytest.skip(f'cuequivariance torch backend unavailable: {exc}')
 
-        with torch.no_grad():
-            out_torch_cue = torch_linear_cue(features_torch).cpu().numpy()
+        try:
+            with torch.no_grad():
+                out_torch_cue = torch_linear_cue(features_torch).cpu().numpy()
+        except NotImplementedError as exc:
+            pytest.skip(f'cuequivariance torch backend unavailable: {exc}')
 
         variables_cue = JaxLinear.import_from_torch(torch_linear_cue, variables)
         out_jax = jax_linear.apply(variables_cue, features_jax)
@@ -213,6 +246,9 @@ class TestLinearParity:
 
     def test_cue_linear_matches_torch_mul_ir(self, simple_xyz_features):
         """Cue Linear adapter should mirror torch cuet.Linear in mul_ir layout."""
+        _, _, CueLinearTorch = _require_cue_torch()
+        if not _torch_cuda_available():
+            pytest.skip('cuequivariance torch backend requires CUDA')
         irreps_in = '1x0e + 1x1o'
         irreps_out = '2x0e'
 
@@ -246,6 +282,9 @@ class TestLinearParity:
 
     def test_cue_linear_matches_torch_ir_mul(self, simple_xyz_features):
         """Cue Linear adapter should mirror torch cuet.Linear in ir_mul layout."""
+        _, _, CueLinearTorch = _require_cue_torch()
+        if not _torch_cuda_available():
+            pytest.skip('cuequivariance torch backend requires CUDA')
         irreps_in = '2x0e + 1x1o'
         irreps_out = '1x0e + 1x1o'
         irreps_in_obj = Irreps(irreps_in)
@@ -284,6 +323,9 @@ class TestLinearParity:
 
     def test_import_rejects_layout_mismatch(self):
         """Import should fail when Torch and JAX layouts disagree."""
+        _, _, CueLinearTorch = _require_cue_torch()
+        if not _torch_cuda_available():
+            pytest.skip('cuequivariance torch backend requires CUDA')
         irreps_in = '1x0e + 1x1o'
         irreps_out = '1x0e'
 
