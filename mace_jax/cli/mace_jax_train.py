@@ -939,7 +939,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     if args.print_config:
         logging.info('Operative gin config:\n%s', gin.config_str())
 
-    run_training(dry_run=args.dry_run)
+    try:
+        run_training(dry_run=args.dry_run)
+    except ValueError as exc:
+        logging.error(str(exc))
+        raise SystemExit(2) from None
 
 
 if __name__ == '__main__':

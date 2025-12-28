@@ -248,6 +248,101 @@ def _instantiate_loss(loss_cls, overrides: dict):
     return loss_cls(**overrides)
 
 
+def _required_targets_from_loss(loss_fn) -> set[str]:
+    """Infer required targets based on loss weights and presence checks."""
+    required: set[str] = set()
+    if float(getattr(loss_fn, 'energy_weight', 0.0) or 0.0) != 0.0:
+        required.add('energy')
+    if float(getattr(loss_fn, 'forces_weight', 0.0) or 0.0) != 0.0:
+        required.add('forces')
+    if float(getattr(loss_fn, 'stress_weight', 0.0) or 0.0) != 0.0:
+        required.add('stress')
+    if float(getattr(loss_fn, 'virials_weight', 0.0) or 0.0) != 0.0:
+        required.add('virials')
+    if float(getattr(loss_fn, 'dipole_weight', 0.0) or 0.0) != 0.0:
+        required.add('dipole')
+    if float(getattr(loss_fn, 'polarizability_weight', 0.0) or 0.0) != 0.0:
+        required.add('polarizability')
+    return required
+
+
+def _required_targets_from_log_errors(log_errors: str | None) -> tuple[set[str], list[tuple[str, set[str]]]]:
+    """Infer required targets based on log_errors configuration."""
+    selection = log_errors or 'PerAtomRMSE'
+    required: set[str] = set()
+    any_of: list[tuple[str, set[str]]] = []
+    if selection in {
+        'PerAtomRMSE',
+        'rel_PerAtomRMSE',
+        'TotalRMSE',
+        'PerAtomMAE',
+        'rel_PerAtomMAE',
+        'TotalMAE',
+        'PerAtomRMSEstressvirials',
+        'PerAtomMAEstressvirials',
+    }:
+        required.update({'energy', 'forces'})
+        any_of.append(('stress or virials', {'stress', 'virials'}))
+    elif selection == 'DipoleRMSE':
+        required.add('dipole')
+    elif selection == 'DipolePolarRMSE':
+        required.update({'dipole', 'polarizability'})
+    elif selection == 'EnergyDipoleRMSE':
+        required.update({'energy', 'forces', 'dipole'})
+    return required, any_of
+
+
+def _sample_graph_from_loader(loader):
+    """Extract a representative graph from a loader without consuming state."""
+    graphs = getattr(loader, 'graphs', None)
+    if graphs:
+        sample = graphs[0]
+    else:
+        try:
+            sample = next(iter(loader))
+        except StopIteration:
+            return None
+    if isinstance(sample, Sequence) and not isinstance(sample, jraph.GraphsTuple):
+        for item in sample:
+            if isinstance(item, jraph.GraphsTuple):
+                return item
+        return None
+    return sample
+
+
+def _assert_required_targets(
+    loader,
+    *,
+    required: set[str],
+    any_of: list[tuple[str, set[str]]],
+    context: str,
+) -> None:
+    """Validate that requested targets are present in a loader."""
+    if loader is None:
+        return
+    graph = _sample_graph_from_loader(loader)
+    if graph is None:
+        return
+    available = {
+        'energy': getattr(graph.globals, 'energy', None) is not None,
+        'forces': getattr(graph.nodes, 'forces', None) is not None,
+        'stress': getattr(graph.globals, 'stress', None) is not None,
+        'virials': getattr(graph.globals, 'virials', None) is not None,
+        'dipole': getattr(graph.globals, 'dipole', None) is not None,
+        'polarizability': getattr(graph.globals, 'polarizability', None) is not None,
+    }
+    missing = sorted([name for name in required if not available.get(name, False)])
+    if missing:
+        raise ValueError(
+            f'{context} requires targets {missing}, but they are missing from the dataset.'
+        )
+    for label, options in any_of:
+        if not any(available.get(name, False) for name in options):
+            raise ValueError(
+                f'{context} requires {label}, but none of {sorted(options)} are present in the dataset.'
+            )
+
+
 @gin.configurable('loss')
 def loss(
     loss_cls=modules.WeightedEnergyForcesStressLoss,
@@ -863,6 +958,8 @@ def train(
     loss_fn = loss()
     if log_errors is None and isinstance(loss_fn, modules.WeightedEnergyForcesL1L2Loss):
         log_errors = 'PerAtomMAE'
+    required_by_loss = _required_targets_from_loss(loss_fn)
+    metric_required, metric_any_of = _required_targets_from_log_errors(log_errors)
     start_time = time.perf_counter()
     total_time_per_interval = []
     eval_time_per_interval = []
@@ -1022,6 +1119,70 @@ def train(
         )
     valid_head_loaders = _split_loader_by_heads(valid_loader)
     test_head_loaders = _split_loader_by_heads(test_loader)
+
+    _assert_required_targets(
+        train_loader,
+        required=required_by_loss,
+        any_of=[],
+        context='Training loss',
+    )
+    if eval_train:
+        _assert_required_targets(
+            train_loader,
+            required=metric_required,
+            any_of=metric_any_of,
+            context=f'Training metrics ({log_errors or "PerAtomRMSE"})',
+        )
+    _assert_required_targets(
+        valid_loader,
+        required=required_by_loss,
+        any_of=[],
+        context='Validation loss',
+    )
+    _assert_required_targets(
+        valid_loader,
+        required=metric_required,
+        any_of=metric_any_of,
+        context=f'Validation metrics ({log_errors or "PerAtomRMSE"})',
+    )
+    _assert_required_targets(
+        test_loader,
+        required=required_by_loss,
+        any_of=[],
+        context='Test loss',
+    )
+    _assert_required_targets(
+        test_loader,
+        required=metric_required,
+        any_of=metric_any_of,
+        context=f'Test metrics ({log_errors or "PerAtomRMSE"})',
+    )
+    for head_name, head_loader in valid_head_loaders.items():
+        _assert_required_targets(
+            head_loader,
+            required=required_by_loss,
+            any_of=[],
+            context=f'Validation loss (head={head_name})',
+        )
+        _assert_required_targets(
+            head_loader,
+            required=metric_required,
+            any_of=metric_any_of,
+            context=f'Validation metrics ({log_errors or "PerAtomRMSE"}, head={head_name})',
+        )
+    for head_name, head_loader in test_head_loaders.items():
+        _assert_required_targets(
+            head_loader,
+            required=required_by_loss,
+            any_of=[],
+            context=f'Test loss (head={head_name})',
+        )
+        _assert_required_targets(
+            head_loader,
+            required=metric_required,
+            any_of=metric_any_of,
+            context=f'Test metrics ({log_errors or "PerAtomRMSE"}, head={head_name})',
+        )
 
     def _should_run_eval(current_epoch: int, is_last: bool) -> bool:
         """Decide whether to run evaluation for the current epoch."""
