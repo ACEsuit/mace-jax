@@ -1,3 +1,12 @@
+"""Gin-configurable model factory and graph-to-model adapters.
+
+The model factory builds either a native Flax MACE module or wraps a converted
+Torch checkpoint. The apply functions accept padded `GraphsTuple` batches and
+return energy/force/stress predictions. Using padded, fixed-shape batches is
+important for JAX/XLA: it lets the compiled model be reused across epochs
+without recompiling for each new batch shape.
+"""
+
 import logging
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -26,11 +35,32 @@ gin.register('rms_forces_scaling')(tools.compute_mean_rms_energy_forces)
 
 @gin.configurable
 def constant_scaling(graphs, atomic_energies, *, mean=0.0, std=1.0):
+    """Return fixed mean/std values for energy normalization.
+
+    Args:
+        graphs: Training graphs (unused; kept for API compatibility).
+        atomic_energies: Per-species atomic energies (unused).
+        mean: Constant mean energy offset to apply per graph.
+        std: Constant scaling factor for energies/forces/stress.
+
+    Returns:
+        Tuple of (mean, std) consumed by `model()` to rescale predictions.
+    """
     return mean, std
 
 
 @gin.configurable
 def bessel_basis(length, max_length, number: int):
+    """Compute a radial basis using e3nn's Bessel expansion.
+
+    Args:
+        length: Edge lengths (distance) array.
+        max_length: Cutoff radius used by the basis.
+        number: Number of basis functions.
+
+    Returns:
+        Radial basis values with shape derived from `length` and `number`.
+    """
     return e3nn.bessel(length, number, max_length)
 
 
@@ -38,6 +68,17 @@ def bessel_basis(length, max_length, number: int):
 def soft_envelope(
     length, max_length, arg_multiplicator: float = 2.0, value_at_origin: float = 1.2
 ):
+    """Compute a smooth cutoff envelope for radial features.
+
+    Args:
+        length: Edge lengths (distance) array.
+        max_length: Cutoff radius.
+        arg_multiplicator: Controls how quickly the envelope decays.
+        value_at_origin: Value of the envelope at zero distance.
+
+    Returns:
+        Envelope values matching `length` shape, used to dampen features near cutoff.
+    """
     return e3nn.soft_envelope(
         length,
         max_length,
@@ -48,11 +89,32 @@ def soft_envelope(
 
 @gin.configurable
 def polynomial_envelope(length, max_length, degree0: int, degree1: int):
+    """Compute a polynomial cutoff envelope for radial features.
+
+    Args:
+        length: Edge lengths (distance) array.
+        max_length: Cutoff radius.
+        degree0: Inner polynomial degree.
+        degree1: Outer polynomial degree.
+
+    Returns:
+        Envelope values used by the MACE radial basis pipeline.
+    """
     return e3nn.poly_envelope(degree0, degree1, max_length)(length)
 
 
 @gin.configurable
 def u_envelope(length, max_length, p: int):
+    """Compute a U-shaped polynomial envelope parameterized by p.
+
+    Args:
+        length: Edge lengths (distance) array.
+        max_length: Cutoff radius.
+        p: Envelope smoothness parameter.
+
+    Returns:
+        Envelope values for tapering radial basis contributions.
+    """
     return e3nn.poly_envelope(p - 1, 2, max_length)(length)
 
 
@@ -60,7 +122,19 @@ def u_envelope(length, max_length, p: int):
 def _graph_to_data(
     graph: jraph.GraphsTuple, *, num_species: int
 ) -> dict[str, jnp.ndarray]:
-    """Convert a (possibly padded) graph into the dictionary layout expected by MACE."""
+    """Convert a (possibly padded) graph into the MACE data dictionary.
+
+    Args:
+        graph: Input `jraph.GraphsTuple`, potentially padded.
+        num_species: Size of the atomic-number vocabulary used for one-hot encoding.
+
+    Returns:
+        Dict of arrays matching the MACE module inputs (positions, edges, shifts,
+        batch/ptr indexing, optional head indices, and cell data).
+
+    This adapter is called by both the native Flax MACE apply function and the
+    Torch-to-JAX converted apply function.
+    """
     positions = jnp.asarray(graph.nodes.positions, dtype=default_dtype())
     shifts = jnp.asarray(graph.edges.shifts, dtype=positions.dtype)
     cell = jnp.asarray(graph.globals.cell, dtype=positions.dtype)
@@ -141,6 +215,41 @@ def model(
     torch_param_dtype: str | None = None,
     **kwargs,
 ):
+    """Construct a MACE model and return an apply function plus initial params.
+
+    This gin-configurable factory is used by training/evaluation entry points to
+    build a Flax MACE module or wrap a converted Torch checkpoint. It resolves
+    dataset-derived defaults (species, atomic energies, neighbor statistics) and
+    optional output normalization.
+
+    Args:
+        r_max: Cutoff radius for neighbor interactions.
+        atomic_energies_dict: Optional per-species atomic energies from preprocessing.
+        train_graphs: Sample graphs used to infer species and statistics.
+        initialize_seed: PRNG seed used to initialize parameters (optional).
+        scaling: Callable that returns (mean, std) for output rescaling.
+        atomic_energies: How to populate atomic energies ('average', 'isolated_atom',
+            'zero', or explicit array/dict).
+        avg_num_neighbors: Precomputed or 'average' neighbor count for normalization.
+        avg_r_min: Precomputed or 'average' minimum neighbor distance.
+        num_species: Explicit number of species; inferred if not provided.
+        num_interactions: Number of interaction blocks in the MACE model.
+        path_normalization: e3nn path normalization setting.
+        gradient_normalization: e3nn gradient normalization setting.
+        learnable_atomic_energies: Flag for learnable atomic energies (unsupported).
+        radial_basis: Callable to compute radial basis features.
+        radial_envelope: Callable to compute radial envelope values.
+        torch_checkpoint: Optional Torch checkpoint path to convert and wrap.
+        torch_head: Optional head name to select from Torch multi-head models.
+        torch_param_dtype: Optional dtype override ('float32' or 'float64') for Torch params.
+        **kwargs: Remaining MACE module constructor arguments.
+
+    Returns:
+        Tuple of (apply_fn, params_bundle, num_interactions). The apply function
+        accepts a `jraph.GraphsTuple` and returns energy/force/stress predictions.
+        `params_bundle` includes parameters (and optional config state), and
+        `num_interactions` reflects the number of interaction blocks used.
+    """
     z_table = kwargs.get('z_table', None)
     if z_table is not None:
         max_z = max(z_table.zs)
@@ -252,6 +361,7 @@ def model(
             compute_force: bool = True,
             compute_stress: bool = False,
         ) -> dict[str, jnp.ndarray]:
+            """Apply the converted Torch model to a `GraphsTuple` input."""
             variables_local = parameters
             if config_state is not None and not (
                 isinstance(parameters, dict) and 'config' in parameters
@@ -426,6 +536,7 @@ def model(
     kwargs.pop('radial_envelope', None)
 
     def _ensure_irreps(value):
+        """Coerce configuration values into e3nn.Irreps when possible."""
         if value is None:
             return None
         if isinstance(value, e3nn.Irreps):
@@ -451,7 +562,17 @@ def model(
         compute_force: bool = True,
         compute_stress: bool = False,
     ) -> dict[str, jnp.ndarray]:
-        """Apply the MACE module to a (possibly padded) graph."""
+        """Apply the MACE module to a (possibly padded) graph.
+
+        Args:
+            params: Trainable parameters (and optional config state).
+            graph: Input batch as a `jraph.GraphsTuple`.
+            compute_force: Whether to compute forces from the energy prediction.
+            compute_stress: Whether to compute stress/virials from the energy prediction.
+
+        Returns:
+            Dict with `energy`, `forces`, and `stress` arrays (masked for padding).
+        """
         e3nn.config('path_normalization', path_normalization)
         e3nn.config('gradient_normalization', gradient_normalization)
 
@@ -469,6 +590,7 @@ def model(
         edge_mask_bool = edge_mask > 0.0
 
         def _sanitize(array, mask, expand_dims=0):
+            """Fill padded entries with a valid sentinel so masked values are stable."""
             if array is None:
                 return None
             if array.shape[0] == 0:

@@ -1,3 +1,13 @@
+"""Low-level training and evaluation loops for JAX MACE.
+
+The routines in this file assume that batches are padded to fixed shapes
+(`n_node`, `n_edge`, `n_graph`). Fixed shapes are essential for JAX/XLA because
+the model is compiled per input shape; a changing batch shape would trigger
+recompilation and stall training. The streaming loader plus packing logic
+ensures those fixed shapes, while these loops focus on efficient updates and
+metric aggregation.
+"""
+
 import dataclasses
 import itertools
 import logging
@@ -23,7 +33,17 @@ from mace_jax import data
 @gin.register
 @dataclasses.dataclass
 class SWAConfig:
-    """Configuration for simple Stochastic Weight Averaging."""
+    """Configuration for simple Stochastic Weight Averaging (SWA).
+
+    Attributes:
+        start_interval: Epoch/interval index to begin collecting SWA snapshots.
+        update_interval: Frequency (in intervals) for collecting SWA snapshots.
+        min_snapshots_for_eval: Minimum snapshots before using SWA parameters.
+        max_snapshots: Optional cap on the number of stored snapshots.
+        prefer_swa_params: Whether to use SWA params for evaluation once available.
+        stage_loss_factory: Optional loss factory to swap in at SWA stage start.
+        stage_loss_kwargs: Optional kwargs for the stage-two loss.
+    """
 
     start_interval: int = 0
     update_interval: int = 1
@@ -34,6 +54,7 @@ class SWAConfig:
     stage_loss_kwargs: dict[str, float] | None = None
 
     def __post_init__(self) -> None:
+        """Validate SWA configuration values."""
         if self.start_interval < 0:
             raise ValueError('SWA start_interval must be non-negative')
         if self.update_interval <= 0:
@@ -42,6 +63,7 @@ class SWAConfig:
             raise ValueError('SWA min_snapshots_for_eval must be positive')
 
     def should_collect(self, interval: int, num_snapshots: int) -> bool:
+        """Return True if a snapshot should be collected at this interval."""
         if interval < self.start_interval:
             return False
         if self.max_snapshots is not None and num_snapshots >= self.max_snapshots:
@@ -50,15 +72,24 @@ class SWAConfig:
         return offset % self.update_interval == 0
 
     def should_use(self, num_snapshots: int) -> bool:
+        """Return True if SWA parameters should be used for evaluation."""
         if not self.prefer_swa_params:
             return False
         return num_snapshots >= self.min_snapshots_for_eval
 
 
 def _sanitize_grads(grads):
-    """Replace NaNs/inf/float0 leaves to keep the optimizer stable."""
+    """Replace NaNs/inf/float0 leaves to keep the optimizer stable.
+
+    Args:
+        grads: Gradient pytree produced by JAX/Optax.
+
+    Returns:
+        Sanitized gradient pytree with finite floating-point values.
+    """
 
     def _sanitize(leaf):
+        """Convert unsupported dtypes and replace NaNs/infs."""
         arr = jnp.asarray(leaf)
         if 'float0' in str(arr.dtype):
             arr = jnp.zeros_like(arr, dtype=jnp.float32)
@@ -68,6 +99,15 @@ def _sanitize_grads(grads):
 
 
 def _prefetch_iterator(iterator, capacity: int):
+    """Prefetch items from an iterator into a bounded queue.
+
+    Args:
+        iterator: Source iterator yielding training batches.
+        capacity: Max items to buffer; <=0 disables prefetching.
+
+    Returns:
+        An iterator that yields the same items with optional prefetching.
+    """
     if capacity is None or capacity <= 0:
         return iterator
     queue: Queue = Queue(maxsize=capacity)
@@ -75,6 +115,7 @@ def _prefetch_iterator(iterator, capacity: int):
     total_hint = getattr(iterator, 'total_batches_hint', 0)
 
     def _producer():
+        """Fill the queue with items from the source iterator."""
         try:
             for item in iterator:
                 queue.put(item)
@@ -84,14 +125,18 @@ def _prefetch_iterator(iterator, capacity: int):
     threading.Thread(target=_producer, daemon=True).start()
 
     class _Prefetched:
+        """Iterator wrapper that yields prefetched items from a queue."""
         def __init__(self):
+            """Initialize the prefetched iterator wrapper."""
             self._done = False
             self.total_batches_hint = total_hint
 
         def __iter__(self):
+            """Return self as an iterator."""
             return self
 
         def __next__(self):
+            """Return the next prefetched item or stop iteration."""
             if self._done:
                 raise StopIteration
             item = queue.get()
@@ -104,18 +149,32 @@ def _prefetch_iterator(iterator, capacity: int):
 
 
 def _group_batches(iterator, group_size: int, total_hint: int = 0):
+    """Group consecutive batches into fixed-size chunks.
+
+    Args:
+        iterator: Iterator yielding individual batches.
+        group_size: Number of batches per grouped chunk.
+        total_hint: Optional total batch hint to propagate.
+
+    Returns:
+        Iterator yielding lists of length `group_size`.
+    """
     if group_size <= 1:
         return iterator
 
     class _Grouped:
+        """Iterator wrapper that yields fixed-size groups of batches."""
         def __init__(self):
+            """Initialize the grouped iterator wrapper."""
             self._iter = iter(iterator)
             self.total_batches_hint = total_hint
 
         def __iter__(self):
+            """Return self as an iterator."""
             return self
 
         def __next__(self):
+            """Return the next grouped chunk or stop iteration."""
             chunk = []
             for _ in range(group_size):
                 try:
@@ -129,6 +188,7 @@ def _group_batches(iterator, group_size: int, total_hint: int = 0):
 
 @dataclasses.dataclass
 class _MetricAccumulator:
+    """Accumulate metric sums across batches for final reduction."""
     count: float = 0.0
     sum_abs_delta: float = 0.0
     sum_abs_target: float = 0.0
@@ -136,6 +196,7 @@ class _MetricAccumulator:
     sum_sq_target: float = 0.0
 
     def update(self, batch: dict | None) -> None:
+        """Update accumulator with a batch-level metric dict."""
         if not batch:
             return
         self.count += float(batch['count'])
@@ -145,6 +206,7 @@ class _MetricAccumulator:
         self.sum_sq_target += float(batch['sum_sq_target'])
 
     def finalize(self) -> dict[str, float] | None:
+        """Finalize accumulated metrics into MAE/RMSE and relative variants."""
         if self.count <= 0:
             return None
         mae = self.sum_abs_delta / self.count
@@ -160,6 +222,16 @@ class _MetricAccumulator:
 
 
 def _metric_stats(delta, target, mask):
+    """Compute masked error statistics for a single tensor.
+
+    Args:
+        delta: Difference between reference and prediction.
+        target: Reference tensor (used for relative error stats).
+        mask: Broadcastable mask indicating valid entries.
+
+    Returns:
+        Dict of aggregated counts and sums used to derive MAE/RMSE.
+    """
     broadcast_mask = jnp.broadcast_to(mask, delta.shape)
     mask_float = broadcast_mask.astype(delta.dtype)
     count = jnp.sum(mask_float)
@@ -179,6 +251,7 @@ def _metric_stats(delta, target, mask):
 
 
 def _graph_mask(graph: jraph.GraphsTuple) -> jnp.ndarray:
+    """Build a per-graph mask that excludes padded or zero-weight graphs."""
     mask = jraph.get_graph_padding_mask(graph).astype(jnp.float32)
     if mask.shape == graph.n_node.shape:
         non_empty = jnp.asarray(graph.n_node > 0, dtype=jnp.float32)
@@ -194,6 +267,18 @@ def _graph_mask(graph: jraph.GraphsTuple) -> jnp.ndarray:
 def _compute_eval_batch_metrics(
     loss_fn, graph, pred_graph, pred_outputs, mask_override=None
 ):
+    """Compute loss and per-target metric stats for a single evaluation batch.
+
+    Args:
+        loss_fn: Loss function returning per-graph losses.
+        graph: Reference graph with target values.
+        pred_graph: Graph with predicted values attached.
+        pred_outputs: Raw model outputs (energy/forces/stress, etc.).
+        mask_override: Optional mask to further filter graphs.
+
+    Returns:
+        Dict containing loss and metric statistic aggregates for the batch.
+    """
     graph_mask = _graph_mask(graph)
     if mask_override is not None:
         override = jnp.asarray(mask_override, dtype=jnp.float32)
@@ -315,7 +400,9 @@ def _compute_eval_batch_metrics(
 
 
 def _make_eval_batch_metrics(loss_fn):
+    """Create a jitted per-batch metric computation function."""
     def _batch(graph, pred_graph, pred_outputs, graph_mask):
+        """Compute metric stats for a single batch."""
         return _compute_eval_batch_metrics(
             loss_fn, graph, pred_graph, pred_outputs, graph_mask
         )
@@ -332,6 +419,7 @@ def _apply_metric_stats(
     rmse_key: str | None = None,
     rel_rmse_key: str | None = None,
 ) -> None:
+    """Populate an aux dict with derived metrics from a stats dict."""
     if not stats:
         return
     if mae_key:
@@ -345,6 +433,14 @@ def _apply_metric_stats(
 
 
 def _padding_amounts(graph) -> tuple[int, int, int, int, int, int]:
+    """Compute padding statistics for a (possibly grouped) batch.
+
+    Args:
+        graph: GraphsTuple or sequence of GraphsTuple items.
+
+    Returns:
+        Tuple of (node_cap, edge_cap, graph_cap, pad_nodes, pad_edges, pad_graphs).
+    """
     if isinstance(graph, Sequence) and not isinstance(graph, jraph.GraphsTuple):
         totals = [0, 0, 0, 0, 0, 0]
         for item in graph:
@@ -380,9 +476,32 @@ def train(
     lr_scale_by_graphs: bool = True,
     lr_reference_graphs: int | None = None,
 ):
-    """
-    for interval, params, optimizer_state, ema_params in train(...):
-        # do something
+    """Yield training state for each epoch while updating parameters.
+
+    This is the low-level training iterator used by `gin_functions.train`. It
+    performs gradient updates, optional EMA/SWA tracking, padding diagnostics,
+    and yields updated parameters and optimizer state after each epoch. Fixed
+    batch shapes are assumed so that the compiled model can be reused across
+    epochs without recompilation.
+
+    Args:
+        params: Trainable parameters (and optional config state).
+        total_loss_fn: Callable returning per-graph loss values.
+        train_loader: Training data loader yielding graph batches.
+        gradient_transform: Optax gradient transformation.
+        optimizer_state: Initial optimizer state.
+        ema_decay: Optional EMA decay for evaluation parameters.
+        progress_bar: Whether to show a progress bar during training.
+        swa_config: Optional SWA configuration.
+        max_grad_norm: Optional gradient clipping threshold.
+        schedule_free_eval_fn: Optional schedule-free eval parameter extractor.
+        start_interval: Starting epoch/interval index.
+        data_seed: Optional data shuffling seed for the loader.
+        lr_scale_by_graphs: Whether to scale LR per batch size.
+        lr_reference_graphs: Reference graph count used for LR scaling.
+
+    Yields:
+        Tuple of (epoch, trainable_params, optimizer_state, eval_params).
     """
     num_updates = 0
     ema_params = params
@@ -396,7 +515,14 @@ def train(
     local_device_count = max(1, jax.local_device_count())
 
     def _prepare_graph_for_devices(graph: jraph.GraphsTuple):
-        """Ensure ``graph`` has a leading axis matching local device count."""
+        """Ensure `graph` has a leading axis matching local device count.
+
+        Args:
+            graph: Batch graph or list of per-device microbatches.
+
+        Returns:
+            GraphsTuple with leading device axis suitable for pmap.
+        """
 
         if local_device_count == 1:
             if graph.n_node.ndim == 1:
@@ -419,10 +545,12 @@ def train(
     @partial(jax.pmap, in_axes=(None, 0), out_axes=None, axis_name='devices')
     # @partial(jax.vmap, in_axes=(None, 0), out_axes=0)
     def grad_fn(params, graph: jraph.GraphsTuple):
+        """Compute per-device loss and gradients for a sharded batch."""
         # graph is assumed to be padded by jraph.pad_with_graphs
         mask = _graph_mask(graph)
 
         def _loss_fn(trainable):
+            """Compute masked total loss for gradient evaluation."""
             return jnp.sum(jnp.where(mask, total_loss_fn(trainable, graph), 0.0))
 
         loss, grad = jax.value_and_grad(_loss_fn)(params)
@@ -436,6 +564,7 @@ def train(
     def update_fn(
         params, optimizer_state, ema_params, num_updates: int, graph: jraph.GraphsTuple
     ) -> tuple[float, Any, Any]:
+        """Apply one optimizer step and update EMA parameters."""
         n, loss, grad = grad_fn(params, graph)
         loss = loss / n
         grad = jax.tree_util.tree_map(lambda x: x / n, grad)
@@ -492,6 +621,7 @@ def train(
                     )
 
     def _swa_average(current_avg, new_tree, new_count: int):
+        """Update an SWA running average tree with a new snapshot."""
         if current_avg is None:
             return new_tree
         alpha = 1.0 / float(new_count)
@@ -502,6 +632,7 @@ def train(
         )
 
     def _epoch_batches(epoch: int):
+        """Build an epoch batch iterator and total batch count."""
         iterator = train_loader.iter_batches(
             epoch=epoch,
             seed=data_seed,
@@ -529,10 +660,12 @@ def train(
         return iterator, total_batches
 
     def _legacy_interval_loader():
+        """Yield batches from legacy loaders without iter_batches()."""
         while True:
             yield from train_loader
 
     def _legacy_effective_steps():
+        """Infer number of steps for legacy loaders."""
         nonlocal legacy_steps_cache
         if legacy_steps_cache is not None:
             return legacy_steps_cache
@@ -556,6 +689,7 @@ def train(
         return legacy_steps_cache
 
     def _iter_epoch_batches(epoch: int):
+        """Return an iterator and step count for the given epoch."""
         if supports_iter_batches:
             return _epoch_batches(epoch)
         setter = getattr(train_loader, 'set_epoch', None)
@@ -568,6 +702,7 @@ def train(
             legacy_iter = _group_batches(legacy_iter, local_device_count, total_steps)
 
         def _iter():
+            """Yield the requested number of legacy batches."""
             for _ in range(total_steps):
                 yield next(legacy_iter)
 
@@ -668,10 +803,18 @@ def evaluate(
     r"""Evaluate the predictor on the given data loader.
 
     Args:
-        predictor: function of signature `predictor(params, graph) -> {energy: [num_graphs], forces: [num_nodes, 3], stress: [num_graphs, 3, 3]}`
-        params: parameters of the predictor
-        loss_fn: function of signature `loss_fn(graph, output) -> loss` where `output` is the output of `predictor`
-        data_loader: data loader
+        predictor: Callable `predictor(params, graph)` returning energy/forces/stress.
+        params: Parameters used by the predictor.
+        loss_fn: Loss callable `loss_fn(graph, output) -> per-graph loss`.
+        data_loader: Data loader yielding evaluation batches.
+        name: Name used for progress bar and logging.
+        progress_bar: Whether to display a progress bar.
+
+    Returns:
+        Tuple of (average_loss, metrics_dict) aggregated over the dataset.
+
+    Evaluation uses the same fixed-shape batches as training so the compiled
+    model can be reused without shape-driven recompilation.
     """
     total_loss = 0.0
     num_graphs = 0.0
@@ -717,6 +860,7 @@ def evaluate(
         total_hint = 0
 
     def _prepare_graph_for_devices(graph: jraph.GraphsTuple):
+        """Prepare a graph batch for multi-device evaluation."""
         if local_device_count == 1:
             if graph.n_node.ndim == 1:
                 return jax.tree_util.tree_map(lambda x: x[None, ...], graph)
@@ -733,6 +877,7 @@ def evaluate(
         return graph
 
     def _psum_metrics(tree):
+        """Sum metric trees across devices for pmap evaluation."""
         return jax.tree_util.tree_map(
             lambda x: jax.lax.psum(x, 'devices') if x is not None else None,
             tree,
@@ -741,6 +886,7 @@ def evaluate(
 
     @partial(jax.pmap, in_axes=(None, 0), out_axes=0, axis_name='devices')
     def _eval_step(params_, graph):
+        """Run the predictor and compute per-batch metric stats on devices."""
         output = predictor(params_, graph)
         nodes = graph.nodes
         if output.get('forces') is not None:
@@ -775,6 +921,7 @@ def evaluate(
         return _psum_metrics(batch_metrics)
 
     def _process_batch(ref_graph: jraph.GraphsTuple, *, p_bar=None) -> None:
+        """Update loss/metric accumulators from a single batch."""
         nonlocal total_loss, num_graphs
         node_cap, edge_cap, graph_cap, pad_nodes, pad_edges, pad_graphs = (
             _padding_amounts(ref_graph)

@@ -1,3 +1,14 @@
+"""Gin dataset helpers for streaming HDF5 training/evaluation.
+
+These helpers build streaming loaders that emit fixed-shape batches. Fixed
+shapes are crucial for JAX/XLA: the model compiles per input shape, so varying
+`n_node`/`n_edge`/`n_graph` across batches would trigger repeated recompilation
+and slow training. The streaming stats pass scans datasets, packs graphs into
+batches that respect an `n_edge` budget, and derives padding caps so every batch
+shares the same shape. The resulting assignments are cached per split (train,
+valid, test) so loaders can reuse them without re-scanning the HDF5 files.
+"""
+
 import hashlib
 import json
 import logging
@@ -20,6 +31,16 @@ _STREAMING_STATS_CACHE_VERSION = 1
 
 
 def _ensure_list(value) -> list[str]:
+    """Normalize a scalar/sequence into a list of strings.
+
+    Args:
+        value: None, a string, or a sequence of values.
+
+    Returns:
+        List of stringified values. Returns an empty list when ``value`` is None.
+
+    This helper keeps downstream dataset spec handling uniform across gin/CLI inputs.
+    """
     if value is None:
         return []
     if isinstance(value, (list, tuple)):
@@ -29,6 +50,11 @@ def _ensure_list(value) -> list[str]:
 
 @dataclass
 class _StreamingStats:
+    """Cached batch assignment summary for a single HDF5 dataset.
+
+    These values are persisted in the streaming stats cache so subsequent runs
+    can reuse batch packing without rescanning the dataset.
+    """
     batch_assignments: list[list[int]]
     n_nodes: int
     n_edges: int
@@ -37,6 +63,11 @@ class _StreamingStats:
 
 @dataclass
 class _StreamingMetadata:
+    """Metadata gathered while scanning a dataset for streaming stats.
+
+    Used to build initialization graphs, estimate E0s/neighbor statistics, and
+    compute aggregate counts when constructing streaming loaders.
+    """
     sample_graphs: list
     ata: np.ndarray
     atb: np.ndarray
@@ -50,6 +81,14 @@ class _StreamingMetadata:
 
 
 def _graph_has_positive_weight(graph) -> bool:
+    """Check whether a graph contributes to loss/metrics.
+
+    Args:
+        graph: GraphsTuple with optional ``globals.weight``.
+
+    Returns:
+        True if the graph has no weight field or a positive scalar weight.
+    """
     weight = getattr(graph.globals, 'weight', None)
     if weight is None:
         return True
@@ -66,6 +105,21 @@ def _graph_from_dataset_entry(
     r_max: float,
     head_to_index: dict[str, int],
 ):
+    """Load an HDF5 entry, apply dataset spec, and convert it into a graph.
+
+    Args:
+        dataset: Open HDF5 dataset reader.
+        idx: Index within the dataset.
+        spec: Streaming dataset spec (keys, weights, head name).
+        z_table: Atomic number table for species indexing.
+        r_max: Cutoff used to build neighborhood edges.
+        head_to_index: Mapping from head names to integer indices.
+
+    Returns:
+        A ``jraph.GraphsTuple`` representing the configuration at ``idx``.
+
+    This is the core adapter between on-disk HDF5 configs and in-memory graphs.
+    """
     atoms = dataset[idx]
     conf = data.config_from_atoms(
         atoms,
@@ -96,6 +150,22 @@ def _gather_sample_graphs(
     head_to_index: dict[str, int],
     sample_limit: int,
 ) -> list:
+    """Collect a small set of graphs from a dataset for initialization.
+
+    Args:
+        dataset_path: Path to an HDF5 dataset.
+        spec: Dataset spec describing keys and weights.
+        z_table: Atomic number table for indexing species.
+        r_max: Cutoff used to build edges.
+        head_to_index: Mapping from head names to indices.
+        sample_limit: Max number of graphs to return.
+
+    Returns:
+        A list of graphs with positive weights (may be empty).
+
+    Used to seed model initialization and fallback E0 estimates without scanning
+    the full dataset.
+    """
     if sample_limit <= 0:
         return []
     graphs: list = []
@@ -131,6 +201,21 @@ def _extend_sample_graphs(
     r_max: float,
     head_to_index: dict[str, int],
 ) -> None:
+    """Fill the sample graph buffer up to ``sample_limit``.
+
+    Args:
+        sample_graphs: Existing list to extend in-place.
+        sample_limit: Target number of samples to keep.
+        metadata: Cached metadata with precomputed samples (optional).
+        dataset_path: Dataset to pull extra samples from.
+        spec: Dataset spec for graph construction.
+        z_table: Atomic number table.
+        r_max: Cutoff used to build edges.
+        head_to_index: Mapping from head names to indices.
+
+    Returns:
+        None. ``sample_graphs`` is mutated in-place.
+    """
     remaining = max(sample_limit - len(sample_graphs), 0)
     if not remaining:
         return
@@ -152,16 +237,19 @@ def _extend_sample_graphs(
 
 
 def _stats_cache_path(dataset_path: Path) -> Path:
+    """Return the cache path for streaming stats for a dataset."""
     suffix = dataset_path.suffix + '.streamstats.pkl'
     return dataset_path.with_suffix(suffix)
 
 
 def _dataset_signature(dataset_path: Path) -> dict[str, float]:
+    """Compute a lightweight signature used to invalidate cached stats."""
     stat = dataset_path.stat()
     return {'size': stat.st_size, 'mtime': stat.st_mtime}
 
 
 def _normalized_config_type_weights(weights: dict | None) -> dict | None:
+    """Normalize config type weights for hashing and cache fingerprints."""
     if not weights:
         return None
     return {str(key): float(value) for key, value in sorted(weights.items())}
@@ -175,6 +263,20 @@ def _spec_fingerprint(
     head_to_index: dict[str, int] | None = None,
     edge_cap: int | None = None,
 ) -> str:
+    """Build a stable fingerprint for dataset spec + packing parameters.
+
+    Args:
+        spec: Streaming dataset spec to fingerprint.
+        r_max: Cutoff used to build edges.
+        atomic_numbers: Atomic numbers for z-table alignment.
+        head_to_index: Mapping of head names to indices.
+        edge_cap: Edge limit used to pack batches.
+
+    Returns:
+        A SHA256 hex digest identifying the configuration.
+
+    Changing any field that affects packing/statistics should change this hash.
+    """
     head_index = 0
     if head_to_index is not None and spec.head_name in head_to_index:
         head_index = int(head_to_index[spec.head_name])
@@ -202,6 +304,7 @@ def _spec_fingerprint(
 
 
 def _stats_to_payload(stats: _StreamingStats) -> dict:
+    """Serialize streaming stats to a JSON/pickle-friendly payload."""
     return {
         'batch_assignments': stats.batch_assignments,
         'n_nodes': stats.n_nodes,
@@ -211,6 +314,7 @@ def _stats_to_payload(stats: _StreamingStats) -> dict:
 
 
 def _stats_from_payload(payload: dict) -> _StreamingStats:
+    """Deserialize streaming stats payload back into the dataclass."""
     return _StreamingStats(
         batch_assignments=payload['batch_assignments'],
         n_nodes=payload['n_nodes'],
@@ -222,6 +326,15 @@ def _stats_from_payload(payload: dict) -> _StreamingStats:
 def _load_cached_streaming_stats(
     dataset_path: Path, fingerprint: str
 ) -> _StreamingStats | None:
+    """Load cached streaming stats if they match the current dataset and spec.
+
+    Args:
+        dataset_path: Path to the HDF5 dataset file.
+        fingerprint: Spec fingerprint that encodes packing-relevant settings.
+
+    Returns:
+        The cached stats if present and valid; otherwise ``None``.
+    """
     cache_path = _stats_cache_path(dataset_path)
     if not cache_path.exists():
         return None
@@ -250,6 +363,16 @@ def _store_cached_streaming_stats(
     fingerprint: str,
     stats: _StreamingStats,
 ) -> None:
+    """Persist streaming stats to disk for reuse across runs.
+
+    Args:
+        dataset_path: Dataset path used to determine the cache filename.
+        fingerprint: Spec fingerprint for invalidation checks.
+        stats: Streaming stats to cache.
+
+    Returns:
+        None. The cache write is best-effort and may log warnings on failure.
+    """
     cache_path = _stats_cache_path(dataset_path)
     payload = {
         'version': _STREAMING_STATS_CACHE_VERSION,
@@ -267,6 +390,17 @@ def _store_cached_streaming_stats(
 
 
 def _expand_hdf5_inputs(paths: Sequence[str]) -> list[Path]:
+    """Expand HDF5 inputs from files, directories, or glob patterns.
+
+    Args:
+        paths: Paths or glob patterns provided by the user.
+
+    Returns:
+        List of HDF5 file paths.
+
+    Raises:
+        ValueError if no files match or if inputs are invalid.
+    """
     expanded: list[Path] = []
     for raw in paths:
         if any(ch in raw for ch in '*?[]'):
@@ -300,6 +434,15 @@ def _expand_hdf5_inputs(paths: Sequence[str]) -> list[Path]:
 
 
 def _ensure_streaming_head_options(head_name: str, head_cfg: dict) -> None:
+    """Validate that unsupported head options are not used for streaming datasets.
+
+    Args:
+        head_name: Name of the model head.
+        head_cfg: Head-specific configuration dict.
+
+    Raises:
+        ValueError when a head option is incompatible with streaming training.
+    """
     unsupported = [
         'train_num',
         'valid_fraction',
@@ -330,6 +473,23 @@ def _append_streaming_specs(
     weight: float = 1.0,
     log_label: str | None = None,
 ) -> None:
+    """Append streaming dataset specs for a set of paths.
+
+    Args:
+        collection: List to append to.
+        head_name: Head name associated with the dataset.
+        paths: HDF5 inputs (files/dirs/globs) to expand.
+        config_type_weights: Optional config-type weights.
+        energy_key: Energy property key.
+        forces_key: Forces property key.
+        prefactor_stress: Scaling factor for stress.
+        remap_stress: Optional remap indices for stress tensors.
+        weight: Global dataset weight.
+        log_label: Optional label for info logging.
+
+    Returns:
+        None. ``collection`` is mutated in-place.
+    """
     for expanded in _expand_hdf5_inputs(paths):
         collection.append(
             StreamingDatasetSpec(
@@ -363,6 +523,23 @@ def _collect_streaming_specs(
     prefactor_stress: float,
     remap_stress: np.ndarray | None,
 ) -> list[StreamingDatasetSpec]:
+    """Build streaming dataset specs for training inputs.
+
+    Args:
+        head_names: Ordered list of head names.
+        head_configs: Optional per-head configuration overrides.
+        train_path: Default train path when no head overrides are given.
+        config_type_weights: Optional config-type weights to apply.
+        energy_key: Energy property key.
+        forces_key: Forces property key.
+        prefactor_stress: Scaling factor for stress.
+        remap_stress: Optional remap indices for stress tensors.
+
+    Returns:
+        List of ``StreamingDatasetSpec`` entries used by the streaming loader.
+
+    This keeps multi-head training aligned with per-head dataset definitions.
+    """
     specs: list[StreamingDatasetSpec] = []
     if head_configs:
         for head_name in head_names:
@@ -404,6 +581,16 @@ def _collect_streaming_specs(
 
 
 def _unique_atomic_numbers_from_hdf5(paths: Sequence[Path]) -> list[int]:
+    """Scan HDF5 datasets to collect all atomic numbers present.
+
+    Args:
+        paths: HDF5 files to scan.
+
+    Returns:
+        Sorted list of unique atomic numbers.
+
+    Used when no explicit atomic number list is supplied.
+    """
     numbers: set[int] = set()
     for path in paths:
         with data.HDF5Dataset(path, mode='r') as dataset:
@@ -427,6 +614,22 @@ def _pack_streaming_batches(
     edge_cap: int,
     node_cap: int | None = None,
 ) -> list[list[int]]:
+    """Pack graphs into batches under an edge (and optional node) budget.
+
+    Args:
+        graph_sizes: Tuples of (graph_index, num_nodes, num_edges).
+        edge_cap: Maximum total edges per batch.
+        node_cap: Optional maximum total nodes per batch.
+
+    Returns:
+        List of batches as graph index lists.
+
+    This is a greedy knapsack-style packing used for streaming batch assignment.
+    The goal is to keep batches dense (minimal padding) while still respecting
+    a fixed `edge_cap` so that downstream padding produces uniform shapes. This
+    yields stable JAX compilation shapes without requiring an expensive optimal
+    knapsack solution.
+    """
     if not graph_sizes:
         return []
     order = sorted(graph_sizes, key=lambda item: item[2], reverse=True)
@@ -466,6 +669,27 @@ def _compute_streaming_stats(
     edge_cap: int,
     collect_metadata: bool,
 ) -> tuple[_StreamingStats, _StreamingMetadata | None]:
+    """Scan a dataset to compute batch assignments and optional metadata.
+
+    Args:
+        dataset_path: Path to the HDF5 dataset.
+        spec: Dataset spec defining keys/weights/heads.
+        z_table: Atomic number table for species mapping.
+        r_max: Cutoff used to build edges for stats.
+        head_to_index: Mapping from head names to indices.
+        sample_limit: Number of sample graphs to keep for initialization.
+        edge_cap: Edge budget for batch packing.
+        collect_metadata: Whether to compute E0/neighbor statistics metadata.
+
+    Returns:
+        A tuple of (stats, metadata). Metadata is ``None`` when not requested.
+
+    This is the expensive pass that populates the streaming stats cache. It
+    scans the dataset, computes per-graph sizes, raises caps when a graph would
+    exceed the configured edge limit, and builds batch assignments that let the
+    loader emit fixed-shape batches. These fixed shapes are required to compile
+    the model once in JAX and reuse the compiled graph across epochs.
+    """
     dataset = data.HDF5Dataset(dataset_path)
     sample_graphs: list = []
     num_species = len(z_table)
@@ -620,6 +844,25 @@ def _load_or_compute_streaming_stats(
     edge_cap: int,
     collect_metadata: bool,
 ) -> tuple[_StreamingStats, _StreamingMetadata | None]:
+    """Fetch streaming stats from cache or compute them if missing.
+
+    Args:
+        spec: Dataset spec to fingerprint and compute stats for.
+        r_max: Cutoff used to build edges.
+        z_table: Atomic number table.
+        head_to_index: Mapping from head names to indices.
+        atomic_numbers: Atomic numbers used for fingerprinting.
+        sample_limit: Number of sample graphs to collect.
+        edge_cap: Edge budget for batch packing.
+        collect_metadata: Whether to compute E0/neighbor metadata.
+
+    Returns:
+        Cached or freshly computed (stats, metadata).
+
+    The cache stores batch assignments and padding caps so that we avoid an
+    expensive full scan on every run. This keeps startup time low while still
+    ensuring stable batch shapes for JAX compilation.
+    """
     dataset_path = Path(spec.path)
     fingerprint = _spec_fingerprint(
         spec,
@@ -661,6 +904,15 @@ def _atomic_energies_to_array(
     atomic_energies_dict: dict[int, float],
     z_table: data.AtomicNumberTable,
 ) -> np.ndarray:
+    """Convert an atomic-energies dict into a dense array aligned to ``z_table``.
+
+    Args:
+        atomic_energies_dict: Mapping from atomic number to energy.
+        z_table: Atomic number table used for ordering.
+
+    Returns:
+        ``np.ndarray`` of shape ``(num_species,)``.
+    """
     return np.array(
         [
             atomic_energies_dict.get(z_table.index_to_z(i), 0.0)
@@ -681,6 +933,21 @@ def _resolve_atomic_energies(
     atomic_energies_override: dict[int, float] | str | None,
     statistics_metadata_path: str | None,
 ) -> tuple[dict[int, float], np.ndarray]:
+    """Resolve atomic energies from overrides, metadata, or fallback estimation.
+
+    Args:
+        atomic_numbers: Atomic numbers present in the dataset.
+        z_table: Atomic number table for ordering.
+        ata: Normal-equation matrix accumulated from metadata.
+        atb: Normal-equation RHS accumulated from metadata.
+        collect_metadata: Whether metadata was collected for solving E0s.
+        sample_graphs: Sample graphs used for fallback average estimation.
+        atomic_energies_override: Optional dict or string override.
+        statistics_metadata_path: Optional stats path for logging context.
+
+    Returns:
+        (atomic_energies_dict, atomic_energies_array).
+    """
     if isinstance(atomic_energies_override, str):
         if atomic_energies_override.lower() == 'average':
             atomic_energies_override = None
@@ -733,6 +1000,30 @@ def _build_streaming_train_loader(
     atomic_energies_override: dict[int, float] | str | None = None,
     statistics_metadata_path: str | None = None,
 ) -> tuple[data.StreamingGraphDataLoader, dict[int, float], float]:
+    """Construct the streaming training loader and associated statistics.
+
+    Args:
+        dataset_specs: Streaming dataset specs for training.
+        r_max: Cutoff used for edge construction.
+        n_node: Optional node cap (derived when None).
+        n_edge: Edge cap used for batch packing.
+        n_graph: Graph cap for padding.
+        seed: Shuffle seed for streaming loader.
+        head_to_index: Mapping from head names to indices.
+        stream_prefetch: Prefetch batch count.
+        stream_workers: Worker process count for streaming loader.
+        atomic_numbers_override: Explicit atomic numbers (optional).
+        atomic_energies_override: Atomic energies override (optional).
+        statistics_metadata_path: Path to statistics metadata (for logging).
+
+    Returns:
+        (train_loader, atomic_energies_dict, r_max).
+
+    This function computes/loads streaming stats and attaches metadata to the
+    loader. The resulting loader uses precomputed batch assignments and fixed
+    padding caps so that training batches have consistent shapes, allowing the
+    model to compile once and run efficiently.
+    """
     if not dataset_specs:
         raise ValueError('No streaming datasets were provided.')
     if atomic_numbers_override:
@@ -870,6 +1161,23 @@ def _collect_eval_streaming_specs(
     prefactor_stress: float,
     remap_stress: np.ndarray | None,
 ) -> tuple[list[StreamingDatasetSpec], list[StreamingDatasetSpec]]:
+    """Build streaming dataset specs for validation and test splits.
+
+    Args:
+        head_names: Ordered list of head names.
+        head_configs: Optional per-head configuration overrides.
+        valid_path: Default validation path.
+        test_path: Default test path.
+        test_num: Unsupported for streaming evaluation (validated here).
+        config_type_weights: Optional config-type weights.
+        energy_key: Energy property key.
+        forces_key: Forces property key.
+        prefactor_stress: Scaling factor for stress.
+        remap_stress: Optional stress remap indices.
+
+    Returns:
+        (valid_specs, test_specs) lists for streaming loaders.
+    """
     if test_num not in (None, 0):
         raise ValueError(
             'test_num is not supported with streaming evaluation datasets.'
@@ -962,6 +1270,27 @@ def _build_eval_streaming_loader(
     stream_prefetch: int | None = None,
     template_loader: data.StreamingGraphDataLoader | None = None,
 ) -> data.StreamingGraphDataLoader | None:
+    """Construct a streaming loader for evaluation splits.
+
+    Args:
+        dataset_specs: Specs for the evaluation datasets.
+        r_max: Cutoff used for edge construction.
+        n_node: Node cap for padding.
+        n_edge: Edge cap for padding.
+        n_graph: Graph cap for padding.
+        head_to_index: Mapping from head names to indices.
+        base_z_table: Base atomic-number table from training (optional).
+        num_workers: Worker process count.
+        seed: Shuffle seed.
+        stream_prefetch: Prefetch batch count.
+        template_loader: Training loader used to inherit atomic numbers/energies.
+
+    Returns:
+        A ``StreamingGraphDataLoader`` or ``None`` if no specs are provided.
+
+    Evaluation loaders reuse the same fixed padding caps as training to avoid
+    shape-driven recompilation during validation/test passes.
+    """
     if not dataset_specs:
         return None
     atomic_numbers_override: Sequence[int] | None = None
@@ -1032,7 +1361,42 @@ def datasets(
     dict[int, float],
     float,
 ]:
-    """Load datasets, streaming the training split directly from HDF5."""
+    """Load datasets for gin, streaming the training split directly from HDF5.
+
+    Args:
+        r_max: Cutoff used for neighbor construction.
+        train_path: Training HDF5 path(s).
+        config_type_weights: Optional per-config-type weights.
+        train_num: Unsupported for streaming datasets.
+        valid_path: Validation HDF5 path(s).
+        valid_fraction: Unsupported for streaming datasets.
+        valid_num: Unsupported for streaming datasets.
+        test_path: Test HDF5 path(s).
+        test_num: Unsupported for streaming datasets.
+        seed: Shuffle seed for streaming loaders.
+        energy_key: Energy property key.
+        forces_key: Forces property key.
+        n_node: Unsupported for streaming datasets (derived from packing).
+        n_edge: Edge cap for batch packing.
+        n_graph: Graph cap for padding.
+        prefactor_stress: Scaling factor for stress.
+        remap_stress: Optional stress remap indices.
+        heads: Head names for multihead datasets.
+        head_configs: Optional per-head configuration overrides.
+        stream_train_prefetch: Prefetch batch count.
+        stream_train_workers: Worker count (per process/device).
+        num_workers: Optional alias overriding ``stream_train_workers``.
+        atomic_numbers: Optional explicit atomic numbers list.
+        atomic_energies_override: Optional atomic energies override.
+        statistics_metadata_path: Optional stats path for logging context.
+
+    Returns:
+        (train_loader, valid_loader, test_loader, atomic_energies_dict, r_max).
+
+    This is the primary dataset entry point referenced from gin configs. It
+    builds fixed-shape streaming loaders for train/valid/test so JAX compilation
+    happens once and remains stable across epochs and evaluation runs.
+    """
 
     head_names = tuple(heads) if heads else ('Default',)
     head_to_index = {name: idx for idx, name in enumerate(head_names)}

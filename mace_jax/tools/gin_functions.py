@@ -1,3 +1,12 @@
+"""Gin-configurable training helpers and CLI glue.
+
+This module bridges gin configuration to the JAX training stack. It wires up
+losses, optimizers, schedules, logging, and evaluation so that training can be
+launched from gin files or CLI flags. The training loop assumes fixed-shape
+batches from the streaming loader so the model compiles once and runs at steady
+throughput without shape-driven recompilation.
+"""
+
 import datetime
 import inspect
 import logging
@@ -36,6 +45,16 @@ _PROFILE_HELPER_MISSING_WARNED = False
 
 
 def _get_profile_helper(*, log_warning: bool) -> object | None:
+    """Return the optional profiling helper module, caching the import.
+
+    Args:
+        log_warning: Whether to emit a warning if the profiler is unavailable.
+
+    Returns:
+        The imported `profile_nn_jax` module, or None if unavailable.
+
+    This is used by `flags()` and the training loop to enable/trigger profiling.
+    """
     global _PROFILE_HELPER, _PROFILE_HELPER_MISSING_WARNED
     if _PROFILE_HELPER is not None:
         return _PROFILE_HELPER
@@ -57,18 +76,43 @@ def _get_profile_helper(*, log_warning: bool) -> object | None:
 
 
 def _split_config(params):
+    """Split a parameter bundle into trainable params and optional config state.
+
+    Args:
+        params: Either a raw parameter tree or a dict containing 'params'/'config'.
+
+    Returns:
+        Tuple of (trainable_params, config_state_or_None).
+    """
     if isinstance(params, Mapping) and 'params' in params:
         return params['params'], params.get('config')
     return params, None
 
 
 def _attach_config(trainable, config):
+    """Attach config state to trainable params for Flax modules.
+
+    Args:
+        trainable: Trainable parameter tree.
+        config: Optional config/state tree to pair with parameters.
+
+    Returns:
+        Either `trainable` unchanged or a dict containing 'params' and 'config'.
+    """
     if config is None:
         return trainable
     return {'params': trainable, 'config': config}
 
 
 def _maybe_float(value):
+    """Convert scalar-like values into Python floats for logging.
+
+    Args:
+        value: Numeric, NumPy, or JAX scalar-like value.
+
+    Returns:
+        A Python float if conversion is possible, otherwise None.
+    """
     if isinstance(value, numbers.Number):
         return float(value)
     if isinstance(value, (np.ndarray, jnp.ndarray)) and value.shape == ():
@@ -79,6 +123,15 @@ def _maybe_float(value):
 def _select_metrics_for_logging(
     metrics: Mapping[str, Any], log_errors: str | None
 ) -> list[str]:
+    """Select which metric keys to log based on the configured error mode.
+
+    Args:
+        metrics: Metric dict produced by evaluation.
+        log_errors: Named logging preset (e.g. 'PerAtomRMSE', 'PerAtomMAE').
+
+    Returns:
+        List of metric keys to format and print.
+    """
     stress_rmse_key = (
         'rmse_stress'
         if metrics.get('rmse_stress') is not None
@@ -123,6 +176,15 @@ def _select_metrics_for_logging(
 
 
 def _format_metric_value(metrics: Mapping[str, Any], key: str | None) -> str:
+    """Format a metric value with units and human-readable precision.
+
+    Args:
+        metrics: Metric dict containing raw values.
+        key: Metric key to format.
+
+    Returns:
+        Formatted string (with units if applicable) or 'N/A' if missing.
+    """
     if not key:
         return 'N/A'
     value = metrics.get(key, None)
@@ -150,6 +212,18 @@ def _format_metric_value(metrics: Mapping[str, Any], key: str | None) -> str:
 
 
 def _instantiate_loss(loss_cls, overrides: dict):
+    """Instantiate a loss class/function while validating keyword arguments.
+
+    Args:
+        loss_cls: Loss class or factory to construct.
+        overrides: Keyword arguments to pass through.
+
+    Returns:
+        Instantiated loss object.
+
+    Raises:
+        ValueError: If an override is not accepted by the loss signature.
+    """
     target = loss_cls.__init__ if inspect.isclass(loss_cls) else loss_cls
     try:
         signature = inspect.signature(target)
@@ -185,6 +259,21 @@ def loss(
     polarizability_weight: float | None = None,
     huber_delta: float | None = None,
 ):
+    """Construct the configured loss object with optional weight overrides.
+
+    Args:
+        loss_cls: Loss class or factory to instantiate.
+        energy_weight: Optional energy loss weight.
+        forces_weight: Optional forces loss weight.
+        stress_weight: Optional stress loss weight.
+        virials_weight: Optional virials loss weight.
+        dipole_weight: Optional dipole loss weight.
+        polarizability_weight: Optional polarizability loss weight.
+        huber_delta: Optional Huber delta for robust losses.
+
+    Returns:
+        Instantiated loss object used by the training/evaluation loops.
+    """
     overrides = {
         'energy_weight': energy_weight,
         'forces_weight': forces_weight,
@@ -211,6 +300,23 @@ def flags(
     coordinator_address: str | None = None,
     coordinator_port: int | None = None,
 ):
+    """Configure JAX runtime, device selection, and RNG seeds.
+
+    Args:
+        debug: Enable JAX debug checks for NaNs/infs.
+        dtype: Default dtype string ('float32', 'float64', etc.).
+        seed: Base RNG seed; each process offsets by its index.
+        profile: Whether to enable optional profiling support.
+        device: Optional device platform override (e.g. 'cpu', 'gpu').
+        distributed: Whether to initialize distributed JAX.
+        process_count: Total number of processes when distributed.
+        process_index: Index of the current process.
+        coordinator_address: Coordinator host for multi-process setup.
+        coordinator_port: Coordinator port for multi-process setup.
+
+    Returns:
+        The original seed value (for convenience in gin bindings).
+    """
     jax_config.update('jax_debug_nans', debug)
     jax_config.update('jax_debug_infs', debug)
     tools.set_default_dtype(dtype)
@@ -238,6 +344,16 @@ def logs(
     level=logging.INFO,
     directory: str = 'results',
 ):
+    """Configure logging and return a metrics logger.
+
+    Args:
+        name: Optional run name; random name is generated if omitted.
+        level: Logging level for the run.
+        directory: Output directory for logs and metrics files.
+
+    Returns:
+        Tuple of (directory, tag, logger) used throughout training.
+    """
     date = datetime.datetime.now().strftime('%Y%m%d_%H%M')
 
     if name is None:
@@ -274,6 +390,25 @@ def wandb_run(
     config: dict | None = None,
     anonymous: str | None = None,
 ):
+    """Initialize a Weights & Biases run if enabled.
+
+    Args:
+        enabled: Whether to create a W&B run.
+        project: W&B project name.
+        entity: W&B entity/account.
+        name: Run name.
+        group: Run group name.
+        tags: Tags to attach to the run.
+        notes: Free-form notes for the run.
+        mode: W&B mode (online/offline/disabled).
+        resume: Resume setting for W&B.
+        dir: Output directory for W&B files.
+        config: Config dictionary to log to W&B.
+        anonymous: Anonymous setting for W&B.
+
+    Returns:
+        The W&B run object, or None when disabled.
+    """
     if not enabled:
         return None
     try:
@@ -304,6 +439,7 @@ def wandb_run(
 
 
 def finish_wandb(run) -> None:
+    """Safely finalize a W&B run if one was created."""
     if run is None:
         return
     finish = getattr(run, 'finish', None)
@@ -317,6 +453,15 @@ def finish_wandb(run) -> None:
 
 @gin.configurable
 def reload(params, path=None):
+    """Reload parameters from a checkpoint file.
+
+    Args:
+        params: Current parameter tree, used to check compatibility.
+        path: Optional checkpoint path; if None, returns params unchanged.
+
+    Returns:
+        Reloaded parameter tree (or the original params if no path is provided).
+    """
     if path is not None:
         logging.info(f"Reloading parameters from '{path}'")
         with open(path, 'rb') as f:
@@ -339,6 +484,17 @@ def reload(params, path=None):
 def checks(
     energy_forces_predictor, params, train_loader, *, enabled: bool = False
 ) -> bool:
+    """Run a diagnostic pass to validate energy/force normalization.
+
+    Args:
+        energy_forces_predictor: Predictor callable returning energy/forces.
+        params: Parameters to evaluate.
+        train_loader: Loader providing graphs for the check.
+        enabled: When False, this function is a no-op.
+
+    Returns:
+        True if checks ran (and requested early exit), otherwise False.
+    """
     if not enabled:
         return False
 
@@ -375,6 +531,20 @@ def exponential_decay(
     staircase: bool = True,
     end_value: float | None = None,
 ):
+    """Create an exponential learning-rate schedule.
+
+    Args:
+        lr: Initial learning rate.
+        interval_length: Optional steps-per-epoch scaling factor.
+        transition_steps: Number of (scaled) steps between decays.
+        decay_rate: Multiplicative decay factor.
+        transition_begin: Step offset before decay starts.
+        staircase: Whether to apply stepwise (staircase) decay.
+        end_value: Optional minimum learning rate.
+
+    Returns:
+        Optax schedule callable taking a step index.
+    """
     step_scale = int(interval_length) if interval_length and interval_length > 0 else 1
     return optax.exponential_decay(
         init_value=lr,
@@ -393,6 +563,16 @@ def piecewise_constant_schedule(
     *,
     boundaries_and_scales: dict[float, float],
 ):
+    """Create a piecewise constant learning-rate schedule.
+
+    Args:
+        lr: Initial learning rate.
+        interval_length: Optional steps-per-epoch scaling factor.
+        boundaries_and_scales: Dict mapping boundary epochs to scale factors.
+
+    Returns:
+        Optax schedule callable taking a step index.
+    """
     step_scale = int(interval_length) if interval_length and interval_length > 0 else 1
     scaled = {
         boundary * step_scale: scale
@@ -405,6 +585,7 @@ def piecewise_constant_schedule(
 
 @gin.register
 def constant_schedule(lr, interval_length=None):
+    """Return a constant learning-rate schedule."""
     return optax.constant_schedule(lr)
 
 
@@ -418,6 +599,19 @@ def reduce_on_plateau(
     min_lr: float = 0.0,
     threshold: float = 1e-4,
 ):
+    """Create a schedule that decays the LR when validation loss plateaus.
+
+    Args:
+        lr: Initial learning rate.
+        interval_length: Unused; kept for API consistency with other schedulers.
+        factor: Multiplicative decay factor when plateau is detected.
+        patience: Number of evaluations without improvement before decaying.
+        min_lr: Lower bound for the learning rate.
+        threshold: Minimum improvement to reset patience.
+
+    Returns:
+        A schedule callable with an attached `update(loss)` method.
+    """
     state = {
         'best': np.inf,
         'num_bad': 0,
@@ -426,9 +620,11 @@ def reduce_on_plateau(
     }
 
     def schedule(step):
+        """Return the current learning rate (step argument ignored)."""
         return state['current_lr']
 
     def update(loss_value):
+        """Update plateau state and adjust the learning rate if needed."""
         if loss_value + threshold < state['best']:
             state['best'] = float(loss_value)
             state['num_bad'] = 0
@@ -469,7 +665,27 @@ def optimizer(
     schedule_free_b1: float = 0.95,
     schedule_free_weight_lr_power: float = 2.0,
 ):
+    """Build the Optax optimizer and schedule for training.
+
+    Args:
+        max_epochs: Number of training epochs to run.
+        interval_length: Steps-per-epoch scaling for schedules.
+        weight_decay: Weight decay coefficient.
+        lr: Base learning rate.
+        algorithm: Optax transformation factory (e.g. Adam, AMSGrad).
+        scheduler: Schedule factory used to create the LR schedule.
+        stage_two_lr: Optional LR for a second training stage.
+        stage_two_interval: Epoch to switch to the stage-two LR.
+        decoupled_weight_decay: Whether to use decoupled weight decay.
+        schedule_free: Enable schedule-free optimizer wrapper (optax.contrib).
+        schedule_free_b1: Momentum parameter for schedule-free optimizer.
+        schedule_free_weight_lr_power: Weight LR power for schedule-free optimizer.
+
+    Returns:
+        Tuple of (gradient_transformation, max_epochs).
+    """
     def weight_decay_mask(params):
+        """Build a tree mask selecting parameters to regularize."""
         params = tools.flatten_dict(params)
         mask = {
             k: any(('linear_down' in ki) or ('symmetric_contraction' in ki) for ki in k)
@@ -537,15 +753,27 @@ def optimizer(
 def _masked_additive_weight_decay(
     weight_decay: float, mask_fn: Callable[[dict], dict]
 ) -> optax.GradientTransformation:
+    """Create additive weight decay that respects a parameter mask.
+
+    Args:
+        weight_decay: Coefficient applied to masked parameters.
+        mask_fn: Callable returning a pytree mask matching the params.
+
+    Returns:
+        Optax GradientTransformation implementing additive weight decay.
+    """
     def init_fn(params):
+        """Initialize the weight-decay transformation state."""
         return ()
 
     def update_fn(updates, state, params=None):
+        """Apply masked decay to updates using current parameters."""
         if params is None:
             raise ValueError('Additive weight decay requires current parameters.')
         mask = mask_fn(params)
 
         def apply(update, param, mask_entry):
+            """Apply weight decay to a single parameter if masked."""
             if not mask_entry:
                 return update
             return update + weight_decay * param
@@ -588,6 +816,47 @@ def train(
     lr_reference_graphs: int | None = None,
     **kwargs,
 ):
+    """Run the end-to-end training loop with evaluation and checkpointing.
+
+    This wraps the lower-level `tools.train()` iterator, handling logging, validation,
+    early stopping, optional EMA/SWA evaluation parameters, and W&B reporting.
+    It expects fixed-shape batches from the streaming loader so JAX compilation
+    happens once; changing batch shapes would otherwise trigger recompilation and
+    stall the training loop.
+
+    Args:
+        predictor: Callable that maps (params, graph) -> predictions.
+        params: Trainable params (and optional config state).
+        optimizer_state: Optimizer state to update during training.
+        train_loader: Training data loader.
+        valid_loader: Validation data loader.
+        test_loader: Test data loader.
+        gradient_transform: Optax gradient transformation.
+        max_epochs: Max number of epochs to run.
+        logger: Metrics logger for persistent logs.
+        directory: Output directory for logs/checkpoints.
+        tag: Run tag used to name output files.
+        patience: Optional early stopping patience (epochs).
+        eval_train: Whether to run eval on training set at final epoch.
+        eval_test: Whether to run eval on test set during training.
+        eval_interval: Epoch interval between validation runs.
+        log_errors: Metric selection preset to log.
+        ema_decay: Optional EMA decay for evaluation parameters.
+        max_grad_norm: Optional gradient clipping threshold.
+        wandb_run: Optional W&B run handle.
+        swa_config: Optional SWA configuration.
+        checkpoint_dir: Directory to store checkpoints.
+        checkpoint_every: Save checkpoints every N epochs.
+        checkpoint_keep: Number of checkpoints to keep.
+        resume_from: Optional checkpoint path to resume from.
+        data_seed: Optional seed for shuffling data loaders.
+        lr_scale_by_graphs: Whether to scale LR based on graphs per batch.
+        lr_reference_graphs: Reference graph count for LR scaling.
+        **kwargs: Additional arguments forwarded to `tools.train()`.
+
+    Returns:
+        Tuple of (last_epoch, eval_params_with_config).
+    """
     trainable_params, static_config = _split_config(params)
     lowest_loss = np.inf
     patience_counter = 0
@@ -604,6 +873,7 @@ def train(
     is_primary = process_index == 0
 
     def _log_info(message, *args):
+        """Log a formatted message from the primary process only."""
         tools.log_info_primary(message, *args)
 
     checkpoint_dir_path: Path | None = None
@@ -618,6 +888,7 @@ def train(
         )
 
     def _shard_loader(loader):
+        """Shard a data loader across processes when supported."""
         if loader is None:
             return None
         if process_count > 1:
@@ -627,6 +898,7 @@ def train(
         return loader
 
     def _resolve_checkpoint_dir() -> Path:
+        """Resolve the checkpoint directory based on config and resume path."""
         if checkpoint_dir:
             return Path(checkpoint_dir).expanduser()
         if resume_path is not None:
@@ -663,6 +935,7 @@ def train(
     def _save_checkpoint(
         epoch_idx, current_params, current_optimizer_state, eval_params_
     ):
+        """Persist a checkpoint for the current epoch if enabled."""
         if not checkpoint_enabled or not is_primary:
             return None
         if epoch_idx < initial_epoch:
@@ -699,6 +972,7 @@ def train(
         return path
 
     def _loader_has_graphs(loader):
+        """Return True if the loader has graph data to iterate over."""
         if loader is None:
             return False
         graphs = getattr(loader, 'graphs', None)
@@ -707,6 +981,7 @@ def train(
         return len(graphs) > 0
 
     def _split_loader_by_heads(loader):
+        """Split a loader into per-head sub-loaders if supported."""
         if loader is None:
             return {}
         splitter = getattr(loader, 'split_by_heads', None)
@@ -715,6 +990,7 @@ def train(
         return splitter()
 
     def _prepare_loader_for_eval(loader, epoch):
+        """Prepare a loader for evaluation at the current epoch."""
         if loader is None:
             return None
         loader = _shard_loader(loader)
@@ -726,6 +1002,7 @@ def train(
         return loader
 
     def _enumerate_eval_targets(loader, head_loaders, epoch):
+        """Enumerate evaluation loaders (including per-head splits when available)."""
         if not _loader_has_graphs(loader):
             return []
         if head_loaders:
@@ -747,6 +1024,7 @@ def train(
     test_head_loaders = _split_loader_by_heads(test_loader)
 
     def _should_run_eval(current_epoch: int, is_last: bool) -> bool:
+        """Decide whether to run evaluation for the current epoch."""
         if is_last:
             return True
         if current_epoch == initial_epoch:
@@ -756,9 +1034,11 @@ def train(
         return current_epoch % eval_interval == 0
 
     def with_config(params_):
+        """Reattach static config state to params for model application."""
         return _attach_config(params_, static_config)
 
     def predictor_with_config(params_, graph_):
+        """Apply the predictor with config state attached."""
         return predictor(with_config(params_), graph_)
 
     stop_after_epoch = False
@@ -798,6 +1078,7 @@ def train(
                 pickle.dump(with_config(trainable_params), f)
 
         def eval_and_print(loader, mode: str, *, head_name: str | None = None):
+            """Run evaluation on a loader and log metrics."""
             eval_mode = mode if head_name is None else f'{mode}:{head_name}'
             if loader is None:
                 return
@@ -931,7 +1212,16 @@ def train(
 
 
 def parse_argv(argv: list[str]):
+    """Parse CLI-like arguments into gin configuration bindings.
+
+    Args:
+        argv: Argument vector, including the program name at index 0.
+
+    This helper is used by CLI entry points to bind gin parameters from
+    positional `.gin` files and `--key=value` overrides.
+    """
     def gin_bind_parameter(key: str, value: str):
+        """Bind a single key/value pair into the gin configuration."""
         # We need to guess if value is a string or not
         value = value.strip()
         if value[0] == value[-1] and value[0] in ('"', "'"):

@@ -1,4 +1,12 @@
-"""Streaming HDF5 data loader for native MACE datasets."""
+"""Streaming HDF5 data loader for native MACE datasets.
+
+This loader is designed for JAX/XLA training where the model is compiled per
+input shape. We therefore prefer fixed-size (padded) batches so that the model
+compiles once and is reused across epochs, avoiding recompilation stalls and
+shape-driven performance regressions. The streaming pipeline scans datasets,
+packs graphs into batches that respect `n_node`/`n_edge` caps, and pads each
+batch to consistent sizes to keep shapes stable.
+"""
 
 from __future__ import annotations
 
@@ -30,19 +38,25 @@ _RESULT_SKIP = 'skip'
 
 
 class BatchIteratorWrapper:
+    """Wrap an iterator and expose a total_batches_hint attribute."""
+
     def __init__(self, iterator, total_batches_hint: int):
+        """Initialize the wrapper with a source iterator and batch hint."""
         self._iterator = iterator
         self.total_batches_hint = int(total_batches_hint or 0)
 
     def __iter__(self):
+        """Return self as an iterator."""
         return self
 
     def __next__(self):
+        """Yield the next batch from the wrapped iterator."""
         return next(self._iterator)
 
 
 @dataclass(frozen=True)
 class StreamingDatasetSpec:
+    """Configuration describing one HDF5 dataset stream."""
     path: Path
     head_name: str = 'Default'
     config_type_weights: dict[str, float] | None = None
@@ -55,6 +69,14 @@ class StreamingDatasetSpec:
 
 
 def _niggli_reduce_inplace(atoms):
+    """Apply Niggli reduction to ASE atoms if periodic and available.
+
+    Args:
+        atoms: ASE Atoms-like object.
+
+    Returns:
+        The same atoms instance (possibly modified in-place).
+    """
     try:
         from ase.build.tools import niggli_reduce as _niggli_reduce  # noqa: PLC0415
     except ImportError:  # pragma: no cover - ase is an install dependency
@@ -78,6 +100,7 @@ def _graph_worker_main(
     result_queue,
     stop_event,
 ):
+    """Worker process entry point to convert dataset samples into graphs."""
     local_datasets: dict[int, HDF5Dataset] = {}
     try:
         while not stop_event.is_set():
@@ -125,6 +148,19 @@ def _atoms_to_graph(
     head_to_index: dict[str, int],
     niggli_reduce: bool,
 ):
+    """Convert an ASE atoms object into a jraph GraphsTuple.
+
+    Args:
+        atoms: ASE atoms to convert.
+        spec: Dataset-specific configuration and weighting.
+        cutoff: Interaction cutoff radius.
+        z_table: Atomic number table for encoding species.
+        head_to_index: Mapping from head names to integer indices.
+        niggli_reduce: Whether to apply Niggli reduction before conversion.
+
+    Returns:
+        GraphsTuple representation of the configuration.
+    """
     if niggli_reduce:
         atoms = atoms.copy()
         _niggli_reduce_inplace(atoms)
@@ -149,46 +185,12 @@ def _atoms_to_graph(
 
 
 def _has_positive_weight(graph: jraph.GraphsTuple) -> bool:
+    """Return True if graph weight is positive or missing."""
     weight = getattr(graph.globals, 'weight', None)
     if weight is None:
         return True
     value = np.asarray(weight).reshape(-1)[0]
     return float(value) > 0.0
-
-
-def _empty_graph_like(graph: jraph.GraphsTuple) -> jraph.GraphsTuple:
-    def _zero_nodes(arr):
-        if arr is None:
-            return None
-        shape = (0,) + arr.shape[1:]
-        return np.zeros(shape, dtype=arr.dtype)
-
-    def _zero_edges(arr):
-        if arr is None:
-            return None
-        shape = (0,) + arr.shape[1:]
-        return np.zeros(shape, dtype=arr.dtype)
-
-    def _zero_globals(value):
-        if value is None:
-            return None
-        return np.zeros_like(value)
-
-    nodes = graph.nodes.__class__(*(_zero_nodes(value) for value in graph.nodes))
-    edges = graph.edges.__class__(*(_zero_edges(value) for value in graph.edges))
-    globals_dict = graph.globals.__class__(
-        *(_zero_globals(value) for value in graph.globals)
-    )
-
-    return jraph.GraphsTuple(
-        nodes=nodes,
-        edges=edges,
-        senders=np.zeros((0,), dtype=graph.senders.dtype),
-        receivers=np.zeros((0,), dtype=graph.receivers.dtype),
-        globals=globals_dict,
-        n_node=np.asarray([0], dtype=np.int32),
-        n_edge=np.asarray([0], dtype=np.int32),
-    )
 
 
 def _estimate_caps(
@@ -200,6 +202,7 @@ def _estimate_caps(
     head_to_index: dict[str, int],
     niggli_reduce: bool,
 ) -> tuple[int, int]:
+    """Scan datasets to estimate max nodes/edges for padding limits."""
     max_nodes = max_edges = 1
     for dataset, spec in zip(datasets, dataset_specs):
         for idx in range(len(dataset)):
@@ -222,6 +225,7 @@ def _estimate_caps(
 
 
 def _expand_hdf5_paths(paths: Sequence[Path | str]) -> list[Path]:
+    """Expand glob patterns, directories, and file inputs into HDF5 paths."""
     expanded: list[Path] = []
     for raw in paths:
         raw_str = str(raw)
@@ -256,7 +260,16 @@ def _expand_hdf5_paths(paths: Sequence[Path | str]) -> list[Path]:
 
 
 class StreamingGraphDataLoader:
-    """Stream HDF5-backed graphs with greedy packing and optional prefetching."""
+    """Stream HDF5-backed graphs with greedy packing and optional prefetching.
+
+    The key goal is stable batch shapes: JAX compiles the model per input shape,
+    so changing `n_node`/`n_edge`/`n_graph` across batches can trigger repeated
+    recompilations. This loader precomputes or enforces padding caps so that
+    batches are uniform in shape, letting compilation happen once and keeping
+    throughput stable. It also supports multiprocessing conversion and optional
+    precomputed batch assignments to preserve order or enable batch-level
+    shuffling without re-packing every epoch.
+    """
 
     def __init__(
         self,
@@ -277,6 +290,30 @@ class StreamingGraphDataLoader:
         batch_assignments: Sequence[Sequence[Sequence[int]]] | None = None,
         pad_graphs: int | None = None,
     ):
+        """Initialize the streaming loader.
+
+        Args:
+            datasets: Open HDF5Dataset objects to stream from.
+            dataset_specs: Per-dataset configuration overrides.
+            z_table: Atomic number table to map species to indices.
+            r_max: Cutoff radius used for graph construction.
+            n_node: Node padding cap (None triggers a scan).
+            n_edge: Edge padding cap (None triggers a scan).
+            head_to_index: Optional mapping of head names to indices.
+            shuffle: Whether to shuffle graphs or batches each epoch.
+            seed: Seed for reproducible shuffling.
+            niggli_reduce: Whether to apply Niggli reduction to periodic cells.
+            max_batches: Optional cap on batches yielded per epoch.
+            prefetch_batches: Number of batches to prefetch in a background thread.
+            num_workers: Number of multiprocessing workers to use for conversion.
+            batch_assignments: Optional precomputed batch index assignments.
+            pad_graphs: Optional fixed number of graphs per padded batch.
+
+        The loader either uses precomputed batch assignments (from streaming
+        stats) or greedily packs graphs on the fly. In both cases, batches are
+        padded to fixed caps so that downstream JAX compilation sees stable
+        tensor shapes.
+        """
         if not datasets:
             raise ValueError('Expected at least one dataset.')
         self._datasets = list(datasets)
@@ -363,15 +400,18 @@ class StreamingGraphDataLoader:
         return list(self._history)
 
     def set_epoch(self, epoch: int) -> None:
+        """Set the current epoch for deterministic shuffling."""
         self._epoch = int(epoch)
 
     def _effective_seed(self, override: int | None) -> int | None:
+        """Compute the epoch-specific seed using optional overrides."""
         base = self._seed if override is None else override
         if base is None:
             return None
         return int(base) + int(self._epoch)
 
     def _task_iterator(self, seed: int | None) -> Iterator[tuple[int, int, int]]:
+        """Yield dataset/sample indices for streaming conversion tasks."""
         rng = np.random.default_rng(seed)
         emitted = 0
         dataset_indices = list(range(len(self._datasets)))
@@ -387,6 +427,7 @@ class StreamingGraphDataLoader:
                 emitted += 1
 
     def _convert_atoms_to_graph(self, atoms, spec: StreamingDatasetSpec):
+        """Convert a raw atoms object into a graph using dataset spec settings."""
         return _atoms_to_graph(
             atoms=atoms,
             spec=spec,
@@ -397,6 +438,7 @@ class StreamingGraphDataLoader:
         )
 
     def _iter_graphs_single(self, seed: int | None):
+        """Yield graphs by iterating datasets in-process."""
         rng = np.random.default_rng(seed)
         sources = list(zip(self._datasets, self._dataset_specs))
         if self._shuffle and len(sources) > 1:
@@ -413,6 +455,7 @@ class StreamingGraphDataLoader:
                 yield graph
 
     def _iter_graphs_parallel(self, seed: int | None):
+        """Yield graphs using multiprocessing workers."""
         return self._run_task_stream(
             self._task_iterator(seed),
             ordered=not self._shuffle,
@@ -421,6 +464,7 @@ class StreamingGraphDataLoader:
         )
 
     def _iter_graphs_single_from_tasks(self, task_iter: Iterator[tuple]):
+        """Yield graphs for a provided task iterator (single-process)."""
         for task in task_iter:
             if len(task) == 4:
                 _, ds_idx, sample_idx, filter_weight = task
@@ -435,6 +479,7 @@ class StreamingGraphDataLoader:
             yield graph
 
     def _iter_graphs_parallel_from_tasks(self, task_iter: Iterator[tuple]):
+        """Yield graphs from tasks using multiprocessing workers."""
         return self._run_task_stream(
             task_iter,
             ordered=True,
@@ -443,6 +488,7 @@ class StreamingGraphDataLoader:
         )
 
     def _ensure_worker_pool(self) -> None:
+        """Create worker processes and queues if needed."""
         if self._num_workers <= 1 or self._worker_procs is not None:
             return
         worker_count = max(self._num_workers, 1)
@@ -474,6 +520,7 @@ class StreamingGraphDataLoader:
         self._worker_procs = processes
 
     def _shutdown_workers(self) -> None:
+        """Terminate worker processes and release shared resources."""
         if self._worker_procs is None:
             return
         worker_count = len(self._worker_procs)
@@ -498,11 +545,23 @@ class StreamingGraphDataLoader:
         allow_skip: bool,
         expect_all: bool,
     ):
+        """Stream graphs from a task iterator, optionally in parallel.
+
+        Args:
+            task_iter: Iterator yielding (seq_id, dataset_idx, sample_idx) tuples.
+            ordered: Whether to preserve task ordering in output graphs.
+            allow_skip: Whether workers may skip graphs (e.g., zero-weight).
+            expect_all: Whether to warn if fewer graphs than tasks are produced.
+
+        Returns:
+            Iterator over `jraph.GraphsTuple` items.
+        """
         if self._num_workers <= 1:
             return self._iter_graphs_single_from_tasks(task_iter)
         self._ensure_worker_pool()
 
         def _iter():
+            """Drive producer/consumer queues and yield graphs to callers."""
             self._worker_lock.acquire()
             worker_count = len(self._worker_procs or [])
             task_queue = self._worker_task_queue
@@ -513,6 +572,7 @@ class StreamingGraphDataLoader:
             producer_exc: dict[str, Exception | None] = {'value': None}
 
             def _producer():
+                """Feed tasks into the worker queue."""
                 try:
                     for task in task_iter:
                         if stop_event is not None and stop_event.is_set():
@@ -537,6 +597,7 @@ class StreamingGraphDataLoader:
             skipped: set[int] | None = set() if allow_skip and ordered else None
 
             def _advance_pending():
+                """Emit buffered graphs in sequence order when available."""
                 nonlocal next_seq
                 while True:
                     if skipped is not None and next_seq in skipped:
@@ -550,6 +611,7 @@ class StreamingGraphDataLoader:
                     next_seq += 1
 
             def _check_worker_health():
+                """Detect and surface worker process failures."""
                 if self._worker_procs is None:
                     return
                 for idx, proc in enumerate(self._worker_procs):
@@ -660,17 +722,20 @@ class StreamingGraphDataLoader:
         return _iter()
 
     def _graph_iterator_from_tasks(self, task_iter: Iterator[tuple[int, int, int]]):
+        """Select the appropriate task iterator backend (single vs parallel)."""
         if self._num_workers <= 1:
             return self._iter_graphs_single_from_tasks(task_iter)
         return self._iter_graphs_parallel_from_tasks(task_iter)
 
     def _graph_iterator(self, *, seed_override: int | None):
+        """Build a graph iterator for the current epoch and seed."""
         seed = self._effective_seed(seed_override)
         if self._num_workers <= 1:
             return self._iter_graphs_single(seed)
         return self._iter_graphs_parallel(seed)
 
     def _ordered_batches(self, *, seed_override: int | None):
+        """Return ordered batch plans derived from precomputed assignments."""
         if self._batch_assignments is None:
             return None
         seed = self._effective_seed(seed_override)
@@ -712,6 +777,7 @@ class StreamingGraphDataLoader:
     def _task_iterator_from_batches(
         self, batches: Sequence[tuple[int, Sequence[int]]]
     ) -> Iterator[tuple[int, int, int]]:
+        """Yield task tuples for explicit graph index batches."""
         seq = 0
         for ds_idx, graph_indices in batches:
             for graph_idx in graph_indices:
@@ -719,6 +785,12 @@ class StreamingGraphDataLoader:
                 seq += 1
 
     def _pack(self, *, seed_override: int | None = None):
+        """Greedily pack graphs into padded batches.
+
+        This is the fallback path when batch assignments are not provided.
+        Packing uses `pack_graphs_greedy` to respect node/edge caps and to
+        compute padding sizes that stabilize downstream JAX shapes.
+        """
         graph_iter_fn = lambda: self._graph_iterator(seed_override=seed_override)
         reuse_info = getattr(self, '_pack_info', None)
         batches, info = pack_graphs_greedy(
@@ -740,6 +812,7 @@ class StreamingGraphDataLoader:
         return batches, info
 
     def _iter_batches_from_assignments(self, *, seed_override: int | None = None):
+        """Iterate batches based on precomputed graph assignments."""
         batch_plan = self._ordered_batches(seed_override=seed_override)
         if not batch_plan:
             return iter(())
@@ -748,6 +821,7 @@ class StreamingGraphDataLoader:
         pad_graphs = self._fixed_pad_graphs
 
         def _iter():
+            """Yield padded batches following the assignment plan."""
             for _, graph_indices in batch_plan:
                 graphs: list[jraph.GraphsTuple] = []
                 for _ in range(len(graph_indices)):
@@ -788,6 +862,7 @@ class StreamingGraphDataLoader:
         return _iter()
 
     def _limit_batches(self, iterable: Iterable[jraph.GraphsTuple]):
+        """Yield at most `max_batches` items from an iterable."""
         if self._max_batches is None:
             yield from iterable
             return
@@ -799,6 +874,7 @@ class StreamingGraphDataLoader:
             produced += 1
 
     def __iter__(self):
+        """Iterate over batches for the current epoch."""
         if self._batch_assignments is not None:
             batches = self._iter_batches_from_assignments(seed_override=None)
         else:
@@ -810,6 +886,7 @@ class StreamingGraphDataLoader:
             sentinel = object()
 
             def _producer():
+                """Populate the prefetch queue from the limited iterator."""
                 try:
                     for item in limited_iter:
                         queue.put(item)
@@ -834,6 +911,17 @@ class StreamingGraphDataLoader:
         process_count: int,
         process_index: int,
     ) -> Iterator[jraph.GraphsTuple]:
+        """Yield batches for the given epoch and process shard.
+
+        Args:
+            epoch: Epoch index to seed shuffling.
+            seed: Optional override seed.
+            process_count: Total number of data-parallel processes.
+            process_index: Index of the current process.
+
+        Returns:
+            Iterator over padded graph batches.
+        """
         self.set_epoch(epoch)
         previous_info = getattr(self, '_pack_info', None)
         if self._batch_assignments is not None:
@@ -847,6 +935,7 @@ class StreamingGraphDataLoader:
         if process_count > 1:
 
             def _filtered():
+                """Yield only batches assigned to this process."""
                 graphs_count = 0
                 batches_count = 0
                 try:
@@ -865,6 +954,7 @@ class StreamingGraphDataLoader:
         else:
 
             def _single():
+                """Yield all batches and record history."""
                 graphs_count = 0
                 batches_count = 0
                 try:
@@ -885,6 +975,7 @@ class StreamingGraphDataLoader:
         return BatchIteratorWrapper(iterator, total_batches_hint)
 
     def __len__(self):
+        """Return the number of batches for the current packing configuration."""
         if self._pack_info and self._pack_info.get('total_batches') is not None:
             total = int(self._pack_info['total_batches'])
             if self._max_batches is not None:
@@ -897,12 +988,14 @@ class StreamingGraphDataLoader:
         return total
 
     def pack_info(self) -> dict:
+        """Return cached packing metadata (computing it if needed)."""
         if not self._pack_info:
             _, info = self._pack(seed_override=None)
             return dict(info)
         return dict(self._pack_info)
 
     def close(self) -> None:
+        """Close datasets and terminate worker processes."""
         for dataset in self._datasets:
             dataset.close()
         self._shutdown_workers()
@@ -948,6 +1041,7 @@ class StreamingGraphDataLoader:
         )
 
     def split_by_heads(self) -> dict[str, StreamingGraphDataLoader]:
+        """Split the loader into per-head StreamingGraphDataLoader instances."""
         if len(self._head_to_index) <= 1:
             return {}
         grouped: dict[str, list[StreamingDatasetSpec]] = {}
@@ -1015,7 +1109,27 @@ def pack_graphs_greedy(
     fixed_pad_graphs: int | None = None,
     reuse_info: dict | None = None,
 ) -> tuple[Iterable[jraph.GraphsTuple], dict]:
+    """Pack graphs into padded batches using a greedy edge/node heuristic.
+
+    The packing strategy approximates a knapsack solution to minimize padding
+    waste while still producing fixed-size batches. Fixed shapes are important
+    in JAX: they allow the model to compile once and reuse the compiled graph,
+    rather than recompiling for each new batch shape.
+
+    Args:
+        graph_iter_fn: Callable returning a fresh iterator over graphs.
+        max_edges_per_batch: Maximum edges allowed per batch.
+        max_nodes_per_batch: Maximum nodes allowed per batch.
+        fixed_pad_nodes: Optional fixed node padding cap.
+        fixed_pad_edges: Optional fixed edge padding cap.
+        fixed_pad_graphs: Optional fixed graph padding cap.
+        reuse_info: Optional info dict to reuse padding caps from prior packing.
+
+    Returns:
+        Tuple of (batch_iterator, info_dict) with padding/packing statistics.
+    """
     def _make_iter():
+        """Instantiate a new graph iterator."""
         return iter(graph_iter_fn())
 
     nodes_cap = (
@@ -1060,6 +1174,7 @@ def pack_graphs_greedy(
     graph_cap = max(pad_graphs - 1, 1) if pad_graphs is not None else None
 
     def _emit_batch(batch_graphs: list[jraph.GraphsTuple]):
+        """Batch and pad a list of graphs, updating info counters."""
         nonlocal info
         if not batch_graphs:
             return None
@@ -1077,6 +1192,7 @@ def pack_graphs_greedy(
         return result
 
     def _iter():
+        """Yield padded batches greedily packed from the graph stream."""
         current: list[jraph.GraphsTuple] = []
         edge_sum = node_sum = 0
         for g in _make_iter():
@@ -1129,6 +1245,30 @@ def get_hdf5_dataloader(
     dataset_specs: Sequence[StreamingDatasetSpec] | None = None,
     head_to_index: dict[str, int] | None = None,
 ) -> StreamingGraphDataLoader:
+    """Create a StreamingGraphDataLoader from one or more HDF5 files.
+
+    The resulting loader yields fixed-shape padded batches suitable for JAX
+    compilation reuse. This wrapper expands paths/globs, opens datasets, and
+    forwards options to `StreamingGraphDataLoader`.
+
+    Args:
+        data_file: Path(s), directory, or glob patterns for HDF5 files.
+        atomic_numbers: Atomic number table for species encoding.
+        r_max: Cutoff radius for graph construction.
+        shuffle: Whether to shuffle graphs/batches each epoch.
+        max_nodes: Node padding cap.
+        max_edges: Edge padding cap.
+        seed: Optional shuffle seed.
+        niggli_reduce: Whether to apply Niggli reduction to periodic cells.
+        max_batches: Optional cap on batches per epoch.
+        prefetch_batches: Number of batches to prefetch.
+        num_workers: Number of multiprocessing workers for graph conversion.
+        dataset_specs: Optional per-file dataset specifications.
+        head_to_index: Optional mapping of head names to indices.
+
+    Returns:
+        Configured StreamingGraphDataLoader instance.
+    """
     if data_file is None:
         raise ValueError('data_file must be provided.')
     if isinstance(data_file, (list, tuple)):
