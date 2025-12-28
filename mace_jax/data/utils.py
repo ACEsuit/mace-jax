@@ -315,6 +315,28 @@ def compute_average_E0s(
     return atomic_energies_dict
 
 
+def compute_average_E0s_from_configs(
+    configs: Configurations, z_table: AtomicNumberTable
+) -> dict[int, float]:
+    len_train = len(configs)
+    len_zs = len(z_table)
+    A = np.zeros((len_train, len_zs))
+    B = np.zeros(len_train)
+    for i, config in enumerate(configs):
+        B[i] = float(np.asarray(config.energy).reshape(()))
+        for j, z in enumerate(z_table.zs):
+            A[i, j] = np.count_nonzero(config.atomic_numbers == z)
+    try:
+        E0s = np.linalg.lstsq(A, B, rcond=None)[0]
+        atomic_energies_dict = {z: float(E0s[i]) for i, z in enumerate(z_table.zs)}
+    except np.linalg.LinAlgError:
+        logging.warning(
+            'Failed to compute E0s using least squares regression, using the same for all atoms'
+        )
+        atomic_energies_dict = {z: 0.0 for z in z_table.zs}
+    return atomic_energies_dict
+
+
 def compute_average_E0s_from_species(
     graphs: list[jraph.GraphsTuple], num_species: int
 ) -> dict[int, float]:
@@ -364,9 +386,7 @@ def save_configurations_as_HDF5(configurations: Configurations, _, h5_file) -> N
         if config.dipole is not None:
             properties_subgrp['dipole'] = write_value(config.dipole)
         if config.polarizability is not None:
-            properties_subgrp['polarizability'] = write_value(
-                config.polarizability
-            )
+            properties_subgrp['polarizability'] = write_value(config.polarizability)
 
 
 def write_value(value):

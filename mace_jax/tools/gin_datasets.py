@@ -8,11 +8,13 @@ from glob import glob
 from pathlib import Path
 
 import gin
+import jax
 import numpy as np
 from tqdm.auto import tqdm
 
 from mace_jax import data
 from mace_jax.data.streaming_loader import StreamingDatasetSpec
+from mace_jax.tools.utils import log_info_primary
 
 _STREAMING_STATS_CACHE_VERSION = 1
 
@@ -239,7 +241,7 @@ def _load_cached_streaming_stats(
     stats_payload = payload.get('stats')
     if not stats_payload:
         return None
-    logging.info('Loaded cached streaming stats from %s', cache_path)
+    log_info_primary('Loaded cached streaming stats from %s', cache_path)
     return _stats_from_payload(stats_payload)
 
 
@@ -342,7 +344,7 @@ def _append_streaming_specs(
             )
         )
         if log_label:
-            logging.info(
+            log_info_primary(
                 "Prepared streaming %s dataset for head '%s' from '%s'",
                 log_label,
                 head_name,
@@ -655,6 +657,67 @@ def _load_or_compute_streaming_stats(
     return cached, metadata
 
 
+def _atomic_energies_to_array(
+    atomic_energies_dict: dict[int, float],
+    z_table: data.AtomicNumberTable,
+) -> np.ndarray:
+    return np.array(
+        [
+            atomic_energies_dict.get(z_table.index_to_z(i), 0.0)
+            for i in range(len(z_table))
+        ],
+        dtype=np.float64,
+    )
+
+
+def _resolve_atomic_energies(
+    *,
+    atomic_numbers: Sequence[int],
+    z_table: data.AtomicNumberTable,
+    ata: np.ndarray,
+    atb: np.ndarray,
+    collect_metadata: bool,
+    sample_graphs: list,
+    atomic_energies_override: dict[int, float] | str | None,
+    statistics_metadata_path: str | None,
+) -> tuple[dict[int, float], np.ndarray]:
+    if isinstance(atomic_energies_override, str):
+        if atomic_energies_override.lower() == 'average':
+            atomic_energies_override = None
+        else:
+            raise ValueError(
+                f'Unsupported atomic_energies_override string: {atomic_energies_override}'
+            )
+
+    if isinstance(atomic_energies_override, dict):
+        override_dict = {int(k): float(v) for k, v in atomic_energies_override.items()}
+        missing = [z for z in atomic_numbers if z not in override_dict]
+        if missing:
+            raise ValueError(
+                f'atomic_energies_override missing entries for atomic numbers: {missing}'
+            )
+        if statistics_metadata_path:
+            log_info_primary(
+                'Using atomic energies from statistics file %s',
+                statistics_metadata_path,
+            )
+        return override_dict, _atomic_energies_to_array(override_dict, z_table)
+
+    if collect_metadata and np.any(atb):
+        regularizer = 1e-8 * np.eye(len(z_table))
+        atomic_energies = np.linalg.solve(ata + regularizer, atb)
+        atomic_energies_dict = {
+            z_table.index_to_z(i): float(atomic_energies[i])
+            for i in range(len(z_table))
+        }
+        return atomic_energies_dict, atomic_energies.astype(np.float64)
+
+    atomic_energies_dict = data.compute_average_E0s(sample_graphs, z_table)
+    return atomic_energies_dict, _atomic_energies_to_array(
+        atomic_energies_dict, z_table
+    )
+
+
 def _build_streaming_train_loader(
     *,
     dataset_specs: Sequence[StreamingDatasetSpec],
@@ -679,7 +742,7 @@ def _build_streaming_train_loader(
             [spec.path for spec in dataset_specs]
         )
     if atomic_numbers_override and statistics_metadata_path:
-        logging.info(
+        log_info_primary(
             'Using atomic numbers from statistics file %s', statistics_metadata_path
         )
     z_table = data.AtomicNumberTable(atomic_numbers)
@@ -740,47 +803,16 @@ def _build_streaming_train_loader(
     avg_min_distance = (
         min_distance_sum / min_distance_count if min_distance_count else 0.0
     )
-    atomic_energies_dict: dict[int, float] = {}
-    atomic_energies = np.zeros((num_species,), dtype=np.float64)
-    if collect_metadata and np.any(atb):
-        regularizer = 1e-8 * np.eye(num_species)
-        atomic_energies = np.linalg.solve(ata + regularizer, atb)
-        atomic_energies_dict = {
-            z_table.index_to_z(i): float(atomic_energies[i]) for i in range(num_species)
-        }
-    if isinstance(atomic_energies_override, str):
-        if atomic_energies_override.lower() == 'average':
-            atomic_energies_override = None
-        else:
-            raise ValueError(
-                f'Unsupported atomic_energies_override string: {atomic_energies_override}'
-            )
-    if isinstance(atomic_energies_override, dict):
-        override_dict = {int(k): float(v) for k, v in atomic_energies_override.items()}
-        missing = [z for z in atomic_numbers if z not in override_dict]
-        if missing:
-            raise ValueError(
-                f'atomic_energies_override missing entries for atomic numbers: {missing}'
-            )
-        atomic_energies_dict = {z: override_dict[z] for z in atomic_numbers}
-        atomic_energies = np.array(
-            [atomic_energies_dict[z_table.index_to_z(i)] for i in range(num_species)],
-            dtype=np.float64,
-        )
-        if statistics_metadata_path:
-            logging.info(
-                'Using atomic energies from statistics file %s',
-                statistics_metadata_path,
-            )
-    elif not atomic_energies_dict:
-        atomic_energies_dict = data.compute_average_E0s(sample_graphs, z_table)
-        atomic_energies = np.array(
-            [
-                atomic_energies_dict.get(z_table.index_to_z(i), 0.0)
-                for i in range(num_species)
-            ],
-            dtype=np.float64,
-        )
+    atomic_energies_dict, atomic_energies = _resolve_atomic_energies(
+        atomic_numbers=atomic_numbers,
+        z_table=z_table,
+        ata=ata,
+        atb=atb,
+        collect_metadata=collect_metadata,
+        sample_graphs=sample_graphs,
+        atomic_energies_override=atomic_energies_override,
+        statistics_metadata_path=statistics_metadata_path,
+    )
 
     if n_edges <= 0:
         n_edges = int(n_edge)
@@ -939,6 +971,15 @@ def _build_eval_streaming_loader(
         atomic_energies_override = getattr(template_loader, 'atomic_energies', None)
     if atomic_numbers_override is None and base_z_table is not None:
         atomic_numbers_override = [int(z) for z in base_z_table.zs]
+    if (
+        atomic_numbers_override is not None
+        and isinstance(atomic_energies_override, np.ndarray)
+        and atomic_energies_override.size
+    ):
+        atomic_energies_override = {
+            int(z): float(atomic_energies_override[i])
+            for i, z in enumerate(atomic_numbers_override)
+        }
 
     loader, _, _ = _build_streaming_train_loader(
         dataset_specs=dataset_specs,
@@ -980,6 +1021,7 @@ def datasets(
     head_configs: dict[str, dict] | None = None,
     stream_train_prefetch: int | None = None,
     stream_train_workers: int = 0,
+    num_workers: int | None = None,
     atomic_numbers: Sequence[int] | None = None,
     atomic_energies_override: dict[int, float] | str | None = None,
     statistics_metadata_path: str | None = None,
@@ -994,6 +1036,11 @@ def datasets(
 
     head_names = tuple(heads) if heads else ('Default',)
     head_to_index = {name: idx for idx, name in enumerate(head_names)}
+    local_device_count = getattr(jax, 'local_device_count', lambda: 1)()
+    worker_setting = stream_train_workers if num_workers is None else num_workers
+    effective_workers = int(worker_setting or 0)
+    if local_device_count > 1 and effective_workers > 0:
+        effective_workers *= int(local_device_count)
 
     if train_num is not None:
         raise ValueError('train_num is not supported with streaming datasets.')
@@ -1040,7 +1087,7 @@ def datasets(
         seed=seed,
         head_to_index=head_to_index,
         stream_prefetch=stream_train_prefetch,
-        stream_workers=stream_train_workers,
+        stream_workers=effective_workers,
         atomic_numbers_override=atomic_numbers,
         atomic_energies_override=atomic_energies_override,
         statistics_metadata_path=statistics_metadata_path,
@@ -1065,7 +1112,7 @@ def datasets(
         n_graph=n_graph,
         head_to_index=head_to_index,
         base_z_table=base_z_table,
-        num_workers=stream_train_workers,
+        num_workers=effective_workers,
         seed=seed,
         stream_prefetch=stream_train_prefetch,
         template_loader=train_loader,
@@ -1078,17 +1125,17 @@ def datasets(
         n_graph=n_graph,
         head_to_index=head_to_index,
         base_z_table=base_z_table,
-        num_workers=stream_train_workers,
+        num_workers=effective_workers,
         seed=seed,
         stream_prefetch=stream_train_prefetch,
         template_loader=train_loader,
     )
-    logging.info(
+    log_info_primary(
         'Streaming training graphs: %s from %s files',
         getattr(train_loader, 'total_graphs', 'unknown'),
         len(dataset_specs),
     )
     valid_count = getattr(valid_loader, 'total_graphs', 0) if valid_loader else 0
     test_count = getattr(test_loader, 'total_graphs', 0) if test_loader else 0
-    logging.info('Validation graphs: %s | Test graphs: %s', valid_count, test_count)
+    log_info_primary('Validation graphs: %s | Test graphs: %s', valid_count, test_count)
     return train_loader, valid_loader, test_loader, atomic_energies_dict, r_max

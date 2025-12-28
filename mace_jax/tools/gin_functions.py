@@ -592,9 +592,7 @@ def train(
     lowest_loss = np.inf
     patience_counter = 0
     loss_fn = loss()
-    if log_errors is None and isinstance(
-        loss_fn, modules.WeightedEnergyForcesL1L2Loss
-    ):
+    if log_errors is None and isinstance(loss_fn, modules.WeightedEnergyForcesL1L2Loss):
         log_errors = 'PerAtomMAE'
     start_time = time.perf_counter()
     total_time_per_interval = []
@@ -606,8 +604,7 @@ def train(
     is_primary = process_index == 0
 
     def _log_info(message, *args):
-        if is_primary:
-            logging.info(message, *args)
+        tools.log_info_primary(message, *args)
 
     checkpoint_dir_path: Path | None = None
     checkpoint_history: deque[Path] = deque()

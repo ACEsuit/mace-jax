@@ -8,8 +8,8 @@ import json
 import logging
 import multiprocessing as mp
 import random
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 import h5py
 import numpy as np
@@ -60,7 +60,7 @@ def _parse_e0s(value: str) -> dict[int, float] | str:
     if lowered == 'average':
         return 'average'
     if value.endswith('.json') and Path(value).exists():
-        with open(value, 'r', encoding='utf-8') as handle:
+        with open(value, encoding='utf-8') as handle:
             data_dict = json.load(handle)
         if not isinstance(data_dict, dict):
             raise ValueError('E0s JSON must be a dict of atomic energies.')
@@ -69,27 +69,6 @@ def _parse_e0s(value: str) -> dict[int, float] | str:
     if not isinstance(literal, dict):
         raise ValueError('E0s literal must be a dict of atomic energies.')
     return {int(k): float(v) for k, v in literal.items()}
-
-
-def _compute_average_e0s(
-    configs: data.Configurations, z_table: data.AtomicNumberTable
-) -> dict[int, float]:
-    len_train = len(configs)
-    len_zs = len(z_table)
-    A = np.zeros((len_train, len_zs))
-    B = np.zeros(len_train)
-    for i, config in enumerate(configs):
-        B[i] = float(np.asarray(config.energy).reshape(()))
-        for j, z in enumerate(z_table.zs):
-            A[i, j] = np.count_nonzero(config.atomic_numbers == z)
-    try:
-        e0s = np.linalg.lstsq(A, B, rcond=None)[0]
-        return {z: float(e0s[i]) for i, z in enumerate(z_table.zs)}
-    except np.linalg.LinAlgError:
-        logging.warning(
-            'Failed to compute E0s using least squares regression, using zeros.'
-        )
-        return {z: 0.0 for z in z_table.zs}
 
 
 def _split_indices(count: int, num_splits: int) -> list[list[int]]:
@@ -133,39 +112,6 @@ def _write_hdf5_splits(
         proc.join()
 
 
-def _random_train_valid_split(
-    configs: data.Configurations,
-    valid_fraction: float,
-    seed: int,
-    work_dir: Path,
-) -> tuple[data.Configurations, data.Configurations]:
-    if not 0.0 < valid_fraction < 1.0:
-        raise ValueError('valid_fraction must be in (0, 1).')
-    size = len(configs)
-    if size < 2:
-        raise ValueError('Need at least 2 configurations for a validation split.')
-    train_size = min(size - int(valid_fraction * size), size - 1)
-    indices = list(range(size))
-    rng = np.random.default_rng(seed)
-    rng.shuffle(indices)
-    valid_indices = indices[train_size:]
-    if len(valid_indices) >= 10:
-        work_dir.mkdir(parents=True, exist_ok=True)
-        path = work_dir / f'valid_indices_{seed}.txt'
-        with open(path, 'w', encoding='utf-8') as handle:
-            for idx in valid_indices:
-                handle.write(f'{idx}\n')
-        logging.info(
-            'Using random %.0f%% of training set for validation with indices saved in: %s',
-            100 * valid_fraction,
-            path,
-        )
-    return (
-        [configs[i] for i in indices[:train_size]],
-        [configs[i] for i in valid_indices],
-    )
-
-
 def _compute_statistics(
     configs: data.Configurations,
     z_table: data.AtomicNumberTable,
@@ -201,9 +147,7 @@ def _compute_statistics(
             )
         if config.forces is not None:
             forces.append(np.asarray(config.forces))
-    avg_num_neighbors = (
-        neighbor_sum / neighbor_count if neighbor_count > 0 else 0.0
-    )
+    avg_num_neighbors = neighbor_sum / neighbor_count if neighbor_count > 0 else 0.0
     mean = float(np.mean(energy_per_atom)) if energy_per_atom else 0.0
     if forces:
         forces_array = np.concatenate(forces, axis=0)
@@ -264,7 +208,7 @@ def _resolve_atomic_energies(
         )
     parsed = _parse_e0s(e0s_value)
     if parsed == 'average':
-        return _compute_average_e0s(train_configs, z_table)
+        return data.compute_average_E0s_from_configs(train_configs, z_table)
     return parsed
 
 
@@ -317,11 +261,13 @@ def run(args: argparse.Namespace) -> None:
             extract_atomic_energies=False,
         )
     else:
-        train_configs, valid_configs = _random_train_valid_split(
-            train_configs,
-            args.valid_fraction,
-            args.seed,
-            Path(args.work_dir),
+        size = len(train_configs)
+        if not 0.0 < args.valid_fraction < 1.0:
+            raise ValueError('valid_fraction must be in (0, 1).')
+        valid_num = max(1, int(args.valid_fraction * size))
+        valid_num = min(valid_num, size - 1)
+        train_configs, valid_configs = data.random_train_valid_split(
+            train_configs, valid_num, args.seed
         )
 
     test_configs_by_type: list[tuple[str | None, data.Configurations]] = []
@@ -355,16 +301,12 @@ def run(args: argparse.Namespace) -> None:
         z_table = data.AtomicNumberTable(_parse_atomic_numbers(args.atomic_numbers))
 
     prefix = Path(args.h5_prefix) if args.h5_prefix else Path('.')
-    _write_hdf5_splits(
-        train_configs, prefix / 'train', 'train', args.num_process
-    )
+    _write_hdf5_splits(train_configs, prefix / 'train', 'train', args.num_process)
     _write_hdf5_splits(valid_configs, prefix / 'val', 'val', args.num_process)
     if test_configs_by_type:
         for name, subset in test_configs_by_type:
             label = name if name is not None else 'test'
-            _write_hdf5_splits(
-                subset, prefix / 'test', label, args.num_process
-            )
+            _write_hdf5_splits(subset, prefix / 'test', label, args.num_process)
 
     if args.compute_statistics:
         atomic_energies_dict = _resolve_atomic_energies(
@@ -381,9 +323,7 @@ def run(args: argparse.Namespace) -> None:
             logging.warning(
                 'Atomic energies for elements not present in the atomic number table have been removed.'
             )
-            logging.warning(
-                'Removed atomic energies (eV): %s', removed_atomic_energies
-            )
+            logging.warning('Removed atomic energies (eV): %s', removed_atomic_energies)
             logging.warning(
                 'To include these elements, specify all atomic numbers explicitly using --atomic_numbers.'
             )

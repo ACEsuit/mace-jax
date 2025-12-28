@@ -699,6 +699,7 @@ def evaluate(
         'graph_cap': 0,
     }
 
+    local_device_count = max(1, jax.local_device_count())
     process_index = getattr(jax, 'process_index', lambda: 0)()
     process_count = getattr(jax, 'process_count', lambda: 1)()
     supports_iter_batches = hasattr(data_loader, 'iter_batches')
@@ -715,19 +716,33 @@ def evaluate(
         iterator = iter(data_loader)
         total_hint = 0
 
-    def _process_batch(ref_graph: jraph.GraphsTuple, *, p_bar=None) -> None:
-        nonlocal total_loss, num_graphs
-        node_cap, edge_cap, graph_cap, pad_nodes, pad_edges, pad_graphs = (
-            _padding_amounts(ref_graph)
+    def _prepare_graph_for_devices(graph: jraph.GraphsTuple):
+        if local_device_count == 1:
+            if graph.n_node.ndim == 1:
+                return jax.tree_util.tree_map(lambda x: x[None, ...], graph)
+            return graph
+        if isinstance(graph, Sequence) and not isinstance(graph, jraph.GraphsTuple):
+            return data.prepare_sharded_batch(graph, local_device_count)
+        if graph.n_node.ndim == 1:
+            return data.prepare_sharded_batch(graph, local_device_count)
+        if graph.n_node.shape[0] != local_device_count:
+            raise ValueError(
+                'Expected microbatches with leading axis equal to the number of local '
+                f'devices ({local_device_count}), got axis size {graph.n_node.shape[0]}.'
+            )
+        return graph
+
+    def _psum_metrics(tree):
+        return jax.tree_util.tree_map(
+            lambda x: jax.lax.psum(x, 'devices') if x is not None else None,
+            tree,
+            is_leaf=lambda x: x is None,
         )
-        padding_stats['node_cap'] += node_cap
-        padding_stats['edge_cap'] += edge_cap
-        padding_stats['graph_cap'] += graph_cap
-        padding_stats['pad_nodes'] += pad_nodes
-        padding_stats['pad_edges'] += pad_edges
-        padding_stats['pad_graphs'] += pad_graphs
-        output = predictor(params, ref_graph)
-        nodes = ref_graph.nodes
+
+    @partial(jax.pmap, in_axes=(None, 0), out_axes=0, axis_name='devices')
+    def _eval_step(params_, graph):
+        output = predictor(params_, graph)
+        nodes = graph.nodes
         if output.get('forces') is not None:
             nodes = nodes._replace(forces=output.get('forces'))
         globals_updates = {}
@@ -735,16 +750,11 @@ def evaluate(
             if key in output and output[key] is not None:
                 globals_updates[key] = output[key]
         globals_attr = (
-            ref_graph.globals._replace(**globals_updates)
+            graph.globals._replace(**globals_updates)
             if globals_updates
-            else ref_graph.globals
+            else graph.globals
         )
-        pred_graph = ref_graph._replace(nodes=nodes, globals=globals_attr)
-
-        graph_mask = np.asarray(_graph_mask(ref_graph))
-        if not graph_mask.any():
-            return
-        device_graph_mask = jnp.asarray(graph_mask, dtype=jnp.float32)
+        pred_graph = graph._replace(nodes=nodes, globals=globals_attr)
 
         pred_outputs = {
             'energy': pred_graph.globals.energy,
@@ -761,10 +771,24 @@ def evaluate(
         if polar_value is not None:
             pred_outputs['polarizability'] = polar_value
 
-        batch_metrics = batch_metrics_fn(
-            ref_graph, pred_graph, pred_outputs, device_graph_mask
+        batch_metrics = batch_metrics_fn(graph, pred_graph, pred_outputs, None)
+        return _psum_metrics(batch_metrics)
+
+    def _process_batch(ref_graph: jraph.GraphsTuple, *, p_bar=None) -> None:
+        nonlocal total_loss, num_graphs
+        node_cap, edge_cap, graph_cap, pad_nodes, pad_edges, pad_graphs = (
+            _padding_amounts(ref_graph)
         )
-        batch_metrics = jax.device_get(batch_metrics)
+        padding_stats['node_cap'] += node_cap
+        padding_stats['edge_cap'] += edge_cap
+        padding_stats['graph_cap'] += graph_cap
+        padding_stats['pad_nodes'] += pad_nodes
+        padding_stats['pad_edges'] += pad_edges
+        padding_stats['pad_graphs'] += pad_graphs
+
+        device_graph = _prepare_graph_for_devices(ref_graph)
+        batch_metrics = _eval_step(params, device_graph)
+        batch_metrics = data.unreplicate_from_local_devices(batch_metrics)
         total_loss += float(batch_metrics['loss'])
         num_graphs += float(batch_metrics['graph_count'])
         metric_accumulators['energy'].update(batch_metrics.get('energy'))

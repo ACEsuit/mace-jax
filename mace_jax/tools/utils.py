@@ -20,6 +20,18 @@ def set_seeds(seed: int) -> None:
     np.random.seed(seed)
 
 
+def is_primary_process() -> bool:
+    try:
+        return getattr(jax, 'process_index', lambda: 0)() == 0
+    except Exception:
+        return True
+
+
+def log_info_primary(message: str, *args) -> None:
+    if is_primary_process():
+        logging.info(message, *args)
+
+
 def set_default_dtype(dtype: str) -> None:
     jax_config.update('jax_enable_x64', dtype == 'float64')
 
