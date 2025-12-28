@@ -905,6 +905,7 @@ def train(
     checkpoint_dir: str | None = None,
     checkpoint_every: int | None = None,
     checkpoint_keep: int | None = 1,
+    checkpoint_best: bool = False,
     resume_from: str | None = None,
     data_seed: int | None = None,
     lr_scale_by_graphs: bool = True,
@@ -943,6 +944,7 @@ def train(
         checkpoint_dir: Directory to store checkpoints.
         checkpoint_every: Save checkpoints every N epochs.
         checkpoint_keep: Number of checkpoints to keep.
+        checkpoint_best: Save a checkpoint whenever validation loss improves.
         resume_from: Optional checkpoint path to resume from.
         data_seed: Optional seed for shuffling data loaders.
         lr_scale_by_graphs: Whether to scale LR based on graphs per batch.
@@ -965,6 +967,7 @@ def train(
     eval_time_per_interval = []
 
     checkpoint_enabled = bool(checkpoint_every and checkpoint_every > 0)
+    checkpoint_best = bool(checkpoint_best)
     process_index = getattr(jax, 'process_index', lambda: 0)()
     process_count = getattr(jax, 'process_count', lambda: 1)()
     is_primary = process_index == 0
@@ -1026,7 +1029,7 @@ def train(
 
     initial_epoch = start_interval
 
-    if checkpoint_enabled:
+    if checkpoint_enabled or checkpoint_best:
         checkpoint_dir_path = _resolve_checkpoint_dir()
 
     def _save_checkpoint(
@@ -1066,6 +1069,30 @@ def train(
                 except FileNotFoundError:
                     pass
         _log_info('Saved checkpoint to %s', path)
+        return path
+
+    def _save_best_checkpoint(
+        epoch_idx, current_params, current_optimizer_state, eval_params_
+    ):
+        """Persist a checkpoint when validation loss improves."""
+        if not checkpoint_best or not is_primary:
+            return None
+        if checkpoint_dir_path is None:
+            return None
+        checkpoint_dir_path.mkdir(parents=True, exist_ok=True)
+        path = checkpoint_dir_path / f'{tag}_best.ckpt'
+        state = {
+            'epoch': epoch_idx,
+            'params': _attach_config(current_params, static_config),
+            'optimizer_state': current_optimizer_state,
+            'eval_params': _attach_config(eval_params_, static_config),
+            'lowest_loss': lowest_loss,
+            'patience_counter': patience_counter,
+            'checkpoint_format': 2,
+        }
+        with path.open('wb') as f:
+            pickle.dump(state, f)
+        _log_info('Saved best checkpoint to %s', path)
         return path
 
     def _loader_has_graphs(loader):
@@ -1314,6 +1341,7 @@ def train(
                     loader, 'eval_valid', head_name=head_name
                 )
 
+        improved = False
         if last_valid_loss is not None and is_primary:
             if last_valid_loss >= lowest_loss:
                 patience_counter += 1
@@ -1325,6 +1353,7 @@ def train(
             else:
                 lowest_loss = last_valid_loss
                 patience_counter = 0
+                improved = True
 
         if (
             swa_loss_fn is not None
@@ -1362,6 +1391,9 @@ def train(
         plateau_updater = getattr(gradient_transform, 'scheduler_update', None)
         if callable(plateau_updater) and last_valid_loss is not None:
             plateau_updater(last_valid_loss)
+
+        if improved:
+            _save_best_checkpoint(epoch, trainable_params, optimizer_state, eval_params)
 
         _save_checkpoint(epoch, trainable_params, optimizer_state, eval_params)
 

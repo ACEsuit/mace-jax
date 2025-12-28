@@ -482,6 +482,12 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
         help='Keep only the most recent N checkpoints (binds gin train.checkpoint_keep).',
     )
     parser.add_argument(
+        '--checkpoint-best',
+        '--checkpoint_best',
+        action='store_true',
+        help='Save a checkpoint whenever validation loss improves (binds gin train.checkpoint_best).',
+    )
+    parser.add_argument(
         '--resume-from',
         '--resume_from',
         help='Resume training from a previously saved checkpoint file.',

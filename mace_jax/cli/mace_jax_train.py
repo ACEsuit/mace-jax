@@ -121,6 +121,11 @@ def apply_cli_overrides(args: argparse.Namespace) -> None:
                 'mace_jax.tools.gin_functions.train.checkpoint_keep',
                 args.checkpoint_keep,
             )
+        if args.checkpoint_best:
+            gin.bind_parameter(
+                'mace_jax.tools.gin_functions.train.checkpoint_best',
+                True,
+            )
         if args.resume_from:
             gin.bind_parameter(
                 'mace_jax.tools.gin_functions.train.resume_from',

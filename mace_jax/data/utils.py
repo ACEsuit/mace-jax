@@ -769,6 +769,16 @@ def split_graphs_for_devices(graph, num_devices: int) -> list[jraph.GraphsTuple]
         if remainder == 0:
             return graph
         pad_graphs = multiple - remainder
+
+        def _pad_global_value(value):
+            if value is None:
+                return None
+            arr = np.asarray(value)
+            if arr.ndim == 0:
+                arr = np.broadcast_to(arr, (total,))
+            pad_shape = (pad_graphs,) + arr.shape[1:]
+            pad_vals = np.zeros(pad_shape, dtype=arr.dtype)
+            return np.concatenate([arr, pad_vals], axis=0)
         pad_n_node = np.concatenate(
             [np.asarray(graph.n_node), np.zeros(pad_graphs, dtype=np.int32)]
         )
@@ -782,13 +792,15 @@ def split_graphs_for_devices(graph, num_devices: int) -> list[jraph.GraphsTuple]
         elif hasattr(globals_attr, 'items'):
             globals_dict = globals_attr.__class__()
             for key, value in globals_attr.items():
-                pad_shape = (pad_graphs,) + value.shape[1:]
-                pad_vals = np.zeros(pad_shape, dtype=value.dtype)
-                globals_dict[key] = np.concatenate([value, pad_vals], axis=0)
+                globals_dict[key] = _pad_global_value(value)
+        elif hasattr(globals_attr, '_fields'):
+            padded = {
+                key: _pad_global_value(value)
+                for key, value in globals_attr._asdict().items()
+            }
+            globals_dict = globals_attr.__class__(**padded)
         else:
-            pad_shape = (pad_graphs,) + globals_attr.shape[1:]
-            pad_vals = np.zeros(pad_shape, dtype=globals_attr.dtype)
-            globals_dict = np.concatenate([globals_attr, pad_vals], axis=0)
+            globals_dict = _pad_global_value(globals_attr)
 
         return graph._replace(
             globals=globals_dict,
