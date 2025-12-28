@@ -1104,7 +1104,7 @@ def train(
             )
             _log_info(
                 f'Epoch {epoch}: {eval_mode}: '
-                f'loss={loss_:.4f}' + (f', {metrics_blob}' if metrics_blob else '')
+                f'loss={loss_:.4e}' + (f', {metrics_blob}' if metrics_blob else '')
             )
             if wandb_run is not None and is_primary:
                 wandb_mode = eval_mode
