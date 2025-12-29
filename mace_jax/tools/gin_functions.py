@@ -1036,6 +1036,26 @@ def train(
     if checkpoint_enabled or checkpoint_best:
         checkpoint_dir_path = _resolve_checkpoint_dir()
 
+    def _checkpoint_state(
+        epoch_idx, current_params, current_optimizer_state, eval_params_
+    ):
+        """Build a checkpoint payload for the current epoch."""
+        return {
+            'epoch': epoch_idx,
+            'params': _attach_config(current_params, static_config),
+            'optimizer_state': current_optimizer_state,
+            'eval_params': _attach_config(eval_params_, static_config),
+            'lowest_loss': lowest_loss,
+            'patience_counter': patience_counter,
+            'checkpoint_format': 2,
+        }
+
+    def _write_checkpoint(path: Path, state: dict):
+        """Write a checkpoint payload to disk."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open('wb') as f:
+            pickle.dump(state, f)
+
     def _save_checkpoint(
         epoch_idx, current_params, current_optimizer_state, eval_params_
     ):
@@ -1050,20 +1070,12 @@ def train(
             and epoch_idx % checkpoint_every != 0
         ):
             return None
-        checkpoint_dir_path.mkdir(parents=True, exist_ok=True)
         filename = f'{tag}_epoch{epoch_idx:05d}.ckpt'
         path = checkpoint_dir_path / filename
-        state = {
-            'epoch': epoch_idx,
-            'params': _attach_config(current_params, static_config),
-            'optimizer_state': current_optimizer_state,
-            'eval_params': _attach_config(eval_params_, static_config),
-            'lowest_loss': lowest_loss,
-            'patience_counter': patience_counter,
-            'checkpoint_format': 2,
-        }
-        with path.open('wb') as f:
-            pickle.dump(state, f)
+        state = _checkpoint_state(
+            epoch_idx, current_params, current_optimizer_state, eval_params_
+        )
+        _write_checkpoint(path, state)
         checkpoint_history.append(path)
         if checkpoint_keep and checkpoint_keep > 0:
             while len(checkpoint_history) > checkpoint_keep:
@@ -1083,19 +1095,11 @@ def train(
             return None
         if checkpoint_dir_path is None:
             return None
-        checkpoint_dir_path.mkdir(parents=True, exist_ok=True)
         path = checkpoint_dir_path / f'{tag}_best.ckpt'
-        state = {
-            'epoch': epoch_idx,
-            'params': _attach_config(current_params, static_config),
-            'optimizer_state': current_optimizer_state,
-            'eval_params': _attach_config(eval_params_, static_config),
-            'lowest_loss': lowest_loss,
-            'patience_counter': patience_counter,
-            'checkpoint_format': 2,
-        }
-        with path.open('wb') as f:
-            pickle.dump(state, f)
+        state = _checkpoint_state(
+            epoch_idx, current_params, current_optimizer_state, eval_params_
+        )
+        _write_checkpoint(path, state)
         _log_info('Saved best checkpoint to %s', path)
         return path
 
