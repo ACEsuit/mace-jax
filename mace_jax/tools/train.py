@@ -126,6 +126,7 @@ def _prefetch_iterator(iterator, capacity: int):
 
     class _Prefetched:
         """Iterator wrapper that yields prefetched items from a queue."""
+
         def __init__(self):
             """Initialize the prefetched iterator wrapper."""
             self._done = False
@@ -164,6 +165,7 @@ def _group_batches(iterator, group_size: int, total_hint: int = 0):
 
     class _Grouped:
         """Iterator wrapper that yields fixed-size groups of batches."""
+
         def __init__(self):
             """Initialize the grouped iterator wrapper."""
             self._iter = iter(iterator)
@@ -189,6 +191,7 @@ def _group_batches(iterator, group_size: int, total_hint: int = 0):
 @dataclasses.dataclass
 class _MetricAccumulator:
     """Accumulate metric sums across batches for final reduction."""
+
     count: float = 0.0
     sum_abs_delta: float = 0.0
     sum_abs_target: float = 0.0
@@ -401,6 +404,7 @@ def _compute_eval_batch_metrics(
 
 def _make_eval_batch_metrics(loss_fn):
     """Create a jitted per-batch metric computation function."""
+
     def _batch(graph, pred_graph, pred_outputs, graph_mask):
         """Compute metric stats for a single batch."""
         return _compute_eval_batch_metrics(
@@ -541,7 +545,6 @@ def train(
         return graph
 
     @partial(jax.pmap, in_axes=(None, 0), out_axes=None, axis_name='devices')
-    # @partial(jax.vmap, in_axes=(None, 0), out_axes=0)
     def grad_fn(params, graph: jraph.GraphsTuple):
         """Compute per-device loss and gradients for a sharded batch."""
         # graph is assumed to be padded by jraph.pad_with_graphs
@@ -595,6 +598,7 @@ def train(
     process_count = getattr(jax, 'process_count', lambda: 1)()
     supports_iter_batches = hasattr(train_loader, 'iter_batches')
     legacy_steps_cache: int | None = None
+
     def _swa_average(current_avg, new_tree, new_count: int):
         """Update an SWA running average tree with a new snapshot."""
         if current_avg is None:
@@ -911,6 +915,7 @@ def evaluate(
         device_graph = _prepare_graph_for_devices(ref_graph)
         batch_metrics = _eval_step(params, device_graph)
         batch_metrics = data.unreplicate_from_local_devices(batch_metrics)
+
         def _squeeze(value):
             if value is None:
                 return None
