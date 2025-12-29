@@ -966,9 +966,10 @@ def train(
         log_errors = 'PerAtomMAE'
     required_by_loss = _required_targets_from_loss(loss_fn)
     metric_required, metric_any_of = _required_targets_from_log_errors(log_errors)
-    start_time = time.perf_counter()
+    interval_start = time.perf_counter()
     total_time_per_interval = []
     eval_time_per_interval = []
+    timing_active = False
 
     checkpoint_enabled = bool(checkpoint_every and checkpoint_every > 0)
     checkpoint_best = bool(checkpoint_best)
@@ -1259,8 +1260,10 @@ def train(
         **kwargs,
     ):
         stop_after_epoch = False
-        total_time_per_interval.append(time.perf_counter() - start_time)
-        start_time = time.perf_counter()
+        now = time.perf_counter()
+        if timing_active:
+            total_time_per_interval.append(now - interval_start)
+        eval_start = time.perf_counter()
 
         helper = _get_profile_helper(log_warning=False)
         if helper is not None:
@@ -1378,23 +1381,34 @@ def train(
             patience_counter = 0
             stage_two_active = True
 
-        eval_time_per_interval.append(time.perf_counter() - start_time)
-        avg_time_per_interval = np.mean(total_time_per_interval[-3:])
-        avg_eval_time_per_interval = np.mean(eval_time_per_interval[-3:])
-
-        _log_info(
-            f'Epoch {epoch}: Time per epoch: {avg_time_per_interval:.1f}s, '
-            f'among which {avg_eval_time_per_interval:.1f}s for evaluation.'
-        )
-        if wandb_run is not None and total_time_per_interval and eval_time_per_interval:
-            wandb_run.log(
-                {
-                    'interval': int(epoch),
-                    'timing/interval_seconds': float(total_time_per_interval[-1]),
-                    'timing/eval_seconds': float(eval_time_per_interval[-1]),
-                },
-                step=int(epoch),
+        if timing_active:
+            eval_time_per_interval.append(time.perf_counter() - eval_start)
+            recent_train = total_time_per_interval[-3:]
+            recent_eval = eval_time_per_interval[-3:]
+            avg_train_time = np.mean(recent_train)
+            avg_eval_time = np.mean(recent_eval)
+            avg_interval_time = np.mean(
+                [train + eval_ for train, eval_ in zip(recent_train, recent_eval)]
             )
+
+            _log_info(
+                f'Epoch {epoch}: Time per epoch: {avg_interval_time:.1f}s '
+                f'(train {avg_train_time:.1f}s, eval {avg_eval_time:.1f}s).'
+            )
+            if wandb_run is not None:
+                wandb_run.log(
+                    {
+                        'interval': int(epoch),
+                        'timing/interval_seconds': float(
+                            total_time_per_interval[-1] + eval_time_per_interval[-1]
+                        ),
+                        'timing/train_seconds': float(total_time_per_interval[-1]),
+                        'timing/eval_seconds': float(eval_time_per_interval[-1]),
+                    },
+                    step=int(epoch),
+                )
+        interval_start = time.perf_counter()
+        timing_active = True
 
         plateau_updater = getattr(gradient_transform, 'scheduler_update', None)
         if callable(plateau_updater) and last_valid_loss is not None:
