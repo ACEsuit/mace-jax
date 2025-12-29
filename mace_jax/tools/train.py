@@ -564,7 +564,7 @@ def train(
     @jax.jit
     def update_fn(
         params, optimizer_state, ema_params, num_updates: int, graph: jraph.GraphsTuple
-    ) -> tuple[float, Any, Any]:
+    ) -> tuple[float, Any, Any, Any, jnp.ndarray]:
         """Apply one optimizer step and update EMA parameters."""
         n, loss, grad = grad_fn(params, graph)
         loss = loss / n
@@ -591,7 +591,7 @@ def train(
             )
         else:
             ema_params = params
-        return loss, params, optimizer_state, ema_params
+        return loss, params, optimizer_state, ema_params, n
 
     process_index = getattr(jax, 'process_index', lambda: 0)()
     is_primary = process_index == 0
@@ -726,10 +726,13 @@ def train(
             num_updates += 1
             num_updates_value = jnp.asarray(num_updates, dtype=jnp.int32)
             start_time = time.time()
-            loss, params, optimizer_state, ema_params = update_fn(
+            loss, params, optimizer_state, ema_params, n_graphs = update_fn(
                 params, optimizer_state, ema_params, num_updates_value, graph
             )
             loss = float(loss)
+            n_graphs_value = float(n_graphs)
+            if is_primary and n_graphs_value == 0.0:
+                logging.warning('Batch %s contains no valid graphs; gradients are zero.', num_updates)
             if is_primary:
                 p_bar.set_postfix({'loss': f'{loss:7.3f}'})
             p_bar.update(1)

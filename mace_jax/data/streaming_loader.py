@@ -1003,6 +1003,11 @@ class StreamingGraphDataLoader:
 
     def approx_length(self) -> int:
         """Estimate number of batches without forcing a prepass."""
+        if self._pack_info and self._pack_info.get('total_batches') is not None:
+            total = int(self._pack_info['total_batches'])
+            if self._max_batches is not None:
+                return max(1, min(total, int(self._max_batches)))
+            return max(1, total)
         if self.total_graphs is None:
             return max(1, len(self))
         nodes_cap = max(1, self._n_node)
@@ -1014,6 +1019,8 @@ class StreamingGraphDataLoader:
             approx = max(approx, math.ceil(self.total_edges / edges_cap))
         if approx == 0:
             approx = int(self.total_graphs)
+        if self._max_batches is not None:
+            approx = min(approx, int(self._max_batches))
         return max(1, approx)
 
     def subset(self, i):
