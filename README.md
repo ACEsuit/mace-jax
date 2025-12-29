@@ -2,6 +2,30 @@
 
 This repository contains a **porting** of MACE in **jax** developed by [**Philipp Benner**](https://bamescience.github.io/), **Abhijeet Gangan**, **Mario Geiger** and **Ilyes Batatia**.
 
+## Package overview
+
+MACE-JAX provides a JAX/Flax training stack for atomistic models, including
+streaming HDF5 data loading, gin-driven configuration, distributed training,
+and utilities for preprocessing and model conversion. It includes CLI entry
+points for training, preprocessing, plotting metrics, and importing Torch MACE
+checkpoints. Torch-to-JAX conversion is a core feature: it lets users bring in
+pre-trained foundation models and fine-tune them directly in JAX. Fixed-shape
+batching is supported for efficient compilation in JAX/XLA, but it is only one
+part of a broader end-to-end training workflow. The HDF5 dataset format matches
+Torch MACE, so the same HDF5 files can be shared across both implementations.
+
+### Key features
+
+- Streaming HDF5 loader with cached batch assignments per split (train/valid/test)
+- Fixed-shape batching driven by `n_edge` with derived node/graph padding caps
+- Gin-configured model/loss/optimizer stack with CLI overrides
+- Training CLI with EMA, SWA, checkpointing (including best-checkpoint), and W&B
+- Optimizer schedulers (constant, exponential, piecewise, plateau) integrated via gin
+- Torch-to-JAX conversion utilities and corresponding CLI
+- Multi-head training/finetuning support with per-head dataset configs
+- Distributed training via `jax.distributed` with per-process dataset sharding
+- Preprocessing CLI to convert XYZ to streaming HDF5 plus statistics.json output
+
 ## Test without installing
 
 ```sh
