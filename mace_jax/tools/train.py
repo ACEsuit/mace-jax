@@ -474,7 +474,6 @@ def train(
     start_interval: int = 0,
     data_seed: int | None = None,
     lr_scale_by_graphs: bool = True,
-    lr_reference_graphs: int | None = None,
 ):
     """Yield training state for each epoch while updating parameters.
 
@@ -498,7 +497,6 @@ def train(
         start_interval: Starting epoch/interval index.
         data_seed: Optional data shuffling seed for the loader.
         lr_scale_by_graphs: Whether to scale LR per batch size.
-        lr_reference_graphs: Reference graph count used for LR scaling.
 
     Yields:
         Tuple of (epoch, trainable_params, optimizer_state, eval_params).
@@ -568,9 +566,8 @@ def train(
         n, loss, grad = grad_fn(params, graph)
         loss = loss / n
         grad = jax.tree_util.tree_map(lambda x: x / n, grad)
-        if lr_reference is not None:
-            scale = n / lr_reference
-            grad = jax.tree_util.tree_map(lambda g: g * scale, grad)
+        if lr_scale_by_graphs:
+            grad = jax.tree_util.tree_map(lambda g: g * n, grad)
         grad = _sanitize_grads(grad)
 
         if max_grad_norm is not None:
@@ -598,28 +595,6 @@ def train(
     process_count = getattr(jax, 'process_count', lambda: 1)()
     supports_iter_batches = hasattr(train_loader, 'iter_batches')
     legacy_steps_cache: int | None = None
-    lr_reference = None
-    if lr_scale_by_graphs:
-        if lr_reference_graphs is not None:
-            lr_reference = float(lr_reference_graphs)
-        else:
-            total_graphs = getattr(train_loader, 'total_graphs', None)
-            pack_info = getattr(train_loader, '_pack_info', None)
-            total_batches = None
-            if isinstance(pack_info, dict):
-                total_batches = pack_info.get('total_batches')
-            if total_graphs and total_batches:
-                avg_graphs = float(total_graphs) / float(total_batches)
-                lr_reference = avg_graphs * max(1, local_device_count)
-            if lr_reference is None:
-                pad_graphs = getattr(train_loader, '_fixed_pad_graphs', None)
-                if pad_graphs is None:
-                    pad_graphs = getattr(train_loader, 'n_graph', None)
-                if pad_graphs is not None:
-                    lr_reference = float(
-                        max(int(pad_graphs) - 1, 1) * max(1, local_device_count)
-                    )
-
     def _swa_average(current_avg, new_tree, new_count: int):
         """Update an SWA running average tree with a new snapshot."""
         if current_avg is None:

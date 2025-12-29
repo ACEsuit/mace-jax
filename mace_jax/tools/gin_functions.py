@@ -913,7 +913,6 @@ def train(
     resume_from: str | None = None,
     data_seed: int | None = None,
     lr_scale_by_graphs: bool = True,
-    lr_reference_graphs: int | None = None,
     **kwargs,
 ):
     """Run the end-to-end training loop with evaluation and checkpointing.
@@ -952,7 +951,6 @@ def train(
         resume_from: Optional checkpoint path to resume from.
         data_seed: Optional seed for shuffling data loaders.
         lr_scale_by_graphs: Whether to scale LR based on graphs per batch.
-        lr_reference_graphs: Reference graph count for LR scaling.
         **kwargs: Additional arguments forwarded to `tools.train()`.
 
     Returns:
@@ -1256,7 +1254,6 @@ def train(
         schedule_free_eval_fn=schedule_free_eval_fn,
         data_seed=data_seed,
         lr_scale_by_graphs=lr_scale_by_graphs,
-        lr_reference_graphs=lr_reference_graphs,
         **kwargs,
     ):
         stop_after_epoch = False
