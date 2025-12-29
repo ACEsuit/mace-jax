@@ -47,6 +47,15 @@ Or locally:
 python setup.py develop
 ```
 
+## Quick start
+
+```sh
+mace-jax-train configs/aspirin_small.gin --print-config
+```
+
+This runs a short training loop on the bundled example config and prints the
+operative gin configuration.
+
 ## Usage
 
 ### Command-line tools
@@ -55,6 +64,8 @@ After installation, the following convenience commands are available:
 
 ### Streaming HDF5 loader (mace-jax specific)
 
+Fixed-shape batches let JAX/XLA compile once and reuse the same executable, so
+the streaming loader is designed to keep batch shapes stable across epochs.
 MACE‑JAX compiles the model with **fixed batch shapes**, so it cannot accept
 variable‑sized batches on the fly. To make this efficient, the streaming loader
 precomputes **batch assignments** once and then reuses them for every epoch. This is
