@@ -402,6 +402,16 @@ def save_configurations_as_HDF5(configurations: Configurations, _, h5_file) -> N
             properties_subgrp['dipole'] = write_value(config.dipole)
         if config.polarizability is not None:
             properties_subgrp['polarizability'] = write_value(config.polarizability)
+        weights_subgrp = subgroup.create_group('property_weights')
+        for name, value in (
+            ('energy', config.energy),
+            ('forces', config.forces),
+            ('stress', config.stress),
+            ('virials', config.virials),
+            ('dipole', config.dipole),
+            ('polarizability', config.polarizability),
+        ):
+            weights_subgrp[name] = write_value(1.0 if value is not None else 0.0)
 
 
 def write_value(value):
