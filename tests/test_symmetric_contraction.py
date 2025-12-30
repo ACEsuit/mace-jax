@@ -10,7 +10,10 @@ from mace_jax.adapters.cuequivariance.symmetric_contraction import SymmetricCont
 from mace_jax.tools.device import configure_torch_runtime
 
 try:  # pragma: no cover - optional cue torch backend
-    from mace.modules.wrapper_ops import CuEquivarianceConfig, SymmetricContractionWrapper
+    from mace.modules.wrapper_ops import (
+        CuEquivarianceConfig,
+        SymmetricContractionWrapper,
+    )
 
     _CUE_TORCH_AVAILABLE = True
     _CUE_TORCH_IMPORT_ERROR = None

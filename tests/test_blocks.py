@@ -89,7 +89,9 @@ def _module_dtype(module: torch.nn.Module) -> torch.dtype:
     return torch.float32
 
 
-def _features_from_xyz(simple_xyz_features: np.ndarray, irreps_in: o3.Irreps) -> np.ndarray:
+def _features_from_xyz(
+    simple_xyz_features: np.ndarray, irreps_in: o3.Irreps
+) -> np.ndarray:
     """Expand XYZ-derived scalar/vector channels to match an irreps' total dim."""
     base_scalar = simple_xyz_features[:, :1]
     base_vector = simple_xyz_features[:, 1:]

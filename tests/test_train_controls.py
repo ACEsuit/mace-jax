@@ -3,10 +3,17 @@ import jax.numpy as jnp
 import jraph
 import numpy as np
 import optax
+import pytest
 
 from mace_jax.tools.train import train as train_loop
 
 jax.config.update('jax_enable_x64', True)
+
+
+@pytest.fixture(autouse=True)
+def _force_single_device(monkeypatch):
+    """Keep unit tests deterministic on multi-device hosts."""
+    monkeypatch.setattr(jax, 'local_device_count', lambda: 1)
 
 
 def _make_graph(target: float) -> jraph.GraphsTuple:

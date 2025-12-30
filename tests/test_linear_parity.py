@@ -1,4 +1,5 @@
 import math
+
 import numpy as np
 import pytest
 import torch
@@ -6,14 +7,13 @@ from torch.serialization import add_safe_globals
 
 add_safe_globals([slice])
 
+import cuequivariance as cue
 import jax
 import jax.numpy as jnp
 from e3nn import o3
 from e3nn_jax import Irreps, IrrepsArray
 
 from mace_jax.adapters.cuequivariance.linear import Linear as JaxLinear
-
-import cuequivariance as cue
 from mace_jax.adapters.cuequivariance.utility import (
     ir_mul_to_mul_ir as cue_ir_mul_to_mul_ir,
 )
@@ -22,9 +22,11 @@ from mace_jax.adapters.cuequivariance.utility import (
 )
 
 try:
-    from mace.modules.wrapper_ops import CuEquivarianceConfig as CuEquivarianceConfigTorch
-    from mace.modules.wrapper_ops import Linear as TorchLinearWrapper
     from cuequivariance_torch.operations.linear import Linear as CueLinearTorch
+    from mace.modules.wrapper_ops import (
+        CuEquivarianceConfig as CuEquivarianceConfigTorch,
+    )
+    from mace.modules.wrapper_ops import Linear as TorchLinearWrapper
 
     _CUE_TORCH_AVAILABLE = True
     _CUE_TORCH_IMPORT_ERROR = None
@@ -42,7 +44,9 @@ def _torch_cuda_available() -> bool:
 
 def _require_cue_torch():
     if not _CUE_TORCH_AVAILABLE:
-        pytest.skip(f'cuequivariance torch backend unavailable: {_CUE_TORCH_IMPORT_ERROR}')
+        pytest.skip(
+            f'cuequivariance torch backend unavailable: {_CUE_TORCH_IMPORT_ERROR}'
+        )
     return CuEquivarianceConfigTorch, TorchLinearWrapper, CueLinearTorch
 
 
@@ -52,7 +56,9 @@ def _as_irreps_array(irreps: Irreps, array: jnp.ndarray) -> IrrepsArray:
     return IrrepsArray(irreps, array)
 
 
-def _features_from_xyz(simple_xyz_features: np.ndarray, irreps_in: Irreps) -> np.ndarray:
+def _features_from_xyz(
+    simple_xyz_features: np.ndarray, irreps_in: Irreps
+) -> np.ndarray:
     """Expand XYZ-derived scalar/vector channels to match an irreps' total dim."""
     base_scalar = simple_xyz_features[:, :1]
     base_vector = simple_xyz_features[:, 1:]
@@ -97,7 +103,9 @@ class TestLinearParity:
         variables = JaxLinear.import_from_torch(torch_linear, variables)
 
         out_jax = jax_linear.apply(variables, features_jax)
-        out_jax_arr = np.asarray(out_jax.array if hasattr(out_jax, 'array') else out_jax)
+        out_jax_arr = np.asarray(
+            out_jax.array if hasattr(out_jax, 'array') else out_jax
+        )
 
         np.testing.assert_allclose(out_jax_arr, out_torch, rtol=1e-6, atol=1e-6)
 
@@ -124,7 +132,9 @@ class TestLinearParity:
         variables = JaxLinear.import_from_torch(torch_linear, variables)
 
         out_jax = jax_linear.apply(variables, features_jax)
-        out_jax_arr = np.asarray(out_jax.array if hasattr(out_jax, 'array') else out_jax)
+        out_jax_arr = np.asarray(
+            out_jax.array if hasattr(out_jax, 'array') else out_jax
+        )
 
         np.testing.assert_allclose(out_jax_arr, out_torch, rtol=1e-6, atol=1e-6)
 
@@ -138,12 +148,16 @@ class TestLinearParity:
         features_jax = _as_irreps_array(Irreps(irreps_in), jnp.asarray(features_np))
 
         # --- e3nn backend via wrapper (cue disabled) ---
-        torch_linear_e3nn = TorchLinearWrapper(
-            irreps_in,
-            irreps_out,
-            shared_weights=True,
-            cueq_config=CuEquivarianceConfigTorch(enabled=False),
-        ).float().eval()
+        torch_linear_e3nn = (
+            TorchLinearWrapper(
+                irreps_in,
+                irreps_out,
+                shared_weights=True,
+                cueq_config=CuEquivarianceConfigTorch(enabled=False),
+            )
+            .float()
+            .eval()
+        )
         with torch.no_grad():
             out_torch_e3nn = torch_linear_e3nn(features_torch).cpu().numpy()
 
@@ -155,7 +169,9 @@ class TestLinearParity:
         variables = jax_linear.init(jax.random.PRNGKey(0), features_jax)
         variables_e3nn = JaxLinear.import_from_torch(torch_linear_e3nn, variables)
         out_jax = jax_linear.apply(variables_e3nn, features_jax)
-        out_jax_arr = np.asarray(out_jax.array if hasattr(out_jax, 'array') else out_jax)
+        out_jax_arr = np.asarray(
+            out_jax.array if hasattr(out_jax, 'array') else out_jax
+        )
         np.testing.assert_allclose(out_jax_arr, out_torch_e3nn, rtol=1e-6, atol=1e-6)
 
         # --- cue-backed torch backend (enable optimize_linear to trigger cue) ---
@@ -181,7 +197,9 @@ class TestLinearParity:
 
         variables_cue = JaxLinear.import_from_torch(torch_linear_cue, variables)
         out_jax = jax_linear.apply(variables_cue, features_jax)
-        out_jax_arr = np.asarray(out_jax.array if hasattr(out_jax, 'array') else out_jax)
+        out_jax_arr = np.asarray(
+            out_jax.array if hasattr(out_jax, 'array') else out_jax
+        )
 
         np.testing.assert_allclose(out_jax_arr, out_torch_cue, rtol=1e-6, atol=1e-6)
 
@@ -197,12 +215,16 @@ class TestLinearParity:
         features_jax = _as_irreps_array(Irreps(irreps_in), jnp.asarray(features_np))
 
         # --- e3nn backend via wrapper (cue disabled) ---
-        torch_linear_e3nn = TorchLinearWrapper(
-            irreps_in,
-            irreps_out,
-            shared_weights=True,
-            cueq_config=CuEquivarianceConfigTorch(enabled=False),
-        ).float().eval()
+        torch_linear_e3nn = (
+            TorchLinearWrapper(
+                irreps_in,
+                irreps_out,
+                shared_weights=True,
+                cueq_config=CuEquivarianceConfigTorch(enabled=False),
+            )
+            .float()
+            .eval()
+        )
         with torch.no_grad():
             out_torch_e3nn = torch_linear_e3nn(features_torch).cpu().numpy()
 
@@ -214,7 +236,9 @@ class TestLinearParity:
         variables = jax_linear.init(jax.random.PRNGKey(1), features_jax)
         variables_e3nn = JaxLinear.import_from_torch(torch_linear_e3nn, variables)
         out_jax = jax_linear.apply(variables_e3nn, features_jax)
-        out_jax_arr = np.asarray(out_jax.array if hasattr(out_jax, 'array') else out_jax)
+        out_jax_arr = np.asarray(
+            out_jax.array if hasattr(out_jax, 'array') else out_jax
+        )
         np.testing.assert_allclose(out_jax_arr, out_torch_e3nn, rtol=1e-6, atol=1e-6)
 
         # --- cue-backed torch backend (enable optimize_linear to trigger cue) ---
@@ -240,7 +264,9 @@ class TestLinearParity:
 
         variables_cue = JaxLinear.import_from_torch(torch_linear_cue, variables)
         out_jax = jax_linear.apply(variables_cue, features_jax)
-        out_jax_arr = np.asarray(out_jax.array if hasattr(out_jax, 'array') else out_jax)
+        out_jax_arr = np.asarray(
+            out_jax.array if hasattr(out_jax, 'array') else out_jax
+        )
 
         np.testing.assert_allclose(out_jax_arr, out_torch_cue, rtol=1e-6, atol=1e-6)
 

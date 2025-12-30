@@ -56,9 +56,7 @@ def _write_native_hdf5(path: Path, *, num_structures: int, seed: int = 0) -> Non
                 'pbc', data=np.array([False, False, False], dtype=np.bool_)
             )
             subgroup.create_dataset('weight', data=np.array(1.0, dtype=np.float64))
-            subgroup.create_dataset(
-                'config_type', data=np.array('Default', dtype='S')
-            )
+            subgroup.create_dataset('config_type', data=np.array('Default', dtype='S'))
             subgroup.create_dataset('head', data=np.array('Default', dtype='S'))
             properties = subgroup.create_group('properties')
             properties.create_dataset(

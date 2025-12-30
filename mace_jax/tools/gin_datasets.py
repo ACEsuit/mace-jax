@@ -9,10 +9,7 @@ resulting assignments are cached per split (train, valid, test) so loaders can
 reuse them without re-scanning the HDF5 files.
 """
 
-import hashlib
-import json
 import logging
-import pickle
 from collections.abc import Sequence
 from dataclasses import dataclass
 from glob import glob
@@ -25,9 +22,14 @@ from tqdm.auto import tqdm
 
 from mace_jax import data
 from mace_jax.data.streaming_loader import StreamingDatasetSpec
+from mace_jax.data.streaming_stats_cache import (
+    load_cached_streaming_stats,
+    spec_fingerprint,
+    stats_payload_from_parts,
+    stats_payload_to_parts,
+    store_cached_streaming_stats,
+)
 from mace_jax.tools.utils import log_info_primary
-
-_STREAMING_STATS_CACHE_VERSION = 1
 
 
 def _ensure_list(value) -> list[str]:
@@ -55,6 +57,7 @@ class _StreamingStats:
     These values are persisted in the streaming stats cache so subsequent runs
     can reuse batch packing without rescanning the dataset.
     """
+
     batch_assignments: list[list[int]]
     n_nodes: int
     n_edges: int
@@ -68,6 +71,7 @@ class _StreamingMetadata:
     Used to build initialization graphs, estimate E0s/neighbor statistics, and
     compute aggregate counts when constructing streaming loaders.
     """
+
     sample_graphs: list
     ata: np.ndarray
     atb: np.ndarray
@@ -234,159 +238,6 @@ def _extend_sample_graphs(
     )
     if extra_graphs:
         sample_graphs.extend(extra_graphs[:remaining])
-
-
-def _stats_cache_path(dataset_path: Path) -> Path:
-    """Return the cache path for streaming stats for a dataset."""
-    suffix = dataset_path.suffix + '.streamstats.pkl'
-    return dataset_path.with_suffix(suffix)
-
-
-def _dataset_signature(dataset_path: Path) -> dict[str, float]:
-    """Compute a lightweight signature used to invalidate cached stats."""
-    stat = dataset_path.stat()
-    return {'size': stat.st_size, 'mtime': stat.st_mtime}
-
-
-def _normalized_config_type_weights(weights: dict | None) -> dict | None:
-    """Normalize config type weights for hashing and cache fingerprints."""
-    if not weights:
-        return None
-    return {str(key): float(value) for key, value in sorted(weights.items())}
-
-
-def _spec_fingerprint(
-    spec: StreamingDatasetSpec,
-    *,
-    r_max: float,
-    atomic_numbers: Sequence[int],
-    head_to_index: dict[str, int] | None = None,
-    edge_cap: int | None = None,
-) -> str:
-    """Build a stable fingerprint for dataset spec + packing parameters.
-
-    Args:
-        spec: Streaming dataset spec to fingerprint.
-        r_max: Cutoff used to build edges.
-        atomic_numbers: Atomic numbers for z-table alignment.
-        head_to_index: Mapping of head names to indices.
-        edge_cap: Edge limit used to pack batches.
-
-    Returns:
-        A SHA256 hex digest identifying the configuration.
-
-    Changing any field that affects packing/statistics should change this hash.
-    """
-    head_index = 0
-    if head_to_index is not None and spec.head_name in head_to_index:
-        head_index = int(head_to_index[spec.head_name])
-    payload = {
-        'head_name': spec.head_name,
-        'head_index': head_index,
-        'energy_key': spec.energy_key,
-        'forces_key': spec.forces_key,
-        'stress_key': spec.stress_key,
-        'prefactor_stress': float(spec.prefactor_stress),
-        'weight': float(spec.weight),
-        'config_type_weights': _normalized_config_type_weights(
-            spec.config_type_weights
-        ),
-        'remap_stress': spec.remap_stress.tolist()
-        if spec.remap_stress is not None
-        else None,
-        'path': str(Path(spec.path)),
-        'r_max': float(r_max),
-        'atomic_numbers': [int(z) for z in atomic_numbers],
-        'edge_cap': int(edge_cap) if edge_cap is not None else None,
-    }
-    encoded = json.dumps(payload, sort_keys=True)
-    return hashlib.sha256(encoded.encode('utf-8')).hexdigest()
-
-
-def _stats_to_payload(stats: _StreamingStats) -> dict:
-    """Serialize streaming stats to a JSON/pickle-friendly payload."""
-    return {
-        'batch_assignments': stats.batch_assignments,
-        'n_nodes': stats.n_nodes,
-        'n_edges': stats.n_edges,
-        'n_graphs': stats.n_graphs,
-    }
-
-
-def _stats_from_payload(payload: dict) -> _StreamingStats:
-    """Deserialize streaming stats payload back into the dataclass."""
-    return _StreamingStats(
-        batch_assignments=payload['batch_assignments'],
-        n_nodes=payload['n_nodes'],
-        n_edges=payload['n_edges'],
-        n_graphs=payload['n_graphs'],
-    )
-
-
-def _load_cached_streaming_stats(
-    dataset_path: Path, fingerprint: str
-) -> _StreamingStats | None:
-    """Load cached streaming stats if they match the current dataset and spec.
-
-    Args:
-        dataset_path: Path to the HDF5 dataset file.
-        fingerprint: Spec fingerprint that encodes packing-relevant settings.
-
-    Returns:
-        The cached stats if present and valid; otherwise ``None``.
-    """
-    cache_path = _stats_cache_path(dataset_path)
-    if not cache_path.exists():
-        return None
-    try:
-        with cache_path.open('rb') as fh:
-            payload = pickle.load(fh)
-    except Exception as exc:  # pragma: no cover - cache corruption is unexpected
-        logging.warning('Failed to load streaming stats cache %s: %s', cache_path, exc)
-        return None
-    if payload.get('version') != _STREAMING_STATS_CACHE_VERSION:
-        return None
-    dataset_sig = payload.get('dataset_signature')
-    if dataset_sig != _dataset_signature(dataset_path):
-        return None
-    if payload.get('spec_fingerprint') != fingerprint:
-        return None
-    stats_payload = payload.get('stats')
-    if not stats_payload:
-        return None
-    log_info_primary('Loaded cached streaming stats from %s', cache_path)
-    return _stats_from_payload(stats_payload)
-
-
-def _store_cached_streaming_stats(
-    dataset_path: Path,
-    fingerprint: str,
-    stats: _StreamingStats,
-) -> None:
-    """Persist streaming stats to disk for reuse across runs.
-
-    Args:
-        dataset_path: Dataset path used to determine the cache filename.
-        fingerprint: Spec fingerprint for invalidation checks.
-        stats: Streaming stats to cache.
-
-    Returns:
-        None. The cache write is best-effort and may log warnings on failure.
-    """
-    cache_path = _stats_cache_path(dataset_path)
-    payload = {
-        'version': _STREAMING_STATS_CACHE_VERSION,
-        'dataset_signature': _dataset_signature(dataset_path),
-        'spec_fingerprint': fingerprint,
-        'stats': _stats_to_payload(stats),
-    }
-    try:
-        with cache_path.open('wb') as fh:
-            pickle.dump(payload, fh)
-    except OSError as exc:  # pragma: no cover - filesystem failure
-        logging.warning('Failed to write streaming stats cache %s: %s', cache_path, exc)
-        return
-    logging.debug('Cached streaming stats to %s', cache_path)
 
 
 def _expand_hdf5_inputs(paths: Sequence[str]) -> list[Path]:
@@ -864,15 +715,15 @@ def _load_or_compute_streaming_stats(
     ensuring stable batch shapes for JAX compilation.
     """
     dataset_path = Path(spec.path)
-    fingerprint = _spec_fingerprint(
+    fingerprint = spec_fingerprint(
         spec,
         r_max=r_max,
         atomic_numbers=atomic_numbers,
         head_to_index=head_to_index,
         edge_cap=edge_cap,
     )
-    cached = _load_cached_streaming_stats(dataset_path, fingerprint)
-    if cached is None:
+    cached_payload = load_cached_streaming_stats(dataset_path, fingerprint)
+    if cached_payload is None:
         stats, metadata = _compute_streaming_stats(
             dataset_path,
             spec=spec,
@@ -883,10 +734,30 @@ def _load_or_compute_streaming_stats(
             edge_cap=edge_cap,
             collect_metadata=collect_metadata,
         )
-        _store_cached_streaming_stats(dataset_path, fingerprint, stats)
+        store_cached_streaming_stats(
+            dataset_path,
+            fingerprint,
+            stats_payload_from_parts(
+                stats.batch_assignments,
+                stats.n_nodes,
+                stats.n_edges,
+                stats.n_graphs,
+            ),
+        )
         return stats, metadata
     if not collect_metadata:
-        return cached, None
+        batch_assignments, n_nodes, n_edges, n_graphs = stats_payload_to_parts(
+            cached_payload
+        )
+        return (
+            _StreamingStats(
+                batch_assignments=batch_assignments,
+                n_nodes=n_nodes,
+                n_edges=n_edges,
+                n_graphs=n_graphs,
+            ),
+            None,
+        )
     _, metadata = _compute_streaming_stats(
         dataset_path,
         spec=spec,
@@ -897,7 +768,18 @@ def _load_or_compute_streaming_stats(
         edge_cap=edge_cap,
         collect_metadata=True,
     )
-    return cached, metadata
+    batch_assignments, n_nodes, n_edges, n_graphs = stats_payload_to_parts(
+        cached_payload
+    )
+    return (
+        _StreamingStats(
+            batch_assignments=batch_assignments,
+            n_nodes=n_nodes,
+            n_edges=n_edges,
+            n_graphs=n_graphs,
+        ),
+        metadata,
+    )
 
 
 def _atomic_energies_to_array(

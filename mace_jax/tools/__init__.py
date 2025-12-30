@@ -7,7 +7,6 @@ from .device import (
     runtime_device_summary,
     select_jax_device,
 )
-from .dummyfy import dummyfy
 from .predictors import predict_energy_forces_stress
 from .train import evaluate, train
 from .utils import (
@@ -63,7 +62,6 @@ __all__ = [
     'predict_energy_forces_stress',
     'evaluate',
     'train',
-    'dummyfy',
     'configure_torch_runtime',
     'get_torch_device',
     'initialize_jax_runtime',

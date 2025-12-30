@@ -37,7 +37,10 @@ def _graph_to_data(distance: float, cutoff: float = 6.0) -> dict[str, jnp.ndarra
 
 
 def _build_mace_model(
-    *, pair_repulsion: bool, distance_transform: str = 'None', avg_num_neighbors: float = 1.0
+    *,
+    pair_repulsion: bool,
+    distance_transform: str = 'None',
+    avg_num_neighbors: float = 1.0,
 ):
     return modules.ScaleShiftMACE(
         r_max=6.0,

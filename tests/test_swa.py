@@ -15,6 +15,12 @@ from torch.optim.swa_utils import AveragedModel  # noqa: I001
 jax.config.update('jax_enable_x64', True)
 
 
+@pytest.fixture(autouse=True)
+def _force_single_device(monkeypatch):
+    """Keep unit tests deterministic on multi-device hosts."""
+    monkeypatch.setattr(jax, 'local_device_count', lambda: 1)
+
+
 def _make_graph(target: float) -> jraph.GraphsTuple:
     """Build a padded graph carrying the desired regression target."""
     base = jraph.GraphsTuple(

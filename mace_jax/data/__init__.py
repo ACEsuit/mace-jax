@@ -4,7 +4,6 @@ from .streaming_loader import (
     StreamingDatasetSpec,
     StreamingGraphDataLoader,
     get_hdf5_dataloader,
-    pack_graphs_greedy,
 )
 from .utils import (
     AtomicNumberTable,
@@ -69,5 +68,4 @@ __all__ = [
     'StreamingDatasetSpec',
     'StreamingGraphDataLoader',
     'get_hdf5_dataloader',
-    'pack_graphs_greedy',
 ]

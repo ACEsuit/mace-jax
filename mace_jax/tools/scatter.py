@@ -38,8 +38,8 @@ def scatter_sum(
     src: jnp.ndarray,
     index: jnp.ndarray,
     dim: int = -1,
-    out: Optional[jnp.ndarray] = None,
-    dim_size: Optional[int] = None,
+    out: jnp.ndarray | None = None,
+    dim_size: int | None = None,
     reduce: str = 'sum',
 ) -> jnp.ndarray:
     assert reduce == 'sum'
@@ -70,8 +70,8 @@ def scatter_std(
     src: jnp.ndarray,
     index: jnp.ndarray,
     dim: int = -1,
-    out: Optional[jnp.ndarray] = None,
-    dim_size: Optional[int] = None,
+    out: jnp.ndarray | None = None,
+    dim_size: int | None = None,
     unbiased: bool = True,
 ) -> jnp.ndarray:
     """

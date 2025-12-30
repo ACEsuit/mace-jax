@@ -8,7 +8,7 @@ without recompiling for each new batch shape.
 """
 
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from pathlib import Path
 
 import e3nn_jax as e3nn

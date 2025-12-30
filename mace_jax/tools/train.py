@@ -98,15 +98,16 @@ def _sanitize_grads(grads):
     return jax.tree_util.tree_map(_sanitize, grads)
 
 
-def _prefetch_iterator(iterator, capacity: int):
-    """Prefetch items from an iterator into a bounded queue.
+def _prefetch_to_device(iterator, capacity: int, device_put_fn: Callable[[Any], Any]):
+    """Prefetch items onto device(s) using a bounded queue.
 
     Args:
-        iterator: Source iterator yielding training batches.
-        capacity: Max items to buffer; <=0 disables prefetching.
+        iterator: Source iterator yielding host batches.
+        capacity: Max items to buffer; <=0 disables device prefetching.
+        device_put_fn: Callable that moves one item to device(s).
 
     Returns:
-        An iterator that yields the same items with optional prefetching.
+        Iterator yielding device-resident items.
     """
     if capacity is None or capacity <= 0:
         return iterator
@@ -115,17 +116,17 @@ def _prefetch_iterator(iterator, capacity: int):
     total_hint = getattr(iterator, 'total_batches_hint', 0)
 
     def _producer():
-        """Fill the queue with items from the source iterator."""
+        """Fill the queue with device-resident items."""
         try:
             for item in iterator:
-                queue.put(item)
+                queue.put(device_put_fn(item))
         finally:
             queue.put(sentinel)
 
     threading.Thread(target=_producer, daemon=True).start()
 
     class _Prefetched:
-        """Iterator wrapper that yields prefetched items from a queue."""
+        """Iterator wrapper that yields device-prefetched items."""
 
         def __init__(self):
             """Initialize the prefetched iterator wrapper."""
@@ -137,7 +138,7 @@ def _prefetch_iterator(iterator, capacity: int):
             return self
 
         def __next__(self):
-            """Return the next prefetched item or stop iteration."""
+            """Return the next device-prefetched item or stop iteration."""
             if self._done:
                 raise StopIteration
             item = queue.get()
@@ -478,6 +479,7 @@ def train(
     start_interval: int = 0,
     data_seed: int | None = None,
     lr_scale_by_graphs: bool = True,
+    device_prefetch_batches: int | None = None,
 ):
     """Yield training state for each epoch while updating parameters.
 
@@ -501,6 +503,8 @@ def train(
         start_interval: Starting epoch/interval index.
         data_seed: Optional data shuffling seed for the loader.
         lr_scale_by_graphs: Whether to scale LR per batch size.
+        device_prefetch_batches: Optional number of batches to prefetch to devices.
+            Defaults to max(loader prefetch, 2) when None.
 
     Yields:
         Tuple of (epoch, trainable_params, optimizer_state, eval_params).
@@ -599,6 +603,21 @@ def train(
     supports_iter_batches = hasattr(train_loader, 'iter_batches')
     legacy_steps_cache: int | None = None
 
+    def _resolve_lr(step: int) -> float | None:
+        """Return the current learning rate for a given step if available."""
+        schedule = getattr(gradient_transform, 'lr_schedule', None)
+        if schedule is None:
+            schedule = getattr(gradient_transform, 'schedule', None)
+        if schedule is None:
+            schedule = getattr(gradient_transform, 'learning_rate', None)
+        if schedule is None:
+            return None
+        try:
+            value = schedule(step) if callable(schedule) else schedule
+        except Exception:  # pragma: no cover - best effort for custom schedules
+            return None
+        return float(np.asarray(value))
+
     def _swa_average(current_avg, new_tree, new_count: int):
         """Update an SWA running average tree with a new snapshot."""
         if current_avg is None:
@@ -634,8 +653,6 @@ def train(
         if local_device_count > 1:
             total_batches = total_batches // local_device_count
             iterator = _group_batches(iterator, local_device_count, total_batches)
-        prefetch_cap = getattr(train_loader, '_prefetch_batches', None)
-        iterator = _prefetch_iterator(iterator, int(prefetch_cap or 0))
         return iterator, total_batches
 
     def _legacy_interval_loader():
@@ -698,6 +715,34 @@ def train(
             raise ValueError(
                 'iter_batches() produced no data; reduce process_count or provide more data.'
             )
+        if is_primary:
+            lr_value = _resolve_lr(num_updates)
+            if lr_value is not None:
+                logging.info('Epoch %s learning rate %.6e', epoch + 1, lr_value)
+        host_prefetch_cap = int(getattr(train_loader, '_prefetch_batches', 0) or 0)
+        device_prefetch_cap = device_prefetch_batches
+        if device_prefetch_cap is None:
+            device_prefetch_cap = max(host_prefetch_cap, 2)
+        device_prefetch_cap = int(device_prefetch_cap or 0)
+        device_prefetch_active = device_prefetch_cap > 0
+        if device_prefetch_active:
+            source_iter = epoch_batches_iter
+
+            def _prepared_iter(source_iter=source_iter):
+                """Yield device-prepared graphs with host padding stats."""
+                for graph in source_iter:
+                    yield _prepare_graph_for_devices(graph), _padding_amounts(graph)
+
+            def _device_put(item):
+                """Move prepared graphs to device while preserving stats."""
+                graph, padding = item
+                if local_device_count <= 1:
+                    graph = jax.device_put(graph)
+                return graph, padding
+
+            epoch_batches_iter = _prefetch_to_device(
+                _prepared_iter(), device_prefetch_cap, _device_put
+            )
         p_bar = tqdm.tqdm(
             total=effective_steps,
             desc=f'Epoch {epoch + 1}',
@@ -712,17 +757,25 @@ def train(
             'pad_graphs': 0,
             'graph_cap': 0,
         }
-        for graph in epoch_batches_iter:
-            node_cap, edge_cap, graph_cap, pad_nodes, pad_edges, pad_graphs = (
-                _padding_amounts(graph)
-            )
+        for item in epoch_batches_iter:
+            if device_prefetch_active:
+                graph, padding = item
+                node_cap, edge_cap, graph_cap, pad_nodes, pad_edges, pad_graphs = (
+                    padding
+                )
+            else:
+                graph = item
+                node_cap, edge_cap, graph_cap, pad_nodes, pad_edges, pad_graphs = (
+                    _padding_amounts(graph)
+                )
             padding_stats['node_cap'] += node_cap
             padding_stats['edge_cap'] += edge_cap
             padding_stats['graph_cap'] += graph_cap
             padding_stats['pad_nodes'] += pad_nodes
             padding_stats['pad_edges'] += pad_edges
             padding_stats['pad_graphs'] += pad_graphs
-            graph = _prepare_graph_for_devices(graph)
+            if not device_prefetch_active:
+                graph = _prepare_graph_for_devices(graph)
             num_updates += 1
             num_updates_value = jnp.asarray(num_updates, dtype=jnp.int32)
             start_time = time.time()
@@ -732,7 +785,10 @@ def train(
             loss = float(loss)
             n_graphs_value = float(n_graphs)
             if is_primary and n_graphs_value == 0.0:
-                logging.warning('Batch %s contains no valid graphs; gradients are zero.', num_updates)
+                logging.warning(
+                    'Batch %s contains no valid graphs; gradients are zero.',
+                    num_updates,
+                )
             if is_primary:
                 p_bar.set_postfix({'loss': f'{loss:7.3f}'})
             p_bar.update(1)
@@ -781,6 +837,7 @@ def evaluate(
     data_loader: data.GraphDataLoader,
     name: str = 'Evaluation',
     progress_bar: bool = True,
+    device_prefetch_batches: int | None = None,
 ) -> tuple[float, dict[str, Any]]:
     r"""Evaluate the predictor on the given data loader.
 
@@ -791,6 +848,8 @@ def evaluate(
         data_loader: Data loader yielding evaluation batches.
         name: Name used for progress bar and logging.
         progress_bar: Whether to display a progress bar.
+        device_prefetch_batches: Optional number of batches to prefetch to devices.
+            Defaults to max(loader prefetch, 2) when None.
 
     Returns:
         Tuple of (average_loss, metrics_dict) aggregated over the dataset.
@@ -902,12 +961,18 @@ def evaluate(
         batch_metrics = batch_metrics_fn(graph, pred_graph, pred_outputs, None)
         return _psum_metrics(batch_metrics)
 
-    def _process_batch(ref_graph: jraph.GraphsTuple, *, p_bar=None) -> None:
+    def _process_batch(
+        ref_graph: jraph.GraphsTuple,
+        *,
+        p_bar=None,
+        prepared: bool = False,
+        padding: tuple[int, int, int, int, int, int] | None = None,
+    ) -> None:
         """Update loss/metric accumulators from a single batch."""
         nonlocal total_loss, num_graphs
-        node_cap, edge_cap, graph_cap, pad_nodes, pad_edges, pad_graphs = (
-            _padding_amounts(ref_graph)
-        )
+        if padding is None:
+            padding = _padding_amounts(ref_graph)
+        node_cap, edge_cap, graph_cap, pad_nodes, pad_edges, pad_graphs = padding
         padding_stats['node_cap'] += node_cap
         padding_stats['edge_cap'] += edge_cap
         padding_stats['graph_cap'] += graph_cap
@@ -915,7 +980,7 @@ def evaluate(
         padding_stats['pad_edges'] += pad_edges
         padding_stats['pad_graphs'] += pad_graphs
 
-        device_graph = _prepare_graph_for_devices(ref_graph)
+        device_graph = ref_graph if prepared else _prepare_graph_for_devices(ref_graph)
         batch_metrics = _eval_step(params, device_graph)
         batch_metrics = data.unreplicate_from_local_devices(batch_metrics)
 
@@ -957,9 +1022,31 @@ def evaluate(
 
     start_time = time.time()
 
-    eval_iterator = _prefetch_iterator(
-        iterator, int(getattr(data_loader, '_prefetch_batches', 0) or 0)
-    )
+    eval_iterator = iterator
+    host_prefetch_cap = int(getattr(data_loader, '_prefetch_batches', 0) or 0)
+    device_prefetch_cap = device_prefetch_batches
+    if device_prefetch_cap is None:
+        device_prefetch_cap = max(host_prefetch_cap, 2)
+    device_prefetch_cap = int(device_prefetch_cap or 0)
+    device_prefetch_active = device_prefetch_cap > 0
+    if device_prefetch_active:
+        source_iter = eval_iterator
+
+        def _prepared_iter(source_iter=source_iter):
+            """Yield device-prepared graphs with host padding stats."""
+            for graph in source_iter:
+                yield _prepare_graph_for_devices(graph), _padding_amounts(graph)
+
+        def _device_put(item):
+            """Move prepared graphs to device while preserving stats."""
+            graph, padding = item
+            if local_device_count <= 1:
+                graph = jax.device_put(graph)
+            return graph, padding
+
+        eval_iterator = _prefetch_to_device(
+            _prepared_iter(), device_prefetch_cap, _device_put
+        )
 
     p_bar = tqdm.tqdm(
         eval_iterator,
@@ -968,8 +1055,12 @@ def evaluate(
         disable=not progress_bar,
     )
 
-    for ref_graph in p_bar:
-        _process_batch(ref_graph, p_bar=p_bar)
+    for item in p_bar:
+        if device_prefetch_active:
+            ref_graph, padding = item
+            _process_batch(ref_graph, p_bar=p_bar, prepared=True, padding=padding)
+        else:
+            _process_batch(item, p_bar=p_bar)
 
     if num_graphs <= 0:
         logging.warning(f'No graphs in data_loader ! Returning 0.0 for {name}')

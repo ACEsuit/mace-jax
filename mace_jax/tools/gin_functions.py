@@ -845,6 +845,7 @@ def optimizer(
         )
         setattr(gradient_chain, 'schedule_free_eval_fn', schedule_free_eval_params)
 
+    setattr(gradient_chain, 'lr_schedule', schedule)
     return gradient_chain, max_epochs
 
 

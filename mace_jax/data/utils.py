@@ -789,6 +789,7 @@ def split_graphs_for_devices(graph, num_devices: int) -> list[jraph.GraphsTuple]
             pad_shape = (pad_graphs,) + arr.shape[1:]
             pad_vals = np.zeros(pad_shape, dtype=arr.dtype)
             return np.concatenate([arr, pad_vals], axis=0)
+
         pad_n_node = np.concatenate(
             [np.asarray(graph.n_node), np.zeros(pad_graphs, dtype=np.int32)]
         )

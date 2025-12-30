@@ -679,9 +679,7 @@ def test_cli_sets_runtime_and_training_controls(tmp_path):
         gin.query_parameter('mace_jax.tools.gin_functions.train.max_grad_norm') == 0.5
     )
     assert gin.query_parameter('mace_jax.tools.gin_functions.train.ema_decay') == 0.99
-    assert (
-        gin.query_parameter('mace_jax.tools.gin_functions.optimizer.max_epochs') == 7
-    )
+    assert gin.query_parameter('mace_jax.tools.gin_functions.optimizer.max_epochs') == 7
     assert gin.query_parameter('mace_jax.tools.gin_functions.train.patience') == 4
     assert gin.query_parameter(
         'mace_jax.tools.gin_functions.train.eval_train'
