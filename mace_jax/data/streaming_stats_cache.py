@@ -13,9 +13,15 @@ STREAMING_STATS_CACHE_VERSION = 1
 
 
 def stats_cache_path(dataset_path: Path) -> Path:
-    """Return the cache path for streaming stats for a dataset."""
-    suffix = dataset_path.suffix + '.streamstats.pkl'
-    return dataset_path.with_suffix(suffix)
+    """Return the cache path for streaming stats for a dataset.
+
+    Use a hidden sidecar file so glob patterns like ``dir/*`` (used by Torch MACE)
+    do not treat the cache as an HDF5 shard.
+    """
+    cache_name = f'.{dataset_path.stem}.streamstats.pkl'
+    return dataset_path.with_name(cache_name)
+
+
 
 
 def dataset_signature(dataset_path: Path) -> dict[str, float]:
@@ -92,6 +98,7 @@ def stats_payload_to_parts(payload: dict) -> tuple[list[list[int]], int, int, in
 def load_cached_streaming_stats(dataset_path: Path, fingerprint: str) -> dict | None:
     """Load cached streaming stats if they match the current dataset and spec."""
     cache_path = stats_cache_path(dataset_path)
+    payload = None
     if not cache_path.exists():
         return None
     try:
@@ -99,6 +106,8 @@ def load_cached_streaming_stats(dataset_path: Path, fingerprint: str) -> dict | 
             payload = pickle.load(fh)
     except Exception as exc:  # pragma: no cover - cache corruption is unexpected
         logging.warning('Failed to load streaming stats cache %s: %s', cache_path, exc)
+        return None
+    if payload is None:
         return None
     if payload.get('version') != STREAMING_STATS_CACHE_VERSION:
         return None
