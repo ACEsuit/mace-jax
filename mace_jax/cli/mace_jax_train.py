@@ -872,6 +872,15 @@ def run_training(dry_run: bool = False) -> None:
             return
 
         interval_length = max(1, int(train_loader.approx_length()))
+        process_count = getattr(jax, 'process_count', lambda: 1)()
+        process_index = getattr(jax, 'process_index', lambda: 0)()
+        if process_count > 1:
+            interval_length = max(
+                1, (interval_length + process_count - 1 - process_index) // process_count
+            )
+        local_device_count = jax.local_device_count()
+        if local_device_count > 1:
+            interval_length = max(1, interval_length // local_device_count)
         logging.info(
             'Estimated %s batches per epoch from the training loader.',
             interval_length,
