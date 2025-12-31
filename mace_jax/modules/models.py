@@ -104,21 +104,34 @@ class MACE(fnn.Module):
     normalize2mom_consts: dict[str, float] | None = struct.field(
         pytree_node=False, default=None
     )
+    init_normalize2mom_consts: bool = struct.field(pytree_node=False, default=True)
 
     def __post_init__(self):
         super().__post_init__()
         consts = self.normalize2mom_consts
+        if consts is None and not self.init_normalize2mom_consts:
+            object.__setattr__(self, '_normalize2mom_consts', None)
+            return
         if consts is None:
-            silu_value = estimate_normalize2mom_const('silu')
-            consts = {'silu': silu_value, 'swish': silu_value}
+            if self.init_normalize2mom_consts:
+                silu_value = estimate_normalize2mom_const('silu')
+                consts = {'silu': silu_value, 'swish': silu_value}
+            else:
+                consts = None
         else:
             consts = dict(consts)
             if 'silu' not in consts:
-                silu_value = estimate_normalize2mom_const('silu')
-                consts['silu'] = silu_value
-                consts.setdefault('swish', silu_value)
+                if self.init_normalize2mom_consts:
+                    silu_value = estimate_normalize2mom_const('silu')
+                    consts['silu'] = silu_value
+                    consts.setdefault('swish', silu_value)
+                else:
+                    consts = None
             if 'swish' not in consts:
                 consts['swish'] = consts['silu']
+        if consts is None:
+            object.__setattr__(self, '_normalize2mom_consts', None)
+            return
         cleaned: dict[str, float] = {}
         for key, val in consts.items():
             try:
@@ -167,19 +180,20 @@ class MACE(fnn.Module):
         # Normalize2mom constants originate from the Torch model (or fall back
         # to defaults) and are kept as scalar arrays for serialization.
         consts = getattr(self, '_normalize2mom_consts', None)
-        if consts is None:
+        if consts is None and self.init_normalize2mom_consts:
             silu_value = estimate_normalize2mom_const('silu')
             consts = {'silu': silu_value, 'swish': silu_value}
-        const_arrays = {
-            key: jnp.asarray(val, dtype=jnp.float32) for key, val in consts.items()
-        }
-        # Keep normalize2mom constants in a dedicated config collection so they
-        # travel with exported bundles but stay out of the trainable params.
-        self.variable(
-            'config',
-            'normalize2mom_consts',
-            lambda: const_arrays,
-        )
+        if consts is not None:
+            const_arrays = {
+                key: jnp.asarray(val, dtype=jnp.float32) for key, val in consts.items()
+            }
+            # Keep normalize2mom constants in a dedicated config collection so they
+            # travel with exported bundles but stay out of the trainable params.
+            self.variable(
+                'config',
+                'normalize2mom_consts',
+                lambda: const_arrays,
+            )
         # Also seed the e3nn normalize2mom cache at runtime to enforce those
         # constants during forward passes (keeps Torch/JAX energy parity).
         # Registration happens in __post_init__ with concrete values.

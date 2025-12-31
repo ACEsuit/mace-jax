@@ -252,6 +252,7 @@ def _build_jax_model(
     config: dict[str, Any],
     *,
     cueq_config: CuEquivarianceConfig | None = None,
+    init_normalize2mom_consts: bool = True,
 ):
     cue_config_obj: CuEquivarianceConfig | None = None
     if cueq_config is not None:
@@ -294,6 +295,7 @@ def _build_jax_model(
         readout_cls=_readout(config.get('readout_cls', None)),
         gate=resolve_gate_callable(config.get('gate', None)),
         cueq_config=cue_config_obj,
+        init_normalize2mom_consts=init_normalize2mom_consts,
     )
 
     if config.get('normalize2mom_consts') is not None:
@@ -342,10 +344,17 @@ def convert_model(
         return flax_core.freeze(merged)
 
     try:
-        jax_model = _build_jax_model(config, cueq_config=cueq_config)
+        jax_model = _build_jax_model(
+            config,
+            cueq_config=cueq_config,
+            init_normalize2mom_consts=False,
+        )
     except TypeError as exc:
         if 'cueq_config' in str(exc):
-            jax_model = _build_jax_model(config)
+            jax_model = _build_jax_model(
+                config,
+                init_normalize2mom_consts=False,
+            )
         else:
             raise
     template_data = _prepare_template_data(config)

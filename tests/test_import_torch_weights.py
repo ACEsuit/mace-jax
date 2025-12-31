@@ -9,7 +9,9 @@ from mace_jax.cli import mace_jax_from_torch as jax_from_torch
 
 
 def _patch_common(monkeypatch, jax_model):
-    monkeypatch.setattr(jax_from_torch, '_build_jax_model', lambda config: jax_model)
+    monkeypatch.setattr(
+        jax_from_torch, '_build_jax_model', lambda config, **kwargs: jax_model
+    )
     monkeypatch.setattr(
         jax_from_torch, '_prepare_template_data', lambda config: {'dummy': 1}
     )
