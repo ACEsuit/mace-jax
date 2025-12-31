@@ -467,7 +467,7 @@ def _padding_amounts(graph) -> tuple[int, int, int, int, int, int]:
 def train(
     params: Any,
     total_loss_fn: Callable,  # loss_fn(params, graph) -> [num_graphs]
-    train_loader: data.GraphDataLoader,  # device parallel done on the (optional) extra dimension
+    train_loader: data.StreamingGraphDataLoader,
     gradient_transform: Any,
     optimizer_state: dict[str, Any],
     ema_decay: float | None = None,
@@ -492,7 +492,7 @@ def train(
     Args:
         params: Trainable parameters (and optional config state).
         total_loss_fn: Callable returning per-graph loss values.
-        train_loader: Training data loader yielding graph batches.
+        train_loader: Streaming data loader yielding graph batches.
         gradient_transform: Optax gradient transformation.
         optimizer_state: Initial optimizer state.
         ema_decay: Optional EMA decay for evaluation parameters.
@@ -600,8 +600,6 @@ def train(
     process_index = getattr(jax, 'process_index', lambda: 0)()
     is_primary = process_index == 0
     process_count = getattr(jax, 'process_count', lambda: 1)()
-    supports_iter_batches = hasattr(train_loader, 'iter_batches')
-    legacy_steps_cache: int | None = None
 
     def _resolve_lr(step: int) -> float | None:
         """Return the current learning rate for a given step if available."""
@@ -655,62 +653,13 @@ def train(
             iterator = _group_batches(iterator, local_device_count, total_batches)
         return iterator, total_batches
 
-    def _legacy_interval_loader():
-        """Yield batches from legacy loaders without iter_batches()."""
-        while True:
-            yield from train_loader
-
-    def _legacy_effective_steps():
-        """Infer number of steps for legacy loaders."""
-        nonlocal legacy_steps_cache
-        if legacy_steps_cache is not None:
-            return legacy_steps_cache
-        approx_length = getattr(train_loader, 'approx_length', None)
-        if callable(approx_length):
-            value = int(approx_length())
-            if value > 0:
-                legacy_steps_cache = value
-                return legacy_steps_cache
-        length = None
-        try:
-            length = int(len(train_loader))  # type: ignore[arg-type]
-        except Exception:  # pragma: no cover - length optional
-            length = None
-        if length is None or length <= 0:
-            raise ValueError(
-                'Unable to determine number of batches for the training loader; provide '
-                'a loader with iter_batches() support or implement approx_length().'
-            )
-        legacy_steps_cache = length
-        return legacy_steps_cache
-
-    def _iter_epoch_batches(epoch: int):
-        """Return an iterator and step count for the given epoch."""
-        if supports_iter_batches:
-            return _epoch_batches(epoch)
-        setter = getattr(train_loader, 'set_epoch', None)
-        if callable(setter):
-            setter(epoch)
-        legacy_iter = _legacy_interval_loader()
-        total_steps = _legacy_effective_steps()
-        if local_device_count > 1:
-            total_steps = total_steps // local_device_count
-            legacy_iter = _group_batches(legacy_iter, local_device_count, total_steps)
-
-        def _iter():
-            """Yield the requested number of legacy batches."""
-            for _ in range(total_steps):
-                yield next(legacy_iter)
-
-        return _iter(), total_steps
-
     initial_eval = eval_params
     if schedule_free_eval_fn is not None:
         initial_eval = schedule_free_eval_fn(optimizer_state, params)
     yield start_interval, params, optimizer_state, initial_eval
 
     for epoch in itertools.count(start_interval):
-        epoch_batches_iter, effective_steps = _iter_epoch_batches(epoch)
+        epoch_batches_iter, effective_steps = _epoch_batches(epoch)
         if effective_steps <= 0:
             raise ValueError(
                 'iter_batches() produced no data; reduce process_count or provide more data.'
@@ -834,7 +783,7 @@ def evaluate(
     predictor: Callable,
     params: Any,
     loss_fn: Any,
-    data_loader: data.GraphDataLoader,
+    data_loader: data.StreamingGraphDataLoader,
     name: str = 'Evaluation',
     progress_bar: bool = True,
     device_prefetch_batches: int | None = None,
@@ -845,7 +794,7 @@ def evaluate(
         predictor: Callable `predictor(params, graph)` returning energy/forces/stress.
         params: Parameters used by the predictor.
         loss_fn: Loss callable `loss_fn(graph, output) -> per-graph loss`.
-        data_loader: Data loader yielding evaluation batches.
+        data_loader: Streaming loader yielding evaluation batches.
         name: Name used for progress bar and logging.
         progress_bar: Whether to display a progress bar.
         device_prefetch_batches: Optional number of batches to prefetch to devices.
@@ -886,19 +835,25 @@ def evaluate(
     local_device_count = max(1, jax.local_device_count())
     process_index = getattr(jax, 'process_index', lambda: 0)()
     process_count = getattr(jax, 'process_count', lambda: 1)()
-    supports_iter_batches = hasattr(data_loader, 'iter_batches')
-
-    if supports_iter_batches:
-        iterator = data_loader.iter_batches(
-            epoch=0,
-            seed=None,
-            process_count=process_count,
-            process_index=process_index,
+    iterator = data_loader.iter_batches(
+        epoch=0,
+        seed=None,
+        process_count=process_count,
+        process_index=process_index,
+    )
+    total_hint = getattr(iterator, 'total_batches_hint', 0)
+    if not total_hint:
+        approx_length = getattr(data_loader, 'approx_length', None)
+        if callable(approx_length):
+            try:
+                total_hint = int(approx_length())
+            except Exception:  # pragma: no cover - defensive fallback
+                total_hint = 0
+    if not total_hint:
+        raise ValueError(
+            'Evaluation loader did not provide a total batch count; ensure it '
+            'implements iter_batches() with a total_batches_hint or approx_length().'
         )
-        total_hint = getattr(iterator, 'total_batches_hint', 0)
-    else:
-        iterator = iter(data_loader)
-        total_hint = 0
 
     def _prepare_graph_for_devices(graph: jraph.GraphsTuple):
         """Prepare a graph batch for multi-device evaluation."""
@@ -1051,7 +1006,7 @@ def evaluate(
     p_bar = tqdm.tqdm(
         eval_iterator,
         desc=name,
-        total=total_hint or data_loader.approx_length(),
+        total=total_hint,
         disable=not progress_bar,
     )
 

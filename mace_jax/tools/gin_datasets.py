@@ -1215,8 +1215,8 @@ def datasets(
     statistics_metadata_path: str | None = None,
 ) -> tuple[
     data.StreamingGraphDataLoader,
-    data.GraphDataLoader,
-    data.GraphDataLoader,
+    data.StreamingGraphDataLoader | None,
+    data.StreamingGraphDataLoader | None,
     dict[int, float],
     float,
 ]:

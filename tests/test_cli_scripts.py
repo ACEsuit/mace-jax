@@ -20,11 +20,11 @@ class _DummyTorchModel(torch.nn.Module):
 
 
 @pytest.mark.slow
-def test_run_train_cli_dry_run(tmp_path, monkeypatch):
+def test_run_train_cli_dry_run(tmp_path, monkeypatch, simple_hdf5_path):
     results_dir = tmp_path / 'results'
     torch_ckpt = tmp_path / 'dummy.pt'
     torch_ckpt.write_text('checkpoint', encoding='utf-8')
-    train_xyz = Path(__file__).resolve().parent / 'test_data' / 'simple.xyz'
+    train_hdf5 = simple_hdf5_path
 
     args = [
         '--dry-run',
@@ -43,7 +43,7 @@ def test_run_train_cli_dry_run(tmp_path, monkeypatch):
         '--torch-param-dtype',
         'float32',
         '--train-path',
-        str(train_xyz),
+        str(train_hdf5),
         '--valid-path',
         'None',
         '--r-max',
@@ -398,13 +398,13 @@ def test_cli_multiheads_without_foundation():
     gin.clear_config()
 
 
-def test_cli_swa_stage_two_options(tmp_path):
+def test_cli_swa_stage_two_options(tmp_path, simple_hdf5_path):
     gin.clear_config()
-    train_xyz = Path(__file__).resolve().parent / 'test_data' / 'simple.xyz'
+    train_hdf5 = simple_hdf5_path
     args, _ = train_cli.parse_args(
         [
             '--train-file',
-            str(train_xyz),
+            str(train_hdf5),
             '--valid-file',
             'None',
             '--swa',
@@ -433,13 +433,13 @@ def test_cli_swa_stage_two_options(tmp_path):
     gin.clear_config()
 
 
-def test_cli_eval_train_flag(tmp_path):
+def test_cli_eval_train_flag(tmp_path, simple_hdf5_path):
     gin.clear_config()
-    train_xyz = Path(__file__).resolve().parent / 'test_data' / 'simple.xyz'
+    train_hdf5 = simple_hdf5_path
     args, _ = train_cli.parse_args(
         [
             '--train-file',
-            str(train_xyz),
+            str(train_hdf5),
             '--valid-file',
             'None',
             '--eval-train',
@@ -506,7 +506,9 @@ def test_foundation_model_populates_heads(monkeypatch, tmp_path):
     gin.clear_config()
 
 
-def test_foundation_multihead_without_pt_disables(monkeypatch, tmp_path, caplog):
+def test_foundation_multihead_without_pt_disables(
+    monkeypatch, tmp_path, caplog, simple_hdf5_path
+):
     gin.clear_config()
 
     class _DummyRMax:
@@ -549,11 +551,11 @@ def test_foundation_multihead_without_pt_disables(monkeypatch, tmp_path, caplog)
     assert 'Multihead finetuning requires pretraining data' in caplog.text
     train_cli._cleanup_foundation_artifacts()
     gin.clear_config()
-    train_xyz = Path(__file__).resolve().parent / 'test_data' / 'simple.xyz'
+    train_hdf5 = simple_hdf5_path
     args, _ = train_cli.parse_args(
         [
             '--train-file',
-            str(train_xyz),
+            str(train_hdf5),
             '--valid-file',
             'None',
             '--optimizer',
@@ -580,9 +582,9 @@ def test_foundation_multihead_without_pt_disables(monkeypatch, tmp_path, caplog)
     gin.clear_config()
 
 
-def test_cli_sets_runtime_and_training_controls(tmp_path):
+def test_cli_sets_runtime_and_training_controls(tmp_path, simple_hdf5_path):
     gin.clear_config()
-    train_xyz = Path(__file__).resolve().parent / 'test_data' / 'simple.xyz'
+    train_hdf5 = simple_hdf5_path
     args, _ = train_cli.parse_args(
         [
             '--name',
@@ -595,7 +597,7 @@ def test_cli_sets_runtime_and_training_controls(tmp_path):
             'float32',
             '--debug',
             '--train_file',
-            str(train_xyz),
+            str(train_hdf5),
             '--valid_file',
             'None',
             '--energy_key',
@@ -663,7 +665,7 @@ def test_cli_sets_runtime_and_training_controls(tmp_path):
     assert gin.query_parameter('mace_jax.tools.gin_functions.flags.debug') is True
     assert gin.query_parameter(
         'mace_jax.tools.gin_datasets.datasets.train_path'
-    ) == str(train_xyz)
+    ) == str(train_hdf5)
     assert (
         gin.query_parameter('mace_jax.tools.gin_datasets.datasets.valid_path') is None
     )

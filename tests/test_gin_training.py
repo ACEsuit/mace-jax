@@ -38,12 +38,21 @@ mace_jax.tools.gin_functions.train.progress_bar = False
 """
 
 
-def _write_native_hdf5(path: Path, *, num_structures: int, seed: int = 0) -> None:
+def _write_native_hdf5(
+    path: Path,
+    *,
+    num_structures: int,
+    seed: int = 0,
+    atoms_per_structure: int | None = None,
+) -> None:
     rng = np.random.default_rng(seed)
     with h5py.File(path, 'w') as handle:
         batch = handle.create_group('config_batch_0')
         for idx in range(num_structures):
-            n_atoms = 2 + (idx % 3)
+            if atoms_per_structure is None:
+                n_atoms = 2 + (idx % 3)
+            else:
+                n_atoms = int(atoms_per_structure)
             subgroup = batch.create_group(f'config_{idx}')
             numbers = np.asarray(
                 [1 + (idx + j) % 3 for j in range(n_atoms)], dtype=np.int32
@@ -355,37 +364,50 @@ def test_graph_dataloader_split_by_heads(tmp_path):
             assert int(head_attr) == expected_idx
 
 
-def test_graph_dataloader_shard_splits_graphs():
-    def _graph(idx: int) -> jraph.GraphsTuple:
-        return jraph.GraphsTuple(
-            nodes=jnp.array([[idx]], dtype=jnp.float32),
-            edges=jnp.zeros((1, 1), dtype=jnp.float32),
-            senders=jnp.array([0], dtype=jnp.int32),
-            receivers=jnp.array([0], dtype=jnp.int32),
-            n_node=jnp.array([1], dtype=jnp.int32),
-            n_edge=jnp.array([1], dtype=jnp.int32),
-            globals={'head': jnp.array([idx + 1], dtype=jnp.int32)},
-        )
-
-    graphs = [_graph(i) for i in range(6)]
-    loader = data_utils.GraphDataLoader(
-        graphs=graphs,
-        n_node=4,
-        n_edge=4,
-        n_graph=4,
+def test_streaming_loader_shard_splits_graphs(tmp_path):
+    dataset_path = tmp_path / 'shard_stream.h5'
+    _write_native_hdf5(dataset_path, num_structures=6, seed=0, atoms_per_structure=2)
+    spec = data_pkg.StreamingDatasetSpec(path=dataset_path)
+    atomic_numbers = gin_datasets._unique_atomic_numbers_from_hdf5([dataset_path])
+    z_table = data_pkg.AtomicNumberTable(atomic_numbers)
+    dataset = data_pkg.HDF5Dataset(dataset_path, mode='r')
+    loader = data_pkg.StreamingGraphDataLoader(
+        datasets=[dataset],
+        dataset_specs=[spec],
+        z_table=z_table,
+        r_max=2.5,
+        n_node=None,
+        n_edge=None,
+        head_to_index={'Default': 0},
         shuffle=False,
+        seed=0,
+        num_workers=0,
     )
 
-    shard0 = loader.shard(3, 0)
-    shard1 = loader.shard(3, 1)
-    shard2 = loader.shard(3, 2)
+    def _collect_ids(process_index: int) -> set[int]:
+        ids: set[int] = set()
+        for batch in loader.iter_batches(
+            epoch=0,
+            seed=0,
+            process_count=3,
+            process_index=process_index,
+        ):
+            mask = np.asarray(jraph.get_graph_padding_mask(batch))
+            energies = np.asarray(batch.globals.energy).reshape(-1)
+            ids.update(int(v) for v in energies[mask])
+        return ids
 
-    assert [int(g.nodes[0, 0]) for g in shard0.graphs] == [0, 3]
-    assert [int(g.nodes[0, 0]) for g in shard1.graphs] == [1, 4]
-    assert [int(g.nodes[0, 0]) for g in shard2.graphs] == [2, 5]
+    try:
+        ids0 = _collect_ids(0)
+        ids1 = _collect_ids(1)
+        ids2 = _collect_ids(2)
+    finally:
+        loader.close()
 
-    with pytest.raises(ValueError):
-        loader.shard(2, 3)
+    assert ids0.isdisjoint(ids1)
+    assert ids0.isdisjoint(ids2)
+    assert ids1.isdisjoint(ids2)
+    assert sorted(ids0 | ids1 | ids2) == list(range(6))
 
 
 def test_train_evaluates_each_head(monkeypatch, tmp_path):
@@ -510,25 +532,24 @@ def test_streaming_loader_preserves_order_without_shuffle(dataset_paths):
     assert energies == list(range(num_graphs))
 
 
-def test_graph_dataloader_iter_batches_deterministic():
-    def _graph(idx: int) -> jraph.GraphsTuple:
-        return jraph.GraphsTuple(
-            nodes=jnp.array([[idx]], dtype=jnp.float32),
-            edges=jnp.zeros((1, 1), dtype=jnp.float32),
-            senders=jnp.array([0], dtype=jnp.int32),
-            receivers=jnp.array([0], dtype=jnp.int32),
-            n_node=jnp.array([1], dtype=jnp.int32),
-            n_edge=jnp.array([1], dtype=jnp.int32),
-            globals={'head': jnp.array([idx + 1], dtype=jnp.int32)},
-        )
-
-    graphs = [_graph(i) for i in range(8)]
-    loader = data_utils.GraphDataLoader(
-        graphs=graphs,
-        n_node=4,
-        n_edge=4,
-        n_graph=4,
+def test_streaming_loader_iter_batches_deterministic(tmp_path):
+    dataset_path = tmp_path / 'deterministic_stream.h5'
+    _write_native_hdf5(dataset_path, num_structures=8, seed=0, atoms_per_structure=2)
+    spec = data_pkg.StreamingDatasetSpec(path=dataset_path)
+    atomic_numbers = gin_datasets._unique_atomic_numbers_from_hdf5([dataset_path])
+    z_table = data_pkg.AtomicNumberTable(atomic_numbers)
+    dataset = data_pkg.HDF5Dataset(dataset_path, mode='r')
+    loader = data_pkg.StreamingGraphDataLoader(
+        datasets=[dataset],
+        dataset_specs=[spec],
+        z_table=z_table,
+        r_max=2.5,
+        n_node=None,
+        n_edge=None,
+        head_to_index={'Default': 0},
         shuffle=True,
+        seed=123,
+        num_workers=0,
     )
 
     def _collect_batches(epoch, process_count, process_index):
@@ -546,36 +567,36 @@ def test_graph_dataloader_iter_batches_deterministic():
     def _ids_from_batches(batches):
         ids = set()
         for batch in batches:
-            heads = np.asarray(batch.globals['head']).reshape(-1)
-            ids.update(int(h) - 1 for h in heads if h > 0)
+            mask = np.asarray(jraph.get_graph_padding_mask(batch))
+            energies = np.asarray(batch.globals.energy).reshape(-1)
+            ids.update(int(v) for v in energies[mask])
         return ids
 
     def _sequence_signature(batches):
-        return [
-            tuple(
-                sorted(
-                    int(h) - 1
-                    for h in np.asarray(batch.globals['head']).reshape(-1)
-                    if h > 0
-                )
-            )
-            for batch in batches
-        ]
+        signatures = []
+        for batch in batches:
+            mask = np.asarray(jraph.get_graph_padding_mask(batch))
+            energies = np.asarray(batch.globals.energy).reshape(-1)
+            signatures.append(tuple(sorted(int(v) for v in energies[mask])))
+        return signatures
 
-    rank0_batches = _collect_batches(epoch=0, process_count=2, process_index=0)
-    rank1_batches = _collect_batches(epoch=0, process_count=2, process_index=1)
-    ids_rank0 = _ids_from_batches(rank0_batches)
-    ids_rank1 = _ids_from_batches(rank1_batches)
-    assert ids_rank0.isdisjoint(ids_rank1)
-    assert sorted(ids_rank0 | ids_rank1) == list(range(8))
+    try:
+        rank0_batches = _collect_batches(epoch=0, process_count=2, process_index=0)
+        rank1_batches = _collect_batches(epoch=0, process_count=2, process_index=1)
+        ids_rank0 = _ids_from_batches(rank0_batches)
+        ids_rank1 = _ids_from_batches(rank1_batches)
+        assert ids_rank0.isdisjoint(ids_rank1)
+        assert sorted(ids_rank0 | ids_rank1) == list(range(8))
 
-    seq_epoch0 = _sequence_signature(
-        _collect_batches(epoch=0, process_count=1, process_index=0)
-    )
-    seq_epoch1 = _sequence_signature(
-        _collect_batches(epoch=1, process_count=1, process_index=0)
-    )
-    assert seq_epoch0 != seq_epoch1
+        seq_epoch0 = _sequence_signature(
+            _collect_batches(epoch=0, process_count=1, process_index=0)
+        )
+        seq_epoch1 = _sequence_signature(
+            _collect_batches(epoch=1, process_count=1, process_index=0)
+        )
+        assert seq_epoch0 != seq_epoch1
+    finally:
+        loader.close()
 
 
 def test_gin_model_torch_checkpoint(monkeypatch, tmp_path):
