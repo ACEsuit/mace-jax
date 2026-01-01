@@ -205,6 +205,50 @@ def _as_irreps(value: Any) -> Irreps:
     return Irreps(str(value))
 
 
+def _maybe_update_hidden_irreps_from_torch(
+    torch_model: torch.nn.Module, config: dict[str, Any]
+) -> None:
+    try:
+        num_interactions = int(config.get('num_interactions', 0))
+    except Exception:
+        return
+    if num_interactions != 1:
+        return
+
+    if 'hidden_irreps' not in config:
+        return
+
+    torch_hidden = None
+    try:
+        products = getattr(torch_model, 'products', None)
+        if products:
+            linear = getattr(products[0], 'linear', None)
+            if linear is not None:
+                torch_hidden = getattr(linear, 'irreps_out', None)
+        if torch_hidden is None:
+            torch_hidden = getattr(torch_model, 'hidden_irreps', None)
+    except Exception:
+        torch_hidden = None
+
+    if torch_hidden is None:
+        return
+
+    try:
+        torch_irreps = _as_irreps(torch_hidden)
+        config_irreps = _as_irreps(config['hidden_irreps'])
+    except Exception:
+        return
+
+    # Torch started collapsing single-interaction hidden irreps in
+    # mace commit f599b0e ("fix the 1 layer model cueq"); switch to legacy
+    # mode when the Torch model still carries multiple irreps.
+    collapse_hidden = len(torch_irreps) <= 1
+    config['collapse_hidden_irreps'] = collapse_hidden
+
+    if torch_irreps != config_irreps:
+        config['hidden_irreps'] = str(torch_irreps)
+
+
 def _interaction(name_or_cls: Any):
     name = name_or_cls if isinstance(name_or_cls, str) else name_or_cls.__name__
     if name not in interaction_classes:
@@ -254,6 +298,19 @@ def _build_jax_model(
     cueq_config: CuEquivarianceConfig | None = None,
     init_normalize2mom_consts: bool = True,
 ):
+    collapse_hidden_irreps = config.get('collapse_hidden_irreps', None)
+    if collapse_hidden_irreps is None:
+        try:
+            num_interactions = int(config.get('num_interactions', 0))
+        except Exception:
+            num_interactions = 0
+        if num_interactions == 1 and config.get('hidden_irreps') is not None:
+            try:
+                hidden_irreps = _as_irreps(config['hidden_irreps'])
+                collapse_hidden_irreps = len(hidden_irreps) <= 1
+            except Exception:
+                collapse_hidden_irreps = None
+
     cue_config_obj: CuEquivarianceConfig | None = None
     if cueq_config is not None:
         cue_config_obj = cueq_config
@@ -292,6 +349,9 @@ def _build_jax_model(
         use_agnostic_product=config.get('use_agnostic_product', False),
         use_last_readout_only=config.get('use_last_readout_only', False),
         use_embedding_readout=config.get('use_embedding_readout', False),
+        collapse_hidden_irreps=(
+            True if collapse_hidden_irreps is None else bool(collapse_hidden_irreps)
+        ),
         readout_cls=_readout(config.get('readout_cls', None)),
         gate=resolve_gate_callable(config.get('gate', None)),
         cueq_config=cue_config_obj,
@@ -342,6 +402,8 @@ def convert_model(
             if collection not in merged and collection in template_unfrozen:
                 merged[collection] = template_unfrozen[collection]
         return flax_core.freeze(merged)
+
+    _maybe_update_hidden_irreps_from_torch(torch_model, config)
 
     try:
         jax_model = _build_jax_model(

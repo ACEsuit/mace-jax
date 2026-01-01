@@ -86,6 +86,7 @@ class MACE(fnn.Module):
     use_agnostic_product: bool = False
     use_last_readout_only: bool = False
     use_embedding_readout: bool = False
+    collapse_hidden_irreps: bool = struct.field(pytree_node=False, default=True)
     distance_transform: str = 'None'
     edge_irreps: Irreps | None = None
     radial_MLP: Sequence[int] | None = None
@@ -171,11 +172,11 @@ class MACE(fnn.Module):
         self._mlp_irreps = mlp_irreps
         hidden_irreps_out = (
             Irreps(str(hidden_irreps[0]))
-            if self.num_interactions == 1
+            if self.num_interactions == 1 and self.collapse_hidden_irreps
             else hidden_irreps
         )
-        # MACE (torch) collapses to the first irrep when num_interactions == 1,
-        # so mirror that here to keep product/readout shapes and imports aligned.
+        # MACE (torch) collapses to the first irrep when num_interactions == 1;
+        # default to that behavior unless explicitly disabled for legacy models.
 
         # Normalize2mom constants originate from the Torch model (or fall back
         # to defaults) and are kept as scalar arrays for serialization.
