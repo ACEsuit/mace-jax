@@ -19,7 +19,6 @@ from tests.conftest import _write_hdf5_from_configs
 torch = pytest.importorskip('torch')  # pragma: no cover - optional dependency
 from torch.optim.swa_utils import AveragedModel  # noqa: I001
 
-
 jax.config.update('jax_enable_x64', True)
 
 

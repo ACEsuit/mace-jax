@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import nox
 
-
 PYTHON = '3.10'
 PACKAGE = 'mace_jax'
 

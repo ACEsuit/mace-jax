@@ -339,10 +339,12 @@ def model(
             )
             if config_state is not None:
                 config_state = jax.tree_util.tree_map(
-                    lambda x: x.astype(target_dtype)
-                    if isinstance(x, jnp.ndarray)
-                    and jnp.issubdtype(x.dtype, jnp.inexact)
-                    else x,
+                    lambda x: (
+                        x.astype(target_dtype)
+                        if isinstance(x, jnp.ndarray)
+                        and jnp.issubdtype(x.dtype, jnp.inexact)
+                        else x
+                    ),
                     config_state,
                 )
 
@@ -606,44 +608,58 @@ def model(
 
         sanitized_nodes = graph.nodes.__class__(
             positions=_sanitize(graph.nodes.positions, node_mask_bool, expand_dims=1),
-            forces=_sanitize(graph.nodes.forces, node_mask_bool, expand_dims=1)
-            if getattr(graph.nodes, 'forces', None) is not None
-            else None,
+            forces=(
+                _sanitize(graph.nodes.forces, node_mask_bool, expand_dims=1)
+                if getattr(graph.nodes, 'forces', None) is not None
+                else None
+            ),
             species=_sanitize(graph.nodes.species, node_mask_bool),
         )
         sanitized_edges = graph.edges.__class__(
             shifts=_sanitize(graph.edges.shifts, edge_mask_bool, expand_dims=1),
-            unit_shifts=_sanitize(
-                graph.edges.unit_shifts, edge_mask_bool, expand_dims=1
-            )
-            if getattr(graph.edges, 'unit_shifts', None) is not None
-            else None,
+            unit_shifts=(
+                _sanitize(graph.edges.unit_shifts, edge_mask_bool, expand_dims=1)
+                if getattr(graph.edges, 'unit_shifts', None) is not None
+                else None
+            ),
         )
         sanitized_globals = graph.globals.__class__(
-            cell=_sanitize(graph.globals.cell, graph_mask_bool, expand_dims=2)
-            if getattr(graph.globals, 'cell', None) is not None
-            else None,
-            energy=_sanitize(graph.globals.energy, graph_mask_bool)
-            if getattr(graph.globals, 'energy', None) is not None
-            else None,
-            stress=_sanitize(graph.globals.stress, graph_mask_bool, expand_dims=2)
-            if getattr(graph.globals, 'stress', None) is not None
-            else None,
+            cell=(
+                _sanitize(graph.globals.cell, graph_mask_bool, expand_dims=2)
+                if getattr(graph.globals, 'cell', None) is not None
+                else None
+            ),
+            energy=(
+                _sanitize(graph.globals.energy, graph_mask_bool)
+                if getattr(graph.globals, 'energy', None) is not None
+                else None
+            ),
+            stress=(
+                _sanitize(graph.globals.stress, graph_mask_bool, expand_dims=2)
+                if getattr(graph.globals, 'stress', None) is not None
+                else None
+            ),
             weight=graph.globals.weight,
-            head=_sanitize(graph.globals.head, graph_mask_bool)
-            if getattr(graph.globals, 'head', None) is not None
-            else None,
-            virials=_sanitize(graph.globals.virials, graph_mask_bool, expand_dims=2)
-            if getattr(graph.globals, 'virials', None) is not None
-            else None,
-            dipole=_sanitize(graph.globals.dipole, graph_mask_bool, expand_dims=1)
-            if getattr(graph.globals, 'dipole', None) is not None
-            else None,
-            polarizability=_sanitize(
-                graph.globals.polarizability, graph_mask_bool, expand_dims=2
-            )
-            if getattr(graph.globals, 'polarizability', None) is not None
-            else None,
+            head=(
+                _sanitize(graph.globals.head, graph_mask_bool)
+                if getattr(graph.globals, 'head', None) is not None
+                else None
+            ),
+            virials=(
+                _sanitize(graph.globals.virials, graph_mask_bool, expand_dims=2)
+                if getattr(graph.globals, 'virials', None) is not None
+                else None
+            ),
+            dipole=(
+                _sanitize(graph.globals.dipole, graph_mask_bool, expand_dims=1)
+                if getattr(graph.globals, 'dipole', None) is not None
+                else None
+            ),
+            polarizability=(
+                _sanitize(graph.globals.polarizability, graph_mask_bool, expand_dims=2)
+                if getattr(graph.globals, 'polarizability', None) is not None
+                else None
+            ),
         )
         sanitized_graph = graph._replace(
             nodes=sanitized_nodes, edges=sanitized_edges, globals=sanitized_globals

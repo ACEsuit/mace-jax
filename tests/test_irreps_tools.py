@@ -2,12 +2,8 @@ import numpy as np
 import torch
 from e3nn import o3
 from e3nn_jax import Irreps, IrrepsArray
-from mace.modules.irreps_tools import (
-    CuEquivarianceConfig as TorchCuEquivarianceConfig,
-)
-from mace.modules.irreps_tools import (
-    reshape_irreps as TorchReshapeIrreps,
-)
+from mace.modules.irreps_tools import CuEquivarianceConfig as TorchCuEquivarianceConfig
+from mace.modules.irreps_tools import reshape_irreps as TorchReshapeIrreps
 
 from mace_jax.modules.irreps_tools import CuEquivarianceConfig, reshape_irreps
 

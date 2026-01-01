@@ -22,19 +22,19 @@ from __future__ import annotations
 
 from functools import cache
 
+import cuequivariance as cue
 import cuequivariance_jax as cuex
 import jax
 import jax.numpy as jnp
 import numpy as np
 import torch
+from cuequivariance.group_theory.experimental.mace.symmetric_contractions import (
+    symmetric_contraction as cue_mace_symmetric_contraction,
+)
 from e3nn_jax import Irreps
 from flax import linen as fnn
 from flax.core import freeze, unfreeze
 
-import cuequivariance as cue
-from cuequivariance.group_theory.experimental.mace.symmetric_contractions import (
-    symmetric_contraction as cue_mace_symmetric_contraction,
-)
 from mace_jax.adapters.flax.torch import (
     _resolve_scope,
     auto_import_from_torch_flax,

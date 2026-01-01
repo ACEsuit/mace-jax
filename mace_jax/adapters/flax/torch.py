@@ -7,8 +7,8 @@ from collections.abc import Callable, MutableMapping, Sequence
 
 import jax.nn as jnn
 import jax.numpy as jnp
-
 from flax.core import freeze, unfreeze
+
 from mace_jax.adapters.e3nn.math._normalize_activation import (
     register_normalize2mom_const,
 )

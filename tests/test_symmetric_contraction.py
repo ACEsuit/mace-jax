@@ -28,6 +28,7 @@ pytestmark = pytest.mark.skipif(
     reason=f'cuequivariance torch backend unavailable: {_CUE_TORCH_IMPORT_ERROR}',
 )
 
+
 def _jax_float_dtype() -> jnp.dtype:
     return jnp.asarray(0.0).dtype
 

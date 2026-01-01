@@ -356,9 +356,11 @@ class LAMMPS_MLIAP_MACE(MLIAPUnified):
             'lammps_class': data,
         }
         return {
-            key: jax.device_put(value, self.device)
-            if isinstance(value, jnp.ndarray)
-            else value
+            key: (
+                jax.device_put(value, self.device)
+                if isinstance(value, jnp.ndarray)
+                else value
+            )
             for key, value in batch_dict.items()
         }
 

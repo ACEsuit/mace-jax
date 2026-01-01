@@ -16,7 +16,6 @@ from roundmantissa import ceil_mantissa
 
 from mace_jax.data.neighborhood import get_neighborhood
 
-
 Vector = np.ndarray  # [3,]
 Positions = np.ndarray  # [..., 3]
 Forces = np.ndarray  # [..., 3]

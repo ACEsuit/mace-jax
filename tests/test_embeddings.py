@@ -2,9 +2,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import torch
-from mace.modules.embeddings import (
-    GenericJointEmbedding as TorchGenericJointEmbedding,
-)
+from mace.modules.embeddings import GenericJointEmbedding as TorchGenericJointEmbedding
 
 from mace_jax.adapters.flax.torch import init_from_torch
 from mace_jax.modules.embeddings import (

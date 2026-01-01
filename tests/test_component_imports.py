@@ -7,17 +7,13 @@ from e3nn_jax import Irreps
 from mace.modules.blocks import (
     LinearNodeEmbeddingBlock as TorchLinearNodeEmbeddingBlock,
 )
-from mace.modules.blocks import (
-    ScaleShiftBlock as TorchScaleShiftBlock,
-)
+from mace.modules.blocks import ScaleShiftBlock as TorchScaleShiftBlock
 
 from mace_jax.adapters.flax.torch import init_from_torch
 from mace_jax.modules.blocks import (
     LinearNodeEmbeddingBlock as FlaxLinearNodeEmbeddingBlock,
 )
-from mace_jax.modules.blocks import (
-    ScaleShiftBlock as FlaxScaleShiftBlock,
-)
+from mace_jax.modules.blocks import ScaleShiftBlock as FlaxScaleShiftBlock
 from mace_jax.modules.utils import (
     add_output_interface,
     compute_forces_and_stress,

@@ -798,7 +798,9 @@ def build_preprocess_arg_parser() -> argparse.ArgumentParser:
         type=str,
         default='',
     )
-    parser.add_argument('--r_max', help='distance cutoff (in Ang)', type=float, default=5.0)
+    parser.add_argument(
+        '--r_max', help='distance cutoff (in Ang)', type=float, default=5.0
+    )
     parser.add_argument(
         '--config_type_weights',
         help='String of dictionary containing the weights for each config type',

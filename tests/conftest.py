@@ -69,9 +69,7 @@ def _write_hdf5_from_configs(path: Path, configs) -> None:
                 else np.asarray(config.forces)
             )
             stress = (
-                np.zeros((3, 3))
-                if config.stress is None
-                else np.asarray(config.stress)
+                np.zeros((3, 3)) if config.stress is None else np.asarray(config.stress)
             )
             properties.create_dataset('energy', data=np.array(energy, dtype=np.float64))
             properties.create_dataset('forces', data=forces)

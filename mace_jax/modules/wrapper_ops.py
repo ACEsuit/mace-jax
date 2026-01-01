@@ -12,15 +12,11 @@ from e3nn_jax import Irreps  # type: ignore
 from mace_jax.adapters.cuequivariance import (
     FullyConnectedTensorProduct as CueFullyConnectedTensorProduct,
 )
-from mace_jax.adapters.cuequivariance import (
-    Linear as CueLinear,
-)
+from mace_jax.adapters.cuequivariance import Linear as CueLinear
 from mace_jax.adapters.cuequivariance import (
     SymmetricContraction as CueSymmetricContraction,
 )
-from mace_jax.adapters.cuequivariance import (
-    TensorProduct as CueTensorProduct,
-)
+from mace_jax.adapters.cuequivariance import TensorProduct as CueTensorProduct
 from mace_jax.tools.cg import O3_e3nn
 
 

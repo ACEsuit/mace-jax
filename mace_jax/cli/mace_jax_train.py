@@ -525,9 +525,9 @@ def _apply_swa_options(args: argparse.Namespace) -> None:
     swa_config = SWAConfig(
         start_interval=args.swa_start if args.swa_start is not None else 0,
         update_interval=args.swa_every if args.swa_every is not None else 1,
-        min_snapshots_for_eval=args.swa_min_snapshots
-        if args.swa_min_snapshots is not None
-        else 1,
+        min_snapshots_for_eval=(
+            args.swa_min_snapshots if args.swa_min_snapshots is not None else 1
+        ),
         max_snapshots=args.swa_max_snapshots,
         prefer_swa_params=args.swa_prefer if args.swa_prefer is not None else True,
         stage_loss_factory=_resolve_swa_loss_factory(args, stage_loss_kwargs),
@@ -876,7 +876,8 @@ def run_training(dry_run: bool = False) -> None:
         process_index = getattr(jax, 'process_index', lambda: 0)()
         if process_count > 1:
             interval_length = max(
-                1, (interval_length + process_count - 1 - process_index) // process_count
+                1,
+                (interval_length + process_count - 1 - process_index) // process_count,
             )
         local_device_count = jax.local_device_count()
         if local_device_count > 1:

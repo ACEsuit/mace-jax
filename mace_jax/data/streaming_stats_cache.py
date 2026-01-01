@@ -22,8 +22,6 @@ def stats_cache_path(dataset_path: Path) -> Path:
     return dataset_path.with_name(cache_name)
 
 
-
-
 def dataset_signature(dataset_path: Path) -> dict[str, float]:
     """Compute a lightweight signature used to invalidate cached stats."""
     stat = dataset_path.stat()
@@ -58,9 +56,9 @@ def spec_fingerprint(
         'prefactor_stress': float(spec.prefactor_stress),
         'weight': float(spec.weight),
         'config_type_weights': normalized_config_type_weights(spec.config_type_weights),
-        'remap_stress': spec.remap_stress.tolist()
-        if spec.remap_stress is not None
-        else None,
+        'remap_stress': (
+            spec.remap_stress.tolist() if spec.remap_stress is not None else None
+        ),
         'path': str(Path(spec.path)),
         'r_max': float(r_max),
         'atomic_numbers': [int(z) for z in atomic_numbers],

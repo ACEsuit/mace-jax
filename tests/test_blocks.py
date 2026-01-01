@@ -13,12 +13,8 @@ from mace.modules.blocks import (
 from mace.modules.blocks import (
     LinearNodeEmbeddingBlock as LinearNodeEmbeddingBlockTorch,
 )
-from mace.modules.blocks import (
-    LinearReadoutBlock as LinearReadoutBlockTorch,
-)
-from mace.modules.blocks import (
-    NonLinearReadoutBlock as NonLinearReadoutBlockTorch,
-)
+from mace.modules.blocks import LinearReadoutBlock as LinearReadoutBlockTorch
+from mace.modules.blocks import NonLinearReadoutBlock as NonLinearReadoutBlockTorch
 from mace.modules.blocks import (
     RealAgnosticAttResidualInteractionBlock as RealAgnosticAttResidualInteractionBlockTorch,
 )
@@ -37,9 +33,7 @@ from mace.modules.blocks import (
 from mace.modules.blocks import (
     RealAgnosticResidualNonLinearInteractionBlock as RealAgnosticResidualNonLinearInteractionBlockTorch,
 )
-from mace.modules.wrapper_ops import (
-    CuEquivarianceConfig as CuEquivarianceConfigTorch,
-)
+from mace.modules.wrapper_ops import CuEquivarianceConfig as CuEquivarianceConfigTorch
 
 from mace_jax.adapters.flax.torch import init_from_torch
 from mace_jax.modules.blocks import (
@@ -48,12 +42,8 @@ from mace_jax.modules.blocks import (
 from mace_jax.modules.blocks import (
     LinearNodeEmbeddingBlock as LinearNodeEmbeddingBlockJAX,
 )
-from mace_jax.modules.blocks import (
-    LinearReadoutBlock as LinearReadoutBlockJAX,
-)
-from mace_jax.modules.blocks import (
-    NonLinearReadoutBlock as NonLinearReadoutBlockJAX,
-)
+from mace_jax.modules.blocks import LinearReadoutBlock as LinearReadoutBlockJAX
+from mace_jax.modules.blocks import NonLinearReadoutBlock as NonLinearReadoutBlockJAX
 from mace_jax.modules.blocks import (
     RealAgnosticAttResidualInteractionBlock as RealAgnosticAttResidualInteractionBlockJAX,
 )

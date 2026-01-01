@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import cuequivariance as cue
 import cuequivariance_jax as cuex
 import jax
 import jax.numpy as jnp
@@ -9,7 +10,6 @@ from e3nn_jax import Irreps  # type: ignore
 from flax import linen as fnn
 from flax.core import freeze, unfreeze
 
-import cuequivariance as cue
 from mace_jax.adapters.flax.torch import auto_import_from_torch_flax
 from mace_jax.tools.cg import O3_e3nn
 from mace_jax.tools.scatter import scatter_sum

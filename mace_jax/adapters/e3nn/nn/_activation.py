@@ -77,7 +77,9 @@ class Activation:
                 register_normalize2mom_const(orig or jax_act or act, const)
             use_norm = normalize_act or const is not None
             if use_norm:
-                processed_acts.append(normalize2mom(jax_act) if jax_act is not None else None)
+                processed_acts.append(
+                    normalize2mom(jax_act) if jax_act is not None else None
+                )
             else:
                 processed_acts.append(jax_act)
 

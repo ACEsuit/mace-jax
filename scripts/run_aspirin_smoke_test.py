@@ -42,16 +42,72 @@ def _normalize_optional(value: str | None) -> str | None:
     return stripped
 
 
-def _optional_path(
-    value: str | None, *, ensure_exists: bool = False, label: str = 'dataset'
-) -> str:
-    normalized = _normalize_optional(value)
-    if normalized is None:
+def _optional_binding_path(path: Path | None) -> str:
+    if path is None:
         return 'None'
-    path = Path(normalized)
-    if ensure_exists:
-        _ensure_exists(path, label)
     return _quote_string(path)
+
+
+def _is_hdf5_path(path: Path) -> bool:
+    if path.is_dir():
+        return any(
+            child.is_file() and child.suffix.lower() in ('.h5', '.hdf5')
+            for child in path.iterdir()
+        )
+    return path.suffix.lower() in ('.h5', '.hdf5')
+
+
+def _is_xyz_path(path: Path) -> bool:
+    lowered = path.name.lower()
+    return lowered.endswith('.xyz') or lowered.endswith('.xyz.gz')
+
+
+def _hdf5_cache_path(source: Path, cache_dir: Path | None) -> Path:
+    lowered = source.name.lower()
+    if lowered.endswith('.xyz.gz'):
+        stem = source.name[:-7]
+    elif lowered.endswith('.xyz'):
+        stem = source.name[:-4]
+    else:
+        stem = source.stem
+    target_dir = cache_dir if cache_dir is not None else source.parent
+    return target_dir / f'{stem}.h5'
+
+
+def _convert_xyz_to_hdf5(source: Path, target: Path) -> None:
+    import h5py
+
+    from mace_jax.data import utils as data_utils
+
+    _, configs = data_utils.load_from_xyz(source.as_posix())
+    if not configs:
+        raise ValueError(f'No configurations found in {source}')
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(target, 'w') as handle:
+        handle.attrs['drop_last'] = False
+        data_utils.save_configurations_as_HDF5(configs, 0, handle)
+
+
+def _maybe_convert_dataset(path: Path, *, cache_dir: Path | None, label: str) -> Path:
+    if _is_hdf5_path(path):
+        return path
+    if path.is_dir():
+        raise ValueError(
+            f"{label} dataset directory '{path}' does not contain HDF5 files."
+        )
+    if not _is_xyz_path(path):
+        raise ValueError(f"{label} dataset '{path}' must be HDF5 (.h5/.hdf5) or XYZ.")
+    target = _hdf5_cache_path(path, cache_dir)
+    if target.exists():
+        try:
+            if target.stat().st_mtime >= path.stat().st_mtime:
+                logging.info('Using cached HDF5 %s dataset: %s', label, target)
+                return target
+        except OSError:
+            pass
+    logging.info('Converting %s dataset to HDF5: %s -> %s', label, path, target)
+    _convert_xyz_to_hdf5(path, target)
+    return target
 
 
 def main() -> None:
@@ -80,6 +136,14 @@ def main() -> None:
         '--test-path',
         default=None,
         help="Optional test dataset. Defaults to 'None' (no test set).",
+    )
+    parser.add_argument(
+        '--hdf5-cache-dir',
+        default=None,
+        help=(
+            'Optional directory to store auto-converted HDF5 datasets. '
+            'Defaults to the source dataset directory.'
+        ),
     )
     parser.add_argument(
         '--log-dir',
@@ -139,14 +203,34 @@ def main() -> None:
     from mace_jax.cli import mace_jax_train
 
     config_path = _ensure_exists(Path(args.config), 'Gin config')
+    cache_dir = Path(args.hdf5_cache_dir) if args.hdf5_cache_dir else None
     train_path = _ensure_exists(Path(args.train_path), 'Training dataset')
+    train_path = _maybe_convert_dataset(
+        train_path, cache_dir=cache_dir, label='training'
+    )
+    valid_path: Path | None
+    valid_value = _normalize_optional(args.valid_path)
+    if valid_value is None:
+        valid_path = None
+    else:
+        valid_path = _ensure_exists(Path(valid_value), 'Validation dataset')
+        valid_path = _maybe_convert_dataset(
+            valid_path, cache_dir=cache_dir, label='validation'
+        )
+    test_path: Path | None
+    test_value = _normalize_optional(args.test_path)
+    if test_value is None:
+        test_path = None
+    else:
+        test_path = _ensure_exists(Path(test_value), 'Test dataset')
+        test_path = _maybe_convert_dataset(test_path, cache_dir=cache_dir, label='test')
 
     cli_args: list[str] = [str(config_path)]
 
     bindings = [
         f'mace_jax.tools.gin_datasets.datasets.train_path={_quote_string(train_path)}',
-        f'mace_jax.tools.gin_datasets.datasets.valid_path={_optional_path(args.valid_path, ensure_exists=True, label="validation dataset")}',
-        f'mace_jax.tools.gin_datasets.datasets.test_path={_optional_path(args.test_path, ensure_exists=True, label="test dataset")}',
+        f'mace_jax.tools.gin_datasets.datasets.valid_path={_optional_binding_path(valid_path)}',
+        f'mace_jax.tools.gin_datasets.datasets.test_path={_optional_binding_path(test_path)}',
         f'mace_jax.tools.gin_functions.flags.seed={args.seed}',
         f'mace_jax.tools.gin_functions.optimizer.max_epochs={args.max_epochs}',
     ]
@@ -161,9 +245,7 @@ def main() -> None:
 
     if args.batch_max_edges is not None:
         limit = _format_batch_limit(args.batch_max_edges)
-        bindings.append(
-            f'mace_jax.tools.gin_datasets.datasets.n_edge={limit}'
-        )
+        bindings.append(f'mace_jax.tools.gin_datasets.datasets.n_edge={limit}')
 
     if args.log_dir is not None:
         bindings.append(
