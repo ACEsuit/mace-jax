@@ -142,6 +142,28 @@ Additional convenience flags let you adjust common gin settings directly from th
 - `--r-max VALUE`: synchronise the cutoff used in both dataset construction and model definition.
   For streaming datasets, `--batch-max-edges` (or `n_edge` in gin) sets the edge cap.
 
+##### cuequivariance (cueq) / conv_fusion
+
+MACE-JAX exposes cuequivariance with CLI flags that mirror the Torch interface:
+
+```sh
+# Enable cueq + conv_fusion (similar to mace --enable_cueq).
+mace-jax-train configs/aspirin_small.gin --enable_cueq
+
+# cueq-only style (similar to mace --only_cueq): force cueq backend + optimizations.
+mace-jax-train configs/aspirin_small.gin --only_cueq
+```
+
+Notes:
+- `conv_fusion` is enabled automatically when CUDA is detected.
+- You can still override `CuEquivarianceConfig` via `--binding` if you need custom
+  layout/group settings.
+ - `--cueq-optimize-all/--no-cueq-optimize-all` and
+   `--cueq-conv-fusion/--no-cueq-conv-fusion` provide direct CLI control over
+   these settings.
+ - `--cueq-layout {mul_ir,ir_mul}` and `--cueq-group {O3,O3_e3nn}` mirror the
+   Torch defaults (use `ir_mul`/`O3_e3nn` for `--only_cueq`).
+
 For instance, fine-tuning a Torch foundation model against a new dataset can be done with:
 
 ```sh

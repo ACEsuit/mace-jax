@@ -59,6 +59,56 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
         help='Preferred JAX platform for execution.',
     )
     parser.add_argument(
+        '--enable-cueq',
+        '--enable_cueq',
+        action='store_true',
+        help='Enable cuequivariance acceleration.',
+    )
+    parser.add_argument(
+        '--only-cueq',
+        '--only_cueq',
+        action='store_true',
+        help='Force the cuequivariance backend for model operations.',
+    )
+    parser.add_argument(
+        '--cueq-optimize-all',
+        dest='cueq_optimize_all',
+        action='store_true',
+        default=None,
+        help='Enable all cueq optimizations.',
+    )
+    parser.add_argument(
+        '--no-cueq-optimize-all',
+        dest='cueq_optimize_all',
+        action='store_false',
+        help='Disable cueq optimizations.',
+    )
+    parser.add_argument(
+        '--cueq-conv-fusion',
+        dest='cueq_conv_fusion',
+        action='store_true',
+        default=None,
+        help='Enable cueq conv_fusion.',
+    )
+    parser.add_argument(
+        '--no-cueq-conv-fusion',
+        dest='cueq_conv_fusion',
+        action='store_false',
+        help='Disable cueq conv_fusion.',
+    )
+    parser.add_argument(
+        '--cueq-layout',
+        choices=['mul_ir', 'ir_mul'],
+        default=None,
+        help='Select cueq layout (mul_ir or ir_mul).',
+    )
+    parser.add_argument(
+        '--cueq-group',
+        choices=['O3', 'O3_e3nn'],
+        default=None,
+        help='Select cueq group (O3 or O3_e3nn).',
+    )
+    parser.add_argument(
         '--distributed',
         action='store_true',
         help='Initialize jax.distributed for multi-process training.',
