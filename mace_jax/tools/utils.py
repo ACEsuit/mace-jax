@@ -321,6 +321,7 @@ def setup_logger(
     filename: str | None = None,
     directory: str | None = None,
     name: str | None = None,
+    stream: bool = True,
 ):
     logger = logging.getLogger()
     logger.setLevel(level)
@@ -334,9 +335,10 @@ def setup_logger(
         fmt = f'{name} {fmt}'
     formatter = logging.Formatter(fmt, datefmt='%Y-%m-%d %H:%M:%S')
 
-    ch = logging.StreamHandler(stream=sys.stdout)
-    ch.setFormatter(formatter)
-    logger.addHandler(ch)
+    if stream:
+        ch = logging.StreamHandler(stream=sys.stdout)
+        ch.setFormatter(formatter)
+        logger.addHandler(ch)
 
     if (directory is not None) and (filename is not None):
         os.makedirs(name=directory, exist_ok=True)

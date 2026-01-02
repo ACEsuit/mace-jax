@@ -64,6 +64,15 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
         help='Initialize jax.distributed for multi-process training.',
     )
     parser.add_argument(
+        '--launcher',
+        choices=['none', 'local', 'auto'],
+        default='auto',
+        help=(
+            'Launch strategy for distributed training. '
+            'auto enables local multi-process when multiple GPUs are visible.'
+        ),
+    )
+    parser.add_argument(
         '--process-count',
         '--process_count',
         type=int,

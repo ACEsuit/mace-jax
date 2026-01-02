@@ -187,9 +187,23 @@ mace-jax-train configs/finetune.gin \
   (optionally with `--force_mh_ft_lr`): learning rate/EMA defaults are adjusted
   automatically when combined with `--foundation_model`, so migrating scripts
   can keep the same behaviour.
-- **Distributed training** is enabled via `--device` (e.g. `cuda`/`cpu`) together with
-  `--distributed`, `--process-count`, `--process-index`, and optional
-  `--coordinator-address/--coordinator-port`. When these flags are provided the CLI
+- **Distributed training** can run multi-process on a single node or across hosts.
+  For single-node multi-GPU runs, the default `--launcher auto` will start one process
+  per visible GPU and enable `jax.distributed` automatically when more than one GPU is
+  visible. Use `CUDA_VISIBLE_DEVICES` to restrict which GPUs are used, or pass
+  `--launcher none` to force single-process mode.
+
+  ```sh
+  # Single node, two GPUs (auto spawns 2 processes).
+  CUDA_VISIBLE_DEVICES=0,1 \
+  mace-jax-train configs/aspirin_small.gin \
+    --device cuda \
+    --launcher auto
+  ```
+
+  For multi-host launches you still need to provide `--distributed` plus the
+  process topology (`--process-count`, `--process-index`, and optional
+  `--coordinator-address/--coordinator-port`). When distributed is enabled the CLI
   initialises `jax.distributed`, shards the training/validation/test datasets per
   process with deterministic per-epoch shuffles, and only writes logs/checkpoints from
   rank 0. Environment variables such as `JAX_PROCESS_COUNT`, `JAX_PROCESS_INDEX` or

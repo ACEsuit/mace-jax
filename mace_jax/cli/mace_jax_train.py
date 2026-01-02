@@ -6,11 +6,21 @@ import atexit
 import contextlib
 import json
 import logging
+import os
 import shutil
+import signal
+import subprocess
 import sys
 import tempfile
+import time
+import uuid
 from collections.abc import Sequence
 from pathlib import Path
+
+# Suppress PJRT coordination-service shutdown warnings on exit
+# (WatchJobStateAsync CANCELLED/UNAVAILABLE); must be set before importing JAX.
+os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '2')
+os.environ.setdefault('ABSL_MIN_LOG_LEVEL', '2')
 
 import gin
 import jax
@@ -334,6 +344,232 @@ def _parse_batch_limit_option(value):
             return None
         return int(value)
     return int(value)
+
+
+def _parse_visible_devices() -> list[str] | None:
+    raw = os.environ.get('CUDA_VISIBLE_DEVICES')
+    if not raw:
+        return None
+    devices = [device.strip() for device in raw.split(',') if device.strip()]
+    return devices or None
+
+
+def _infer_gpu_count() -> int | None:
+    visible_devices = _parse_visible_devices()
+    if visible_devices:
+        return len(visible_devices)
+    slurm_gpus = os.environ.get('SLURM_GPUS_ON_NODE')
+    if slurm_gpus:
+        try:
+            return int(slurm_gpus)
+        except ValueError:
+            pass
+    try:
+        return sum(
+            1 for dev in jax.devices() if dev.platform in {'cuda', 'gpu', 'rocm'}
+        )
+    except Exception:
+        return None
+
+
+def _infer_process_count(args: argparse.Namespace) -> int | None:
+    if args.process_count is not None:
+        return args.process_count
+    env_count = os.environ.get('JAX_PROCESS_COUNT')
+    if env_count:
+        try:
+            return int(env_count)
+        except ValueError:
+            pass
+    visible_devices = _parse_visible_devices()
+    if visible_devices:
+        return len(visible_devices)
+    slurm_gpus = os.environ.get('SLURM_GPUS_ON_NODE')
+    if slurm_gpus:
+        try:
+            return int(slurm_gpus)
+        except ValueError:
+            pass
+    try:
+        return jax.local_device_count()
+    except Exception:
+        return None
+
+
+def _resolve_coordinator_address(args: argparse.Namespace) -> str:
+    address = args.coordinator_address or os.environ.get('JAX_COORDINATOR_ADDRESS')
+    port = args.coordinator_port or 12345
+    if address:
+        if ':' in address:
+            return address
+        return f'{address}:{port}'
+    return f'127.0.0.1:{port}'
+
+
+def _ensure_shared_run_name(args: argparse.Namespace, child_argv: list[str]) -> None:
+    if args.name is not None:
+        return
+    for arg in child_argv:
+        if arg == '--name' or arg.startswith('--name='):
+            return
+    from unique_names_generator import get_random_name  # noqa: PLC0415
+    from unique_names_generator.data import ADJECTIVES, NAMES  # noqa: PLC0415
+
+    shared_name = get_random_name(
+        separator='-', style='lowercase', combo=[ADJECTIVES, NAMES]
+    )
+    child_argv.extend(['--name', shared_name])
+
+
+def _launch_local_processes(args: argparse.Namespace) -> int | None:
+    launcher = getattr(args, 'launcher', 'none')
+    auto = launcher == 'auto'
+    if launcher not in {'local', 'auto'}:
+        return None
+    if (
+        args.process_index is not None
+        or os.environ.get('JAX_PROCESS_INDEX') is not None
+    ):
+        return None
+    if auto and not getattr(args, 'distributed', False):
+        device = getattr(args, 'device', None)
+        if device and device.lower() in {'cpu', 'tpu'}:
+            return None
+        gpu_count = _infer_gpu_count()
+        if gpu_count is None or gpu_count <= 1:
+            return None
+        args.distributed = True
+        if args.process_count is None:
+            args.process_count = gpu_count
+
+    if not getattr(args, 'distributed', False):
+        raise ValueError('Use --distributed together with --launcher local.')
+
+    process_count = _infer_process_count(args)
+    if process_count is None:
+        raise ValueError(
+            'Unable to infer process count. Set --process-count or CUDA_VISIBLE_DEVICES.'
+        )
+    if process_count < 1:
+        raise ValueError(f'Invalid process count: {process_count}.')
+    if process_count == 1:
+        return None
+
+    visible_devices = _parse_visible_devices()
+    if visible_devices and process_count > len(visible_devices):
+        raise ValueError(
+            'process_count exceeds available CUDA_VISIBLE_DEVICES entries.'
+        )
+    if visible_devices is None:
+        device_count = jax.local_device_count()
+        if process_count > device_count:
+            raise ValueError(
+                f'process_count ({process_count}) exceeds visible devices ({device_count}).'
+            )
+
+    coordinator = _resolve_coordinator_address(args)
+    base_env = os.environ.copy()
+    base_env['JAX_PROCESS_COUNT'] = str(process_count)
+    base_env['JAX_COORDINATOR_ADDRESS'] = coordinator
+    base_env['MACE_JAX_LAUNCHED_LOCAL'] = '1'
+    base_env['MACE_JAX_DISTRIBUTED_RUN_ID'] = uuid.uuid4().hex
+    # Suppress PJRT coordination-service shutdown warnings on exit
+    # (WatchJobStateAsync CANCELLED/UNAVAILABLE) seen in local multi-process runs.
+    base_env.setdefault('TF_CPP_MIN_LOG_LEVEL', '2')
+    base_env.setdefault('ABSL_MIN_LOG_LEVEL', '2')
+
+    child_argv = list(sys.argv)
+    if '--distributed' not in child_argv:
+        child_argv.append('--distributed')
+    _ensure_shared_run_name(args, child_argv)
+
+    procs: list[subprocess.Popen] = []
+    previous_handlers = {}
+
+    def _terminate_processes(sig: int, *, force: bool = False) -> None:
+        if not procs:
+            return
+        for proc in procs:
+            if proc.poll() is not None:
+                continue
+            try:
+                if proc.pid:
+                    os.killpg(proc.pid, sig)
+            except Exception:
+                try:
+                    proc.send_signal(sig)
+                except Exception:
+                    pass
+        if force:
+            return
+        deadline = time.time() + 10.0
+        for proc in procs:
+            if proc.poll() is not None:
+                continue
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            try:
+                proc.wait(timeout=remaining)
+            except subprocess.TimeoutExpired:
+                pass
+        for proc in procs:
+            if proc.poll() is not None:
+                continue
+            try:
+                if proc.pid:
+                    os.killpg(proc.pid, signal.SIGKILL)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+
+    def _handle_signal(signum, _frame):
+        _terminate_processes(signum)
+        raise SystemExit(128 + signum)
+
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        previous_handlers[signum] = signal.getsignal(signum)
+        signal.signal(signum, _handle_signal)
+
+    try:
+        for index in range(process_count):
+            env = base_env.copy()
+            env['JAX_PROCESS_INDEX'] = str(index)
+            if visible_devices:
+                env['CUDA_VISIBLE_DEVICES'] = visible_devices[index]
+            else:
+                env['CUDA_VISIBLE_DEVICES'] = str(index)
+            procs.append(
+                subprocess.Popen(
+                    [sys.executable, *child_argv],
+                    env=env,
+                    start_new_session=True,
+                )
+            )
+
+        exit_codes: list[int] = []
+        active = list(procs)
+        while active:
+            for proc in list(active):
+                retcode = proc.poll()
+                if retcode is None:
+                    continue
+                exit_codes.append(retcode)
+                active.remove(proc)
+                if retcode != 0 and active:
+                    _terminate_processes(signal.SIGTERM)
+                    active.clear()
+                    break
+            if active:
+                time.sleep(0.1)
+        _terminate_processes(signal.SIGTERM)
+        return max(exit_codes) if exit_codes else 0
+    finally:
+        _terminate_processes(signal.SIGTERM, force=True)
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
 
 
 def _apply_run_options(args: argparse.Namespace) -> None:
@@ -802,6 +1038,135 @@ def _prepare_foundation_checkpoint(args: argparse.Namespace) -> None:
     _maybe_adjust_multihead_defaults(args)
 
 
+def _write_operative_config(
+    *, directory: str, tag: str, operative_config: str, is_primary: bool
+) -> None:
+    if not is_primary:
+        return
+    config_path = Path(directory) / f'{tag}.gin'
+    with config_path.open('w', encoding='utf-8') as f:
+        f.write(operative_config)
+
+
+def _start_wandb(
+    *,
+    is_primary: bool,
+    tag: str,
+    directory: str,
+    operative_config: str,
+    seed: int,
+):
+    if not is_primary:
+        return None
+    return gin_functions.wandb_run(
+        name=tag,
+        dir=directory,
+        config={
+            'gin_config': operative_config,
+            'mace_jax_version': mace_jax.__version__,
+            'seed': seed,
+        },
+    )
+
+
+def _build_predictor(model_fn, loss_fn):
+    forces_weight = getattr(loss_fn, 'forces_weight', 0.0)
+    stress_weight = getattr(loss_fn, 'stress_weight', 0.0)
+    compute_force = bool(float(forces_weight) != 0.0)
+    compute_stress = bool(float(stress_weight) != 0.0)
+    return jax.jit(
+        lambda w, g: model_fn(
+            w,
+            g,
+            compute_force=compute_force,
+            compute_stress=compute_stress,
+        )
+    )
+
+
+def _estimate_interval_length(train_loader) -> int:
+    interval_length = max(1, int(train_loader.approx_length()))
+    process_count = getattr(jax, 'process_count', lambda: 1)()
+    process_index = getattr(jax, 'process_index', lambda: 0)()
+    if process_count > 1:
+        interval_length = max(
+            1,
+            (interval_length + process_count - 1 - process_index) // process_count,
+        )
+    local_device_count = jax.local_device_count()
+    if local_device_count > 1:
+        interval_length = max(1, interval_length // local_device_count)
+    return interval_length
+
+
+def _init_optimizer_state(params, *, interval_length: int):
+    gradient_transform, max_epochs = gin_functions.optimizer(
+        interval_length=interval_length
+    )
+    params_for_opt, _ = gin_functions._split_config(params)
+    optimizer_state = gradient_transform.init(params_for_opt)
+    return gradient_transform, max_epochs, optimizer_state
+
+
+def _log_param_counts(params, optimizer_state) -> int:
+    num_params = tools.count_parameters(params)
+    num_opt_params = tools.count_parameters(optimizer_state)
+    logging.info('Number of parameters: %s', num_params)
+    logging.info('Number of optimizer parameters: %s', num_opt_params)
+    return num_params
+
+
+def _graph_count(loader) -> int:
+    if loader is None:
+        return 0
+    graphs = getattr(loader, 'graphs', None)
+    if graphs is None:
+        total = getattr(loader, 'total_graphs', None)
+        if total is None:
+            return 0
+        return int(total)
+    return len(graphs)
+
+
+def _log_wandb_dataset_info(
+    *,
+    wandb_run,
+    train_loader,
+    valid_loader,
+    test_loader,
+    num_message_passing: int,
+    num_params: int,
+) -> None:
+    if wandb_run is None:
+        return
+    dataset_info = {
+        'num_train_graphs': _graph_count(train_loader),
+        'num_valid_graphs': _graph_count(valid_loader),
+        'num_test_graphs': _graph_count(test_loader),
+        'num_message_passing': num_message_passing,
+        'num_parameters': num_params,
+    }
+    wandb_run.config.update(dataset_info, allow_val_change=True)
+
+
+def _shutdown_distributed(*, directory: str, tag: str) -> None:
+    distributed = getattr(jax, 'distributed', None)
+    shutdown = getattr(distributed, 'shutdown', None)
+    is_initialized = getattr(distributed, 'is_initialized', None)
+    if not callable(shutdown):
+        return
+    try:
+        if not callable(is_initialized) or is_initialized():
+            process_count = getattr(jax, 'process_count', lambda: 1)()
+            # Avoid jax.distributed.shutdown for local multi-process runs because PJRT
+            # emits coordination-service warnings even after clean training.
+            if process_count > 1 and os.environ.get('MACE_JAX_LAUNCHED_LOCAL') == '1':
+                return
+            shutdown()
+    except Exception:
+        logging.debug('Failed to shutdown JAX distributed runtime', exc_info=True)
+
+
 def run_training(dry_run: bool = False) -> None:
     seed = gin_functions.flags()
     directory, tag, logger = gin_functions.logs()
@@ -810,9 +1175,12 @@ def run_training(dry_run: bool = False) -> None:
 
     Path(directory).mkdir(parents=True, exist_ok=True)
     operative_config = gin.operative_config_str()
-    if is_primary:
-        with open(Path(directory) / f'{tag}.gin', 'w', encoding='utf-8') as f:
-            f.write(operative_config)
+    _write_operative_config(
+        directory=directory,
+        tag=tag,
+        operative_config=operative_config,
+        is_primary=is_primary,
+    )
 
     logging.info('MACE-JAX version: %s', mace_jax.__version__)
 
@@ -832,16 +1200,13 @@ def run_training(dry_run: bool = False) -> None:
             r_max,
         ) = gin_datasets.datasets()
 
-        if is_primary:
-            wandb_run = gin_functions.wandb_run(
-                name=tag,
-                dir=directory,
-                config={
-                    'gin_config': operative_config,
-                    'mace_jax_version': mace_jax.__version__,
-                    'seed': seed,
-                },
-            )
+        wandb_run = _start_wandb(
+            is_primary=is_primary,
+            tag=tag,
+            directory=directory,
+            operative_config=operative_config,
+            seed=seed,
+        )
 
         model_fn, params, num_message_passing = gin_model.model(
             r_max=r_max,
@@ -854,70 +1219,29 @@ def run_training(dry_run: bool = False) -> None:
         params = gin_functions.reload(params)
 
         loss_fn = gin_functions.loss()
-        forces_weight = getattr(loss_fn, 'forces_weight', 0.0)
-        stress_weight = getattr(loss_fn, 'stress_weight', 0.0)
-        compute_force = bool(float(forces_weight) != 0.0)
-        compute_stress = bool(float(stress_weight) != 0.0)
-        predictor = jax.jit(
-            lambda w, g: model_fn(
-                w,
-                g,
-                compute_force=compute_force,
-                compute_stress=compute_stress,
-            )
-        )
+        predictor = _build_predictor(model_fn, loss_fn)
 
         if gin_functions.checks(predictor, params, train_loader):
             logging.info('Checks enabled; exiting after sanity verification.')
             return
 
-        interval_length = max(1, int(train_loader.approx_length()))
-        process_count = getattr(jax, 'process_count', lambda: 1)()
-        process_index = getattr(jax, 'process_index', lambda: 0)()
-        if process_count > 1:
-            interval_length = max(
-                1,
-                (interval_length + process_count - 1 - process_index) // process_count,
-            )
-        local_device_count = jax.local_device_count()
-        if local_device_count > 1:
-            interval_length = max(1, interval_length // local_device_count)
+        interval_length = _estimate_interval_length(train_loader)
         logging.info(
             'Estimated %s batches per epoch from the training loader.',
             interval_length,
         )
-        gradient_transform, max_epochs = gin_functions.optimizer(
-            interval_length=interval_length
+        gradient_transform, max_epochs, optimizer_state = _init_optimizer_state(
+            params, interval_length=interval_length
         )
-        params_for_opt, _ = gin_functions._split_config(params)
-        optimizer_state = gradient_transform.init(params_for_opt)
-
-        num_params = tools.count_parameters(params)
-        num_opt_params = tools.count_parameters(optimizer_state)
-        logging.info('Number of parameters: %s', num_params)
-        logging.info('Number of optimizer parameters: %s', num_opt_params)
-
-        if wandb_run is not None:
-
-            def _graph_count(loader):
-                if loader is None:
-                    return 0
-                graphs = getattr(loader, 'graphs', None)
-                if graphs is None:
-                    total = getattr(loader, 'total_graphs', None)
-                    if total is None:
-                        return 0
-                    return int(total)
-                return len(graphs)
-
-            dataset_info = {
-                'num_train_graphs': _graph_count(train_loader),
-                'num_valid_graphs': _graph_count(valid_loader),
-                'num_test_graphs': _graph_count(test_loader),
-                'num_message_passing': num_message_passing,
-                'num_parameters': num_params,
-            }
-            wandb_run.config.update(dataset_info, allow_val_change=True)
+        num_params = _log_param_counts(params, optimizer_state)
+        _log_wandb_dataset_info(
+            wandb_run=wandb_run,
+            train_loader=train_loader,
+            valid_loader=valid_loader,
+            test_loader=test_loader,
+            num_message_passing=num_message_passing,
+            num_params=num_params,
+        )
 
         gin_functions.train(
             predictor=predictor,
@@ -936,17 +1260,21 @@ def run_training(dry_run: bool = False) -> None:
         )
     finally:
         gin_functions.finish_wandb(wandb_run)
+        _shutdown_distributed(directory=directory, tag=tag)
 
 
 def main(argv: Sequence[str] | None = None) -> None:
     args, remaining = parse_args(argv)
-    configure_gin(args, remaining)
-    apply_cli_overrides(args)
-
-    if args.print_config:
-        logging.info('Operative gin config:\n%s', gin.config_str())
-
     try:
+        exit_code = _launch_local_processes(args)
+        if exit_code is not None:
+            raise SystemExit(exit_code)
+        configure_gin(args, remaining)
+        apply_cli_overrides(args)
+
+        if args.print_config:
+            logging.info('Operative gin config:\n%s', gin.config_str())
+
         run_training(dry_run=args.dry_run)
     except ValueError as exc:
         logging.error(str(exc))

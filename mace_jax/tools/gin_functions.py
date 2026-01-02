@@ -464,7 +464,11 @@ def logs(
     suffix = f'.rank{process_index}' if process_index else ''
 
     tools.setup_logger(
-        level, directory=directory, filename=f'{tag}{suffix}.log', name=name
+        level,
+        directory=directory,
+        filename=f'{tag}{suffix}.log',
+        name=name,
+        stream=process_index == 0,
     )
     logger = tools.MetricsLogger(directory=directory, filename=f'{tag}{suffix}.metrics')
 
@@ -1419,6 +1423,12 @@ def train(
 
         if stop_after_epoch or last_epoch:
             break
+
+    if process_count > 1:
+        try:
+            multihost_utils.sync_global_devices('mace_jax_train_complete')
+        except Exception as exc:  # pragma: no cover - best effort barrier
+            _log_info('Failed to sync processes at shutdown: %s', exc)
 
     _log_info('Training complete')
     return epoch, _attach_config(eval_params, static_config)

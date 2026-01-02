@@ -518,7 +518,8 @@ def train(
 
     logging.info('Started training')
 
-    local_device_count = max(1, jax.local_device_count())
+    local_devices = jax.local_devices()
+    local_device_count = max(1, len(local_devices))
 
     def _prepare_graph_for_devices(graph: jraph.GraphsTuple):
         """Ensure `graph` has a leading axis matching local device count.
@@ -548,7 +549,13 @@ def train(
             )
         return graph
 
-    @partial(jax.pmap, in_axes=(None, 0), out_axes=None, axis_name='devices')
+    @partial(
+        jax.pmap,
+        in_axes=(None, 0),
+        out_axes=None,
+        axis_name='devices',
+        devices=local_devices,
+    )
     def grad_fn(params, graph: jraph.GraphsTuple):
         """Compute per-device loss and gradients for a sharded batch."""
         # graph is assumed to be padded by jraph.pad_with_graphs
@@ -677,20 +684,16 @@ def train(
         if device_prefetch_active:
             source_iter = epoch_batches_iter
 
-            def _prepared_iter(source_iter=source_iter):
-                """Yield device-prepared graphs with host padding stats."""
-                for graph in source_iter:
-                    yield _prepare_graph_for_devices(graph), _padding_amounts(graph)
-
-            def _device_put(item):
-                """Move prepared graphs to device while preserving stats."""
-                graph, padding = item
+            def _device_put(graph):
+                """Prepare/pad and move graphs to device while preserving stats."""
+                padding = _padding_amounts(graph)
+                graph = _prepare_graph_for_devices(graph)
                 if local_device_count <= 1:
                     graph = jax.device_put(graph)
                 return graph, padding
 
             epoch_batches_iter = _prefetch_to_device(
-                _prepared_iter(), device_prefetch_cap, _device_put
+                source_iter, device_prefetch_cap, _device_put
             )
         p_bar = tqdm.tqdm(
             total=effective_steps,
@@ -832,9 +835,11 @@ def evaluate(
         'graph_cap': 0,
     }
 
-    local_device_count = max(1, jax.local_device_count())
+    local_devices = jax.local_devices()
+    local_device_count = max(1, len(local_devices))
     process_index = getattr(jax, 'process_index', lambda: 0)()
     process_count = getattr(jax, 'process_count', lambda: 1)()
+    is_primary = process_index == 0
     iterator = data_loader.iter_batches(
         epoch=0,
         seed=None,
@@ -880,7 +885,13 @@ def evaluate(
             is_leaf=lambda x: x is None,
         )
 
-    @partial(jax.pmap, in_axes=(None, 0), out_axes=0, axis_name='devices')
+    @partial(
+        jax.pmap,
+        in_axes=(None, 0),
+        out_axes=0,
+        axis_name='devices',
+        devices=local_devices,
+    )
     def _eval_step(params_, graph):
         """Run the predictor and compute per-batch metric stats on devices."""
         output = predictor(params_, graph)
@@ -987,27 +998,23 @@ def evaluate(
     if device_prefetch_active:
         source_iter = eval_iterator
 
-        def _prepared_iter(source_iter=source_iter):
-            """Yield device-prepared graphs with host padding stats."""
-            for graph in source_iter:
-                yield _prepare_graph_for_devices(graph), _padding_amounts(graph)
-
-        def _device_put(item):
-            """Move prepared graphs to device while preserving stats."""
-            graph, padding = item
+        def _device_put(graph):
+            """Prepare/pad and move graphs to device while preserving stats."""
+            padding = _padding_amounts(graph)
+            graph = _prepare_graph_for_devices(graph)
             if local_device_count <= 1:
                 graph = jax.device_put(graph)
             return graph, padding
 
         eval_iterator = _prefetch_to_device(
-            _prepared_iter(), device_prefetch_cap, _device_put
+            source_iter, device_prefetch_cap, _device_put
         )
 
     p_bar = tqdm.tqdm(
         eval_iterator,
         desc=name,
         total=total_hint,
-        disable=not progress_bar,
+        disable=not (progress_bar and is_primary),
     )
 
     for item in p_bar:
