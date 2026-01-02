@@ -86,6 +86,7 @@ class SymmetricContraction(fnn.Module):
     num_elements: int
     use_reduced_cg: bool = True
     input_layout: str = 'mul_ir'
+    group: object = cue.O3
 
     def setup(self) -> None:
         """Validate configuration and construct the cuEquivariance descriptor.
@@ -118,8 +119,8 @@ class SymmetricContraction(fnn.Module):
             )
         self.mul = next(iter(muls_in))
 
-        self.irreps_in_cue = cue.Irreps(cue.O3, irreps_in_o3)
-        self.irreps_out_cue = cue.Irreps(cue.O3, irreps_out_o3)
+        self.irreps_in_cue = cue.Irreps(self.group, irreps_in_o3)
+        self.irreps_out_cue = cue.Irreps(self.group, irreps_out_o3)
         self.feature_dim = sum(ir.dim for _, ir in irreps_in_o3)
         self.irreps_in_cue_base = self.irreps_in_cue.set_mul(1)
         self.irreps_out_dim = irreps_out_o3.dim
@@ -395,8 +396,13 @@ def _select_weights(
     selector = jnp.asarray(selector)
     if selector.ndim == 1:
         idx = selector.astype(jnp.int32)
-        if jnp.any(idx < 0) or jnp.any(idx >= num_elements):
-            raise ValueError('indices out of range for the available elements')
+        invalid = jnp.any(idx < 0) | jnp.any(idx >= num_elements)
+
+        def _raise(_):
+            jax.debug.callback(_raise_invalid_indices, jnp.int32(0))
+            return jnp.int32(0)
+
+        jax.lax.cond(invalid, _raise, lambda _: jnp.int32(0), operand=jnp.int32(0))
         return weight_flat[idx]
 
     if selector.ndim == 2:
@@ -406,6 +412,10 @@ def _select_weights(
         return mix @ weight_flat
 
     raise ValueError('indices must be rank-1 (element ids) or rank-2 (mixing matrix)')
+
+
+def _raise_invalid_indices(_: jnp.ndarray) -> None:
+    raise ValueError('indices out of range for the available elements')
 
 
 ## Import functions

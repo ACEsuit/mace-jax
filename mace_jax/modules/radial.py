@@ -175,10 +175,15 @@ class ZBLBasis(fnn.Module):
         node_attrs: jnp.ndarray,
         edge_index: jnp.ndarray,
         atomic_numbers: jnp.ndarray,
+        node_attrs_index: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
         sender, receiver = edge_index
 
-        node_atomic_numbers = atomic_numbers[jnp.argmax(node_attrs, axis=1)][..., None]
+        if node_attrs_index is None:
+            node_attrs_index = jnp.argmax(node_attrs, axis=1)
+        node_atomic_numbers = atomic_numbers[
+            jnp.asarray(node_attrs_index, dtype=jnp.int32).reshape(-1)
+        ][..., None]
         Z_u = node_atomic_numbers[sender].astype(jnp.int32)
         Z_v = node_atomic_numbers[receiver].astype(jnp.int32)
 
@@ -249,10 +254,15 @@ class AgnesiTransform(fnn.Module):
         node_attrs: jnp.ndarray,
         edge_index: jnp.ndarray,
         atomic_numbers: jnp.ndarray,
+        node_attrs_index: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
         sender, receiver = edge_index
 
-        node_atomic_numbers = atomic_numbers[jnp.argmax(node_attrs, axis=1)][..., None]
+        if node_attrs_index is None:
+            node_attrs_index = jnp.argmax(node_attrs, axis=1)
+        node_atomic_numbers = atomic_numbers[
+            jnp.asarray(node_attrs_index, dtype=jnp.int32).reshape(-1)
+        ][..., None]
         Z_u = node_atomic_numbers[sender].astype(jnp.int32)
         Z_v = node_atomic_numbers[receiver].astype(jnp.int32)
 
@@ -299,11 +309,14 @@ class SoftTransform(fnn.Module):
         node_attrs: jnp.ndarray,
         edge_index: jnp.ndarray,
         atomic_numbers: jnp.ndarray,
+        node_attrs_index: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
         sender, receiver = edge_index
-        node_atomic_numbers = atomic_numbers[jnp.argmax(node_attrs, axis=1)].reshape(
-            -1, 1
-        )
+        if node_attrs_index is None:
+            node_attrs_index = jnp.argmax(node_attrs, axis=1)
+        node_atomic_numbers = atomic_numbers[
+            jnp.asarray(node_attrs_index, dtype=jnp.int32).reshape(-1)
+        ].reshape(-1, 1)
         Z_u = node_atomic_numbers[sender].astype(jnp.int32)
         Z_v = node_atomic_numbers[receiver].astype(jnp.int32)
         return self._covalent_radii[Z_u] + self._covalent_radii[Z_v]
@@ -315,9 +328,12 @@ class SoftTransform(fnn.Module):
         node_attrs: jnp.ndarray,
         edge_index: jnp.ndarray,
         atomic_numbers: jnp.ndarray,
+        node_attrs_index: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
         dtype = x.dtype
-        r_0 = self.compute_r_0(node_attrs, edge_index, atomic_numbers).astype(dtype)
+        r_0 = self.compute_r_0(
+            node_attrs, edge_index, atomic_numbers, node_attrs_index=node_attrs_index
+        ).astype(dtype)
         p_0 = (3.0 / 4.0) * r_0
         p_1 = (4.0 / 3.0) * r_0
         m = 0.5 * (p_0 + p_1)

@@ -3,6 +3,7 @@ import importlib
 import cuequivariance as cue
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 from e3nn_jax import Irreps  # type: ignore
 
@@ -237,3 +238,106 @@ class TestWrapperBlockConvFusion:
             assert fused_method == baseline_method == 'naive'
         assert fused_out.shape == baseline_out.shape
         assert jnp.allclose(fused_out, baseline_out, rtol=1e-5, atol=1e-6)
+
+
+class TestConvFusionTorchParity:
+    def test_tensor_product_matches_torch(self):
+        import torch
+        from mace.modules.wrapper_ops import (
+            CuEquivarianceConfig as TorchCuEquivarianceConfig,
+        )
+        from mace.modules.wrapper_ops import TensorProduct as TorchTensorProduct
+
+        if not torch.cuda.is_available():
+            pytest.skip('Torch CUDA is required for conv_fusion parity.')
+        if not any(device.platform == 'gpu' for device in jax.devices()):
+            pytest.skip('JAX GPU backend is required for conv_fusion parity.')
+
+        irreps = Irreps('1x0e')
+        num_nodes = 3
+        num_edges = 4
+        edge_index = np.array([[0, 1, 2, 1], [1, 2, 0, 1]], dtype=np.int32)
+
+        torch_config = TorchCuEquivarianceConfig(
+            enabled=True,
+            optimize_channelwise=True,
+            conv_fusion=True,
+            layout='mul_ir',
+        )
+        torch_module = TorchTensorProduct(
+            irreps,
+            irreps,
+            irreps,
+            shared_weights=True,
+            internal_weights=False,
+            cueq_config=torch_config,
+        )
+        torch_module.eval()
+
+        weight_numel = int(getattr(torch_module, 'weight_numel', _WEIGHT_NUMEL))
+        assert weight_numel == _WEIGHT_NUMEL
+
+        rng = np.random.default_rng(0)
+        node_feats = rng.normal(size=(num_nodes, irreps.dim)).astype(np.float32)
+        edge_attrs = rng.normal(size=(num_edges, irreps.dim)).astype(np.float32)
+        weights = rng.normal(size=(num_edges, weight_numel)).astype(np.float32)
+
+        torch_out = torch_module(
+            torch.tensor(node_feats),
+            torch.tensor(edge_attrs),
+            torch.tensor(weights),
+            torch.tensor(edge_index, dtype=torch.int64),
+        )
+        torch_out = torch_out.detach().cpu().numpy()
+
+        jax_config = CuEquivarianceConfig(
+            enabled=True,
+            optimize_channelwise=True,
+            conv_fusion=True,
+            layout='mul_ir',
+        )
+        jax_module = TensorProduct(
+            irreps,
+            irreps,
+            irreps,
+            shared_weights=True,
+            internal_weights=False,
+            cueq_config=jax_config,
+        )
+
+        node_feats_j = jnp.asarray(node_feats)
+        edge_attrs_j = jnp.asarray(edge_attrs)
+        weights_j = jnp.asarray(weights)
+        edge_index_j = jnp.asarray(edge_index)
+
+        variables = jax_module.init(
+            jax.random.PRNGKey(0),
+            node_feats_j,
+            edge_attrs_j,
+            weights_j,
+            edge_index=edge_index_j,
+        )
+
+        def _apply_with_method(mdl, x1, x2, w, edge_index):
+            out = mdl(x1, x2, w, edge_index=edge_index)
+            return out, mdl._conv_method
+
+        jax_out, method = jax_module.apply(
+            variables,
+            node_feats_j,
+            edge_attrs_j,
+            weights_j,
+            edge_index=edge_index_j,
+            method=_apply_with_method,
+        )
+
+        if method != 'uniform_1d':
+            pytest.skip('JAX conv_fusion was not selected for this configuration.')
+
+        assert torch_out.shape == jax_out.shape
+        np.testing.assert_allclose(
+            np.array(jax_out),
+            torch_out,
+            rtol=1e-5,
+            atol=1e-6,
+        )

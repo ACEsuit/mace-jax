@@ -20,6 +20,7 @@ import numpy as np
 
 from mace_jax import data, modules, tools
 from mace_jax.modules.blocks import RealAgnosticResidualInteractionBlock
+from mace_jax.modules.wrapper_ops import CuEquivarianceConfig
 from mace_jax.tools.dtype import default_dtype
 
 gin.register(jax.nn.silu)
@@ -31,6 +32,19 @@ gin.register('identity')(lambda x: x)
 
 gin.register('std_scaling')(tools.compute_mean_std_atomic_inter_energy)
 gin.register('rms_forces_scaling')(tools.compute_mean_rms_energy_forces)
+gin.external_configurable(CuEquivarianceConfig)
+
+
+def _resolve_cueq_config(cueq_config):
+    if cueq_config is None:
+        return None
+    if isinstance(cueq_config, CuEquivarianceConfig):
+        return cueq_config
+    if isinstance(cueq_config, dict):
+        return CuEquivarianceConfig(**cueq_config)
+    if callable(cueq_config):
+        return cueq_config()
+    return cueq_config
 
 
 @gin.configurable
@@ -153,6 +167,7 @@ def _graph_to_data(
         dtype=positions.dtype,
     )
     node_attrs = node_attrs * node_mask[:, None]
+    node_attrs_index = jnp.argmax(node_attrs, axis=1).astype(jnp.int32)
 
     # Batch indices and pointer array defining graph segment boundaries.
     graph_indices = jnp.arange(graph.n_node.shape[0], dtype=jnp.int32)
@@ -170,6 +185,7 @@ def _graph_to_data(
     data_dict: dict[str, jnp.ndarray] = {
         'positions': positions,
         'node_attrs': node_attrs,
+        'node_attrs_index': node_attrs_index,
         'edge_index': jnp.stack([senders, receivers], axis=0),
         'shifts': shifts,
         'batch': batch,
@@ -213,6 +229,7 @@ def model(
     torch_checkpoint: str | None = None,
     torch_head: str | None = None,
     torch_param_dtype: str | None = None,
+    cueq_config=None,
     **kwargs,
 ):
     """Construct a MACE model and return an apply function plus initial params.
@@ -242,6 +259,7 @@ def model(
         torch_checkpoint: Optional Torch checkpoint path to convert and wrap.
         torch_head: Optional head name to select from Torch multi-head models.
         torch_param_dtype: Optional dtype override ('float32' or 'float64') for Torch params.
+        cueq_config: Optional CuEquivarianceConfig to enable cueq acceleration paths.
         **kwargs: Remaining MACE module constructor arguments.
 
     Returns:
@@ -509,6 +527,10 @@ def model(
         raise NotImplementedError(
             'learnable_atomic_energies is not supported by the Flax-based gin model.'
         )
+
+    cueq_config = _resolve_cueq_config(cueq_config)
+    if cueq_config is not None:
+        kwargs['cueq_config'] = cueq_config
 
     kwargs.update(
         dict(

@@ -382,7 +382,8 @@ class MACE(fnn.Module):
         *,
         lammps_mliap: bool = False,
         lammps_class: Any | None = None,
-    ) -> dict[str, jnp.ndarray]:
+        compute_node_feats: bool = True,
+    ) -> dict[str, jnp.ndarray | None]:
         ctx = prepare_graph(
             data,
             lammps_mliap=lammps_mliap,
@@ -396,31 +397,54 @@ class MACE(fnn.Module):
         n_real = int(num_atoms_arange.shape[0])
         if lammps_class is not None:
             n_real = int(lammps_natoms[0])
-        node_e0 = self.atomic_energies_fn(data['node_attrs'])[
-            num_atoms_arange, node_heads
-        ]
+        node_attrs = data['node_attrs']
+        need_node_attrs_index = self.pair_repulsion or self.distance_transform in {
+            'Agnesi',
+            'Soft',
+        }
+        if self.cueq_config is not None and getattr(self.cueq_config, 'enabled', False):
+            need_node_attrs_index = need_node_attrs_index or bool(
+                getattr(self.cueq_config, 'optimize_all', False)
+                or getattr(self.cueq_config, 'optimize_symmetric', False)
+            )
+        node_attrs_index = data.get('node_attrs_index')
+        if node_attrs_index is None:
+            node_attrs_index = data.get('node_type')
+        if node_attrs_index is None:
+            node_attrs_index = data.get('species')
+        if node_attrs_index is not None and getattr(node_attrs_index, 'ndim', 1) != 1:
+            node_attrs_index = None
+        if node_attrs_index is None and need_node_attrs_index:
+            node_attrs_index = jnp.argmax(node_attrs, axis=1)
+        if node_attrs_index is not None:
+            node_attrs_index = jnp.asarray(node_attrs_index, dtype=jnp.int32)
+
+        node_e0 = self.atomic_energies_fn(node_attrs)[num_atoms_arange, node_heads]
         e0 = scatter_sum(
             src=node_e0,
             index=data['batch'],
             dim=0,
             dim_size=ctx.num_graphs,
+            indices_are_sorted=True,
         ).astype(ctx.vectors.dtype)
 
-        node_feats = self.node_embedding(data['node_attrs'])
+        node_feats = self.node_embedding(node_attrs)
         edge_attrs = self.spherical_harmonics(ctx.vectors)
         edge_feats, cutoff = self.radial_embedding(
             ctx.lengths,
-            data['node_attrs'],
+            node_attrs,
             data['edge_index'],
             self._atomic_numbers,
+            node_attrs_index=node_attrs_index,
         )
 
         if self.pair_repulsion:
             pair_node_energy = self.pair_repulsion_fn(
                 ctx.lengths,
-                data['node_attrs'],
+                node_attrs,
                 data['edge_index'],
                 self._atomic_numbers,
+                node_attrs_index=node_attrs_index,
             )
             if lammps_class is not None:
                 pair_node_energy = pair_node_energy[:n_real]
@@ -429,6 +453,7 @@ class MACE(fnn.Module):
                 index=data['batch'],
                 dim=-1,
                 dim_size=ctx.num_graphs,
+                indices_are_sorted=True,
             )
         else:
             pair_node_energy = jnp.zeros_like(node_e0)
@@ -446,6 +471,7 @@ class MACE(fnn.Module):
                     index=data['batch'],
                     dim=0,
                     dim_size=ctx.num_graphs,
+                    indices_are_sorted=True,
                 )
                 e0 += embedding_energy
 
@@ -453,7 +479,8 @@ class MACE(fnn.Module):
         node_energies_list = [node_e0, pair_node_energy]
         node_feats_concat: list[jnp.ndarray] = []
 
-        node_attrs_full = data['node_attrs']
+        node_attrs_full = node_attrs
+        node_attrs_index_full = node_attrs_index
 
         for idx, (interaction, product) in enumerate(
             zip(self.interactions, self.products)
@@ -464,8 +491,11 @@ class MACE(fnn.Module):
                 )
 
             node_attrs_slice = node_attrs_full
+            node_attrs_index_slice = node_attrs_index_full
             if lammps_class is not None and idx > 0:
                 node_attrs_slice = node_attrs_slice[:n_real]
+                if node_attrs_index_slice is not None:
+                    node_attrs_index_slice = node_attrs_index_slice[:n_real]
 
             node_feats, sc = interaction(
                 node_attrs=node_attrs_slice,
@@ -479,10 +509,13 @@ class MACE(fnn.Module):
             )
             if lammps_class is not None and idx == 0:
                 node_attrs_slice = node_attrs_slice[:n_real]
+                if node_attrs_index_slice is not None:
+                    node_attrs_index_slice = node_attrs_index_slice[:n_real]
             node_feats = product(
                 node_feats=node_feats,
                 sc=sc,
                 node_attrs=node_attrs_slice,
+                node_attrs_index=node_attrs_index_slice,
             )
             if lammps_class is not None:
                 node_feats = node_feats[:n_real]
@@ -499,6 +532,7 @@ class MACE(fnn.Module):
                 index=data['batch'],
                 dim=0,
                 dim_size=ctx.num_graphs,
+                indices_are_sorted=True,
             )
             energies.append(energy)
             node_energies_list.append(node_es)
@@ -506,11 +540,13 @@ class MACE(fnn.Module):
         contributions = jnp.stack(energies, axis=-1)
         total_energy = jnp.sum(contributions, axis=-1)
         node_energy = jnp.sum(jnp.stack(node_energies_list, axis=-1), axis=-1)
-        node_feats_out = (
-            jnp.concatenate(node_feats_concat, axis=-1)
-            if node_feats_concat
-            else node_feats
-        )
+        node_feats_out = None
+        if compute_node_feats:
+            node_feats_out = (
+                jnp.concatenate(node_feats_concat, axis=-1)
+                if node_feats_concat
+                else node_feats
+            )
         return {
             'energy': total_energy,
             'node_energy': node_energy,
@@ -541,7 +577,8 @@ class ScaleShiftMACE(MACE):
         *,
         lammps_mliap: bool = False,
         lammps_class: Any | None = None,
-    ) -> dict[str, jnp.ndarray]:
+        compute_node_feats: bool = True,
+    ) -> dict[str, jnp.ndarray | None]:
         ctx = prepare_graph(
             data,
             lammps_mliap=lammps_mliap,
@@ -555,31 +592,54 @@ class ScaleShiftMACE(MACE):
         n_real = int(num_atoms_arange.shape[0])
         if lammps_class is not None:
             n_real = int(lammps_natoms[0])
-        node_e0 = self.atomic_energies_fn(data['node_attrs'])[
-            num_atoms_arange, node_heads
-        ]
+        node_attrs = data['node_attrs']
+        need_node_attrs_index = self.pair_repulsion or self.distance_transform in {
+            'Agnesi',
+            'Soft',
+        }
+        if self.cueq_config is not None and getattr(self.cueq_config, 'enabled', False):
+            need_node_attrs_index = need_node_attrs_index or bool(
+                getattr(self.cueq_config, 'optimize_all', False)
+                or getattr(self.cueq_config, 'optimize_symmetric', False)
+            )
+        node_attrs_index = data.get('node_attrs_index')
+        if node_attrs_index is None:
+            node_attrs_index = data.get('node_type')
+        if node_attrs_index is None:
+            node_attrs_index = data.get('species')
+        if node_attrs_index is not None and getattr(node_attrs_index, 'ndim', 1) != 1:
+            node_attrs_index = None
+        if node_attrs_index is None and need_node_attrs_index:
+            node_attrs_index = jnp.argmax(node_attrs, axis=1)
+        if node_attrs_index is not None:
+            node_attrs_index = jnp.asarray(node_attrs_index, dtype=jnp.int32)
+
+        node_e0 = self.atomic_energies_fn(node_attrs)[num_atoms_arange, node_heads]
         e0 = scatter_sum(
             src=node_e0,
             index=data['batch'],
             dim=0,
             dim_size=ctx.num_graphs,
+            indices_are_sorted=True,
         ).astype(ctx.vectors.dtype)
 
-        node_feats = self.node_embedding(data['node_attrs'])
+        node_feats = self.node_embedding(node_attrs)
         edge_attrs = self.spherical_harmonics(ctx.vectors)
         edge_feats, cutoff = self.radial_embedding(
             ctx.lengths,
-            data['node_attrs'],
+            node_attrs,
             data['edge_index'],
             self._atomic_numbers,
+            node_attrs_index=node_attrs_index,
         )
 
         if self.pair_repulsion:
             pair_node_energy = self.pair_repulsion_fn(
                 ctx.lengths,
-                data['node_attrs'],
+                node_attrs,
                 data['edge_index'],
                 self._atomic_numbers,
+                node_attrs_index=node_attrs_index,
             )
             if lammps_class is not None:
                 pair_node_energy = pair_node_energy[:n_real]
@@ -598,12 +658,14 @@ class ScaleShiftMACE(MACE):
                     index=data['batch'],
                     dim=0,
                     dim_size=ctx.num_graphs,
+                    indices_are_sorted=True,
                 )
 
         node_energies_list = [pair_node_energy]
         node_feats_list: list[jnp.ndarray] = []
 
-        node_attrs_full = data['node_attrs']
+        node_attrs_full = node_attrs
+        node_attrs_index_full = node_attrs_index
 
         for idx, (interaction, product) in enumerate(
             zip(self.interactions, self.products)
@@ -614,8 +676,11 @@ class ScaleShiftMACE(MACE):
                 )
 
             node_attrs_slice = node_attrs_full
+            node_attrs_index_slice = node_attrs_index_full
             if lammps_class is not None and idx > 0:
                 node_attrs_slice = node_attrs_slice[:n_real]
+                if node_attrs_index_slice is not None:
+                    node_attrs_index_slice = node_attrs_index_slice[:n_real]
 
             node_feats, sc = interaction(
                 node_attrs=node_attrs_slice,
@@ -629,10 +694,13 @@ class ScaleShiftMACE(MACE):
             )
             if lammps_class is not None and idx == 0:
                 node_attrs_slice = node_attrs_slice[:n_real]
+                if node_attrs_index_slice is not None:
+                    node_attrs_index_slice = node_attrs_index_slice[:n_real]
             node_feats = product(
                 node_feats=node_feats,
                 sc=sc,
                 node_attrs=node_attrs_slice,
+                node_attrs_index=node_attrs_index_slice,
             )
             if lammps_class is not None:
                 node_feats = node_feats[:n_real]
@@ -647,9 +715,13 @@ class ScaleShiftMACE(MACE):
                 ]
             )
 
-        node_feats_out = (
-            jnp.concatenate(node_feats_list, axis=-1) if node_feats_list else node_feats
-        )
+        node_feats_out = None
+        if compute_node_feats:
+            node_feats_out = (
+                jnp.concatenate(node_feats_list, axis=-1)
+                if node_feats_list
+                else node_feats
+            )
         node_inter_es = jnp.sum(jnp.stack(node_energies_list, axis=0), axis=0)
         node_inter_es = self.scale_shift(node_inter_es, node_heads)
         inter_e = scatter_sum(
@@ -657,6 +729,7 @@ class ScaleShiftMACE(MACE):
             index=data['batch'],
             dim=-1,
             dim_size=ctx.num_graphs,
+            indices_are_sorted=True,
         )
 
         total_energy = e0 + inter_e

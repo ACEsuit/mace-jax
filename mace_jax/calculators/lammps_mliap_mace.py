@@ -345,6 +345,7 @@ class LAMMPS_MLIAP_MACE(MLIAPUnified):
         batch_dict: dict[str, Any] = {
             'vectors': vectors,
             'node_attrs': node_attrs,
+            'node_attrs_index': species.astype(jnp.int32),
             'edge_index': jnp.stack((pair_j, pair_i), axis=0),
             'batch': batch,
             'natoms': (natoms, nghosts),

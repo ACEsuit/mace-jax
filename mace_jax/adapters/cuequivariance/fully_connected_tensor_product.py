@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import cuequivariance as cue
 import cuequivariance_jax as cuex
 import jax
 import jax.numpy as jnp
@@ -10,6 +9,7 @@ from e3nn_jax import Irreps  # type: ignore
 from flax import linen as fnn
 from flax.core import freeze, unfreeze
 
+import cuequivariance as cue
 from mace_jax.adapters.flax.torch import (
     _resolve_scope,
     auto_import_from_torch_flax,
@@ -35,6 +35,7 @@ class FullyConnectedTensorProduct(fnn.Module):
     irreps_out: Irreps
     shared_weights: bool = True
     internal_weights: bool = True
+    group: object = cue.O3
 
     def setup(self) -> None:
         """Prepare cue descriptors and cache Irreps metadata for evaluation.
@@ -54,9 +55,9 @@ class FullyConnectedTensorProduct(fnn.Module):
         self.irreps_in2_o3 = Irreps(self.irreps_in2)
         self.irreps_out_o3 = Irreps(self.irreps_out)
 
-        self.irreps_in1_cue = cue.Irreps(cue.O3, self.irreps_in1_o3)
-        self.irreps_in2_cue = cue.Irreps(cue.O3, self.irreps_in2_o3)
-        self.irreps_out_cue = cue.Irreps(cue.O3, self.irreps_out_o3)
+        self.irreps_in1_cue = cue.Irreps(self.group, self.irreps_in1_o3)
+        self.irreps_in2_cue = cue.Irreps(self.group, self.irreps_in2_o3)
+        self.irreps_out_cue = cue.Irreps(self.group, self.irreps_out_o3)
 
         descriptor = cue.descriptors.fully_connected_tensor_product(
             self.irreps_in1_cue,

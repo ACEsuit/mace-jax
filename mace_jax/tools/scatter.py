@@ -1,5 +1,4 @@
-from typing import Optional
-
+import jax
 import jax.numpy as jnp
 
 
@@ -41,12 +40,37 @@ def scatter_sum(
     out: jnp.ndarray | None = None,
     dim_size: int | None = None,
     reduce: str = 'sum',
+    indices_are_sorted: bool = False,
+    unique_indices: bool = False,
+    bucket_size: int | None = None,
+    mode: str | None = None,
 ) -> jnp.ndarray:
     assert reduce == 'sum'
-    index = _broadcast(index, src, dim)
 
     if dim < 0:
         dim = src.ndim + dim
+
+    if dim == 0 and index.ndim == 1 and index.shape[0] == src.shape[0]:
+        index = jnp.asarray(index)
+        if out is None:
+            if dim_size is None:
+                dim_size = 0 if index.size == 0 else int(index.max()) + 1
+            out = jnp.zeros((dim_size,) + src.shape[1:], dtype=src.dtype)
+        else:
+            if dim_size is None:
+                dim_size = out.shape[0]
+        segment = jax.ops.segment_sum(
+            src,
+            index,
+            num_segments=dim_size,
+            indices_are_sorted=indices_are_sorted,
+            unique_indices=unique_indices,
+            bucket_size=bucket_size,
+            mode=mode,
+        )
+        return out.at[:].add(segment)
+
+    index = _broadcast(index, src, dim)
 
     if out is None:
         size = list(src.shape)

@@ -19,6 +19,45 @@ from mace_jax.adapters.cuequivariance import (
 from mace_jax.adapters.cuequivariance import TensorProduct as CueTensorProduct
 from mace_jax.tools.cg import O3_e3nn
 
+_SUPPORTED_CUE_GROUPS = {'O3', 'O3_e3nn'}
+
+
+def _group_name(group_value: object | None) -> str | None:
+    if group_value is None:
+        return None
+    if isinstance(group_value, str):
+        return group_value
+    return getattr(group_value, '__name__', None) or str(group_value)
+
+
+def _resolve_cue_group(cueq_config: 'CuEquivarianceConfig | None') -> object:
+    if cueq_config is None:
+        return cue.O3
+    group_value = getattr(cueq_config, 'group', None)
+    if group_value is None:
+        return cue.O3
+    if isinstance(group_value, str):
+        if group_value == 'O3_e3nn':
+            return O3_e3nn
+        try:
+            return getattr(cue, group_value)
+        except AttributeError as exc:
+            raise ValueError(
+                f"Unsupported cuequivariance group '{group_value}'."
+            ) from exc
+    return group_value
+
+
+def _validate_cue_group(group_value: object | None, *, context: str) -> None:
+    name = _group_name(group_value)
+    if name is None:
+        return
+    if name not in _SUPPORTED_CUE_GROUPS:
+        raise ValueError(
+            f"{context} only supports the 'O3' or 'O3_e3nn' groups; "
+            f'received {group_value!r}.'
+        )
+
 
 @dataclasses.dataclass
 class CuEquivarianceConfig:
@@ -56,17 +95,9 @@ class Linear:
         cueq_config: CuEquivarianceConfig | None = None,
         name: str | None = None,
     ):
-        if cueq_config is not None:
-            group_value = getattr(cueq_config, 'group', None)
-            if isinstance(group_value, str):
-                group_name = group_value
-            else:
-                group_name = getattr(group_value, '__name__', None)
-            if group_name != 'O3':
-                raise ValueError(
-                    "TensorProduct only supports the 'O3' group; "
-                    f'received {group_value!r}.'
-                )
+        group_value = getattr(cueq_config, 'group', None) if cueq_config else None
+        _validate_cue_group(group_value, context='Linear')
+        group = _resolve_cue_group(cueq_config) if cueq_config else None
 
         layout = (
             getattr(cueq_config, 'layout', 'mul_ir')
@@ -74,13 +105,19 @@ class Linear:
             else 'mul_ir'
         )
 
-        return CueLinear(
-            irreps_in,
-            irreps_out,
+        linear_kwargs = dict(
             shared_weights=shared_weights,
             internal_weights=internal_weights,
             layout=layout,
             name=name,
+        )
+        if group is not None:
+            linear_kwargs['group'] = group
+
+        return CueLinear(
+            irreps_in,
+            irreps_out,
+            **linear_kwargs,
         )
 
 
@@ -99,28 +136,27 @@ class TensorProduct:
         name: str | None = None,
     ):
         conv_fusion = False
+        group_value = getattr(cueq_config, 'group', None) if cueq_config else None
+        _validate_cue_group(group_value, context='TensorProduct')
+        group = _resolve_cue_group(cueq_config) if cueq_config else None
         if cueq_config is not None:
             conv_fusion = bool(getattr(cueq_config, 'conv_fusion', False))
-            group_value = getattr(cueq_config, 'group', None)
-            if isinstance(group_value, str):
-                group_name = group_value
-            else:
-                group_name = getattr(group_value, '__name__', None)
-            if group_name != 'O3':
-                raise ValueError(
-                    "TensorProduct only supports the 'O3' group; "
-                    f'received {group_value!r}.'
-                )
 
-        return CueTensorProduct(
-            irreps_in1,
-            irreps_in2,
-            irreps_out,
+        tp_kwargs = dict(
             instructions=instructions,
             shared_weights=shared_weights,
             internal_weights=internal_weights,
             conv_fusion=conv_fusion,
             name=name,
+        )
+        if group is not None:
+            tp_kwargs['group'] = group
+
+        return CueTensorProduct(
+            irreps_in1,
+            irreps_in2,
+            irreps_out,
+            **tp_kwargs,
         )
 
 
@@ -149,26 +185,24 @@ def FullyConnectedTensorProduct(
     # conv_fusion can be toggled independently (enabled stays False) so that the
     # tensor product backend switches to cue while symmetric contraction remains
     # on the pure-JAX implementation, matching the Torch wrapper semantics.
+    group_value = getattr(cueq_config, 'group', None) if cueq_config else None
+    if use_cue or cueq_config is not None:
+        _validate_cue_group(group_value, context='FullyConnectedTensorProduct')
+    group = _resolve_cue_group(cueq_config) if cueq_config else None
 
-    if cueq_config is not None and use_cue:
-        group_value = getattr(cueq_config, 'group', None)
-        if isinstance(group_value, str):
-            group_name = group_value
-        else:
-            group_name = getattr(group_value, '__name__', None)
-        if group_name != 'O3':
-            raise ValueError(
-                "FullyConnectedTensorProduct only supports the 'O3' group; "
-                f'received {group_value!r}.'
-            )
+    fctp_kwargs = dict(
+        shared_weights=shared_weights,
+        internal_weights=internal_weights,
+        name=name,
+    )
+    if group is not None:
+        fctp_kwargs['group'] = group
 
     return CueFullyConnectedTensorProduct(
         irreps_in1,
         irreps_in2,
         irreps_out,
-        shared_weights=shared_weights,
-        internal_weights=internal_weights,
-        name=name,
+        **fctp_kwargs,
     )
 
 
@@ -187,16 +221,11 @@ def SymmetricContractionWrapper(
 
     use_cue = cueq_config is not None and getattr(cueq_config, 'enabled', False)
 
+    group_value = getattr(cueq_config, 'group', None) if cueq_config else None
+    if cueq_config is not None:
+        _validate_cue_group(group_value, context='SymmetricContraction')
+    group = _resolve_cue_group(cueq_config) if cueq_config else None
     if cueq_config is not None and use_cue:
-        group_value = getattr(cueq_config, 'group', None)
-        if isinstance(group_value, str):
-            group_name = group_value
-        else:
-            group_name = getattr(group_value, '__name__', None)
-        if group_name != 'O3':
-            raise ValueError(
-                f"TensorProduct only supports the 'O3' group; received {group_value!r}."
-            )
         if cueq_config.layout_str not in {'mul_ir', 'ir_mul'}:
             raise ValueError(
                 f"Unsupported cuequivariance layout '{cueq_config.layout_str}'."
@@ -209,14 +238,20 @@ def SymmetricContractionWrapper(
         elif cueq_config.layout_str == 'ir_mul':
             input_layout = 'mul_ir'
 
-    return CueSymmetricContraction(
-        irreps_in=irreps_in,
-        irreps_out=irreps_out,
+    sc_kwargs = dict(
         correlation=correlation,
         num_elements=num_elements,
         use_reduced_cg=use_reduced_cg,
         input_layout=input_layout,
         name=name,
+    )
+    if group is not None:
+        sc_kwargs['group'] = group
+
+    return CueSymmetricContraction(
+        irreps_in=irreps_in,
+        irreps_out=irreps_out,
+        **sc_kwargs,
     )
 
 

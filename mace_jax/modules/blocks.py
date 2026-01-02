@@ -437,6 +437,7 @@ class RadialEmbeddingBlock(fnn.Module):
         node_attrs: jnp.ndarray,
         edge_index: jnp.ndarray,
         atomic_numbers: jnp.ndarray,
+        node_attrs_index: jnp.ndarray | None = None,
     ):
         cutoff = self.cutoff_fn(edge_lengths)
 
@@ -447,6 +448,7 @@ class RadialEmbeddingBlock(fnn.Module):
                 node_attrs,
                 edge_index,
                 atomic_numbers,
+                node_attrs_index=node_attrs_index,
             )
 
         radial = self.basis_fn(transformed_lengths)
@@ -497,9 +499,11 @@ class EquivariantProductBasisBlock(fnn.Module):
         node_feats: jnp.ndarray,
         sc: jnp.ndarray | None,
         node_attrs: jnp.ndarray,
+        node_attrs_index: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
         if self.use_agnostic_product:
             node_attrs = jnp.ones((node_feats.shape[0], 1), dtype=node_feats.dtype)
+            node_attrs_index = None
 
         use_cueq = False
         layout_str = getattr(self.cueq_config, 'layout_str', 'mul_ir')
@@ -510,7 +514,15 @@ class EquivariantProductBasisBlock(fnn.Module):
                 use_cueq = True
 
         if use_cueq:
-            index_attrs = jnp.argmax(node_attrs, axis=1).astype(jnp.int32)
+            if (
+                node_attrs_index is not None
+                and getattr(node_attrs_index, 'ndim', 1) != 1
+            ):
+                node_attrs_index = None
+            if node_attrs_index is None:
+                index_attrs = jnp.argmax(node_attrs, axis=1).astype(jnp.int32)
+            else:
+                index_attrs = jnp.asarray(node_attrs_index, dtype=jnp.int32).reshape(-1)
             features = node_feats
             if layout_str == 'mul_ir':
                 features = jnp.transpose(features, (0, 2, 1))

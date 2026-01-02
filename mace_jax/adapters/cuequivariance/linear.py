@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-import cuequivariance as cue
 import cuequivariance_jax as cuex
 import jax
 import jax.numpy as jnp
+import numpy as np
 from e3nn_jax import Irreps, IrrepsArray  # type: ignore
 from flax import linen as fnn
-from flax.errors import ScopeCollectionNotFound
 
+import cuequivariance as cue
 from mace_jax.adapters.flax.torch import auto_import_from_torch_flax
 
 from .utility import ir_mul_to_mul_ir, mul_ir_to_ir_mul
@@ -31,6 +31,7 @@ class Linear(fnn.Module):
     shared_weights: bool | None = None
     internal_weights: bool | None = None
     layout: object = 'mul_ir'
+    group: object = cue.O3
 
     def setup(self) -> None:
         """Resolve configuration flags and construct the cue descriptor."""
@@ -45,8 +46,8 @@ class Linear(fnn.Module):
 
         self.irreps_in_o3 = Irreps(self.irreps_in)
         self.irreps_out_o3 = Irreps(self.irreps_out)
-        self.irreps_in_cue = cue.Irreps(cue.O3, self.irreps_in_o3)
-        self.irreps_out_cue = cue.Irreps(cue.O3, self.irreps_out_o3)
+        self.irreps_in_cue = cue.Irreps(self.group, self.irreps_in_o3)
+        self.irreps_out_cue = cue.Irreps(self.group, self.irreps_out_o3)
         self._api_layout, self._layout_str = self._resolve_layout(self.layout)
 
         descriptor = cue.descriptors.linear(

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import cuequivariance as cue
 import cuequivariance_jax as cuex
 import jax
 import jax.numpy as jnp
@@ -10,6 +9,7 @@ from e3nn_jax import Irreps  # type: ignore
 from flax import linen as fnn
 from flax.core import freeze, unfreeze
 
+import cuequivariance as cue
 from mace_jax.adapters.flax.torch import auto_import_from_torch_flax
 from mace_jax.tools.cg import O3_e3nn
 from mace_jax.tools.scatter import scatter_sum
@@ -101,6 +101,7 @@ class TensorProduct(fnn.Module):
     internal_weights: bool = False
     instructions: list[tuple[int, int, int, str, bool, float]] | None = None
     conv_fusion: bool = False
+    group: object = O3_e3nn
 
     def setup(self) -> None:
         """Initialise cue descriptors and validate the instruction template.
@@ -121,9 +122,9 @@ class TensorProduct(fnn.Module):
         self.irreps_in2_o3 = Irreps(self.irreps_in2)
         self.irreps_out_o3 = Irreps(self.irreps_out)
 
-        self.irreps_in1_cue = cue.Irreps(O3_e3nn, self.irreps_in1_o3)
-        self.irreps_in2_cue = cue.Irreps(O3_e3nn, self.irreps_in2_o3)
-        self.irreps_out_cue = cue.Irreps(O3_e3nn, self.irreps_out_o3)
+        self.irreps_in1_cue = cue.Irreps(self.group, self.irreps_in1_o3)
+        self.irreps_in2_cue = cue.Irreps(self.group, self.irreps_in2_o3)
+        self.irreps_out_cue = cue.Irreps(self.group, self.irreps_out_o3)
 
         descriptor = cue.descriptors.channelwise_tensor_product(
             self.irreps_in1_cue, self.irreps_in2_cue, self.irreps_out_cue
@@ -320,7 +321,7 @@ class TensorProduct(fnn.Module):
             weight_tensor,
             dtype=dtype,
         )
-        aggregated = scatter_sum(per_edge, receiver, dim_size=num_nodes)
+        aggregated = scatter_sum(per_edge, receiver, dim=0, dim_size=num_nodes)
         object.__setattr__(self, '_conv_method', 'naive')
         return aggregated
 
