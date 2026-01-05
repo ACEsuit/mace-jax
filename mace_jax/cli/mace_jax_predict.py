@@ -10,9 +10,16 @@ from typing import Any
 import jax
 import jraph
 import numpy as np
+import tqdm
 
 from mace_jax import data, tools
-from mace_jax.data.streaming_loader import _expand_hdf5_paths
+from mace_jax.data.streaming_loader import (
+    BatchIteratorWrapper,
+    _expand_hdf5_paths,
+    _mark_padding_graph_ids,
+    _pack_sizes_by_edge_cap,
+    _with_graph_id,
+)
 from mace_jax.data.streaming_stats_cache import (
     STREAMING_STATS_CACHE_VERSION,
     dataset_signature,
@@ -287,31 +294,6 @@ def _build_predictor(
     return _predict
 
 
-def _append_single_prediction(
-    outputs: dict[str, list[Any]],
-    graph: jraph.GraphsTuple,
-    raw_outputs: dict[str, Any],
-) -> None:
-    node_count = int(np.asarray(graph.n_node).sum())
-    for key, value in raw_outputs.items():
-        if value is None:
-            continue
-        arr = np.asarray(value)
-        if arr.ndim == 0:
-            val = arr.item()
-        elif key in _NODE_OUTPUT_KEYS:
-            val = arr[:node_count]
-        elif key in _GRAPH_OUTPUT_KEYS:
-            val = arr.reshape(-1)[0] if arr.shape[0] == 1 else arr
-        elif arr.shape[0] == 1:
-            val = arr.reshape(-1)[0]
-        elif arr.shape[0] == node_count:
-            val = arr[:node_count]
-        else:
-            val = arr
-        outputs.setdefault(key, []).append(val)
-
-
 def _predict_xyz(
     input_path: Path,
     *,
@@ -320,25 +302,140 @@ def _predict_xyz(
     model_config: dict[str, Any],
     head_name: str,
     head_to_index: dict[str, int],
+    batch_max_edges: int | None,
+    batch_max_nodes: int | None,
+    batch_max_graphs: int | None,
+    prefetch_batches: int | None,
+    progress_bar: bool,
 ) -> tuple[list[int], dict[str, list[Any]]]:
     _, configs = data.load_from_xyz(input_path, head_name=head_name, no_data_ok=True)
     if not configs:
         raise ValueError(f'No configurations found in {input_path}.')
-    predictor_fn = jax.jit(predictor)
     z_table = data.AtomicNumberTable(model_config['atomic_numbers'])
-    graph_ids: list[int] = []
-    outputs: dict[str, list[Any]] = {}
-    for idx, config in enumerate(configs):
+    process_index = getattr(jax, 'process_index', lambda: 0)()
+    process_count = getattr(jax, 'process_count', lambda: 1)()
+    show_progress = bool(progress_bar and process_index == 0)
+    graphs: list[jraph.GraphsTuple] = []
+    graph_sizes: list[tuple[int, int]] = []
+    max_graph_edges = 0
+    config_iter = enumerate(configs)
+    if show_progress:
+        config_iter = tqdm.tqdm(config_iter, desc='Prepare', total=len(configs))
+    for idx, config in config_iter:
+        if process_count > 1 and (idx % process_count) != process_index:
+            continue
         graph = data.graph_from_configuration(
             config,
             cutoff=float(model_config['r_max']),
             z_table=z_table,
             head_to_index=head_to_index,
         )
-        graph_ids.append(idx)
-        raw_outputs = predictor_fn(params, graph)
-        raw_outputs = jax.device_get(raw_outputs)
-        _append_single_prediction(outputs, graph, raw_outputs)
+        graph = _with_graph_id(graph, idx)
+        graphs.append(graph)
+        nodes = int(graph.n_node.sum())
+        edges = int(graph.n_edge.sum())
+        graph_sizes.append((nodes, edges))
+        max_graph_edges = max(max_graph_edges, edges)
+
+    if not graphs:
+        return [], {}
+
+    edge_cap = int(batch_max_edges or max_graph_edges or 1)
+    if max_graph_edges > edge_cap:
+        logging.warning(
+            'Requested max edges per batch (%s) is below the largest graph (%s) '
+            'in %s. Raising the limit to fit.',
+            edge_cap,
+            max_graph_edges,
+            input_path.name,
+        )
+        edge_cap = max_graph_edges
+
+    batches = _pack_sizes_by_edge_cap(graph_sizes, edge_cap)
+    max_nodes_per_batch = max((batch['node_sum'] for batch in batches), default=1)
+    max_graphs_per_batch = max((batch['graph_count'] for batch in batches), default=1)
+    inferred_nodes = max(max_nodes_per_batch + 1, 2)
+    inferred_graphs = max(max_graphs_per_batch + 1, 2)
+
+    n_node = inferred_nodes if batch_max_nodes is None else int(batch_max_nodes)
+    n_graph = inferred_graphs if batch_max_graphs is None else int(batch_max_graphs)
+    if n_node < inferred_nodes or n_graph < inferred_graphs:
+        raise ValueError(
+            'Provided batch caps are smaller than required for XYZ inputs '
+            f'(n_node={n_node} required={inferred_nodes}, '
+            f'n_graph={n_graph} required={inferred_graphs}).'
+        )
+
+    max_graphs = max(int(n_graph) - 1, 1)
+    packed_batches: list[jraph.GraphsTuple] = []
+    nodes_sum = 0
+    edges_sum = 0
+    graph_count = 0
+    bucket: list[jraph.GraphsTuple] = []
+
+    def _flush():
+        nonlocal nodes_sum, edges_sum, graph_count, bucket
+        if not bucket:
+            return
+        batched = jraph.batch_np(bucket)
+        batch = jraph.pad_with_graphs(
+            batched,
+            n_node=n_node,
+            n_edge=edge_cap,
+            n_graph=n_graph,
+        )
+        batch = _mark_padding_graph_ids(batch, graph_count)
+        packed_batches.append(batch)
+        bucket = []
+        nodes_sum = 0
+        edges_sum = 0
+        graph_count = 0
+
+    for graph in graphs:
+        nodes = int(graph.n_node.sum())
+        edges = int(graph.n_edge.sum())
+        if nodes >= n_node or edges > edge_cap:
+            raise ValueError(
+                'Graph exceeds padding limits '
+                f'(nodes={nodes} edges={edges}, n_node={n_node} n_edge={edge_cap}).'
+            )
+        if bucket and (
+            nodes_sum + nodes >= n_node
+            or edges_sum + edges > edge_cap
+            or graph_count >= max_graphs
+        ):
+            _flush()
+        bucket.append(graph)
+        graph_count += 1
+        nodes_sum += nodes
+        edges_sum += edges
+        if graph_count >= max_graphs:
+            _flush()
+    _flush()
+
+    class _GraphListLoader:
+        def __init__(self, batches, prefetch):
+            self._batches = list(batches)
+            self._prefetch_batches = int(prefetch or 0)
+
+        def iter_batches(self, *, epoch, seed, process_count, process_index):
+            del epoch, seed, process_count, process_index
+
+            def _iter():
+                yield from self._batches
+
+            return BatchIteratorWrapper(_iter(), len(self._batches))
+
+        def approx_length(self):
+            return len(self._batches)
+
+    loader = _GraphListLoader(packed_batches, prefetch_batches)
+    graph_ids, outputs = tools.predict_streaming(
+        predictor,
+        params,
+        loader,
+        progress_bar=progress_bar,
+    )
     return graph_ids, outputs
 
 
@@ -465,6 +562,19 @@ def main(argv: Sequence[str] | None = None) -> None:
                 model_config=bundle.config,
                 head_name=head_name,
                 head_to_index=head_to_index,
+                batch_max_edges=args.batch_max_edges,
+                batch_max_nodes=(
+                    int(args.batch_max_nodes)
+                    if args.batch_max_nodes is not None
+                    else None
+                ),
+                batch_max_graphs=None,
+                prefetch_batches=(
+                    int(args.prefetch_batches)
+                    if args.prefetch_batches is not None
+                    else None
+                ),
+                progress_bar=not args.no_progress,
             )
         else:
             raise ValueError(

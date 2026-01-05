@@ -238,6 +238,8 @@ Notes:
   streaming stats are present next to the file.
 - `--batch-max-nodes` is optional for predictions if you want to override the
   cached node cap.
+- XYZ predictions use the same fixed-shape batching path as HDF5 (pmap + padding);
+  you can pass `--batch-max-edges` to force the same caps used during training.
 
 #### `mace-jax-preprocess`
 
@@ -364,6 +366,11 @@ graph_ids, outputs = mace_jax_predict._predict_xyz(
     model_config=bundle.config,
     head_name=head_name,
     head_to_index=head_to_index,
+    batch_max_edges=None,
+    batch_max_nodes=None,
+    batch_max_graphs=None,
+    prefetch_batches=2,
+    progress_bar=True,
 )
 
 # Streaming HDF5 prediction (requires batch_max_edges).
@@ -505,7 +512,7 @@ If you use this code, please cite our papers:
 
 ## Contact
 
-If you have any questions, please contact us at ilyes.batatia@ens-paris-saclay.fr or geiger.mario@gmail.com.
+If you have any questions, please contact us at ilyes.batatia@ens-paris-saclay.fr, geiger.mario@gmail.com, or philipp.benner@gmail.com.
 
 ## License
 

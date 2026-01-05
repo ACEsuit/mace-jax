@@ -273,5 +273,6 @@ def main():
     config_path.write_text(json.dumps(_serialize_for_json(config), indent=2))
     print(f'Config written to {config_path}')
 
+
 if __name__ == '__main__':
     main()
