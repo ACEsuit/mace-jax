@@ -379,8 +379,6 @@ def test_streaming_loader_shard_splits_graphs(tmp_path):
         n_node=None,
         n_edge=None,
         head_to_index={'Default': 0},
-        shuffle=False,
-        seed=0,
         num_workers=0,
     )
 
@@ -502,7 +500,9 @@ def test_streaming_loader_preserves_order_without_shuffle(dataset_paths):
         head_to_index=head_to_index,
         sample_limit=0,
         edge_cap=16,
+        node_percentile=None,
         collect_metadata=False,
+        stats_workers=None,
     )
     dataset = data_pkg.HDF5Dataset(dataset_path, mode='r')
     num_graphs = len(dataset)
@@ -515,10 +515,7 @@ def test_streaming_loader_preserves_order_without_shuffle(dataset_paths):
             n_node=stats.n_nodes,
             n_edge=stats.n_edges,
             head_to_index=head_to_index,
-            shuffle=False,
-            seed=0,
             num_workers=0,
-            batch_assignments=[stats.batch_assignments],
             pad_graphs=stats.n_graphs,
         )
         energies = []
@@ -547,8 +544,6 @@ def test_streaming_loader_iter_batches_deterministic(tmp_path):
         n_node=None,
         n_edge=None,
         head_to_index={'Default': 0},
-        shuffle=True,
-        seed=123,
         num_workers=0,
     )
 
@@ -594,7 +589,7 @@ def test_streaming_loader_iter_batches_deterministic(tmp_path):
         seq_epoch1 = _sequence_signature(
             _collect_batches(epoch=1, process_count=1, process_index=0)
         )
-        assert seq_epoch0 != seq_epoch1
+        assert seq_epoch0 == seq_epoch1
     finally:
         loader.close()
 

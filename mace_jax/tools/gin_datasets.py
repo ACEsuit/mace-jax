@@ -3,17 +3,17 @@
 These helpers build streaming loaders that emit fixed-shape batches. Fixed
 shapes are crucial for JAX/XLA: the model compiles per input shape, so varying
 batch sizes across steps would trigger repeated recompilation. The streaming
-stats pass scans datasets, packs graphs into batches that respect an `n_edge`
-budget, and derives padding caps so every batch shares the same shape. The
-resulting assignments are cached per split (train, valid, test) so loaders can
-reuse them without re-scanning the HDF5 files.
+stats pass scans datasets to derive fixed padding caps so every batch shares
+the same shape, and the caps can be cached per split to avoid rescans.
 """
 
 import logging
+import multiprocessing as mp
 from collections.abc import Sequence
 from dataclasses import dataclass
 from glob import glob
 from pathlib import Path
+from queue import Empty
 
 import gin
 import jax
@@ -29,7 +29,7 @@ from mace_jax.data.streaming_stats_cache import (
     stats_payload_to_parts,
     store_cached_streaming_stats,
 )
-from mace_jax.tools.utils import log_info_primary
+from mace_jax.tools.utils import log_info_primary, pt_head_first
 
 
 def _ensure_list(value) -> list[str]:
@@ -50,18 +50,25 @@ def _ensure_list(value) -> list[str]:
     return [str(value)]
 
 
+def _normalize_node_percentile(value: float | None) -> float | None:
+    if value is None:
+        return None
+    percentile = float(value)
+    if 0.0 <= percentile <= 1.0:
+        percentile *= 100.0
+    if percentile < 0.0 or percentile > 100.0:
+        raise ValueError(f'node_percentile must be between 0 and 100, got {value}.')
+    return percentile
+
+
 @dataclass
 class _StreamingStats:
-    """Cached batch assignment summary for a single HDF5 dataset.
+    """Cached padding caps for a single HDF5 dataset."""
 
-    These values are persisted in the streaming stats cache so subsequent runs
-    can reuse batch packing without rescanning the dataset.
-    """
-
-    batch_assignments: list[list[int]]
     n_nodes: int
     n_edges: int
     n_graphs: int
+    n_batches: int | None = None
 
 
 @dataclass
@@ -143,6 +150,115 @@ def _graph_from_dataset_entry(
         z_table=z_table,
         head_to_index=head_to_index,
     )
+
+
+def _streaming_stats_worker_main(
+    worker_id: int,
+    dataset_path: Path,
+    spec: StreamingDatasetSpec,
+    z_table: data.AtomicNumberTable,
+    r_max: float,
+    head_to_index: dict[str, int],
+    start_idx: int,
+    end_idx: int,
+    collect_metadata: bool,
+    result_queue,
+    progress_queue,
+    progress_every: int | None,
+):
+    """Worker process entry point to scan graphs for streaming stats."""
+    dataset = None
+    try:
+        dataset = data.HDF5Dataset(dataset_path)
+        num_species = len(z_table)
+        graph_sizes: list[tuple[int, int]] = []
+        max_graph_edges = 0
+        total_graphs = 0
+        total_nodes = 0
+        total_edges = 0
+        ata = np.zeros((num_species, num_species), dtype=np.float64)
+        atb = np.zeros((num_species,), dtype=np.float64)
+        neighbor_sum = 0.0
+        neighbor_count = 0
+        min_distance_sum = 0.0
+        min_distance_count = 0
+        progress_count = 0
+        for idx in range(start_idx, end_idx):
+            graph = _graph_from_dataset_entry(
+                dataset,
+                idx,
+                spec=spec,
+                z_table=z_table,
+                r_max=r_max,
+                head_to_index=head_to_index,
+            )
+            progress_count += 1
+            if (
+                progress_queue is not None
+                and progress_every
+                and progress_count >= progress_every
+            ):
+                progress_queue.put(progress_count)
+                progress_count = 0
+            if not _graph_has_positive_weight(graph):
+                continue
+            g_nodes = int(graph.n_node.sum())
+            g_edges = int(graph.n_edge.sum())
+            if collect_metadata:
+                species = np.asarray(graph.nodes.species)
+                counts = np.bincount(species, minlength=num_species).astype(np.float64)
+                ata += np.outer(counts, counts)
+                energy = getattr(graph.globals, 'energy', None)
+                if energy is not None:
+                    energy_value = float(np.asarray(energy).reshape(-1)[0])
+                    atb += counts * energy_value
+                receivers = np.asarray(graph.receivers)
+                if receivers.size:
+                    _, per_counts = np.unique(receivers, return_counts=True)
+                    neighbor_sum += per_counts.sum()
+                    neighbor_count += per_counts.size
+                senders = np.asarray(graph.senders)
+                if senders.size and receivers.size:
+                    positions = np.asarray(graph.nodes.positions)
+                    shifts = np.asarray(graph.edges.shifts)
+                    recv_pos = positions[receivers]
+                    vectors = positions[senders] + shifts - recv_pos
+                    lengths = np.linalg.norm(vectors, axis=-1)
+                    if lengths.size:
+                        min_distance_sum += float(lengths.min())
+                        min_distance_count += 1
+            total_graphs += 1
+            total_nodes += g_nodes
+            total_edges += g_edges
+            max_graph_edges = max(max_graph_edges, g_edges)
+            graph_sizes.append((g_nodes, g_edges))
+        if progress_queue is not None and progress_count:
+            progress_queue.put(progress_count)
+        result_queue.put(
+            (
+                worker_id,
+                None,
+                {
+                    'start_idx': start_idx,
+                    'graph_sizes': graph_sizes,
+                    'max_graph_edges': max_graph_edges,
+                    'total_graphs': total_graphs,
+                    'total_nodes': total_nodes,
+                    'total_edges': total_edges,
+                    'ata': ata,
+                    'atb': atb,
+                    'neighbor_sum': neighbor_sum,
+                    'neighbor_count': neighbor_count,
+                    'min_distance_sum': min_distance_sum,
+                    'min_distance_count': min_distance_count,
+                },
+            )
+        )
+    except Exception as exc:  # pragma: no cover - worker crashes are unexpected
+        result_queue.put((worker_id, repr(exc), None))
+    finally:
+        if dataset is not None:
+            dataset.close()
 
 
 def _gather_sample_graphs(
@@ -460,53 +576,94 @@ def _unique_atomic_numbers_from_hdf5(paths: Sequence[Path]) -> list[int]:
     return sorted(numbers)
 
 
-def _pack_streaming_batches(
-    graph_sizes: list[tuple[int, int, int]],
+def _estimate_padding_caps(
+    graph_sizes: list[tuple[int, int]],
     edge_cap: int,
-    node_cap: int | None = None,
-) -> list[list[int]]:
-    """Pack graphs into batches under an edge (and optional node) budget.
+    node_percentile: float | None = None,
+) -> tuple[int, int]:
+    """Estimate padding caps by sequential packing under an edge budget.
 
     Args:
-        graph_sizes: Tuples of (graph_index, num_nodes, num_edges).
+        graph_sizes: Tuples of (num_nodes, num_edges).
         edge_cap: Maximum total edges per batch.
-        node_cap: Optional maximum total nodes per batch.
 
     Returns:
-        List of batches as graph index lists.
+        (n_nodes, n_graphs) padding caps.
 
-    This is a greedy knapsack-style packing used for streaming batch assignment.
-    The goal is to keep batches dense (minimal padding) while still respecting
-    a fixed `edge_cap` so that downstream padding produces uniform shapes. This
-    yields stable JAX compilation shapes without requiring an expensive optimal
-    knapsack solution.
+    This keeps batch shapes stable without precomputing batches.
     """
     if not graph_sizes:
-        return []
-    order = sorted(graph_sizes, key=lambda item: item[2], reverse=True)
-    batches: list[dict[str, object]] = []
-    for graph_idx, nodes, edges in order:
-        placed = False
-        for batch in batches:
-            edge_sum = batch['edge_sum']
-            node_sum = batch['node_sum']
-            if edge_sum + edges <= edge_cap and (
-                node_cap is None or node_sum + nodes <= node_cap
-            ):
-                batch['edge_sum'] = edge_sum + edges
-                batch['node_sum'] = node_sum + nodes
-                batch['graphs'].append(graph_idx)
-                placed = True
-                break
-        if not placed:
-            batches.append(
-                {
-                    'edge_sum': edges,
-                    'node_sum': nodes,
-                    'graphs': [graph_idx],
-                }
-            )
-    return [batch['graphs'] for batch in batches]
+        return 2, 2
+
+    nodes_per_batch: list[int] = []
+    graphs_per_batch: list[int] = []
+    max_single_nodes = max(nodes for nodes, _ in graph_sizes)
+    nodes_sum = 0
+    edges_sum = 0
+    graph_count = 0
+    for nodes, edges in graph_sizes:
+        if graph_count and edges_sum + edges > edge_cap:
+            nodes_per_batch.append(nodes_sum)
+            graphs_per_batch.append(graph_count)
+            nodes_sum = 0
+            edges_sum = 0
+            graph_count = 0
+        nodes_sum += nodes
+        edges_sum += edges
+        graph_count += 1
+    if graph_count:
+        nodes_per_batch.append(nodes_sum)
+        graphs_per_batch.append(graph_count)
+
+    max_nodes_per_batch = max(nodes_per_batch)
+    max_graphs_per_batch = max(graphs_per_batch)
+    target_nodes = max_nodes_per_batch
+    if node_percentile is not None:
+        percentile = _normalize_node_percentile(node_percentile)
+        if percentile is not None:
+            target_nodes = float(np.percentile(nodes_per_batch, percentile))
+    target_nodes = max(target_nodes, max_single_nodes)
+    n_nodes = max(int(np.ceil(target_nodes)) + 1, 2)
+    n_graphs = max(max_graphs_per_batch + 1, 2)
+    return n_nodes, n_graphs
+
+
+def _estimate_batch_count(
+    graph_sizes: list[tuple[int, int]],
+    *,
+    n_nodes: int,
+    n_edges: int,
+    n_graphs: int,
+) -> int:
+    """Estimate batches by simulating sequential packing with fixed caps."""
+    if not graph_sizes:
+        return 0
+    max_graphs = max(int(n_graphs) - 1, 1)
+    batch_count = 0
+    nodes_sum = 0
+    edges_sum = 0
+    graph_count = 0
+    for nodes, edges in graph_sizes:
+        if graph_count and (
+            nodes_sum + nodes >= n_nodes
+            or edges_sum + edges > n_edges
+            or graph_count >= max_graphs
+        ):
+            batch_count += 1
+            nodes_sum = 0
+            edges_sum = 0
+            graph_count = 0
+        nodes_sum += nodes
+        edges_sum += edges
+        graph_count += 1
+        if graph_count >= max_graphs:
+            batch_count += 1
+            nodes_sum = 0
+            edges_sum = 0
+            graph_count = 0
+    if graph_count:
+        batch_count += 1
+    return max(batch_count, 1)
 
 
 def _compute_streaming_stats(
@@ -518,9 +675,11 @@ def _compute_streaming_stats(
     head_to_index: dict[str, int],
     sample_limit: int,
     edge_cap: int,
+    node_percentile: float | None,
     collect_metadata: bool,
+    stats_workers: int | None,
 ) -> tuple[_StreamingStats, _StreamingMetadata | None]:
-    """Scan a dataset to compute batch assignments and optional metadata.
+    """Scan a dataset to compute padding caps and optional metadata.
 
     Args:
         dataset_path: Path to the HDF5 dataset.
@@ -530,6 +689,7 @@ def _compute_streaming_stats(
         head_to_index: Mapping from head names to indices.
         sample_limit: Number of sample graphs to keep for initialization.
         edge_cap: Edge budget for batch packing.
+        node_percentile: Optional percentile for node padding cap.
         collect_metadata: Whether to compute E0/neighbor statistics metadata.
 
     Returns:
@@ -537,12 +697,20 @@ def _compute_streaming_stats(
 
     This is the expensive pass that populates the streaming stats cache. It
     scans the dataset, computes per-graph sizes, raises caps when a graph would
-    exceed the configured edge limit, and builds batch assignments that let the
-    loader emit fixed-shape batches. These fixed shapes are required to compile
-    the model once in JAX and reuse the compiled graph across epochs.
+    exceed the configured edge limit, and derives padding caps from greedy
+    packing. These fixed shapes are required to compile the model once in JAX
+    and reuse the compiled graph across epochs.
     """
-    dataset = data.HDF5Dataset(dataset_path)
     sample_graphs: list = []
+    if collect_metadata:
+        sample_graphs = _gather_sample_graphs(
+            dataset_path,
+            spec=spec,
+            z_table=z_table,
+            r_max=r_max,
+            head_to_index=head_to_index,
+            sample_limit=sample_limit,
+        )
     num_species = len(z_table)
     ata = np.zeros((num_species, num_species), dtype=np.float64)
     atb = np.zeros((num_species,), dtype=np.float64)
@@ -553,68 +721,165 @@ def _compute_streaming_stats(
     total_graphs = 0
     total_nodes = 0
     total_edges = 0
+    total_batches = 0
     max_graph_edges = 0
-    max_graph_nodes = 0
-    graph_sizes: list[tuple[int, int, int]] = []
+    graph_sizes: list[tuple[int, int]] = []
+    dataset = data.HDF5Dataset(dataset_path)
     dataset_len = len(dataset)
-    progress = None
-    try:
-        iterator = range(dataset_len)
+    dataset.close()
+    stats_workers = int(stats_workers or 0)
+    if stats_workers > 1 and dataset_len > 0:
+        stats_workers = min(stats_workers, dataset_len)
+    if stats_workers <= 1 or dataset_len <= 0:
+        dataset = data.HDF5Dataset(dataset_path)
+        progress = None
+        try:
+            iterator = range(dataset_len)
+            if dataset_len >= 1024:
+                progress = tqdm(
+                    iterator,
+                    desc=f'Computing streaming stats ({dataset_path.name})',
+                    leave=False,
+                )
+                iterator = progress
+            for idx in iterator:
+                graph = _graph_from_dataset_entry(
+                    dataset,
+                    idx,
+                    spec=spec,
+                    z_table=z_table,
+                    r_max=r_max,
+                    head_to_index=head_to_index,
+                )
+                if not _graph_has_positive_weight(graph):
+                    continue
+                g_nodes = int(graph.n_node.sum())
+                g_edges = int(graph.n_edge.sum())
+                if collect_metadata:
+                    species = np.asarray(graph.nodes.species)
+                    counts = np.bincount(species, minlength=num_species).astype(
+                        np.float64
+                    )
+                    ata += np.outer(counts, counts)
+                    energy = getattr(graph.globals, 'energy', None)
+                    if energy is not None:
+                        energy_value = float(np.asarray(energy).reshape(-1)[0])
+                        atb += counts * energy_value
+                    receivers = np.asarray(graph.receivers)
+                    if receivers.size:
+                        _, per_counts = np.unique(receivers, return_counts=True)
+                        neighbor_sum += per_counts.sum()
+                        neighbor_count += per_counts.size
+                    senders = np.asarray(graph.senders)
+                    if senders.size and receivers.size:
+                        positions = np.asarray(graph.nodes.positions)
+                        shifts = np.asarray(graph.edges.shifts)
+                        recv_pos = positions[receivers]
+                        vectors = positions[senders] + shifts - recv_pos
+                        lengths = np.linalg.norm(vectors, axis=-1)
+                        if lengths.size:
+                            min_distance_sum += float(lengths.min())
+                            min_distance_count += 1
+                total_graphs += 1
+                total_nodes += g_nodes
+                total_edges += g_edges
+                max_graph_edges = max(max_graph_edges, g_edges)
+                graph_sizes.append((g_nodes, g_edges))
+        finally:
+            if progress is not None:
+                progress.close()
+            dataset.close()
+    else:
+        ranges: list[tuple[int, int]] = []
+        base = dataset_len // stats_workers
+        remainder = dataset_len % stats_workers
+        start = 0
+        for worker_idx in range(stats_workers):
+            extra = 1 if worker_idx < remainder else 0
+            end = start + base + extra
+            if end > start:
+                ranges.append((start, end))
+            start = end
+        ctx = mp.get_context('spawn')
+        result_queue = ctx.Queue()
+        progress_queue = None
+        progress = None
+        progress_every = None
         if dataset_len >= 1024:
             progress = tqdm(
-                iterator,
+                total=dataset_len,
                 desc=f'Computing streaming stats ({dataset_path.name})',
                 leave=False,
             )
-            iterator = progress
-        for idx in iterator:
-            graph = _graph_from_dataset_entry(
-                dataset,
-                idx,
-                spec=spec,
-                z_table=z_table,
-                r_max=r_max,
-                head_to_index=head_to_index,
+            progress_queue = ctx.Queue()
+            progress_every = max(1024, dataset_len // max(stats_workers * 20, 1))
+        processes: list[mp.Process] = []
+        for worker_id, (start_idx, end_idx) in enumerate(ranges):
+            proc = ctx.Process(
+                target=_streaming_stats_worker_main,
+                args=(
+                    worker_id,
+                    dataset_path,
+                    spec,
+                    z_table,
+                    r_max,
+                    head_to_index,
+                    start_idx,
+                    end_idx,
+                    collect_metadata,
+                    result_queue,
+                    progress_queue,
+                    progress_every,
+                ),
             )
-            if not _graph_has_positive_weight(graph):
-                continue
-            g_nodes = int(graph.n_node.sum())
-            g_edges = int(graph.n_edge.sum())
-            if collect_metadata:
-                species = np.asarray(graph.nodes.species)
-                counts = np.bincount(species, minlength=num_species).astype(np.float64)
-                ata += np.outer(counts, counts)
-                energy = getattr(graph.globals, 'energy', None)
-                if energy is not None:
-                    energy_value = float(np.asarray(energy).reshape(-1)[0])
-                    atb += counts * energy_value
-                receivers = np.asarray(graph.receivers)
-                if receivers.size:
-                    _, per_counts = np.unique(receivers, return_counts=True)
-                    neighbor_sum += per_counts.sum()
-                    neighbor_count += per_counts.size
-                senders = np.asarray(graph.senders)
-                if senders.size and receivers.size:
-                    positions = np.asarray(graph.nodes.positions)
-                    shifts = np.asarray(graph.edges.shifts)
-                    recv_pos = positions[receivers]
-                    vectors = positions[senders] + shifts - recv_pos
-                    lengths = np.linalg.norm(vectors, axis=-1)
-                    if lengths.size:
-                        min_distance_sum += float(lengths.min())
-                        min_distance_count += 1
-            if len(sample_graphs) < sample_limit:
-                sample_graphs.append(graph)
-            total_graphs += 1
-            total_nodes += g_nodes
-            total_edges += g_edges
-            max_graph_edges = max(max_graph_edges, g_edges)
-            max_graph_nodes = max(max_graph_nodes, g_nodes)
-            graph_sizes.append((idx, g_nodes, g_edges))
-    finally:
-        if progress is not None:
-            progress.close()
-        dataset.close()
+            proc.daemon = True
+            proc.start()
+            processes.append(proc)
+        finished = 0
+        ordered_sizes: list[tuple[int, list[tuple[int, int]]]] = []
+        try:
+            while finished < len(processes):
+                if progress_queue is not None:
+                    try:
+                        while True:
+                            progress.update(progress_queue.get_nowait())
+                    except Empty:
+                        pass
+                if progress is None:
+                    worker_id, error, payload = result_queue.get()
+                else:
+                    try:
+                        worker_id, error, payload = result_queue.get(timeout=0.5)
+                    except Empty:
+                        continue
+                finished += 1
+                if error is not None:
+                    raise RuntimeError(
+                        f'Streaming stats worker {worker_id} failed: {error}'
+                    )
+                ordered_sizes.append(
+                    (int(payload['start_idx']), payload['graph_sizes'])
+                )
+                max_graph_edges = max(max_graph_edges, int(payload['max_graph_edges']))
+                total_graphs += int(payload['total_graphs'])
+                total_nodes += int(payload['total_nodes'])
+                total_edges += int(payload['total_edges'])
+                if collect_metadata:
+                    ata += payload['ata']
+                    atb += payload['atb']
+                    neighbor_sum += float(payload['neighbor_sum'])
+                    neighbor_count += int(payload['neighbor_count'])
+                    min_distance_sum += float(payload['min_distance_sum'])
+                    min_distance_count += int(payload['min_distance_count'])
+        finally:
+            if progress is not None:
+                if progress.n < dataset_len:
+                    progress.update(dataset_len - progress.n)
+                progress.close()
+            for proc in processes:
+                proc.join()
+        for _, sizes in sorted(ordered_sizes, key=lambda item: item[0]):
+            graph_sizes.extend(sizes)
 
     if total_graphs == 0:
         raise ValueError(f"No graphs found in '{dataset_path}'.")
@@ -629,43 +894,20 @@ def _compute_streaming_stats(
         )
         edge_cap = max_graph_edges
 
-    batch_assignments = _pack_streaming_batches(graph_sizes, edge_cap)
-    nodes_by_index = {idx: nodes for idx, nodes, _ in graph_sizes}
-    node_sums = [sum(nodes_by_index[i] for i in batch) for batch in batch_assignments]
-    if node_sums:
-        node_target = int(np.ceil(np.percentile(node_sums, 80)))
-    else:
-        node_target = max_graph_nodes
-    if node_target < max_graph_nodes:
-        logging.warning(
-            'Typical node target (%s) is below the largest graph (%s) in %s. '
-            'Raising to fit.',
-            node_target,
-            max_graph_nodes,
-            dataset_path.name,
-        )
-        node_target = max_graph_nodes
-    if node_sums:
-        max_nodes_per_batch = max(node_sums)
-        if node_target < max_nodes_per_batch:
-            batch_assignments = _pack_streaming_batches(
-                graph_sizes, edge_cap, node_target
-            )
-
-    max_nodes_per_batch = 0
-    max_graphs_per_batch = 0
-    for batch in batch_assignments:
-        nodes_sum = sum(nodes_by_index[i] for i in batch)
-        max_nodes_per_batch = max(max_nodes_per_batch, nodes_sum)
-        graphs_count = len(batch)
-        max_graphs_per_batch = max(max_graphs_per_batch, graphs_count)
-    n_nodes = max(max_nodes_per_batch + 1, 2)
-    n_graphs = max(max_graphs_per_batch + 1, 2)
-    stats = _StreamingStats(
-        batch_assignments=batch_assignments,
+    n_nodes, n_graphs = _estimate_padding_caps(
+        graph_sizes, edge_cap, node_percentile=node_percentile
+    )
+    n_batches = _estimate_batch_count(
+        graph_sizes,
         n_nodes=n_nodes,
         n_edges=edge_cap,
         n_graphs=n_graphs,
+    )
+    stats = _StreamingStats(
+        n_nodes=n_nodes,
+        n_edges=edge_cap,
+        n_graphs=n_graphs,
+        n_batches=n_batches,
     )
     metadata = None
     if collect_metadata:
@@ -693,7 +935,9 @@ def _load_or_compute_streaming_stats(
     atomic_numbers: Sequence[int],
     sample_limit: int,
     edge_cap: int,
+    node_percentile: float | None,
     collect_metadata: bool,
+    stats_workers: int | None,
 ) -> tuple[_StreamingStats, _StreamingMetadata | None]:
     """Fetch streaming stats from cache or compute them if missing.
 
@@ -705,14 +949,15 @@ def _load_or_compute_streaming_stats(
         atomic_numbers: Atomic numbers used for fingerprinting.
         sample_limit: Number of sample graphs to collect.
         edge_cap: Edge budget for batch packing.
+        node_percentile: Optional percentile for node padding cap.
         collect_metadata: Whether to compute E0/neighbor metadata.
 
     Returns:
         Cached or freshly computed (stats, metadata).
 
-    The cache stores batch assignments and padding caps so that we avoid an
-    expensive full scan on every run. This keeps startup time low while still
-    ensuring stable batch shapes for JAX compilation.
+    The cache stores padding caps so we avoid an expensive full scan on every
+    run. This keeps startup time low while still ensuring stable batch shapes
+    for JAX compilation.
     """
     dataset_path = Path(spec.path)
     fingerprint = spec_fingerprint(
@@ -721,6 +966,7 @@ def _load_or_compute_streaming_stats(
         atomic_numbers=atomic_numbers,
         head_to_index=head_to_index,
         edge_cap=edge_cap,
+        node_percentile=node_percentile,
     )
     cached_payload = load_cached_streaming_stats(dataset_path, fingerprint)
     if cached_payload is None:
@@ -732,29 +978,29 @@ def _load_or_compute_streaming_stats(
             head_to_index=head_to_index,
             sample_limit=sample_limit,
             edge_cap=edge_cap,
+            node_percentile=node_percentile,
             collect_metadata=collect_metadata,
+            stats_workers=stats_workers,
         )
         store_cached_streaming_stats(
             dataset_path,
             fingerprint,
             stats_payload_from_parts(
-                stats.batch_assignments,
                 stats.n_nodes,
                 stats.n_edges,
                 stats.n_graphs,
+                stats.n_batches,
             ),
         )
         return stats, metadata
     if not collect_metadata:
-        batch_assignments, n_nodes, n_edges, n_graphs = stats_payload_to_parts(
-            cached_payload
-        )
+        n_nodes, n_edges, n_graphs, n_batches = stats_payload_to_parts(cached_payload)
         return (
             _StreamingStats(
-                batch_assignments=batch_assignments,
                 n_nodes=n_nodes,
                 n_edges=n_edges,
                 n_graphs=n_graphs,
+                n_batches=n_batches,
             ),
             None,
         )
@@ -766,17 +1012,17 @@ def _load_or_compute_streaming_stats(
         head_to_index=head_to_index,
         sample_limit=sample_limit,
         edge_cap=edge_cap,
+        node_percentile=node_percentile,
         collect_metadata=True,
+        stats_workers=stats_workers,
     )
-    batch_assignments, n_nodes, n_edges, n_graphs = stats_payload_to_parts(
-        cached_payload
-    )
+    n_nodes, n_edges, n_graphs, n_batches = stats_payload_to_parts(cached_payload)
     return (
         _StreamingStats(
-            batch_assignments=batch_assignments,
             n_nodes=n_nodes,
             n_edges=n_edges,
             n_graphs=n_graphs,
+            n_batches=n_batches,
         ),
         metadata,
     )
@@ -876,6 +1122,10 @@ def _build_streaming_train_loader(
     head_to_index: dict[str, int],
     stream_prefetch: int | None,
     stream_workers: int,
+    stream_stats_workers: int | None = None,
+    max_batches: int | None = None,
+    shuffle: bool = True,
+    node_percentile: float | None = None,
     atomic_numbers_override: Sequence[int] | None = None,
     atomic_energies_override: dict[int, float] | str | None = None,
     statistics_metadata_path: str | None = None,
@@ -886,10 +1136,14 @@ def _build_streaming_train_loader(
         dataset_specs: Streaming dataset specs for training.
         r_max: Cutoff used for edge construction.
         n_edge: Edge cap used for batch packing.
-        seed: Shuffle seed for streaming loader.
+        seed: Random seed for downstream training utilities.
         head_to_index: Mapping from head names to indices.
         stream_prefetch: Prefetch batch count.
-        stream_workers: Worker process count for streaming loader.
+        stream_workers: Worker count for streaming loader.
+        stream_stats_workers: Optional worker count for streaming stats scans.
+        max_batches: Optional cap on the number of batches per epoch.
+        shuffle: Whether to shuffle training samples each epoch.
+        node_percentile: Percentile for node padding cap (min is max graph size).
         atomic_numbers_override: Explicit atomic numbers (optional).
         atomic_energies_override: Atomic energies override (optional).
         statistics_metadata_path: Path to statistics metadata (for logging).
@@ -898,9 +1152,9 @@ def _build_streaming_train_loader(
         (train_loader, atomic_energies_dict, r_max).
 
     This function computes/loads streaming stats and attaches metadata to the
-    loader. The resulting loader uses precomputed batch assignments and fixed
-    padding caps so that training batches have consistent shapes, allowing the
-    model to compile once and run efficiently.
+    loader. The resulting loader streams graphs in file order and packs batches
+    on the fly within fixed padding caps so training batches have consistent
+    shapes, allowing the model to compile once and run efficiently.
     """
     if not dataset_specs:
         raise ValueError('No streaming datasets were provided.')
@@ -925,12 +1179,24 @@ def _build_streaming_train_loader(
     min_distance_count = 0
     sample_graphs: list = []
     sample_cap = 32
-    batch_assignments: list[list[list[int]]] = []
     n_nodes = 0
     n_edges = 0
     n_graphs = 0
+    total_graphs = 0
+    total_nodes = 0
+    total_edges = 0
+    total_batches = 0
+    per_dataset_batches: list[int | None] = []
 
     collect_metadata = not isinstance(atomic_energies_override, dict)
+
+    node_percentile = _normalize_node_percentile(node_percentile)
+    if stream_stats_workers is None:
+        stream_stats_workers = stream_workers
+    if max_batches is not None:
+        max_batches = int(max_batches)
+        if max_batches <= 0:
+            max_batches = None
 
     for spec in dataset_specs:
         stats, metadata = _load_or_compute_streaming_stats(
@@ -941,12 +1207,16 @@ def _build_streaming_train_loader(
             atomic_numbers=atomic_numbers,
             sample_limit=sample_cap,
             edge_cap=n_edge,
+            node_percentile=node_percentile,
             collect_metadata=collect_metadata,
+            stats_workers=stream_stats_workers,
         )
-        batch_assignments.append(stats.batch_assignments)
         n_nodes = max(n_nodes, int(stats.n_nodes))
         n_edges = max(n_edges, int(stats.n_edges))
         n_graphs = max(n_graphs, int(stats.n_graphs))
+        if stats.n_batches:
+            total_batches += int(stats.n_batches)
+        per_dataset_batches.append(stats.n_batches)
         _extend_sample_graphs(
             sample_graphs,
             sample_limit=sample_cap,
@@ -964,6 +1234,12 @@ def _build_streaming_train_loader(
             neighbor_count += metadata.neighbor_count
             min_distance_sum += metadata.min_distance_sum
             min_distance_count += metadata.min_distance_count
+            total_graphs += metadata.total_graphs
+            total_nodes += metadata.total_nodes
+            total_edges += metadata.total_edges
+        else:
+            with data.HDF5Dataset(spec.path, mode='r') as dataset:
+                total_graphs += len(dataset)
 
     if not sample_graphs:
         raise ValueError('Unable to build initialization graphs from training data.')
@@ -999,25 +1275,23 @@ def _build_streaming_train_loader(
         n_node=n_nodes,
         n_edge=n_edges,
         head_to_index=head_to_index,
-        shuffle=True,
-        seed=seed,
         niggli_reduce=False,
-        max_batches=None,
+        max_batches=max_batches,
         prefetch_batches=None if stream_prefetch is None else int(stream_prefetch),
         num_workers=int(stream_workers or 0),
-        batch_assignments=batch_assignments,
         pad_graphs=n_graphs,
+        shuffle=bool(shuffle),
     )
     loader.graphs = sample_graphs
     loader.atomic_numbers = tuple(atomic_numbers)
     loader.avg_num_neighbors = avg_neighbors
     loader.avg_r_min = avg_min_distance
     loader.atomic_energies = atomic_energies
-    loader.total_graphs = sum(
-        len(batch) for batches in batch_assignments for batch in batches
-    )
-    loader.total_nodes = None
-    loader.total_edges = None
+    loader.total_graphs = total_graphs or None
+    loader.total_nodes = total_nodes or None
+    loader.total_edges = total_edges or None
+    loader.estimated_batches = total_batches or None
+    loader._dataset_estimated_batches = per_dataset_batches
     loader.streaming = True
     loader.z_table = z_table
     loader._fixed_pad_nodes = int(n_nodes)
@@ -1137,6 +1411,10 @@ def _build_eval_streaming_loader(
     num_workers: int = 0,
     seed: int = 0,
     stream_prefetch: int | None = None,
+    stream_stats_workers: int | None = None,
+    max_batches: int | None = None,
+    shuffle: bool = False,
+    node_percentile: float | None = None,
     template_loader: data.StreamingGraphDataLoader | None = None,
 ) -> data.StreamingGraphDataLoader | None:
     """Construct a streaming loader for evaluation splits.
@@ -1147,9 +1425,12 @@ def _build_eval_streaming_loader(
         n_edge: Edge cap for padding.
         head_to_index: Mapping from head names to indices.
         base_z_table: Base atomic-number table from training (optional).
-        num_workers: Worker process count.
-        seed: Shuffle seed.
+        num_workers: Worker count.
+        seed: Random seed for downstream training utilities.
         stream_prefetch: Prefetch batch count.
+        stream_stats_workers: Optional worker count for streaming stats scans.
+        shuffle: Whether to shuffle evaluation samples (default False).
+        node_percentile: Percentile for node padding cap (min is max graph size).
         template_loader: Training loader used to inherit atomic numbers/energies.
 
     Returns:
@@ -1185,6 +1466,10 @@ def _build_eval_streaming_loader(
         head_to_index=head_to_index,
         stream_prefetch=stream_prefetch,
         stream_workers=num_workers,
+        stream_stats_workers=stream_stats_workers,
+        max_batches=max_batches,
+        shuffle=shuffle,
+        node_percentile=node_percentile,
         atomic_numbers_override=atomic_numbers_override,
         atomic_energies_override=atomic_energies_override,
     )
@@ -1209,6 +1494,10 @@ def datasets(
     head_configs: dict[str, dict] | None = None,
     stream_train_prefetch: int | None = None,
     stream_train_workers: int = 0,
+    stream_train_stats_workers: int | None = None,
+    stream_train_max_batches: int | None = None,
+    stream_train_shuffle: bool = True,
+    stream_train_node_percentile: float = 90.0,
     num_workers: int | None = None,
     atomic_numbers: Sequence[int] | None = None,
     atomic_energies_override: dict[int, float] | str | None = None,
@@ -1228,7 +1517,7 @@ def datasets(
         config_type_weights: Optional per-config-type weights.
         valid_path: Validation HDF5 path(s).
         test_path: Test HDF5 path(s).
-        seed: Shuffle seed for streaming loaders.
+        seed: Random seed for downstream training utilities.
         energy_key: Energy property key.
         forces_key: Forces property key.
         n_edge: Edge cap for batch packing.
@@ -1238,6 +1527,10 @@ def datasets(
         head_configs: Optional per-head configuration overrides.
         stream_train_prefetch: Prefetch batch count.
         stream_train_workers: Worker count (per process/device).
+        stream_train_stats_workers: Optional worker count for streaming stats scans.
+        stream_train_max_batches: Optional cap on streaming batches per epoch.
+        stream_train_shuffle: Whether to shuffle training samples each epoch.
+        stream_train_node_percentile: Percentile for node padding cap (min is max graph size).
         num_workers: Optional alias overriding ``stream_train_workers``.
         atomic_numbers: Optional explicit atomic numbers list.
         atomic_energies_override: Optional atomic energies override.
@@ -1252,12 +1545,16 @@ def datasets(
     """
 
     head_names = tuple(heads) if heads else ('Default',)
+    head_names = pt_head_first(head_names)
     head_to_index = {name: idx for idx, name in enumerate(head_names)}
     local_device_count = getattr(jax, 'local_device_count', lambda: 1)()
     worker_setting = stream_train_workers if num_workers is None else num_workers
     effective_workers = int(worker_setting or 0)
     if local_device_count > 1 and effective_workers > 0:
         effective_workers *= int(local_device_count)
+    stats_workers = stream_train_stats_workers
+    if stats_workers is None:
+        stats_workers = effective_workers
 
     if n_edge is None:
         raise ValueError('n_edge must be provided for streaming datasets.')
@@ -1292,6 +1589,10 @@ def datasets(
         head_to_index=head_to_index,
         stream_prefetch=stream_train_prefetch,
         stream_workers=effective_workers,
+        stream_stats_workers=stats_workers,
+        max_batches=stream_train_max_batches,
+        shuffle=stream_train_shuffle,
+        node_percentile=stream_train_node_percentile,
         atomic_numbers_override=atomic_numbers,
         atomic_energies_override=atomic_energies_override,
         statistics_metadata_path=statistics_metadata_path,
@@ -1314,6 +1615,10 @@ def datasets(
         num_workers=effective_workers,
         seed=seed,
         stream_prefetch=stream_train_prefetch,
+        stream_stats_workers=stats_workers,
+        max_batches=stream_train_max_batches,
+        shuffle=False,
+        node_percentile=stream_train_node_percentile,
         template_loader=train_loader,
     )
     test_loader = _build_eval_streaming_loader(
@@ -1325,6 +1630,10 @@ def datasets(
         num_workers=effective_workers,
         seed=seed,
         stream_prefetch=stream_train_prefetch,
+        stream_stats_workers=stats_workers,
+        max_batches=stream_train_max_batches,
+        shuffle=False,
+        node_percentile=stream_train_node_percentile,
         template_loader=train_loader,
     )
     log_info_primary(

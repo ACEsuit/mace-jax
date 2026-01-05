@@ -181,11 +181,6 @@ def main() -> None:
         action='store_true',
         help='Request the CLI to print the operative gin config.',
     )
-    parser.add_argument(
-        '--dry-run',
-        action='store_true',
-        help='Only parse configs and exit without launching training.',
-    )
     args, unknown = parser.parse_known_args()
     if unknown:
         raise SystemExit(f'Unexpected extra CLI arguments: {unknown}')
@@ -260,8 +255,6 @@ def main() -> None:
         cli_args += ['--binding', binding]
     if args.print_config:
         cli_args.append('--print-config')
-    if args.dry_run:
-        cli_args.append('--dry-run')
 
     mace_jax_train.main(cli_args)
 

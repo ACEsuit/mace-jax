@@ -20,14 +20,15 @@ class _DummyTorchModel(torch.nn.Module):
 
 
 @pytest.mark.slow
-def test_run_train_cli_dry_run(tmp_path, monkeypatch, simple_hdf5_path):
+def test_run_train_cli_writes_operative_config(tmp_path, monkeypatch, simple_hdf5_path):
+    gin.clear_config()
     results_dir = tmp_path / 'results'
+    results_dir.mkdir(parents=True, exist_ok=True)
     torch_ckpt = tmp_path / 'dummy.pt'
     torch_ckpt.write_text('checkpoint', encoding='utf-8')
     train_hdf5 = simple_hdf5_path
 
     args = [
-        '--dry-run',
         '-b',
         'mace_jax.tools.gin_functions.flags.debug=False',
         '-b',
@@ -50,14 +51,24 @@ def test_run_train_cli_dry_run(tmp_path, monkeypatch, simple_hdf5_path):
         '3.5',
     ]
 
-    train_cli.main(args)
+    parsed, remaining = train_cli.parse_args(args)
+    train_cli.configure_gin(parsed, remaining)
+    train_cli.apply_cli_overrides(parsed)
+    operative = gin.operative_config_str()
+    train_cli._write_operative_config(
+        directory=str(results_dir),
+        tag='test',
+        operative_config=operative,
+        is_primary=True,
+    )
 
     gin_files = list(Path(results_dir).glob('*.gin'))
-    assert gin_files, 'Expected operative gin config to be written during dry run.'
+    assert gin_files, 'Expected operative gin config to be written.'
     operative = gin_files[0].read_text(encoding='utf-8')
     assert 'mace_jax.tools.gin_model.model.torch_checkpoint' in operative
     assert 'dummy.pt' in operative
     assert 'mace_jax.tools.gin_datasets.datasets.train_path' in operative
+    gin.clear_config()
 
 
 def test_plot_train_cli_generates_output(tmp_path):
@@ -178,7 +189,7 @@ def test_cli_pt_head_respects_heads_list(tmp_path):
     )
     train_cli.apply_cli_overrides(args)
     heads = gin.query_parameter('mace_jax.tools.gin_model.model.heads')
-    assert heads == ('Default', 'pt_head')
+    assert heads == ('pt_head', 'Default')
     gin.clear_config()
 
 

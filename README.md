@@ -16,7 +16,7 @@ Torch MACE, so the same HDF5 files can be shared across both implementations.
 
 ### Key features
 
-- Streaming HDF5 loader with cached batch assignments per split (train/valid/test)
+- Streaming HDF5 loader with cached padding caps per split (train/valid/test)
 - Fixed-shape batching driven by `n_edge` with derived node/graph padding caps
 - Gin-configured model/loss/optimizer stack with CLI overrides
 - Training CLI with EMA, SWA, checkpointing (including best-checkpoint), and W&B
@@ -50,11 +50,21 @@ pip install -e .
 ## Quick start
 
 ```sh
-mace-jax-train configs/aspirin_small.gin --print-config
+mkdir -p data/hdf5
+mace-jax-preprocess \
+  --train_file data/rmd17_aspirin_train.xyz \
+  --valid_file data/rmd17_aspirin_test.xyz \
+  --h5_prefix data/hdf5/ \
+  --r_max 5.0 \
+  --compute_statistics \
+  --atomic_numbers "[1, 6, 7, 8]" \
+  --E0s "average"
+
+JAX_PLATFORMS=cpu mace-jax-train configs/aspirin_small.gin --print-config
 ```
 
-This runs a short training loop on the bundled example config and prints the
-operative gin configuration.
+This prints the operative gin configuration before training starts. On CPU-only
+machines the `JAX_PLATFORMS=cpu` override avoids CUDA plugin warnings.
 
 ## Usage
 
@@ -66,6 +76,8 @@ After installation, the following convenience commands are available:
 - `mace-jax-preprocess`
 - `mace-jax-train-plot`
 - `mace-jax-from-torch`
+- `mace-jax-hdf5-benchmark`
+- `mace-jax-hdf5-info`
 - `mace-create-lammps-model`
 
 #### `mace-jax-train`
@@ -78,7 +90,7 @@ mace-jax-train configs/aspirin_small.gin \
   --print-config
 ```
 
-Use `--dry-run` to validate the configuration without launching training. The operative configuration is saved alongside the run logs.
+The operative configuration is saved alongside the run logs.
 
 A repository helper mirrors this example and runs a one-interval smoke test on
 the bundled 3BPA dataset:
@@ -187,8 +199,8 @@ mace-jax-train configs/finetune.gin \
   process topology (`--process-count`, `--process-index`, and optional
   `--coordinator-address/--coordinator-port`). When distributed is enabled the CLI
   initialises `jax.distributed`, shards the training/validation/test datasets per
-  process with deterministic per-epoch shuffles, and only writes logs/checkpoints from
-  rank 0. Environment variables such as `JAX_PROCESS_COUNT`, `JAX_PROCESS_INDEX` or
+  process deterministically, and only writes logs/checkpoints from rank 0.
+  Environment variables such as `JAX_PROCESS_COUNT`, `JAX_PROCESS_INDEX` or
   Slurm launch variables can also be used; they override the CLI defaults automatically.
 A typical 2-host launch (one process per host) looks like:
 
@@ -232,6 +244,25 @@ mace-jax-train-plot --path results --keys rmse_e_per_atom,rmse_f --output-format
 
 The command accepts either a directory (all `.metrics` files are processed) or a single metrics file.
 
+#### `mace-jax-hdf5-info`
+
+Prints a quick summary of MACE-style HDF5 datasets (batch counts, graph counts,
+property keys, etc.). If a streaming stats cache is present, it also reports the
+cached padding caps:
+
+```sh
+mace-jax-hdf5-info data/hdf5/train_*.h5
+```
+
+#### `mace-jax-hdf5-benchmark`
+
+Measures HDF5 read throughput for MACE-style datasets (sequential and optional
+shuffled access patterns):
+
+```sh
+mace-jax-hdf5-benchmark data/hdf5/train_0.h5 --count 1000 --repeat 3 --shuffle
+```
+
 #### `mace-create-lammps-model`
 
 Converts a Torch MACE checkpoint to the JAX MLIAP format:
@@ -262,45 +293,136 @@ mace-jax-from-torch --foundation mp --model-name small --predict tests/test_data
 
 All commands can be invoked via `python -m mace_jax.<module>` if preferred.
 
+### Expert usage (internal APIs)
+
+If you want to call the CLI helpers directly from Python (for notebooks or
+custom pipelines), the internal entrypoints are exposed in the CLI modules.
+These helpers are not part of the stable public API (they use leading
+underscores), so prefer the CLI for long-term scripts.
+
+#### Predictions (`_predict_xyz` / `_predict_hdf5`)
+
+Both helpers live in `mace_jax.cli.mace_jax_predict` and return
+`(graph_ids, outputs)`. For HDF5 inputs the outputs are **sorted by graph_id**
+within the local process, so they can be merged across processes later if
+needed.
+
+```py
+from pathlib import Path
+
+from mace_jax.cli import mace_jax_predict
+from mace_jax.tools import bundle as bundle_tools
+
+bundle = bundle_tools.load_model_bundle("checkpoints/model-jax.npz", "")
+head_name, head_to_index = mace_jax_predict._resolve_head_mapping(
+    bundle.config, head=None
+)
+predictor = mace_jax_predict._build_predictor(
+    bundle.module, compute_forces=True, compute_stress=True
+)
+
+# XYZ prediction (equivalent to CLI on .xyz input).
+graph_ids, outputs = mace_jax_predict._predict_xyz(
+    Path("data/structures.xyz"),
+    predictor=predictor,
+    params=bundle.params,
+    model_config=bundle.config,
+    head_name=head_name,
+    head_to_index=head_to_index,
+)
+
+# Streaming HDF5 prediction (requires batch_max_edges).
+graph_ids, outputs = mace_jax_predict._predict_hdf5(
+    Path("data/train_0.h5"),
+    predictor=predictor,
+    params=bundle.params,
+    model_config=bundle.config,
+    head_name=head_name,
+    head_to_index=head_to_index,
+    batch_max_edges=6000,
+    batch_max_nodes=None,
+    prefetch_batches=2,
+    num_workers=8,
+    progress_bar=True,
+)
+```
+
+#### Training (`run_training`)
+
+The CLI entrypoint in `mace_jax.cli.mace_jax_train` is also reusable in-process
+as long as gin is configured first:
+
+```py
+import gin
+
+from mace_jax.cli import mace_jax_train
+
+gin.parse_config_files_and_bindings(
+    ["configs/aspirin_small.gin"],
+    bindings=[],
+)
+mace_jax_train.run_training()
+```
+
+For even finer control you can call the same building blocks used by the CLI:
+`mace_jax.tools.gin_datasets.datasets`, `mace_jax.tools.gin_model.model`,
+`mace_jax.tools.gin_functions.loss/optimizer/train`, and the helper functions
+inside `mace_jax.cli.mace_jax_train` (such as `_build_predictor`).
+
 ### Streaming HDF5 loader (mace-jax specific)
 
 Fixed-shape batches let JAX/XLA compile once and reuse the same executable, so
 the streaming loader is designed to keep batch shapes stable across epochs.
 MACE‑JAX compiles the model with **fixed batch shapes**, so it cannot accept
 variable‑sized batches on the fly. To make this efficient, the streaming loader
-precomputes **batch assignments** once and then reuses them for every epoch. This is
-the key difference from Torch MACE and is why streaming HDF5 datasets are the
-recommended format for larger runs.
+runs a stats scan to derive fixed padding caps and then builds batches on the fly
+within those caps. This avoids repeated recompilations and keeps throughput stable
+on large HDF5 datasets.
 
 The only sizing knob you must provide is `n_edge` (also exposed as `--batch-max-edges`
 or `n_edge` in gin). `n_node` is **not** supported for streaming datasets; it is
-derived automatically from the assigned batches.
+derived automatically from the streaming stats scan (with an optional percentile
+cap for tighter node padding).
 
 How `n_edge` is used:
 
 - **Edge cap / graph feasibility:** Each graph’s edge count is checked against the
   configured `n_edge` limit. If a graph exceeds the limit, the loader raises the cap
   and logs a warning so all graphs fit.
-- **Batch packing (knapsack‑like):** The loader builds batches by packing graphs so
-  their **total edges** fit under the `n_edge` cap. This is a near‑optimal greedy
-  packing step that minimizes padding while remaining fast.
-- **Derived node/graph caps:** After batches are fixed, the loader computes the
-  **maximum** total nodes and graphs needed across those batches. These become the
-  fixed `n_node`/`n_graph` pads used for JAX compilation.
-- **Persisted assignments:** The batch assignments and the derived
-  `n_nodes/n_edges/n_graphs` caps are stored in the streaming stats. Train/valid/test
-  each get their own stats so loaders can be reused independently.
-- **Shuffling:** When `shuffle=True`, the loader shuffles **batches**, not individual
-  graphs. When `shuffle=False`, graphs are yielded in original order by inverting the
-  precomputed batch mapping.
+- **Batch packing (knapsack‑like):** The stats pass uses greedy packing to estimate
+  typical batch sizes under the `n_edge` cap.
+- **Derived node/graph caps:** The streaming stats compute node/graph caps from the
+  edge-limited batches. `n_node` defaults to the 90th percentile of batch node
+  totals, but is never lower than the largest single-graph node count. `n_graph`
+  uses the maximum observed graph count per batch. These become the fixed
+  `n_node`/`n_graph` pads used for JAX compilation.
+- **On‑the‑fly batching:** During training/eval, worker processes read HDF5 entries
+  directly, pack batches until a cap is hit, pad, and emit the batch. There are
+  no separate reader processes. Shuffling is optional and, when enabled, uses a
+  deterministic per-epoch shuffle of global graph indices.
+- **Graph IDs:** Each graph is tagged with a stable global `graph_id` so streaming
+  prediction outputs can be reordered to the original HDF5 order when needed.
+- **Multi-process sharding:** For distributed runs, global graph indices are
+  sharded round-robin by `process_index` across processes; each process reads only
+  its own slice of indices but can span all HDF5 files.
+- **Persisted caps:** The derived `n_nodes/n_edges/n_graphs` caps are stored in the
+  streaming stats. Train/valid/test each get their own stats so loaders can be reused
+  independently.
 
 In short, `n_edge` controls memory and compilation shape: it is the fixed edge budget
 per batch. The loader packs graphs to stay under this budget, computes the node/graph
 padding needed, and then reuses these fixed shapes for every epoch.
 
 Streaming datasets accept a single HDF5 file, a directory of `.h5/.hdf5` files, or a
-glob pattern. The loader expands all matching files and builds the batch assignments
-across the combined dataset.
+glob pattern. The loader expands all matching files and derives padding caps across
+the combined dataset.
+
+Streaming loader knobs (CLI or gin):
+- `--batch-max-edges` / `n_edge`: edge cap for fixed-shape batches.
+- `--suffle`: enable/disable per-epoch shuffling for training (default: true).
+- `--batch-node-precentile`: percentile for node padding cap (default: 90);
+  caps never drop below the largest single graph.
+- `--stream-train-max-batches`: optional cap on batches per epoch.
 
 ### Configuration
 

@@ -1,4 +1,15 @@
-"""Shared streaming stats cache helpers."""
+"""Shared streaming stats cache helpers.
+
+Streaming stats (n_nodes/n_edges/n_graphs/n_batches) are computed once per
+dataset/shard and reused across runs to avoid expensive rescans. The cache is
+stored as a hidden sidecar file (``.<stem>.streamstats.pkl``) next to each HDF5
+shard, so glob patterns like ``dir/*.h5`` do not treat the cache as data.
+
+Cache entries are invalidated when either the dataset signature (size/mtime) or
+the spec fingerprint changes (e.g. r_max, atomic_numbers, edge cap, or node
+percentile). These helpers are used by gin_datasets when building streaming
+train/valid/test loaders.
+"""
 
 from __future__ import annotations
 
@@ -15,15 +26,18 @@ STREAMING_STATS_CACHE_VERSION = 1
 def stats_cache_path(dataset_path: Path) -> Path:
     """Return the cache path for streaming stats for a dataset.
 
-    Use a hidden sidecar file so glob patterns like ``dir/*`` (used by Torch MACE)
-    do not treat the cache as an HDF5 shard.
+    Uses a hidden sidecar file to avoid treating the cache as a shard when
+    globbing directories (e.g. ``dir/*.h5``).
     """
     cache_name = f'.{dataset_path.stem}.streamstats.pkl'
     return dataset_path.with_name(cache_name)
 
 
 def dataset_signature(dataset_path: Path) -> dict[str, float]:
-    """Compute a lightweight signature used to invalidate cached stats."""
+    """Compute a lightweight signature used to invalidate cached stats.
+
+    The signature uses file size and mtime as a fast change detector.
+    """
     stat = dataset_path.stat()
     return {'size': stat.st_size, 'mtime': stat.st_mtime}
 
@@ -42,8 +56,14 @@ def spec_fingerprint(
     atomic_numbers: Sequence[int],
     head_to_index: dict[str, int] | None = None,
     edge_cap: int | None = None,
+    node_percentile: float | None = None,
 ) -> str:
-    """Build a stable fingerprint for dataset spec + packing parameters."""
+    """Build a stable fingerprint for dataset spec + packing parameters.
+
+    Any change to dataset interpretation (keys, weights, r_max, head index,
+    edge cap, node percentile, etc.) yields a new fingerprint and invalidates
+    the cached stats.
+    """
     head_index = 0
     if head_to_index is not None and spec.head_name in head_to_index:
         head_index = int(head_to_index[spec.head_name])
@@ -63,38 +83,47 @@ def spec_fingerprint(
         'r_max': float(r_max),
         'atomic_numbers': [int(z) for z in atomic_numbers],
         'edge_cap': int(edge_cap) if edge_cap is not None else None,
+        'node_percentile': (
+            float(node_percentile) if node_percentile is not None else None
+        ),
     }
     encoded = json.dumps(payload, sort_keys=True)
     return hashlib.sha256(encoded.encode('utf-8')).hexdigest()
 
 
 def stats_payload_from_parts(
-    batch_assignments: list[list[int]],
     n_nodes: int,
     n_edges: int,
     n_graphs: int,
+    n_batches: int | None = None,
 ) -> dict:
-    """Serialize streaming stats to a JSON/pickle-friendly payload."""
-    return {
-        'batch_assignments': batch_assignments,
+    """Serialize streaming caps to a JSON/pickle-friendly payload."""
+    payload = {
         'n_nodes': int(n_nodes),
         'n_edges': int(n_edges),
         'n_graphs': int(n_graphs),
     }
+    if n_batches is not None:
+        payload['n_batches'] = int(n_batches)
+    return payload
 
 
-def stats_payload_to_parts(payload: dict) -> tuple[list[list[int]], int, int, int]:
+def stats_payload_to_parts(payload: dict) -> tuple[int, int, int, int | None]:
     """Deserialize streaming stats payload back into components."""
+    n_batches = payload.get('n_batches')
     return (
-        payload['batch_assignments'],
         int(payload['n_nodes']),
         int(payload['n_edges']),
         int(payload['n_graphs']),
+        int(n_batches) if n_batches is not None else None,
     )
 
 
 def load_cached_streaming_stats(dataset_path: Path, fingerprint: str) -> dict | None:
-    """Load cached streaming stats if they match the current dataset and spec."""
+    """Load cached streaming stats if they match the current dataset and spec.
+
+    Returns None when the cache is missing, stale, or incompatible.
+    """
     cache_path = stats_cache_path(dataset_path)
     payload = None
     if not cache_path.exists():
@@ -126,7 +155,11 @@ def store_cached_streaming_stats(
     fingerprint: str,
     stats_payload: dict,
 ) -> None:
-    """Persist streaming stats to disk for reuse across runs."""
+    """Persist streaming stats to disk for reuse across runs.
+
+    The cached payload is a pickle containing the version, dataset signature,
+    spec fingerprint, and the stats payload.
+    """
     cache_path = stats_cache_path(dataset_path)
     payload = {
         'version': STREAMING_STATS_CACHE_VERSION,

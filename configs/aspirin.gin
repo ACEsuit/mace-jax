@@ -6,8 +6,9 @@ flags.profile = False  # If True, profiles the execution time and normalization 
 
 logs.directory = "results"
 
-datasets.train_path = "data/rmd17_aspirin_train.xyz"  # in units of eV and Å
-datasets.test_path = "data/rmd17_aspirin_test.xyz"
+datasets.train_path = "data/hdf5/train"
+datasets.valid_path = "data/hdf5/val"
+datasets.test_path = None
 datasets.r_max = 5.0
 datasets.n_edge = 2048
 

@@ -22,6 +22,7 @@ from mace_jax import data, modules, tools
 from mace_jax.modules.blocks import RealAgnosticResidualInteractionBlock
 from mace_jax.modules.wrapper_ops import CuEquivarianceConfig
 from mace_jax.tools.dtype import default_dtype
+from mace_jax.tools.utils import pt_head_first
 
 gin.register(jax.nn.silu)
 gin.register(jax.nn.relu)
@@ -543,6 +544,8 @@ def model(
             radial_envelope=radial_envelope,
         )
     )
+    if kwargs.get('heads') is not None:
+        kwargs['heads'] = pt_head_first(kwargs['heads'])
     logging.info(f'Create MACE with parameters {kwargs}')
     kwargs.setdefault(
         'atomic_numbers',
@@ -680,6 +683,11 @@ def model(
             polarizability=(
                 _sanitize(graph.globals.polarizability, graph_mask_bool, expand_dims=2)
                 if getattr(graph.globals, 'polarizability', None) is not None
+                else None
+            ),
+            graph_id=(
+                _sanitize(graph.globals.graph_id, graph_mask_bool)
+                if getattr(graph.globals, 'graph_id', None) is not None
                 else None
             ),
         )

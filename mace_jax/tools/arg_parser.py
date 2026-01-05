@@ -158,11 +158,6 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
         help='Additional gin binding applied after the config files.',
     )
     parser.add_argument(
-        '--dry-run',
-        action='store_true',
-        help='Parse the configuration and exit without launching training.',
-    )
-    parser.add_argument(
         '--print-config',
         action='store_true',
         help='Print the operative gin config before training starts.',
@@ -263,6 +258,39 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
         help=(
             'Maximum number of edges allowed in a padded batch. '
             "Pass 'auto' or 'None' to request automatic sizing."
+        ),
+    )
+    parser.add_argument(
+        '--stream-train-max-batches',
+        '--stream_train_max_batches',
+        type=int,
+        default=None,
+        help=(
+            'Optional cap on the number of streaming batches per epoch '
+            '(binds mace_jax.tools.gin_datasets.datasets.stream_train_max_batches).'
+        ),
+    )
+    parser.add_argument(
+        '--suffle',
+        dest='stream_train_shuffle',
+        type=str2bool,
+        default=True,
+        help=(
+            'Shuffle streaming training samples each epoch '
+            '(binds mace_jax.tools.gin_datasets.datasets.stream_train_shuffle).'
+        ),
+    )
+    parser.add_argument(
+        '--batch-node-precentile',
+        '--stream-train-node-percentile',
+        '--stream_train_node_percentile',
+        dest='stream_train_node_percentile',
+        type=float,
+        default=90.0,
+        help=(
+            'Percentile (0-100, or 0-1 fraction) used to set the node padding cap; '
+            'the cap is never below the largest single graph '
+            '(binds mace_jax.tools.gin_datasets.datasets.stream_train_node_percentile).'
         ),
     )
     parser.add_argument(

@@ -8,7 +8,7 @@ from .device import (
     select_jax_device,
 )
 from .predictors import predict_energy_forces_stress
-from .train import evaluate, train
+from .train import evaluate, predict_streaming, train
 from .utils import (
     MetricsLogger,
     compute_avg_min_neighbor_distance,
@@ -61,6 +61,7 @@ __all__ = [
     'MetricsLogger',
     'predict_energy_forces_stress',
     'evaluate',
+    'predict_streaming',
     'train',
     'configure_torch_runtime',
     'get_torch_device',

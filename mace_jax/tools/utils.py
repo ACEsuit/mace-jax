@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import sys
+from collections.abc import Sequence
 from typing import Any
 
 import e3nn_jax as e3nn
@@ -30,6 +31,21 @@ def is_primary_process() -> bool:
 def log_info_primary(message: str, *args) -> None:
     if is_primary_process():
         logging.info(message, *args)
+
+
+def pt_head_first(
+    heads: Sequence[str], pt_head_name: str = 'pt_head'
+) -> tuple[str, ...]:
+    if not heads:
+        return ()
+    head_list = [str(head) for head in heads]
+    if not pt_head_name:
+        return tuple(head_list)
+    pt_heads = [head for head in head_list if head == pt_head_name]
+    if not pt_heads:
+        return tuple(head_list)
+    rest = [head for head in head_list if head != pt_head_name]
+    return tuple(pt_heads + rest)
 
 
 def set_default_dtype(dtype: str) -> None:

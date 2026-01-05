@@ -33,6 +33,7 @@ from mace_jax.modules.wrapper_ops import CuEquivarianceConfig
 from mace_jax.tools import gin_datasets, gin_functions, gin_model
 from mace_jax.tools.arg_parser import build_cli_arg_parser
 from mace_jax.tools.train import SWAConfig
+from mace_jax.tools.utils import pt_head_first
 
 _OPTIMIZER_ALGORITHMS = {
     'adam': optax.scale_by_adam,
@@ -192,6 +193,8 @@ def apply_cli_overrides(args: argparse.Namespace) -> None:
             heads_list = list(args.heads)
 
         if heads_list:
+            pt_head_name = getattr(args, 'pt_head_name', 'pt_head') or 'pt_head'
+            heads_list = list(pt_head_first(heads_list, pt_head_name=pt_head_name))
             gin.bind_parameter(
                 'mace_jax.tools.gin_datasets.datasets.heads', tuple(heads_list)
             )
@@ -610,12 +613,16 @@ def _apply_run_options(args: argparse.Namespace) -> None:
             layout=(
                 args.cueq_layout
                 if args.cueq_layout is not None
-                else 'ir_mul' if only_cueq else 'mul_ir'
+                else 'ir_mul'
+                if only_cueq
+                else 'mul_ir'
             ),
             group=(
                 args.cueq_group
                 if args.cueq_group is not None
-                else 'O3_e3nn' if only_cueq else 'O3'
+                else 'O3_e3nn'
+                if only_cueq
+                else 'O3'
             ),
             optimize_all=only_cueq or enable_cueq,
             conv_fusion=(
@@ -625,8 +632,10 @@ def _apply_run_options(args: argparse.Namespace) -> None:
             ),
         )
         gin.bind_parameter('mace_jax.tools.gin_model.model.cueq_config', cueq_config)
-    if cueq_override and not getattr(args, 'enable_cueq', False) and not getattr(
-        args, 'only_cueq', False
+    if (
+        cueq_override
+        and not getattr(args, 'enable_cueq', False)
+        and not getattr(args, 'only_cueq', False)
     ):
         gin.bind_parameter(
             'mace_jax.tools.gin_model.model.cueq_config', CuEquivarianceConfig
@@ -766,6 +775,21 @@ def _apply_dataset_options(args: argparse.Namespace) -> None:
     if getattr(args, 'batch_max_edges', None) is not None:
         limit = _parse_batch_limit_option(args.batch_max_edges)
         gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.n_edge', limit)
+    if getattr(args, 'stream_train_max_batches', None) is not None:
+        gin.bind_parameter(
+            'mace_jax.tools.gin_datasets.datasets.stream_train_max_batches',
+            args.stream_train_max_batches,
+        )
+    if getattr(args, 'stream_train_shuffle', None) is not None:
+        gin.bind_parameter(
+            'mace_jax.tools.gin_datasets.datasets.stream_train_shuffle',
+            bool(args.stream_train_shuffle),
+        )
+    if getattr(args, 'stream_train_node_percentile', None) is not None:
+        gin.bind_parameter(
+            'mace_jax.tools.gin_datasets.datasets.stream_train_node_percentile',
+            float(args.stream_train_node_percentile),
+        )
 
 
 def _apply_training_controls(args: argparse.Namespace) -> None:
@@ -1226,7 +1250,7 @@ def _shutdown_distributed(*, directory: str, tag: str) -> None:
         logging.debug('Failed to shutdown JAX distributed runtime', exc_info=True)
 
 
-def run_training(dry_run: bool = False) -> None:
+def run_training() -> None:
     seed = gin_functions.flags()
     directory, tag, logger = gin_functions.logs()
     process_index = getattr(jax, 'process_index', lambda: 0)()
@@ -1245,12 +1269,6 @@ def run_training(dry_run: bool = False) -> None:
 
     wandb_run = None
     try:
-        if dry_run:
-            logging.info(
-                'Dry-run requested; skipping dataset construction and training.'
-            )
-            return
-
         (
             train_loader,
             valid_loader,
@@ -1332,9 +1350,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         apply_cli_overrides(args)
 
         if args.print_config:
-            logging.info('Operative gin config:\n%s', gin.config_str())
+            print(f'Operative gin config:\n{gin.config_str()}')
 
-        run_training(dry_run=args.dry_run)
+        run_training()
     except ValueError as exc:
         logging.error(str(exc))
         raise SystemExit(2) from None

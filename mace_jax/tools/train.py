@@ -745,15 +745,31 @@ def train(
                 p_bar.set_postfix({'loss': f'{loss:7.3f}'})
             p_bar.update(1)
             batches_in_epoch += 1
+        if p_bar.total is not None and p_bar.n != p_bar.total:
+            p_bar.total = p_bar.n
+            p_bar.refresh()
         p_bar.close()
         if is_primary and padding_stats['node_cap'] > 0:
-            logging.debug(
-                'Epoch %s padding: nodes=%.6f%% edges=%.6f%% graphs=%.2f%%',
-                epoch + 1,
-                100.0 * padding_stats['pad_nodes'] / padding_stats['node_cap'],
-                100.0 * padding_stats['pad_edges'] / padding_stats['edge_cap'],
-                100.0 * padding_stats['pad_graphs'] / padding_stats['graph_cap'],
-            )
+            if getattr(train_loader, 'streaming', False):
+                logging.info(
+                    'Streaming padding: batches=%s nodes avg_pad=%.1f (%.1f%%) '
+                    'edges avg_pad=%.1f (%.1f%%) graphs avg_pad=%.2f (%.1f%%)',
+                    batches_in_epoch,
+                    padding_stats['pad_nodes'] / batches_in_epoch,
+                    100.0 * padding_stats['pad_nodes'] / padding_stats['node_cap'],
+                    padding_stats['pad_edges'] / batches_in_epoch,
+                    100.0 * padding_stats['pad_edges'] / padding_stats['edge_cap'],
+                    padding_stats['pad_graphs'] / batches_in_epoch,
+                    100.0 * padding_stats['pad_graphs'] / padding_stats['graph_cap'],
+                )
+            else:
+                logging.debug(
+                    'Epoch %s padding: nodes=%.6f%% edges=%.6f%% graphs=%.2f%%',
+                    epoch + 1,
+                    100.0 * padding_stats['pad_nodes'] / padding_stats['node_cap'],
+                    100.0 * padding_stats['pad_edges'] / padding_stats['edge_cap'],
+                    100.0 * padding_stats['pad_graphs'] / padding_stats['graph_cap'],
+                )
         if batches_in_epoch <= 0:
             raise ValueError(
                 'iter_batches() produced no data; reduce process_count or provide more data.'
@@ -1017,25 +1033,44 @@ def evaluate(
         disable=not (progress_bar and is_primary),
     )
 
+    batches_seen = 0
     for item in p_bar:
         if device_prefetch_active:
             ref_graph, padding = item
             _process_batch(ref_graph, p_bar=p_bar, prepared=True, padding=padding)
         else:
             _process_batch(item, p_bar=p_bar)
+        batches_seen += 1
+    if p_bar.total is not None and p_bar.n != p_bar.total:
+        p_bar.total = p_bar.n
+        p_bar.refresh()
+    p_bar.close()
 
     if num_graphs <= 0:
         logging.warning(f'No graphs in data_loader ! Returning 0.0 for {name}')
         return 0.0, {}
 
     if padding_stats['node_cap'] > 0:
-        logging.debug(
-            '%s padding: nodes=%.6f%% edges=%.6f%% graphs=%.2f%%',
-            name,
-            100.0 * padding_stats['pad_nodes'] / padding_stats['node_cap'],
-            100.0 * padding_stats['pad_edges'] / padding_stats['edge_cap'],
-            100.0 * padding_stats['pad_graphs'] / padding_stats['graph_cap'],
-        )
+        if getattr(data_loader, 'streaming', False):
+            logging.info(
+                'Streaming padding: batches=%s nodes avg_pad=%.1f (%.1f%%) '
+                'edges avg_pad=%.1f (%.1f%%) graphs avg_pad=%.2f (%.1f%%)',
+                batches_seen,
+                padding_stats['pad_nodes'] / batches_seen,
+                100.0 * padding_stats['pad_nodes'] / padding_stats['node_cap'],
+                padding_stats['pad_edges'] / batches_seen,
+                100.0 * padding_stats['pad_edges'] / padding_stats['edge_cap'],
+                padding_stats['pad_graphs'] / batches_seen,
+                100.0 * padding_stats['pad_graphs'] / padding_stats['graph_cap'],
+            )
+        else:
+            logging.debug(
+                '%s padding: nodes=%.6f%% edges=%.6f%% graphs=%.2f%%',
+                name,
+                100.0 * padding_stats['pad_nodes'] / padding_stats['node_cap'],
+                100.0 * padding_stats['pad_edges'] / padding_stats['edge_cap'],
+                100.0 * padding_stats['pad_graphs'] / padding_stats['graph_cap'],
+            )
 
     avg_loss = total_loss / num_graphs
 
@@ -1123,3 +1158,237 @@ def evaluate(
         aux['rel_rmse_stress'] = aux['rel_rmse_s']
 
     return avg_loss, aux
+
+
+_GRAPH_OUTPUT_KEYS = {
+    'energy',
+    'stress',
+    'virials',
+    'dipole',
+    'polarizability',
+    'polar',
+}
+_NODE_OUTPUT_KEYS = {
+    'forces',
+}
+_EDGE_OUTPUT_KEYS: set[str] = set()
+
+
+def _filter_by_mask(values: Sequence[Any], mask: np.ndarray) -> list[Any]:
+    if len(values) != len(mask):
+        raise ValueError(
+            f'Mismatched graph mask length ({len(values)} values vs {len(mask)} mask).'
+        )
+    return [value for value, keep in zip(values, mask) if keep]
+
+
+def _split_prediction_outputs(
+    outputs: dict[str, Any],
+    graph: jraph.GraphsTuple,
+) -> tuple[list[int], dict[str, list[Any]]]:
+    graph_ids = getattr(graph.globals, 'graph_id', None)
+    if graph_ids is None:
+        raise ValueError(
+            'Streaming prediction requires graph.globals.graph_id to be set.'
+        )
+    graph_ids = np.asarray(graph_ids).reshape(-1)
+    graph_mask = np.asarray(jraph.get_graph_padding_mask(graph), dtype=bool)
+    if graph_ids.shape[0] != graph_mask.shape[0]:
+        raise ValueError(
+            'graph_id length does not match graph batch size '
+            f'({graph_ids.shape[0]} vs {graph_mask.shape[0]}).'
+        )
+
+    n_node = np.asarray(graph.n_node, dtype=int)
+    n_edge = np.asarray(graph.n_edge, dtype=int)
+    total_nodes = int(n_node.sum())
+    total_edges = int(n_edge.sum())
+    n_graphs = int(n_node.shape[0])
+
+    def _split_by_counts(arr: np.ndarray, counts: np.ndarray) -> list[np.ndarray]:
+        if counts.size == 0:
+            return []
+        total = int(counts.sum())
+        if total == 0:
+            return [arr[:0]] * len(counts)
+        splits = np.cumsum(counts)[:-1]
+        return np.split(arr[:total], splits, axis=0)
+
+    per_graph_outputs: dict[str, list[Any]] = {}
+    for key, value in outputs.items():
+        if value is None:
+            continue
+        arr = np.asarray(value)
+        if arr.ndim == 0:
+            continue
+        if key in _NODE_OUTPUT_KEYS:
+            chunks = _split_by_counts(arr, n_node)
+            per_graph_outputs[key] = _filter_by_mask(chunks, graph_mask)
+            continue
+        if key in _EDGE_OUTPUT_KEYS:
+            chunks = _split_by_counts(arr, n_edge)
+            per_graph_outputs[key] = _filter_by_mask(chunks, graph_mask)
+            continue
+        if key in _GRAPH_OUTPUT_KEYS:
+            arr = arr[:n_graphs]
+            per_graph_outputs[key] = _filter_by_mask(list(arr), graph_mask)
+            continue
+
+        if arr.shape[0] >= total_nodes and total_nodes > 0:
+            chunks = _split_by_counts(arr, n_node)
+            per_graph_outputs[key] = _filter_by_mask(chunks, graph_mask)
+        elif arr.shape[0] >= total_edges and total_edges > 0:
+            chunks = _split_by_counts(arr, n_edge)
+            per_graph_outputs[key] = _filter_by_mask(chunks, graph_mask)
+        elif arr.shape[0] >= n_graphs:
+            arr = arr[:n_graphs]
+            per_graph_outputs[key] = _filter_by_mask(list(arr), graph_mask)
+        else:
+            raise ValueError(
+                f'Output {key} has incompatible leading dimension {arr.shape[0]} '
+                f'(graphs={n_graphs}, nodes={total_nodes}, edges={total_edges}).'
+            )
+
+    graph_ids = [int(val) for val in graph_ids[graph_mask]]
+    return graph_ids, per_graph_outputs
+
+
+def predict_streaming(
+    predictor: Callable,
+    params: Any,
+    data_loader: data.StreamingGraphDataLoader,
+    name: str = 'Prediction',
+    progress_bar: bool = True,
+    device_prefetch_batches: int | None = None,
+) -> tuple[list[int], dict[str, list[Any]]]:
+    """Run the predictor on a streaming loader and order outputs by graph_id.
+
+    Returns per-graph outputs sorted by graph_id for the local process. For
+    multi-process runs, callers should gather results across processes.
+    """
+    local_devices = jax.local_devices()
+    local_device_count = max(1, len(local_devices))
+    process_index = getattr(jax, 'process_index', lambda: 0)()
+    process_count = getattr(jax, 'process_count', lambda: 1)()
+    is_primary = process_index == 0
+
+    iterator = data_loader.iter_batches(
+        epoch=0,
+        seed=None,
+        process_count=process_count,
+        process_index=process_index,
+    )
+    total_hint = getattr(iterator, 'total_batches_hint', 0)
+    if not total_hint:
+        approx_length = getattr(data_loader, 'approx_length', None)
+        if callable(approx_length):
+            try:
+                total_hint = int(approx_length())
+            except Exception:  # pragma: no cover - defensive fallback
+                total_hint = 0
+
+    @partial(
+        jax.pmap,
+        in_axes=(None, 0),
+        out_axes=0,
+        axis_name='devices',
+        devices=local_devices,
+    )
+    def _predict_step(params_, graph):
+        return predictor(params_, graph)
+
+    def _prepare_device_graphs(graph):
+        if local_device_count <= 1:
+            return graph, [graph]
+        device_graphs = data.split_graphs_for_devices(graph, local_device_count)
+        device_batch = data.prepare_sharded_batch(device_graphs, local_device_count)
+        return device_batch, device_graphs
+
+    host_prefetch_cap = int(getattr(data_loader, '_prefetch_batches', 0) or 0)
+    device_prefetch_cap = device_prefetch_batches
+    if device_prefetch_cap is None:
+        device_prefetch_cap = max(host_prefetch_cap, 2)
+    device_prefetch_cap = int(device_prefetch_cap or 0)
+    device_prefetch_active = device_prefetch_cap > 0
+    if device_prefetch_active:
+        source_iter = iterator
+
+        def _device_put(graph):
+            device_batch, device_graphs = _prepare_device_graphs(graph)
+            device_batch = jax.device_put(device_batch)
+            return device_batch, device_graphs
+
+        iterator = _prefetch_to_device(source_iter, device_prefetch_cap, _device_put)
+
+    p_bar = tqdm.tqdm(
+        iterator,
+        desc=name,
+        total=total_hint or None,
+        disable=not (progress_bar and is_primary),
+    )
+
+    def _select_device_output(value, device_idx):
+        if value is None:
+            return None
+        arr = np.asarray(value)
+        if arr.ndim > 0 and arr.shape[0] == local_device_count:
+            return value[device_idx]
+        return value
+
+    graph_ids: list[int] = []
+    outputs: dict[str, list[Any]] = {}
+    for item in p_bar:
+        if device_prefetch_active:
+            device_batch, device_graphs = item
+        else:
+            device_batch, device_graphs = _prepare_device_graphs(item)
+        if local_device_count <= 1:
+            raw_outputs = predictor(params, device_batch)
+            raw_outputs = jax.device_get(raw_outputs)
+            batch_graph_ids, batch_outputs = _split_prediction_outputs(
+                raw_outputs, device_graphs[0]
+            )
+        else:
+            raw_outputs = _predict_step(params, device_batch)
+            raw_outputs = jax.device_get(raw_outputs)
+            batch_graph_ids = []
+            batch_outputs: dict[str, list[Any]] = {}
+            for device_idx, device_graph in enumerate(device_graphs):
+                device_outputs = jax.tree_util.tree_map(
+                    lambda x: _select_device_output(x, device_idx),
+                    raw_outputs,
+                    is_leaf=lambda x: x is None,
+                )
+                ids, per_graph = _split_prediction_outputs(device_outputs, device_graph)
+                for key in batch_outputs:
+                    if key not in per_graph:
+                        batch_outputs[key].extend([None] * len(ids))
+                for key, values in per_graph.items():
+                    if key not in batch_outputs:
+                        batch_outputs[key] = [None] * len(batch_graph_ids)
+                    batch_outputs[key].extend(values)
+                batch_graph_ids.extend(ids)
+
+        for key in outputs:
+            if key not in batch_outputs:
+                outputs[key].extend([None] * len(batch_graph_ids))
+        for key, values in batch_outputs.items():
+            if key not in outputs:
+                outputs[key] = [None] * len(graph_ids)
+            outputs[key].extend(values)
+        graph_ids.extend(batch_graph_ids)
+
+    if p_bar.total is not None and p_bar.n != p_bar.total:
+        p_bar.total = p_bar.n
+        p_bar.refresh()
+    p_bar.close()
+
+    if not graph_ids:
+        return [], {}
+
+    order = np.argsort(np.asarray(graph_ids))
+    ordered_graph_ids = [graph_ids[idx] for idx in order]
+    ordered_outputs = {
+        key: [values[idx] for idx in order] for key, values in outputs.items()
+    }
+    return ordered_graph_ids, ordered_outputs

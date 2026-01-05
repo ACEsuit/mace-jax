@@ -38,7 +38,6 @@ def _make_streaming_loader(tmp_path, targets: list[float]) -> StreamingGraphData
     dataset_path = tmp_path / 'train_controls_targets.h5'
     _write_hdf5_from_configs(dataset_path, configs)
     dataset = HDF5Dataset(dataset_path, mode='r')
-    assignments = [[[idx] for idx in range(len(configs))]]
     return StreamingGraphDataLoader(
         datasets=[dataset],
         dataset_specs=[StreamingDatasetSpec(path=dataset_path)],
@@ -47,10 +46,8 @@ def _make_streaming_loader(tmp_path, targets: list[float]) -> StreamingGraphData
         n_node=None,
         n_edge=None,
         head_to_index={'Default': 0},
-        shuffle=False,
-        seed=0,
         num_workers=0,
-        batch_assignments=assignments,
+        pad_graphs=2,
     )
 
 

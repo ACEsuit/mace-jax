@@ -433,6 +433,7 @@ class GraphGlobals(NamedTuple):
     virials: np.ndarray | None = None
     dipole: np.ndarray | None = None
     polarizability: np.ndarray | None = None
+    graph_id: np.ndarray | None = None
 
 
 def graph_from_configuration(
