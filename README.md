@@ -300,20 +300,16 @@ Add `--head NAME` when exporting a multi-head model.
 
 #### `mace-jax-from-torch`
 
-Performs Torch→JAX parameter conversion and (optionally) prediction. It can also
+Performs Torch→JAX parameter conversion. It can also
 download and import pre-trained foundation models when `--torch-model` is not
-provided. To compute energies for the provided test structure:
-
-```sh
-mace-jax-from-torch --torch-model checkpoints/model.pt --predict tests/test_data/simple.xyz
-```
+provided.
 
 If `--output` is omitted the converted parameters are written to `<checkpoint>-jax.npz`.
 
 You can try this with one of the released foundation models (downloaded automatically):
 
 ```sh
-mace-jax-from-torch --foundation mp --model-name small --predict tests/test_data/simple.xyz
+mace-jax-from-torch --foundation mp --model-name small
 ```
 
 All commands can be invoked via `python -m mace_jax.<module>` if preferred.

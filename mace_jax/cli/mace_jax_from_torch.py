@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import warnings
-from dataclasses import replace
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
@@ -27,9 +27,6 @@ from flax import serialization
 from mace.calculators import foundations_models
 from mace.tools.scripts_utils import extract_config_mace_model
 
-from mace_jax.data import utils as data_utils
-from mace_jax.data.utils import graph_from_configuration
-from mace_jax.tools.gin_model import _graph_to_data  # type: ignore[attr-defined]
 from mace_jax.tools.import_from_torch import import_from_torch
 from mace_jax.tools.model_builder import (
     _as_irreps,
@@ -118,6 +115,44 @@ def _maybe_update_hidden_irreps_from_torch(
         config['hidden_irreps'] = str(torch_irreps)
 
 
+def _serialize_for_json(value: Any) -> Any:
+    if is_dataclass(value):
+        return {str(k): _serialize_for_json(v) for k, v in asdict(value).items()}
+    if isinstance(value, dict):
+        return {str(k): _serialize_for_json(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_serialize_for_json(v) for v in value]
+    if isinstance(value, set):
+        return [_serialize_for_json(v) for v in sorted(value)]
+    if isinstance(value, torch.Tensor):
+        arr = value.detach().cpu().numpy()
+        if arr.ndim == 0:
+            return arr.item()
+        return arr.tolist()
+    if isinstance(value, torch.device):
+        return str(value)
+    if isinstance(value, torch.dtype):
+        return str(value).replace('torch.', '')
+    if isinstance(value, torch.Size):
+        return list(value)
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, (np.integer, np.floating)):
+        return value.item()
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, type):
+        return value.__name__
+    if callable(value):
+        name = getattr(value, '__name__', None)
+        if name:
+            return name
+        cls = getattr(value, '__class__', None)
+        if cls is not None:
+            return getattr(cls, '__name__', str(value))
+    return value
+
+
 def convert_model(
     torch_model,
     config: dict[str, Any],
@@ -196,10 +231,6 @@ def main():
             "(or '<source>-<model>-jax.npz' for foundation downloads)."
         ),
     )
-    parser.add_argument(
-        '--predict',
-        help='Optional path to an XYZ file for prediction. Results are written to stdout.',
-    )
     args = parser.parse_args()
 
     if args.torch_model:
@@ -239,43 +270,8 @@ def main():
     print(f'Serialized JAX parameters written to {output_path}')
     # Persist config alongside parameters.
     config_path = output_path.with_suffix('.json')
-    config_path.write_text(json.dumps(config, indent=2))
+    config_path.write_text(json.dumps(_serialize_for_json(config), indent=2))
     print(f'Config written to {config_path}')
-
-    if args.predict:
-        _, configurations = data_utils.load_from_xyz(args.predict)
-        if not configurations:
-            raise ValueError(f'No configurations found in {args.predict}')
-
-        species_table = data_utils.AtomicNumberTable(
-            [int(z) for z in config['atomic_numbers']]
-        )
-
-        for idx, configuration in enumerate(configurations):
-            species_indices = data_utils.atomic_numbers_to_indices(
-                configuration.atomic_numbers, species_table
-            )
-            indexed_config = replace(configuration, atomic_numbers=species_indices)
-
-            graph = graph_from_configuration(
-                indexed_config,
-                cutoff=float(config['r_max']),
-            )
-            data_dict = _graph_to_data(graph, num_species=len(species_table))
-            outputs = jax_model.apply(
-                variables,
-                data_dict,
-                compute_force=True,
-                compute_stress=False,
-            )
-            forces = np.asarray(outputs['forces'])
-            energy = float(np.asarray(outputs['energy']).sum())
-
-            print(f'Configuration {idx}:')
-            print(f'  Energy: {energy}')
-            print(f'  Forces (shape {forces.shape}):')
-            print(forces)
-
 
 if __name__ == '__main__':
     main()
