@@ -27,15 +27,8 @@ model.hidden_irreps = "256x0e + 256x1o"
 model.MLP_irreps = "16x0e"
 model.correlation = 3  # 4 is better but 5x slower
 model.gate = @silu
-model.num_species = 11
 model.atomic_energies = "average"
 model.avg_num_neighbors = "average"
-# model.atomic_energies = {
-#     1: -13.587222780835477,
-#     6: -1029.4889999855063,
-#     7: -1484.9814568572233,
-#     8: -2041.9816003861047
-# }
 
 
 loss.energy_weight = 1.0

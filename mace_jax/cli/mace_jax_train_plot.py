@@ -121,11 +121,19 @@ def load_dataframe(paths: Iterable[Path]) -> pd.DataFrame:
     frame = pd.DataFrame(rows)
     if 'interval' not in frame:
         raise KeyError("Metrics files do not contain an 'interval' field.")
+    if 'mode' not in frame:
+        raise KeyError("Metrics files do not contain a 'mode' field.")
+    mode_split = frame['mode'].astype(str).str.split(':', n=1, expand=True)
+    frame['mode_base'] = mode_split[0].replace({'eval': 'eval_valid'})
+    if mode_split.shape[1] > 1:
+        frame['head'] = mode_split[1].fillna('')
+    else:
+        frame['head'] = ''
     return frame
 
 
 def _aggregate(frame: pd.DataFrame, keys: list[str]) -> pd.DataFrame:
-    columns = ['run_directory', 'run_name', 'mode', 'interval']
+    columns = ['run_directory', 'run_name', 'mode_base', 'head', 'interval']
     available_keys = [k for k in keys if k in frame.columns]
     if available_keys:
         columns.extend(available_keys)
@@ -134,7 +142,7 @@ def _aggregate(frame: pd.DataFrame, keys: list[str]) -> pd.DataFrame:
 
     trimmed = frame[columns].copy()
     grouped = (
-        trimmed.groupby(['run_directory', 'run_name', 'mode', 'interval'])
+        trimmed.groupby(['run_directory', 'run_name', 'mode_base', 'head', 'interval'])
         .agg(['mean', 'std'])
         .reset_index()
     )
@@ -174,13 +182,18 @@ def plot_run(
             )
 
     loss_ax = axes[0]
-    eval_data = data[data['mode'] == 'eval']
-    train_data = data[data['mode'] == 'eval_train']
+    eval_data = data[data['mode_base'] == 'eval_valid']
+    train_data = data[data['mode_base'] == 'eval_train']
 
     if not eval_data.empty:
-        _plot_series(loss_ax, eval_data, 'Validation', colors[0])
+        for idx, (head, series) in enumerate(eval_data.groupby('head')):
+            label = 'Validation' if not head else f'Validation ({head})'
+            _plot_series(loss_ax, series, label, colors[idx % len(colors)])
     if not train_data.empty:
-        _plot_series(loss_ax, train_data, 'Train (eval interval)', colors[3])
+        for idx, (head, series) in enumerate(train_data.groupby('head')):
+            label = 'Train (eval interval)' if not head else f'Train ({head})'
+            color_idx = (idx + 3) % len(colors)
+            _plot_series(loss_ax, series, label, colors[color_idx])
 
     if start_interval is not None:
         loss_ax.axvline(start_interval, linestyle='--', color='black', alpha=0.5)
@@ -200,26 +213,29 @@ def plot_run(
         if column_mean not in data.columns:
             logging.debug("Metric '%s' not present in metrics file; skipping.", key)
             continue
-        series = data[data['mode'] == 'eval']
+        series = data[data['mode_base'] == 'eval_valid']
         if series.empty:
             continue
-        metric_ax.plot(
-            series['interval'],
-            series[column_mean],
-            label=key,
-            color=colors[(idx + 1) % len(colors)],
-        )
-        if error_bars:
-            column_std = f'{key}_std'
-            if column_std in series:
-                std = series[column_std].fillna(0.0)
-                metric_ax.fill_between(
-                    series['interval'],
-                    series[column_mean] - std,
-                    series[column_mean] + std,
-                    alpha=0.2,
-                    color=colors[(idx + 1) % len(colors)],
-                )
+        for head_idx, (head, head_series) in enumerate(series.groupby('head')):
+            label = key if not head else f'{key} ({head})'
+            color_idx = (idx + 1 + head_idx) % len(colors)
+            metric_ax.plot(
+                head_series['interval'],
+                head_series[column_mean],
+                label=label,
+                color=colors[color_idx],
+            )
+            if error_bars:
+                column_std = f'{key}_std'
+                if column_std in head_series:
+                    std = head_series[column_std].fillna(0.0)
+                    metric_ax.fill_between(
+                        head_series['interval'],
+                        head_series[column_mean] - std,
+                        head_series[column_mean] + std,
+                        alpha=0.2,
+                        color=colors[color_idx],
+                    )
 
     metric_ax.set_xlabel('Interval')
     handles, labels = metric_ax.get_legend_handles_labels()

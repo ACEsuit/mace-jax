@@ -74,6 +74,7 @@ After installation, the following convenience commands are available:
 
 - `mace-jax-train`
 - `mace-jax-preprocess`
+- `mace-jax-predict`
 - `mace-jax-train-plot`
 - `mace-jax-from-torch`
 - `mace-jax-hdf5-benchmark`
@@ -214,6 +215,28 @@ A typical 2-host launch (one process per host) looks like:
     --coordinator-port 12345
   ```
 
+#### `mace-jax-predict`
+
+Runs inference on XYZ or HDF5 datasets and writes `.npz` outputs (one per input).
+For streaming HDF5 inputs, predictions are ordered by the stable `graph_id` and
+written as NumPy arrays:
+
+```sh
+# XYZ inference.
+mace-jax-predict checkpoints/model.ckpt data/structures.xyz
+
+# HDF5 inference (uses cached streaming stats if present).
+mace-jax-predict checkpoints/model.ckpt data/hdf5/train_0.h5 \
+  --batch-max-edges 6000 \
+  --num-workers 8
+```
+
+Notes:
+- `--batch-max-edges` is required for streaming HDF5 predictions unless cached
+  streaming stats are present next to the file.
+- `--batch-max-nodes` is optional for predictions if you want to override the
+  cached node cap.
+
 #### `mace-jax-preprocess`
 
 Converts one or more XYZ files into MACE-style streaming HDF5 files and (optionally)
@@ -236,13 +259,15 @@ to reuse the computed scaling and average neighbor counts.
 
 #### `mace-jax-train-plot`
 
-Produces loss/metric curves from `.metrics` logs generated during training:
+Produces loss/metric curves from `.metrics` logs generated during training (JSON-lines logs in the run directory):
 
 ```sh
 mace-jax-train-plot --path results --keys rmse_e_per_atom,rmse_f --output-format pdf
 ```
 
-The command accepts either a directory (all `.metrics` files are processed) or a single metrics file.
+The command accepts either a directory (all `.metrics` files are processed) or a single metrics file. It plots
+`eval_valid` and `eval_train` loss curves (with per-head suffixes like `eval_valid:Surface` when present), plus the
+extra metric keys requested via `--keys`.
 
 #### `mace-jax-hdf5-info`
 
@@ -420,6 +445,7 @@ the combined dataset.
 Streaming loader knobs (CLI or gin):
 - `--batch-max-edges` / `n_edge`: edge cap for fixed-shape batches.
 - `--suffle`: enable/disable per-epoch shuffling for training (default: true).
+  Validation/test loaders never shuffle.
 - `--batch-node-precentile`: percentile for node padding cap (default: 90);
   caps never drop below the largest single graph.
 - `--stream-train-max-batches`: optional cap on batches per epoch.
