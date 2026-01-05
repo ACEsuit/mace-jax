@@ -145,9 +145,11 @@ mace-jax-train configs/finetune.gin \
   --torch-head Surface \
   --train-path data/surface.xyz \
   --valid-path None \
-  --r-max 4.5 \
   --print-config
 ```
+
+See the **Foundation models** note below for how to download or select the
+pre-trained checkpoint used in this example.
 
 ##### Optional logging & averaging
 
@@ -250,12 +252,24 @@ mace-jax-preprocess \
   --h5_prefix data/hdf5/ \
   --r_max 5.0 \
   --compute_statistics \
-  --atomic_numbers "[1, 6, 8]" \
   --E0s "average"
 ```
 
 Pass the resulting `statistics.json` to training via `mace-jax-train --statistics-file`
 to reuse the computed scaling and average neighbor counts.
+
+Key preprocessing arguments (most commonly used):
+- `--train_file/--valid_file/--test_file`: input XYZ files. If `--valid_file` is omitted,
+  `--valid_fraction` is used to split the training file.
+- `--h5_prefix`: output root for HDF5 shards (`<prefix>/train`, `<prefix>/val`, `<prefix>/test`).
+- `--num_process`: number of worker processes **and** output shards per split
+  (e.g., `train_0.h5`, `train_1.h5`). Higher values increase parallel writes
+  and create more shards for streaming; keep it in line with disk throughput.
+- `--r_max`: neighbor cutoff used for graph construction and statistics.
+- `--atomic_numbers` / `--E0s`: explicitly set atomic numbers or atomic energies; otherwise
+  they are inferred from the dataset (energies default to `average` when stats are computed).
+- `--compute_statistics`: write `statistics.json` (scaling + neighbor stats) for reuse in training.
+- `--shuffle`: randomize configs before splitting/sharding (affects train/valid ordering).
 
 #### `mace-jax-train-plot`
 
