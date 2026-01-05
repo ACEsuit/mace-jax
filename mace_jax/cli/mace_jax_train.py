@@ -1291,6 +1291,7 @@ def run_training() -> None:
             train_graphs=train_loader.graphs,
             initialize_seed=seed,
         )
+        model_config = getattr(model_fn, 'model_config', None)
         logging.info('Number of interaction blocks: %s', num_message_passing)
 
         params = gin_functions.reload(params)
@@ -1334,6 +1335,7 @@ def run_training() -> None:
             tag=tag,
             data_seed=seed,
             wandb_run=wandb_run,
+            model_config=model_config,
         )
     finally:
         gin_functions.finish_wandb(wandb_run)

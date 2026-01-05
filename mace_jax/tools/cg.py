@@ -8,7 +8,6 @@
 import collections
 import itertools
 from collections.abc import Iterator
-from typing import Union
 
 import cuequivariance as cue
 import jax.numpy as jnp

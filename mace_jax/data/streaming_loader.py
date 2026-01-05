@@ -138,6 +138,33 @@ def _with_graph_id(graph: jraph.GraphsTuple, graph_id: int) -> jraph.GraphsTuple
     return graph._replace(globals=globals_attr._replace(graph_id=graph_id_arr))
 
 
+def _mark_padding_graph_ids(
+    graph: jraph.GraphsTuple, graph_count: int
+) -> jraph.GraphsTuple:
+    """Set graph_id=-1 for padded graphs so predictions can filter them out."""
+    globals_attr = getattr(graph, 'globals', None)
+    if globals_attr is None:
+        return graph
+    graph_ids = getattr(globals_attr, 'graph_id', None)
+    if graph_ids is None:
+        return graph
+    graph_ids = np.asarray(graph_ids)
+    if graph_ids.ndim == 0:
+        return graph
+    if graph_ids.shape[0] <= int(graph_count):
+        return graph
+    graph_ids = graph_ids.copy()
+    graph_ids[int(graph_count) :] = -1
+    if hasattr(globals_attr, '_replace'):
+        globals_attr = globals_attr._replace(graph_id=graph_ids)
+    elif hasattr(globals_attr, 'items'):
+        globals_attr = dict(globals_attr)
+        globals_attr['graph_id'] = graph_ids
+    else:
+        return graph
+    return graph._replace(globals=globals_attr)
+
+
 def _pack_sizes_by_edge_cap(
     graph_sizes: list[tuple[int, int]],
     edge_cap: int,
@@ -306,6 +333,7 @@ def _graph_worker_main(
             n_edge=int(n_edge),
             n_graph=int(n_graph),
         )
+        batch = _mark_padding_graph_ids(batch, graph_count)
         _result_put((_RESULT_BATCH, batch, graph_count))
         graphs = []
         nodes_sum = 0
@@ -540,6 +568,7 @@ class StreamingGraphDataLoader:
                 n_edge=self._n_edge,
                 n_graph=self._n_graph,
             )
+            batch = _mark_padding_graph_ids(batch, graph_count)
             result = (batch, graph_count)
             graphs = []
             nodes_sum = 0
@@ -899,6 +928,7 @@ def get_hdf5_dataloader(
     r_max: float,
     max_nodes: int | None,
     max_edges: int | None,
+    max_graphs: int | None = None,
     niggli_reduce: bool = False,
     max_batches: int | None = None,
     prefetch_batches: int | None = None,
@@ -915,6 +945,7 @@ def get_hdf5_dataloader(
         r_max: Cutoff radius for neighbor construction.
         max_nodes: Fixed node padding cap (None to infer).
         max_edges: Fixed edge padding cap (None to infer).
+        max_graphs: Fixed graph padding cap (None to infer).
         niggli_reduce: Apply Niggli reduction to periodic cells before graphing.
         max_batches: Optional cap on batches per epoch.
         prefetch_batches: Host prefetch depth for produced batches.
@@ -947,7 +978,7 @@ def get_hdf5_dataloader(
         max_batches=max_batches,
         prefetch_batches=prefetch_batches,
         num_workers=num_workers,
-        pad_graphs=None,
+        pad_graphs=max_graphs,
         shuffle=shuffle,
     )
 

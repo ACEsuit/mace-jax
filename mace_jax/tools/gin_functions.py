@@ -918,6 +918,7 @@ def train(
     resume_from: str | None = None,
     data_seed: int | None = None,
     lr_scale_by_graphs: bool = True,
+    model_config: dict | None = None,
     **kwargs,
 ):
     """Run the end-to-end training loop with evaluation and checkpointing.
@@ -956,6 +957,7 @@ def train(
         resume_from: Optional checkpoint path to resume from.
         data_seed: Optional seed for shuffling data loaders.
         lr_scale_by_graphs: Whether to scale LR based on graphs per batch.
+        model_config: Optional serialized model configuration for checkpoints.
         **kwargs: Additional arguments forwarded to `tools.train()`.
 
     Returns:
@@ -1044,7 +1046,7 @@ def train(
         epoch_idx, current_params, current_optimizer_state, eval_params_
     ):
         """Build a checkpoint payload for the current epoch."""
-        return {
+        state = {
             'epoch': epoch_idx,
             'params': _attach_config(current_params, static_config),
             'optimizer_state': current_optimizer_state,
@@ -1053,6 +1055,9 @@ def train(
             'patience_counter': patience_counter,
             'checkpoint_format': 2,
         }
+        if model_config is not None:
+            state['model_config'] = model_config
+        return state
 
     def _write_checkpoint(path: Path, state: dict):
         """Write a checkpoint payload to disk."""

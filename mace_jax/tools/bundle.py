@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import json
+import pickle
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 import jax
+import numpy as np
+from e3nn_jax import Irrep, Irreps
 from flax import core as flax_core
 from flax import serialization
 
-from mace_jax.cli import mace_jax_from_torch
+from mace_jax.tools import model_builder
 
 DEFAULT_CONFIG_NAME = 'config.json'
 DEFAULT_PARAMS_NAME = 'params.msgpack'
@@ -45,29 +49,112 @@ def resolve_model_paths(model_arg: str) -> tuple[Path, Path]:
     return config_path, params_path
 
 
+def _maybe_set_dtype(dtype: str | None) -> None:
+    if dtype and dtype.lower() == 'float64':
+        jax.config.update('jax_enable_x64', True)
+    elif dtype:
+        jax.config.update('jax_enable_x64', False)
+
+
+def _load_checkpoint_bundle(path: Path, dtype: str) -> ModelBundle:
+    with path.open('rb') as handle:
+        payload = pickle.load(handle)
+    if not isinstance(payload, dict):
+        raise ValueError(f'Checkpoint {path} did not contain a dict payload.')
+    model_config = payload.get('model_config')
+    if model_config is None:
+        raise ValueError(
+            f'Checkpoint {path} does not include model_config; '
+            're-run training with a newer mace-jax or export a model bundle.'
+        )
+    params = payload.get('eval_params') or payload.get('params')
+    if params is None:
+        raise ValueError(f'Checkpoint {path} is missing params/eval_params.')
+    model_config, _, _ = model_builder._normalize_atomic_config(model_config)
+    _validate_config_matches_params(model_config, params, context=str(path))
+    _maybe_set_dtype(dtype)
+    module = model_builder._build_jax_model(model_config)
+    return ModelBundle(config=model_config, params=params, module=module)
+
+
 def load_model_bundle(
     model_arg: str,
     dtype: str,
     *,
     wrapper: str | None = None,
 ) -> ModelBundle:
+    path = Path(model_arg).expanduser().resolve()
+    if path.suffix == '.ckpt':
+        if wrapper not in (None, '', 'mace'):
+            raise ValueError('mace-jax only supports the built-in MACE wrapper.')
+        return _load_checkpoint_bundle(path, dtype)
     config_path, params_path = resolve_model_paths(model_arg)
     config = json.loads(config_path.read_text())
 
-    if dtype and dtype.lower() == 'float64':
-        jax.config.update('jax_enable_x64', True)
-    elif dtype:
-        jax.config.update('jax_enable_x64', False)
+    _maybe_set_dtype(dtype)
 
     if wrapper not in (None, '', 'mace'):
         raise ValueError('mace-jax only supports the built-in MACE wrapper.')
 
-    module = mace_jax_from_torch._build_jax_model(config)
-    template = mace_jax_from_torch._prepare_template_data(config)
+    config, _, _ = model_builder._normalize_atomic_config(config)
+    module = model_builder._build_jax_model(config)
+    template = model_builder._prepare_template_data(config)
     variables = module.init(jax.random.PRNGKey(0), template)
     variables = serialization.from_bytes(variables, params_path.read_bytes())
     variables = flax_core.freeze(variables)
+    _validate_config_matches_params(config, variables, context=str(params_path))
     return ModelBundle(config=config, params=variables, module=module)
+
+
+def _find_param_leaf(tree, keys: Sequence[str]):
+    if isinstance(tree, flax_core.FrozenDict):
+        tree = flax_core.unfreeze(tree)
+    for key in keys:
+        if not isinstance(tree, dict) or key not in tree:
+            return None
+        tree = tree[key]
+        if isinstance(tree, flax_core.FrozenDict):
+            tree = flax_core.unfreeze(tree)
+    if isinstance(tree, (np.ndarray, getattr(jax, 'Array', ()))):
+        return tree
+    return None
+
+
+def _infer_num_elements_from_params(config: dict, params) -> int | None:
+    weight = _find_param_leaf(params, ('params', 'node_embedding', 'linear', 'weight'))
+    if weight is None:
+        weight = _find_param_leaf(params, ('node_embedding', 'linear', 'weight'))
+    if weight is None:
+        return None
+    try:
+        hidden_irreps = Irreps(config['hidden_irreps'])
+        scalar_mul = int(hidden_irreps.count(Irrep(0, 1)))
+    except Exception:
+        return None
+    if scalar_mul <= 0:
+        return None
+    weight_numel = int(np.asarray(weight).shape[-1])
+    if weight_numel % scalar_mul != 0:
+        return None
+    return weight_numel // scalar_mul
+
+
+def _validate_config_matches_params(
+    config: dict, params, *, context: str | None = None
+) -> None:
+    inferred = _infer_num_elements_from_params(config, params)
+    if inferred is None:
+        return
+    atomic_numbers = [int(z) for z in config.get('atomic_numbers', [])]
+    current = len(atomic_numbers)
+    if current == inferred:
+        return
+    location = f' in {context}' if context else ''
+    raise ValueError(
+        'Model config atomic_numbers length does not match parameter shapes'
+        f'{location} ({current} vs {inferred}). '
+        'Re-export the bundle or checkpoint with matching atomic_numbers.'
+    )
 
 
 __all__ = ['ModelBundle', 'load_model_bundle', 'resolve_model_paths']

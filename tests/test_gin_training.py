@@ -106,7 +106,6 @@ def reset_gin(dataset_paths):
     gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.test_path', None)
     # Keep toy dataset graphs by setting generous size limits.
     gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.n_edge', 128)
-    gin.bind_parameter('mace_jax.tools.gin_model.model.num_species', 64)
     yield
     gin.clear_config()
 
@@ -126,6 +125,48 @@ def patch_mace_module(monkeypatch):
     class _DummyMACE:
         def __init__(self, **kwargs):
             self.kwargs = kwargs
+            for key, value in kwargs.items():
+                setattr(self, key, value)
+            atomic_numbers = tuple(kwargs.get('atomic_numbers', (1,)))
+            atomic_energies = kwargs.get('atomic_energies')
+            if atomic_energies is None:
+                atomic_energies = np.zeros(len(atomic_numbers), dtype=float)
+            self.r_max = float(kwargs.get('r_max', 0.0))
+            self.num_bessel = int(kwargs.get('num_bessel', 1))
+            self.num_polynomial_cutoff = int(kwargs.get('num_polynomial_cutoff', 1))
+            self.max_ell = int(kwargs.get('max_ell', 0))
+            self.interaction_cls = kwargs.get('interaction_cls')
+            self.interaction_cls_first = kwargs.get('interaction_cls_first')
+            self.num_interactions = int(kwargs.get('num_interactions', 1))
+            self.hidden_irreps = kwargs.get('hidden_irreps', '1x0e')
+            self.MLP_irreps = kwargs.get('MLP_irreps', '1x0e')
+            self.atomic_numbers = atomic_numbers
+            self.atomic_energies = np.asarray(atomic_energies, dtype=float)
+            self.avg_num_neighbors = float(kwargs.get('avg_num_neighbors', 0.0))
+            self.correlation = kwargs.get('correlation')
+            self.radial_type = kwargs.get('radial_type', 'bessel')
+            self.pair_repulsion = bool(kwargs.get('pair_repulsion', False))
+            self.distance_transform = kwargs.get('distance_transform')
+            self.embedding_specs = kwargs.get('embedding_specs')
+            self.use_so3 = bool(kwargs.get('use_so3', False))
+            self.use_reduced_cg = bool(kwargs.get('use_reduced_cg', True))
+            self.use_agnostic_product = bool(kwargs.get('use_agnostic_product', False))
+            self.use_last_readout_only = bool(
+                kwargs.get('use_last_readout_only', False)
+            )
+            self.use_embedding_readout = bool(
+                kwargs.get('use_embedding_readout', False)
+            )
+            self.collapse_hidden_irreps = bool(
+                kwargs.get('collapse_hidden_irreps', True)
+            )
+            self.readout_cls = kwargs.get('readout_cls')
+            self.gate = kwargs.get('gate')
+            self.apply_cutoff = bool(kwargs.get('apply_cutoff', True))
+            self.radial_MLP = kwargs.get('radial_MLP')
+            self.edge_irreps = kwargs.get('edge_irreps')
+            self.heads = kwargs.get('heads')
+            self.cueq_config = kwargs.get('cueq_config')
 
         def init(self, rng, data):
             del rng, data

@@ -2,17 +2,25 @@ from __future__ import annotations
 
 import argparse
 import logging
+import pickle
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 import jax
 import jraph
 import numpy as np
 
 from mace_jax import data, tools
-from mace_jax.tools import bundle as bundle_tools
 from mace_jax.data.streaming_loader import _expand_hdf5_paths
-
+from mace_jax.data.streaming_stats_cache import (
+    STREAMING_STATS_CACHE_VERSION,
+    dataset_signature,
+    stats_cache_path,
+    stats_payload_to_parts,
+)
+from mace_jax.tools import bundle as bundle_tools
+from mace_jax.tools import gin_model
 
 _GRAPH_OUTPUT_KEYS = {
     'energy',
@@ -34,8 +42,9 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         'model',
         help=(
-            'Path to a JAX model bundle (config.json + params.msgpack). '
-            'Pass a directory, config.json, or params.msgpack path.'
+            'Path to a JAX model bundle (config.json + params.msgpack) '
+            'or a training checkpoint (.ckpt). Pass a directory, config.json, '
+            'params.msgpack, or .ckpt path.'
         ),
     )
     parser.add_argument(
@@ -60,7 +69,10 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         '--batch-max-edges',
         type=int,
         default=None,
-        help='Edge cap for streaming HDF5 predictions (required for HDF5 inputs).',
+        help=(
+            'Edge cap for streaming HDF5 predictions. If omitted, cached '
+            'streaming stats are used when available.'
+        ),
     )
     parser.add_argument(
         '--batch-max-nodes',
@@ -116,6 +128,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action='store_true',
         help='Disable progress bars.',
     )
+    parser.add_argument(
+        '--full-outputs',
+        action='store_true',
+        help='Return all model outputs (slower, larger transfers).',
+    )
     return parser.parse_args(argv)
 
 
@@ -167,6 +184,50 @@ def _resolve_output_path(
     return output_path
 
 
+def _load_cached_streaming_caps(
+    paths: Sequence[Path],
+) -> tuple[tuple[int, int, int] | None, list[Path], list[Path]]:
+    caps: list[tuple[int, int, int]] = []
+    missing: list[Path] = []
+    stale: list[Path] = []
+    for path in paths:
+        cache_path = stats_cache_path(path)
+        if not cache_path.exists():
+            missing.append(path)
+            continue
+        try:
+            with cache_path.open('rb') as fh:
+                payload = pickle.load(fh)
+        except Exception as exc:  # pragma: no cover - cache corruption is unexpected
+            logging.warning(
+                'Failed to read streaming stats cache %s: %s', cache_path, exc
+            )
+            missing.append(path)
+            continue
+        if payload is None or payload.get('version') != STREAMING_STATS_CACHE_VERSION:
+            missing.append(path)
+            continue
+        if payload.get('dataset_signature') != dataset_signature(path):
+            stale.append(path)
+            continue
+        stats_payload = payload.get('stats')
+        if not stats_payload:
+            missing.append(path)
+            continue
+        try:
+            n_nodes, n_edges, n_graphs, _ = stats_payload_to_parts(stats_payload)
+        except (KeyError, TypeError, ValueError):
+            missing.append(path)
+            continue
+        caps.append((n_nodes, n_edges, n_graphs))
+    if not caps or missing or stale:
+        return None, missing, stale
+    max_nodes = max(item[0] for item in caps)
+    max_edges = max(item[1] for item in caps)
+    max_graphs = max(item[2] for item in caps)
+    return (max_nodes, max_edges, max_graphs), missing, stale
+
+
 def _stack_or_object(values: list[Any]) -> np.ndarray:
     if not values:
         return np.array([], dtype=np.float32)
@@ -190,15 +251,40 @@ def _write_predictions(
     np.savez(output_path, **payload)
 
 
-def _build_predictor(module, *, compute_forces: bool, compute_stress: bool):
-    return jax.jit(
-        lambda params, graph: module.apply(
+def _build_predictor(
+    module,
+    *,
+    model_config: dict[str, Any],
+    compute_forces: bool,
+    compute_stress: bool,
+    full_outputs: bool,
+):
+    atomic_numbers = model_config.get('atomic_numbers') or []
+    num_species = int(len(atomic_numbers))
+    if num_species <= 0:
+        raise ValueError('Model config is missing atomic_numbers for prediction.')
+
+    keep_keys: set[str] | None = None
+    if not full_outputs:
+        keep_keys = {'energy', 'dipole', 'polarizability', 'polar'}
+        if compute_forces:
+            keep_keys.add('forces')
+        if compute_stress:
+            keep_keys.update({'stress', 'virials'})
+
+    def _predict(params, graph):
+        outputs = module.apply(
             params,
-            graph,
+            gin_model._graph_to_data(graph, num_species=num_species),
             compute_force=compute_forces,
             compute_stress=compute_stress,
+            compute_node_feats=full_outputs,
         )
-    )
+        if full_outputs:
+            return outputs
+        return {key: outputs.get(key) for key in keep_keys if key in outputs}
+
+    return _predict
 
 
 def _append_single_prediction(
@@ -238,6 +324,7 @@ def _predict_xyz(
     _, configs = data.load_from_xyz(input_path, head_name=head_name, no_data_ok=True)
     if not configs:
         raise ValueError(f'No configurations found in {input_path}.')
+    predictor_fn = jax.jit(predictor)
     z_table = data.AtomicNumberTable(model_config['atomic_numbers'])
     graph_ids: list[int] = []
     outputs: dict[str, list[Any]] = {}
@@ -249,7 +336,7 @@ def _predict_xyz(
             head_to_index=head_to_index,
         )
         graph_ids.append(idx)
-        raw_outputs = predictor(params, graph)
+        raw_outputs = predictor_fn(params, graph)
         raw_outputs = jax.device_get(raw_outputs)
         _append_single_prediction(outputs, graph, raw_outputs)
     return graph_ids, outputs
@@ -263,14 +350,45 @@ def _predict_hdf5(
     model_config: dict[str, Any],
     head_name: str,
     head_to_index: dict[str, int],
-    batch_max_edges: int,
+    batch_max_edges: int | None,
     batch_max_nodes: int | None,
+    batch_max_graphs: int | None,
     prefetch_batches: int | None,
     num_workers: int,
     progress_bar: bool,
 ) -> tuple[list[int], dict[str, list[Any]]]:
     z_table = data.AtomicNumberTable(model_config['atomic_numbers'])
     expanded_paths = _expand_hdf5_paths([input_path])
+    if batch_max_edges is None:
+        caps, missing, stale = _load_cached_streaming_caps(expanded_paths)
+        if caps is None:
+            details: list[str] = []
+            if missing:
+                details.append(
+                    f'missing cache for: {", ".join(path.name for path in missing)}'
+                )
+            if stale:
+                details.append(
+                    f'stale cache for: {", ".join(path.name for path in stale)}'
+                )
+            detail_msg = f' ({"; ".join(details)})' if details else ''
+            raise ValueError(
+                f'--batch-max-edges is required for streaming predictions on {input_path}'
+                f' unless a valid streaming stats cache is present{detail_msg}.'
+            )
+        cached_nodes, cached_edges, cached_graphs = caps
+        batch_max_edges = cached_edges
+        if batch_max_nodes is None:
+            batch_max_nodes = cached_nodes
+        if batch_max_graphs is None:
+            batch_max_graphs = cached_graphs
+        logging.info(
+            'Using cached streaming stats for %s: n_nodes=%s n_edges=%s n_graphs=%s',
+            input_path,
+            cached_nodes,
+            cached_edges,
+            cached_graphs,
+        )
     dataset_specs = [
         data.StreamingDatasetSpec(path=path, head_name=head_name)
         for path in expanded_paths
@@ -279,8 +397,9 @@ def _predict_hdf5(
         data_file=expanded_paths,
         atomic_numbers=z_table,
         r_max=float(model_config['r_max']),
-        max_nodes=batch_max_nodes,
-        max_edges=batch_max_edges,
+        max_nodes=int(batch_max_nodes) if batch_max_nodes is not None else None,
+        max_edges=int(batch_max_edges),
+        max_graphs=int(batch_max_graphs) if batch_max_graphs is not None else None,
         prefetch_batches=prefetch_batches,
         num_workers=num_workers,
         dataset_specs=dataset_specs,
@@ -306,18 +425,16 @@ def main(argv: Sequence[str] | None = None) -> None:
     head_name, head_to_index = _resolve_head_mapping(bundle.config, args.head)
     predictor = _build_predictor(
         bundle.module,
+        model_config=bundle.config,
         compute_forces=args.compute_forces,
         compute_stress=args.compute_stress,
+        full_outputs=bool(args.full_outputs),
     )
 
     inputs = [Path(path).expanduser() for path in args.inputs]
     multi_input = len(inputs) > 1
     for input_path in inputs:
         if _is_hdf5_path(input_path):
-            if args.batch_max_edges is None:
-                raise ValueError(
-                    f'--batch-max-edges is required for streaming predictions on {input_path}.'
-                )
             graph_ids, outputs = _predict_hdf5(
                 input_path,
                 predictor=predictor,
@@ -325,12 +442,13 @@ def main(argv: Sequence[str] | None = None) -> None:
                 model_config=bundle.config,
                 head_name=head_name,
                 head_to_index=head_to_index,
-                batch_max_edges=int(args.batch_max_edges),
+                batch_max_edges=args.batch_max_edges,
                 batch_max_nodes=(
                     int(args.batch_max_nodes)
                     if args.batch_max_nodes is not None
                     else None
                 ),
+                batch_max_graphs=None,
                 prefetch_batches=(
                     int(args.prefetch_batches)
                     if args.prefetch_batches is not None

@@ -14,6 +14,7 @@ import logging
 import math
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Sequence
 from functools import partial
 from queue import Queue
@@ -1172,6 +1173,9 @@ _NODE_OUTPUT_KEYS = {
     'forces',
 }
 _EDGE_OUTPUT_KEYS: set[str] = set()
+_SKIP_OUTPUT_KEYS = {
+    'lammps_natoms',
+}
 
 
 def _filter_by_mask(values: Sequence[Any], mask: np.ndarray) -> list[Any]:
@@ -1198,6 +1202,7 @@ def _split_prediction_outputs(
             'graph_id length does not match graph batch size '
             f'({graph_ids.shape[0]} vs {graph_mask.shape[0]}).'
         )
+    valid_mask = graph_mask & (graph_ids >= 0)
 
     n_node = np.asarray(graph.n_node, dtype=int)
     n_edge = np.asarray(graph.n_edge, dtype=int)
@@ -1216,6 +1221,8 @@ def _split_prediction_outputs(
 
     per_graph_outputs: dict[str, list[Any]] = {}
     for key, value in outputs.items():
+        if key in _SKIP_OUTPUT_KEYS:
+            continue
         if value is None:
             continue
         arr = np.asarray(value)
@@ -1223,33 +1230,33 @@ def _split_prediction_outputs(
             continue
         if key in _NODE_OUTPUT_KEYS:
             chunks = _split_by_counts(arr, n_node)
-            per_graph_outputs[key] = _filter_by_mask(chunks, graph_mask)
+            per_graph_outputs[key] = _filter_by_mask(chunks, valid_mask)
             continue
         if key in _EDGE_OUTPUT_KEYS:
             chunks = _split_by_counts(arr, n_edge)
-            per_graph_outputs[key] = _filter_by_mask(chunks, graph_mask)
+            per_graph_outputs[key] = _filter_by_mask(chunks, valid_mask)
             continue
         if key in _GRAPH_OUTPUT_KEYS:
             arr = arr[:n_graphs]
-            per_graph_outputs[key] = _filter_by_mask(list(arr), graph_mask)
+            per_graph_outputs[key] = _filter_by_mask(list(arr), valid_mask)
             continue
 
-        if arr.shape[0] >= total_nodes and total_nodes > 0:
+        if arr.shape[0] >= total_nodes > 0:
             chunks = _split_by_counts(arr, n_node)
-            per_graph_outputs[key] = _filter_by_mask(chunks, graph_mask)
-        elif arr.shape[0] >= total_edges and total_edges > 0:
+            per_graph_outputs[key] = _filter_by_mask(chunks, valid_mask)
+        elif arr.shape[0] >= total_edges > 0:
             chunks = _split_by_counts(arr, n_edge)
-            per_graph_outputs[key] = _filter_by_mask(chunks, graph_mask)
+            per_graph_outputs[key] = _filter_by_mask(chunks, valid_mask)
         elif arr.shape[0] >= n_graphs:
             arr = arr[:n_graphs]
-            per_graph_outputs[key] = _filter_by_mask(list(arr), graph_mask)
+            per_graph_outputs[key] = _filter_by_mask(list(arr), valid_mask)
         else:
             raise ValueError(
                 f'Output {key} has incompatible leading dimension {arr.shape[0]} '
                 f'(graphs={n_graphs}, nodes={total_nodes}, edges={total_edges}).'
             )
 
-    graph_ids = [int(val) for val in graph_ids[graph_mask]]
+    graph_ids = [int(val) for val in graph_ids[valid_mask]]
     return graph_ids, per_graph_outputs
 
 
@@ -1299,9 +1306,22 @@ def predict_streaming(
 
     def _prepare_device_graphs(graph):
         if local_device_count <= 1:
-            return graph, [graph]
+            if graph.n_node.ndim == 1:
+                device_batch = jax.tree_util.tree_map(lambda x: x[None, ...], graph)
+            else:
+                device_batch = graph
+            return device_batch, [graph]
+        if graph.n_node.ndim == 1:
+            device_batch = data.prepare_sharded_batch(graph, local_device_count)
+        else:
+            if graph.n_node.shape[0] != local_device_count:
+                raise ValueError(
+                    'Expected microbatches with leading axis equal to the number of '
+                    f'local devices ({local_device_count}), got axis size '
+                    f'{graph.n_node.shape[0]}.'
+                )
+            device_batch = graph
         device_graphs = data.split_graphs_for_devices(graph, local_device_count)
-        device_batch = data.prepare_sharded_batch(device_graphs, local_device_count)
         return device_batch, device_graphs
 
     host_prefetch_cap = int(getattr(data_loader, '_prefetch_batches', 0) or 0)
@@ -1335,40 +1355,36 @@ def predict_streaming(
             return value[device_idx]
         return value
 
-    graph_ids: list[int] = []
-    outputs: dict[str, list[Any]] = {}
-    for item in p_bar:
-        if device_prefetch_active:
-            device_batch, device_graphs = item
-        else:
-            device_batch, device_graphs = _prepare_device_graphs(item)
+    def _process_outputs(device_outputs, device_graphs):
+        host_outputs = jax.device_get(device_outputs)
         if local_device_count <= 1:
-            raw_outputs = predictor(params, device_batch)
-            raw_outputs = jax.device_get(raw_outputs)
-            batch_graph_ids, batch_outputs = _split_prediction_outputs(
-                raw_outputs, device_graphs[0]
+            host_outputs = jax.tree_util.tree_map(
+                lambda x: _select_device_output(x, 0),
+                host_outputs,
+                is_leaf=lambda x: x is None,
             )
-        else:
-            raw_outputs = _predict_step(params, device_batch)
-            raw_outputs = jax.device_get(raw_outputs)
-            batch_graph_ids = []
-            batch_outputs: dict[str, list[Any]] = {}
-            for device_idx, device_graph in enumerate(device_graphs):
-                device_outputs = jax.tree_util.tree_map(
-                    lambda x: _select_device_output(x, device_idx),
-                    raw_outputs,
-                    is_leaf=lambda x: x is None,
-                )
-                ids, per_graph = _split_prediction_outputs(device_outputs, device_graph)
-                for key in batch_outputs:
-                    if key not in per_graph:
-                        batch_outputs[key].extend([None] * len(ids))
-                for key, values in per_graph.items():
-                    if key not in batch_outputs:
-                        batch_outputs[key] = [None] * len(batch_graph_ids)
-                    batch_outputs[key].extend(values)
-                batch_graph_ids.extend(ids)
+            result = _split_prediction_outputs(host_outputs, device_graphs[0])
+            return result
+        batch_graph_ids: list[int] = []
+        batch_outputs: dict[str, list[Any]] = {}
+        for device_idx, device_graph in enumerate(device_graphs):
+            device_outputs = jax.tree_util.tree_map(
+                lambda x: _select_device_output(x, device_idx),
+                host_outputs,
+                is_leaf=lambda x: x is None,
+            )
+            ids, per_graph = _split_prediction_outputs(device_outputs, device_graph)
+            for key in batch_outputs:
+                if key not in per_graph:
+                    batch_outputs[key].extend([None] * len(ids))
+            for key, values in per_graph.items():
+                if key not in batch_outputs:
+                    batch_outputs[key] = [None] * len(batch_graph_ids)
+                batch_outputs[key].extend(values)
+            batch_graph_ids.extend(ids)
+        return batch_graph_ids, batch_outputs
 
+    def _accumulate(batch_graph_ids, batch_outputs, graph_ids, outputs):
         for key in outputs:
             if key not in batch_outputs:
                 outputs[key].extend([None] * len(batch_graph_ids))
@@ -1377,6 +1393,30 @@ def predict_streaming(
                 outputs[key] = [None] * len(graph_ids)
             outputs[key].extend(values)
         graph_ids.extend(batch_graph_ids)
+
+    graph_ids: list[int] = []
+    outputs: dict[str, list[Any]] = {}
+    pending: deque[tuple[Any, list[jraph.GraphsTuple]]] = deque()
+    output_prefetch_cap = max(int(device_prefetch_cap or 0), 1)
+
+    for item in p_bar:
+        if device_prefetch_active:
+            device_batch, device_graphs = item
+        else:
+            device_batch, device_graphs = _prepare_device_graphs(item)
+        raw_outputs = _predict_step(params, device_batch)
+        pending.append((raw_outputs, device_graphs))
+        if len(pending) > output_prefetch_cap:
+            raw_outputs, device_graphs = pending.popleft()
+            batch_graph_ids, batch_outputs = _process_outputs(
+                raw_outputs, device_graphs
+            )
+            _accumulate(batch_graph_ids, batch_outputs, graph_ids, outputs)
+
+    while pending:
+        raw_outputs, device_graphs = pending.popleft()
+        batch_graph_ids, batch_outputs = _process_outputs(raw_outputs, device_graphs)
+        _accumulate(batch_graph_ids, batch_outputs, graph_ids, outputs)
 
     if p_bar.total is not None and p_bar.n != p_bar.total:
         p_bar.total = p_bar.n

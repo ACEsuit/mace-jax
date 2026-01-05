@@ -1,6 +1,6 @@
 # ###Functions taken from the PR of @merajhashemi d5d72605a5 ####
 
-from typing import Any, NamedTuple, Optional
+from typing import Any, NamedTuple
 
 import chex
 import jax

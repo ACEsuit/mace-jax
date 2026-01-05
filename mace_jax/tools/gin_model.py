@@ -48,6 +48,96 @@ def _resolve_cueq_config(cueq_config):
     return cueq_config
 
 
+def _stringify_callable(value) -> str | None:
+    """Return a stable string name for callables or None."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    name = getattr(value, '__name__', None)
+    if name:
+        return name
+    cls = getattr(value, '__class__', None)
+    return getattr(cls, '__name__', None)
+
+
+def _serialize_config_value(value):
+    """Convert config values into JSON-friendly scalars where possible."""
+    if isinstance(value, dict):
+        return {str(k): _serialize_config_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_serialize_config_value(v) for v in value]
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, (np.integer, np.floating)):
+        return value.item()
+    if isinstance(value, e3nn.Irreps):
+        return str(value)
+    if callable(value):
+        return _stringify_callable(value)
+    return value
+
+
+def _export_model_config(mace_module: modules.MACE) -> dict:
+    """Build a config dict compatible with tools.model_builder._build_jax_model."""
+    cueq_config = getattr(mace_module, 'cueq_config', None)
+    config = {
+        'r_max': float(mace_module.r_max),
+        'num_bessel': int(mace_module.num_bessel),
+        'num_polynomial_cutoff': int(mace_module.num_polynomial_cutoff),
+        'max_ell': int(mace_module.max_ell),
+        'interaction_cls': _stringify_callable(mace_module.interaction_cls),
+        'interaction_cls_first': _stringify_callable(mace_module.interaction_cls_first),
+        'num_interactions': int(mace_module.num_interactions),
+        'hidden_irreps': str(mace_module.hidden_irreps),
+        'MLP_irreps': str(mace_module.MLP_irreps),
+        'atomic_numbers': [int(z) for z in mace_module.atomic_numbers],
+        'atomic_energies': np.asarray(
+            mace_module.atomic_energies, dtype=float
+        ).tolist(),
+        'avg_num_neighbors': float(mace_module.avg_num_neighbors),
+        'correlation': _serialize_config_value(mace_module.correlation),
+        'radial_type': getattr(mace_module, 'radial_type', 'bessel'),
+        'pair_repulsion': bool(getattr(mace_module, 'pair_repulsion', False)),
+        'distance_transform': _serialize_config_value(
+            getattr(mace_module, 'distance_transform', None)
+        ),
+        'embedding_specs': _serialize_config_value(
+            getattr(mace_module, 'embedding_specs', None)
+        ),
+        'use_so3': bool(getattr(mace_module, 'use_so3', False)),
+        'use_reduced_cg': bool(getattr(mace_module, 'use_reduced_cg', True)),
+        'use_agnostic_product': bool(
+            getattr(mace_module, 'use_agnostic_product', False)
+        ),
+        'use_last_readout_only': bool(
+            getattr(mace_module, 'use_last_readout_only', False)
+        ),
+        'use_embedding_readout': bool(
+            getattr(mace_module, 'use_embedding_readout', False)
+        ),
+        'collapse_hidden_irreps': bool(
+            getattr(mace_module, 'collapse_hidden_irreps', True)
+        ),
+        'readout_cls': _stringify_callable(getattr(mace_module, 'readout_cls', None)),
+        'gate': _stringify_callable(getattr(mace_module, 'gate', None)),
+        'apply_cutoff': bool(getattr(mace_module, 'apply_cutoff', True)),
+        'radial_MLP': _serialize_config_value(getattr(mace_module, 'radial_MLP', None)),
+        'edge_irreps': _serialize_config_value(
+            getattr(mace_module, 'edge_irreps', None)
+        ),
+        'heads': _serialize_config_value(getattr(mace_module, 'heads', None)),
+    }
+    normalize2mom_consts = getattr(mace_module, '_normalize2mom_consts', None)
+    if normalize2mom_consts is not None:
+        config['normalize2mom_consts'] = {
+            str(k): float(v) for k, v in normalize2mom_consts.items()
+        }
+    if cueq_config is not None and getattr(cueq_config, 'conv_fusion', False):
+        config['cue_conv_fusion'] = True
+    return config
+
+
 @gin.configurable
 def constant_scaling(graphs, atomic_energies, *, mean=0.0, std=1.0):
     """Return fixed mean/std values for energy normalization.
@@ -269,6 +359,10 @@ def model(
         `params_bundle` includes parameters (and optional config state), and
         `num_interactions` reflects the number of interaction blocks used.
     """
+    atomic_numbers = kwargs.get('atomic_numbers', None)
+    if atomic_numbers is not None and num_species is None:
+        num_species = len(atomic_numbers)
+
     z_table = kwargs.get('z_table', None)
     if z_table is not None:
         max_z = max(z_table.zs)
@@ -410,6 +504,7 @@ def model(
         params_bundle = (
             {'params': params, 'config': config_state} if config_state else params
         )
+        apply_fn.model_config = config
         return apply_fn, params_bundle, torch_num_interactions
 
     passed_z_table = kwargs.pop('z_table', None)
@@ -558,6 +653,12 @@ def model(
         num_elements = len(kwargs['atomic_numbers'])
     else:
         num_elements = num_species_bound
+        if len(kwargs['atomic_numbers']) != num_elements:
+            raise ValueError(
+                'num_species does not match atomic_numbers length '
+                f'({num_elements} vs {len(kwargs["atomic_numbers"])}). '
+                'Remove num_species or update atomic_numbers to match.'
+            )
     kwargs.setdefault('num_elements', num_elements)
 
     kwargs.pop('avg_r_min', None)
@@ -582,6 +683,7 @@ def model(
     kwargs.setdefault('interaction_cls_first', RealAgnosticResidualInteractionBlock)
 
     mace_module = modules.MACE(**kwargs)
+    model_config = _export_model_config(mace_module)
     config_state = None
 
     def apply_fn(
@@ -740,4 +842,5 @@ def model(
     params_bundle = (
         {'params': params, 'config': config_state} if config_state else params
     )
+    apply_fn.model_config = model_config
     return apply_fn, params_bundle, num_interactions
