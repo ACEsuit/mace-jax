@@ -903,7 +903,7 @@ def train(
     tag,
     *,
     patience: int | None = None,
-    eval_train: bool = False,
+    eval_train: bool = True,
     eval_test: bool = False,
     eval_interval: int = 1,
     log_errors: str = 'PerAtomRMSE',
@@ -942,7 +942,7 @@ def train(
         directory: Output directory for logs/checkpoints.
         tag: Run tag used to name output files.
         patience: Optional early stopping patience (epochs).
-        eval_train: Whether to run eval on training set at final epoch.
+        eval_train: Whether to log training metrics each interval.
         eval_test: Whether to run eval on test set during training.
         eval_interval: Epoch interval between validation runs.
         log_errors: Metric selection preset to log.
@@ -1155,12 +1155,58 @@ def train(
             return items
         return [(None, _prepare_loader_for_eval(loader, epoch))]
 
+    def _log_metrics(
+        metrics_: Mapping[str, Any],
+        mode: str,
+        epoch: int,
+        *,
+        head_name: str | None = None,
+    ) -> None:
+        """Log metrics to file/stdout/W&B with consistent formatting."""
+        if metrics_ is None:
+            return
+        metrics_ = dict(metrics_)
+        metrics_['mode'] = mode
+        if head_name is not None:
+            metrics_['head'] = head_name
+        metrics_['interval'] = epoch
+        metrics_['epoch'] = epoch
+        if is_primary:
+            logger.log(metrics_)
+
+        eval_mode = mode if head_name is None else f'{mode}:{head_name}'
+        selected_metrics = _select_metrics_for_logging(metrics_, log_errors)
+        metrics_blob = ', '.join(
+            f'{metric}={_format_metric_value(metrics_, metric)}'
+            for metric in selected_metrics
+        )
+        loss_value = metrics_.get('loss')
+        if loss_value is None:
+            loss_value = float('nan')
+        _log_info(
+            f'Epoch {epoch}: {eval_mode}: '
+            f'loss={float(loss_value):.4e}'
+            + (f', {metrics_blob}' if metrics_blob else '')
+        )
+        if wandb_run is not None and is_primary:
+            wandb_payload = {
+                'interval': int(epoch),
+                'epoch': int(epoch),
+                f'{eval_mode}/loss': float(loss_value),
+            }
+            for key, value in metrics_.items():
+                maybe_value = _maybe_float(value)
+                if maybe_value is not None:
+                    wandb_payload[f'{eval_mode}/{key}'] = maybe_value
+            wandb_run.log(wandb_payload, step=int(epoch))
+
     swa_loss_fn = None
     stage_two_active = False
     if swa_config and swa_config.stage_loss_factory is not None:
         swa_loss_fn = _instantiate_loss(
             swa_config.stage_loss_factory, swa_config.stage_loss_kwargs or {}
         )
+    train_head_loaders = _split_loader_by_heads(train_loader)
     valid_head_loaders = _split_loader_by_heads(valid_loader)
     test_head_loaders = _split_loader_by_heads(test_loader)
 
@@ -1250,7 +1296,7 @@ def train(
     if not isinstance(eval_train, bool):
         raise ValueError('eval_train must be a boolean.')
 
-    for epoch, trainable_params, optimizer_state, eval_params in tools.train(
+    for train_item in tools.train(
         params=trainable_params,
         total_loss_fn=lambda params, graph: loss_fn(
             graph, predictor_with_config(params, graph)
@@ -1264,8 +1310,19 @@ def train(
         schedule_free_eval_fn=schedule_free_eval_fn,
         data_seed=data_seed,
         lr_scale_by_graphs=lr_scale_by_graphs,
+        collect_metrics=eval_train,
+        metrics_predictor=predictor_with_config,
+        metrics_loss_fn=loss_fn,
+        metrics_required_targets=required_by_loss if eval_train else None,
         **kwargs,
     ):
+        if len(train_item) == 5:
+            epoch, trainable_params, optimizer_state, eval_params, train_metrics = (
+                train_item
+            )
+        else:
+            epoch, trainable_params, optimizer_state, eval_params = train_item
+            train_metrics = None
         stop_after_epoch = False
         now = time.perf_counter()
         if timing_active:
@@ -1285,7 +1342,6 @@ def train(
 
         def eval_and_print(loader, mode: str, *, head_name: str | None = None):
             """Run evaluation on a loader and log metrics."""
-            eval_mode = mode if head_name is None else f'{mode}:{head_name}'
             if loader is None:
                 return
             loss_, metrics_ = tools.evaluate(
@@ -1293,37 +1349,12 @@ def train(
                 params=eval_params,
                 loss_fn=loss_fn,
                 data_loader=loader,
-                name=eval_mode,
+                name=mode if head_name is None else f'{mode}:{head_name}',
+                log_padding=False,
             )
-            metrics_['mode'] = mode
-            if head_name is not None:
-                metrics_['head'] = head_name
-            metrics_['interval'] = epoch
-            metrics_['epoch'] = epoch
-            if is_primary:
-                logger.log(metrics_)
-
-            selected_metrics = _select_metrics_for_logging(metrics_, log_errors)
-            metrics_blob = ', '.join(
-                f'{metric}={_format_metric_value(metrics_, metric)}'
-                for metric in selected_metrics
-            )
-            _log_info(
-                f'Epoch {epoch}: {eval_mode}: '
-                f'loss={loss_:.4e}' + (f', {metrics_blob}' if metrics_blob else '')
-            )
-            if wandb_run is not None and is_primary:
-                wandb_mode = eval_mode
-                wandb_payload = {
-                    'interval': int(epoch),
-                    'epoch': int(epoch),
-                    f'{wandb_mode}/loss': float(loss_),
-                }
-                for key, value in metrics_.items():
-                    maybe_value = _maybe_float(value)
-                    if maybe_value is not None:
-                        wandb_payload[f'{wandb_mode}/{key}'] = maybe_value
-                wandb_run.log(wandb_payload, step=int(epoch))
+            metrics_ = dict(metrics_)
+            metrics_['loss'] = loss_
+            _log_metrics(metrics_, mode, epoch, head_name=head_name)
 
             synced_loss = loss_
             if process_count > 1:
@@ -1337,8 +1368,25 @@ def train(
 
         evaluate_now = _should_run_eval(epoch, last_epoch)
 
-        if eval_train and last_epoch:
-            eval_and_print(_prepare_loader_for_eval(train_loader, epoch), 'eval_train')
+        if eval_train and evaluate_now:
+            if train_metrics is not None:
+                head_metrics_map = train_metrics.get('head_metrics')
+                if head_metrics_map:
+                    metrics_ = dict(train_metrics)
+                    metrics_.pop('head_metrics', None)
+                    _log_metrics(metrics_, 'train', epoch)
+                    for head_name, head_metrics in head_metrics_map.items():
+                        _log_metrics(head_metrics, 'train', epoch, head_name=head_name)
+                else:
+                    metrics_ = dict(train_metrics)
+                    metrics_.pop('head_metrics', None)
+                    _log_metrics(metrics_, 'train', epoch)
+            else:
+                if epoch != initial_epoch:
+                    for head_name, loader in _enumerate_eval_targets(
+                        train_loader, train_head_loaders, epoch
+                    ):
+                        eval_and_print(loader, 'train', head_name=head_name)
 
         if (
             (eval_test or last_epoch)
@@ -1355,9 +1403,7 @@ def train(
             for head_name, loader in _enumerate_eval_targets(
                 valid_loader, valid_head_loaders, epoch
             ):
-                last_valid_loss = eval_and_print(
-                    loader, 'eval_valid', head_name=head_name
-                )
+                last_valid_loss = eval_and_print(loader, 'valid', head_name=head_name)
 
         improved = False
         if last_valid_loss is not None and is_primary:
@@ -1425,6 +1471,7 @@ def train(
             _save_best_checkpoint(epoch, trainable_params, optimizer_state, eval_params)
 
         _save_checkpoint(epoch, trainable_params, optimizer_state, eval_params)
+        _log_info('-' * 80)
 
         if stop_after_epoch or last_epoch:
             break

@@ -124,7 +124,9 @@ def load_dataframe(paths: Iterable[Path]) -> pd.DataFrame:
     if 'mode' not in frame:
         raise KeyError("Metrics files do not contain a 'mode' field.")
     mode_split = frame['mode'].astype(str).str.split(':', n=1, expand=True)
-    frame['mode_base'] = mode_split[0].replace({'eval': 'eval_valid'})
+    frame['mode_base'] = mode_split[0].replace(
+        {'eval': 'eval_valid', 'eval_train': 'train'}
+    )
     if mode_split.shape[1] > 1:
         frame['head'] = mode_split[1].fillna('')
     else:
@@ -183,7 +185,7 @@ def plot_run(
 
     loss_ax = axes[0]
     eval_data = data[data['mode_base'] == 'eval_valid']
-    train_data = data[data['mode_base'] == 'eval_train']
+    train_data = data[data['mode_base'].isin(['train', 'eval_train'])]
 
     if not eval_data.empty:
         for idx, (head, series) in enumerate(eval_data.groupby('head')):
@@ -191,7 +193,7 @@ def plot_run(
             _plot_series(loss_ax, series, label, colors[idx % len(colors)])
     if not train_data.empty:
         for idx, (head, series) in enumerate(train_data.groupby('head')):
-            label = 'Train (eval interval)' if not head else f'Train ({head})'
+            label = 'Train' if not head else f'Train ({head})'
             color_idx = (idx + 3) % len(colors)
             _plot_series(loss_ax, series, label, colors[color_idx])
 

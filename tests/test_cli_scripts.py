@@ -77,9 +77,9 @@ def test_plot_train_cli_generates_output(tmp_path):
         '\n'.join(
             [
                 '{"interval": 1, "mode": "eval", "loss": 0.5, "mae_e": 0.2, "mae_f": 0.3}',
-                '{"interval": 1, "mode": "eval_train", "loss": 0.4}',
+                '{"interval": 1, "mode": "train", "loss": 0.4}',
                 '{"interval": 2, "mode": "eval", "loss": 0.3, "mae_e": 0.1, "mae_f": 0.2}',
-                '{"interval": 2, "mode": "eval_train", "loss": 0.35}',
+                '{"interval": 2, "mode": "train", "loss": 0.35}',
             ]
         ),
         encoding='utf-8',

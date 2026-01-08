@@ -48,6 +48,5 @@ optimizer.max_epochs = 2
 
 train.patience = 2048
 train.ema_decay = 0.99
-train.eval_train = True  # if True, evaluates the whole training set at each eval_interval
 train.eval_test = False
 train.log_errors = "PerAtomMAE"

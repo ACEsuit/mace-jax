@@ -226,6 +226,129 @@ class _MetricAccumulator:
         }
 
 
+_METRIC_KEYS = (
+    'energy',
+    'energy_per_atom',
+    'forces',
+    'stress',
+    'virials',
+    'virials_per_atom',
+    'dipole',
+    'dipole_per_atom',
+    'polar',
+    'polar_per_atom',
+)
+
+_METRIC_MAP = [
+    ('energy', 'mae_e', 'rel_mae_e', 'rmse_e', 'rel_rmse_e'),
+    (
+        'energy_per_atom',
+        'mae_e_per_atom',
+        'rel_mae_e_per_atom',
+        'rmse_e_per_atom',
+        'rel_rmse_e_per_atom',
+    ),
+    ('forces', 'mae_f', 'rel_mae_f', 'rmse_f', 'rel_rmse_f'),
+    ('stress', 'mae_s', 'rel_mae_s', 'rmse_s', 'rel_rmse_s'),
+    ('virials', 'mae_virials', None, 'rmse_virials', None),
+    ('virials_per_atom', None, None, 'rmse_virials_per_atom', None),
+    ('dipole', 'mae_mu', 'rel_mae_mu', 'rmse_mu', 'rel_rmse_mu'),
+    ('dipole_per_atom', 'mae_mu_per_atom', None, 'rmse_mu_per_atom', None),
+    ('polar', 'mae_polarizability', None, 'rmse_polarizability', None),
+    (
+        'polar_per_atom',
+        'mae_polarizability_per_atom',
+        None,
+        'rmse_polarizability_per_atom',
+        None,
+    ),
+]
+
+
+def _init_metric_accumulators() -> dict[str, _MetricAccumulator]:
+    """Create fresh accumulators for all supported metrics."""
+    return {key: _MetricAccumulator() for key in _METRIC_KEYS}
+
+
+def _init_head_metric_accumulators(
+    head_indices: Sequence[int],
+) -> dict[int, dict[str, _MetricAccumulator]]:
+    """Create per-head metric accumulators for the configured head indices."""
+    return {int(head_idx): _init_metric_accumulators() for head_idx in head_indices}
+
+
+def _update_metric_accumulators(
+    accumulators: dict[str, _MetricAccumulator], metrics: dict | None
+) -> None:
+    """Update accumulator dict from a batch metrics payload."""
+    if not metrics:
+        return
+    for key in _METRIC_KEYS:
+        accumulators[key].update(metrics.get(key))
+
+
+def _init_metrics_payload(loss: float, elapsed: float) -> dict[str, Any]:
+    """Create the base metrics dict used by train/eval logging."""
+    return {
+        'loss': loss,
+        'time': elapsed,
+        'mae_e': None,
+        'rel_mae_e': None,
+        'mae_e_per_atom': None,
+        'rel_mae_e_per_atom': None,
+        'rmse_e': None,
+        'rel_rmse_e': None,
+        'rmse_e_per_atom': None,
+        'rel_rmse_e_per_atom': None,
+        'mae_f': None,
+        'rel_mae_f': None,
+        'rmse_f': None,
+        'rel_rmse_f': None,
+        'mae_s': None,
+        'rel_mae_s': None,
+        'rmse_s': None,
+        'rel_rmse_s': None,
+        'mae_stress': None,
+        'rel_mae_stress': None,
+        'rmse_stress': None,
+        'rel_rmse_stress': None,
+        'mae_virials': None,
+        'rmse_virials': None,
+        'rmse_virials_per_atom': None,
+        'mae_mu': None,
+        'mae_mu_per_atom': None,
+        'rel_mae_mu': None,
+        'rmse_mu': None,
+        'rmse_mu_per_atom': None,
+        'rel_rmse_mu': None,
+        'mae_polarizability': None,
+        'mae_polarizability_per_atom': None,
+        'rmse_polarizability': None,
+        'rmse_polarizability_per_atom': None,
+    }
+
+
+def _apply_metrics_map(
+    payload: dict[str, Any],
+    accumulators: dict[str, _MetricAccumulator],
+) -> None:
+    """Populate metric payload entries from accumulator values."""
+    for key, mae_key, rel_mae_key, rmse_key, rel_rmse_key in _METRIC_MAP:
+        _apply_metric_stats(
+            payload,
+            accumulators[key].finalize(),
+            mae_key=mae_key,
+            rel_mae_key=rel_mae_key,
+            rmse_key=rmse_key,
+            rel_rmse_key=rel_rmse_key,
+        )
+    if payload.get('mae_s') is not None:
+        payload['mae_stress'] = payload['mae_s']
+        payload['rel_mae_stress'] = payload['rel_mae_s']
+        payload['rmse_stress'] = payload['rmse_s']
+        payload['rel_rmse_stress'] = payload['rel_rmse_s']
+
+
 def _metric_stats(delta, target, mask):
     """Compute masked error statistics for a single tensor.
 
@@ -270,7 +393,12 @@ def _graph_mask(graph: jraph.GraphsTuple) -> jnp.ndarray:
 
 
 def _compute_eval_batch_metrics(
-    loss_fn, graph, pred_graph, pred_outputs, mask_override=None
+    loss_fn,
+    graph,
+    pred_graph,
+    pred_outputs,
+    mask_override=None,
+    metric_targets: set[str] | None = None,
 ):
     """Compute loss and per-target metric stats for a single evaluation batch.
 
@@ -280,6 +408,7 @@ def _compute_eval_batch_metrics(
         pred_graph: Graph with predicted values attached.
         pred_outputs: Raw model outputs (energy/forces/stress, etc.).
         mask_override: Optional mask to further filter graphs.
+        metric_targets: Optional set of target names to compute metrics for.
 
     Returns:
         Dict containing loss and metric statistic aggregates for the batch.
@@ -317,9 +446,18 @@ def _compute_eval_batch_metrics(
         'polar_per_atom': None,
     }
 
+    compute_energy = metric_targets is None or 'energy' in metric_targets
+    compute_forces = metric_targets is None or 'forces' in metric_targets
+    compute_stress = metric_targets is None or 'stress' in metric_targets
+    compute_virials = metric_targets is None or 'virials' in metric_targets
+    compute_dipole = metric_targets is None or 'dipole' in metric_targets
+    compute_polar = metric_targets is None or (
+        'polarizability' in metric_targets or 'polar' in metric_targets
+    )
+
     ref_energy = getattr(graph.globals, 'energy', None)
     pred_energy = getattr(pred_graph.globals, 'energy', None)
-    if ref_energy is not None and pred_energy is not None:
+    if compute_energy and ref_energy is not None and pred_energy is not None:
         ref_energy = jnp.asarray(ref_energy)
         pred_energy = jnp.asarray(pred_energy)
         delta_energy = ref_energy - pred_energy
@@ -333,7 +471,7 @@ def _compute_eval_batch_metrics(
 
     ref_forces = getattr(graph.nodes, 'forces', None)
     pred_forces = getattr(pred_graph.nodes, 'forces', None)
-    if ref_forces is not None and pred_forces is not None:
+    if compute_forces and ref_forces is not None and pred_forces is not None:
         ref_forces = jnp.asarray(ref_forces)
         pred_forces = jnp.asarray(pred_forces)
         delta_forces = ref_forces - pred_forces
@@ -342,7 +480,7 @@ def _compute_eval_batch_metrics(
 
     ref_stress = getattr(graph.globals, 'stress', None)
     pred_stress = getattr(pred_graph.globals, 'stress', None)
-    if ref_stress is not None and pred_stress is not None:
+    if compute_stress and ref_stress is not None and pred_stress is not None:
         ref_stress = jnp.asarray(ref_stress)
         pred_stress = jnp.asarray(pred_stress)
         delta_stress = ref_stress - pred_stress
@@ -353,7 +491,7 @@ def _compute_eval_batch_metrics(
 
     ref_virials = getattr(graph.globals, 'virials', None)
     pred_virials = getattr(pred_graph.globals, 'virials', None)
-    if ref_virials is not None and pred_virials is not None:
+    if compute_virials and ref_virials is not None and pred_virials is not None:
         ref_virials = jnp.asarray(ref_virials)
         pred_virials = jnp.asarray(pred_virials)
         delta_virials = ref_virials - pred_virials
@@ -371,7 +509,7 @@ def _compute_eval_batch_metrics(
 
     ref_dipole = getattr(graph.globals, 'dipole', None)
     pred_dipole = getattr(pred_graph.globals, 'dipole', None)
-    if ref_dipole is not None and pred_dipole is not None:
+    if compute_dipole and ref_dipole is not None and pred_dipole is not None:
         ref_dipole = jnp.asarray(ref_dipole)
         pred_dipole = jnp.asarray(pred_dipole)
         delta_dipole = ref_dipole - pred_dipole
@@ -387,7 +525,7 @@ def _compute_eval_batch_metrics(
 
     ref_polar = getattr(graph.globals, 'polarizability', None)
     pred_polar = getattr(pred_graph.globals, 'polarizability', None)
-    if ref_polar is not None and pred_polar is not None:
+    if compute_polar and ref_polar is not None and pred_polar is not None:
         ref_polar = jnp.asarray(ref_polar)
         pred_polar = jnp.asarray(pred_polar)
         delta_polar = ref_polar - pred_polar
@@ -404,13 +542,18 @@ def _compute_eval_batch_metrics(
     return result
 
 
-def _make_eval_batch_metrics(loss_fn):
+def _make_eval_batch_metrics(loss_fn, metric_targets: set[str] | None = None):
     """Create a jitted per-batch metric computation function."""
 
     def _batch(graph, pred_graph, pred_outputs, graph_mask):
         """Compute metric stats for a single batch."""
         return _compute_eval_batch_metrics(
-            loss_fn, graph, pred_graph, pred_outputs, graph_mask
+            loss_fn,
+            graph,
+            pred_graph,
+            pred_outputs,
+            graph_mask,
+            metric_targets=metric_targets,
         )
 
     return jax.jit(_batch)
@@ -481,6 +624,10 @@ def train(
     data_seed: int | None = None,
     lr_scale_by_graphs: bool = True,
     device_prefetch_batches: int | None = None,
+    collect_metrics: bool = False,
+    metrics_predictor: Callable | None = None,
+    metrics_loss_fn: Any | None = None,
+    metrics_required_targets: set[str] | None = None,
 ):
     """Yield training state for each epoch while updating parameters.
 
@@ -506,6 +653,10 @@ def train(
         lr_scale_by_graphs: Whether to scale LR per batch size.
         device_prefetch_batches: Optional number of batches to prefetch to devices.
             Defaults to max(loader prefetch, 2) when None.
+        collect_metrics: Whether to compute per-epoch training metrics inline.
+        metrics_predictor: Predictor callable used to compute training metrics.
+        metrics_loss_fn: Loss function used to compute training metrics.
+        metrics_required_targets: Optional set of target names to include in metrics.
 
     Yields:
         Tuple of (epoch, trainable_params, optimizer_state, eval_params).
@@ -519,8 +670,74 @@ def train(
 
     logging.info('Started training')
 
+    metrics_enabled = (
+        collect_metrics
+        and metrics_predictor is not None
+        and metrics_loss_fn is not None
+    )
+    if collect_metrics and not metrics_enabled:
+        raise ValueError(
+            'collect_metrics requires metrics_predictor and metrics_loss_fn.'
+        )
+
+    head_indices: list[int] = []
+    head_names: list[str] = []
+    if metrics_enabled:
+        head_names = list(getattr(train_loader, 'heads', ()))
+        head_to_index = getattr(train_loader, '_head_to_index', None)
+        if head_names and head_to_index:
+            head_indices = [int(head_to_index[name]) for name in head_names]
+        if len(head_indices) <= 1:
+            head_indices = []
+            head_names = []
+    head_name_by_index = {
+        int(head_idx): name for name, head_idx in zip(head_names, head_indices)
+    }
+
     local_devices = jax.local_devices()
     local_device_count = max(1, len(local_devices))
+
+    if metrics_enabled:
+        batch_metrics_fn = _make_eval_batch_metrics(
+            metrics_loss_fn, metric_targets=metrics_required_targets
+        )
+
+        def _prepare_pred_graph(graph, output):
+            nodes = graph.nodes
+            if output.get('forces') is not None:
+                nodes = nodes._replace(forces=output.get('forces'))
+            globals_updates = {}
+            for key in ('energy', 'stress', 'virials', 'dipole', 'polarizability'):
+                if key in output and output[key] is not None:
+                    globals_updates[key] = output[key]
+            globals_attr = (
+                graph.globals._replace(**globals_updates)
+                if globals_updates
+                else graph.globals
+            )
+            pred_graph = graph._replace(nodes=nodes, globals=globals_attr)
+            pred_outputs = {
+                'energy': pred_graph.globals.energy,
+                'forces': pred_graph.nodes.forces,
+                'stress': pred_graph.globals.stress,
+            }
+            virials_value = getattr(pred_graph.globals, 'virials', None)
+            if virials_value is not None:
+                pred_outputs['virials'] = virials_value
+            dipole_value = getattr(pred_graph.globals, 'dipole', None)
+            if dipole_value is not None:
+                pred_outputs['dipole'] = dipole_value
+            polar_value = getattr(pred_graph.globals, 'polarizability', None)
+            if polar_value is not None:
+                pred_outputs['polarizability'] = polar_value
+            return pred_graph, pred_outputs
+
+        def _psum_metrics(tree):
+            return jax.tree_util.tree_map(
+                lambda x: jax.lax.psum(x, 'devices') if x is not None else None,
+                tree,
+                is_leaf=lambda x: x is None,
+            )
 
     def _prepare_graph_for_devices(graph: jraph.GraphsTuple):
         """Ensure `graph` has a leading axis matching local device count.
@@ -562,48 +779,136 @@ def train(
         # graph is assumed to be padded by jraph.pad_with_graphs
         mask = _graph_mask(graph)
 
-        def _loss_fn(trainable):
-            """Compute masked total loss for gradient evaluation."""
-            return jnp.sum(jnp.where(mask, total_loss_fn(trainable, graph), 0.0))
+        if metrics_enabled:
 
-        loss, grad = jax.value_and_grad(_loss_fn)(params)
+            def _loss_fn(trainable):
+                """Compute masked total loss and per-batch metrics."""
+                output = metrics_predictor(trainable, graph)
+                per_graph_loss = metrics_loss_fn(graph, output)
+                loss = jnp.sum(jnp.where(mask, per_graph_loss, 0.0))
+                pred_graph, pred_outputs = _prepare_pred_graph(graph, output)
+                batch_metrics = batch_metrics_fn(graph, pred_graph, pred_outputs, None)
+                head_metrics: tuple = ()
+                if head_indices:
+                    head_values = getattr(graph.globals, 'head', None)
+                    if head_values is not None:
+                        head_values = jnp.asarray(head_values).reshape(-1)
+                        per_head = []
+                        for head_idx in head_indices:
+                            head_mask = jnp.asarray(
+                                head_values == head_idx, dtype=jnp.float32
+                            )
+                            per_head.append(
+                                batch_metrics_fn(
+                                    graph, pred_graph, pred_outputs, head_mask
+                                )
+                            )
+                        head_metrics = tuple(per_head)
+                return loss, (batch_metrics, head_metrics)
+
+            (loss, (batch_metrics, head_metrics)), grad = jax.value_and_grad(
+                _loss_fn, has_aux=True
+            )(params)
+            batch_metrics = _psum_metrics(batch_metrics)
+            if head_metrics:
+                head_metrics = tuple(_psum_metrics(metrics) for metrics in head_metrics)
+        else:
+
+            def _loss_fn(trainable):
+                """Compute masked total loss for gradient evaluation."""
+                return jnp.sum(jnp.where(mask, total_loss_fn(trainable, graph), 0.0))
+
+            loss, grad = jax.value_and_grad(_loss_fn)(params)
+            batch_metrics = None
+            head_metrics = ()
         loss = jax.lax.psum(loss, 'devices')
         grad = jax.tree_util.tree_map(lambda g: jax.lax.psum(g, 'devices'), grad)
         num_graphs = jax.lax.psum(jnp.sum(mask), 'devices')
-        return num_graphs, loss, grad
+        return num_graphs, loss, grad, batch_metrics, head_metrics
 
     # jit-of-pmap is not recommended but so far it seems faster
-    @jax.jit
-    def update_fn(
-        params, optimizer_state, ema_params, num_updates: int, graph: jraph.GraphsTuple
-    ) -> tuple[float, Any, Any, Any, jnp.ndarray]:
-        """Apply one optimizer step and update EMA parameters."""
-        n, loss, grad = grad_fn(params, graph)
-        loss = loss / n
-        grad = jax.tree_util.tree_map(lambda x: x / n, grad)
-        if lr_scale_by_graphs:
-            grad = jax.tree_util.tree_map(lambda g: g * n, grad)
-        grad = _sanitize_grads(grad)
+    if metrics_enabled:
 
-        if max_grad_norm is not None:
-            grad_norm = jnp.sqrt(
-                sum(jnp.sum(jnp.square(x)) for x in jax.tree_util.tree_leaves(grad))
-            )
-            clip_coef = jnp.minimum(1.0, max_grad_norm / (grad_norm + 1e-12))
-            grad = jax.tree_util.tree_map(lambda g: g * clip_coef, grad)
+        @jax.jit
+        def update_fn(
+            params,
+            optimizer_state,
+            ema_params,
+            num_updates: int,
+            graph: jraph.GraphsTuple,
+        ) -> tuple[float, Any, Any, Any, jnp.ndarray, dict | None, tuple]:
+            """Apply one optimizer step and update EMA parameters."""
+            n, loss, grad, batch_metrics, head_metrics = grad_fn(params, graph)
+            loss = loss / n
+            grad = jax.tree_util.tree_map(lambda x: x / n, grad)
+            if lr_scale_by_graphs:
+                grad = jax.tree_util.tree_map(lambda g: g * n, grad)
+            grad = _sanitize_grads(grad)
 
-        updates, optimizer_state = gradient_transform.update(
-            grad, optimizer_state, params
-        )
-        params = optax.apply_updates(params, updates)
-        if ema_decay is not None:
-            decay = jnp.minimum(ema_decay, (1 + num_updates) / (10 + num_updates))
-            ema_params = jax.tree_util.tree_map(
-                lambda x, y: x * decay + y * (1 - decay), ema_params, params
+            if max_grad_norm is not None:
+                grad_norm = jnp.sqrt(
+                    sum(jnp.sum(jnp.square(x)) for x in jax.tree_util.tree_leaves(grad))
+                )
+                clip_coef = jnp.minimum(1.0, max_grad_norm / (grad_norm + 1e-12))
+                grad = jax.tree_util.tree_map(lambda g: g * clip_coef, grad)
+
+            updates, optimizer_state = gradient_transform.update(
+                grad, optimizer_state, params
             )
-        else:
-            ema_params = params
-        return loss, params, optimizer_state, ema_params, n
+            params = optax.apply_updates(params, updates)
+            if ema_decay is not None:
+                decay = jnp.minimum(ema_decay, (1 + num_updates) / (10 + num_updates))
+                ema_params = jax.tree_util.tree_map(
+                    lambda x, y: x * decay + y * (1 - decay), ema_params, params
+                )
+            else:
+                ema_params = params
+            return (
+                loss,
+                params,
+                optimizer_state,
+                ema_params,
+                n,
+                batch_metrics,
+                head_metrics,
+            )
+    else:
+
+        @jax.jit
+        def update_fn(
+            params,
+            optimizer_state,
+            ema_params,
+            num_updates: int,
+            graph: jraph.GraphsTuple,
+        ) -> tuple[float, Any, Any, Any, jnp.ndarray]:
+            """Apply one optimizer step and update EMA parameters."""
+            n, loss, grad, _, _ = grad_fn(params, graph)
+            loss = loss / n
+            grad = jax.tree_util.tree_map(lambda x: x / n, grad)
+            if lr_scale_by_graphs:
+                grad = jax.tree_util.tree_map(lambda g: g * n, grad)
+            grad = _sanitize_grads(grad)
+
+            if max_grad_norm is not None:
+                grad_norm = jnp.sqrt(
+                    sum(jnp.sum(jnp.square(x)) for x in jax.tree_util.tree_leaves(grad))
+                )
+                clip_coef = jnp.minimum(1.0, max_grad_norm / (grad_norm + 1e-12))
+                grad = jax.tree_util.tree_map(lambda g: g * clip_coef, grad)
+
+            updates, optimizer_state = gradient_transform.update(
+                grad, optimizer_state, params
+            )
+            params = optax.apply_updates(params, updates)
+            if ema_decay is not None:
+                decay = jnp.minimum(ema_decay, (1 + num_updates) / (10 + num_updates))
+                ema_params = jax.tree_util.tree_map(
+                    lambda x, y: x * decay + y * (1 - decay), ema_params, params
+                )
+            else:
+                ema_params = params
+            return loss, params, optimizer_state, ema_params, n
 
     process_index = getattr(jax, 'process_index', lambda: 0)()
     is_primary = process_index == 0
@@ -666,6 +971,7 @@ def train(
         initial_eval = schedule_free_eval_fn(optimizer_state, params)
     yield start_interval, params, optimizer_state, initial_eval
 
+    padding_logged = False
     for epoch in itertools.count(start_interval):
         epoch_batches_iter, effective_steps = _epoch_batches(epoch)
         if effective_steps <= 0:
@@ -698,8 +1004,9 @@ def train(
             )
         p_bar = tqdm.tqdm(
             total=effective_steps,
-            desc=f'Epoch {epoch + 1}',
+            desc='train',
             disable=not (progress_bar and is_primary),
+            leave=False,
         )
         batches_in_epoch = 0
         padding_stats = {
@@ -710,6 +1017,19 @@ def train(
             'pad_graphs': 0,
             'graph_cap': 0,
         }
+        train_metrics = None
+        if metrics_enabled:
+            train_metrics_start = time.time()
+            train_total_loss = 0.0
+            train_num_graphs = 0.0
+            metric_accumulators = _init_metric_accumulators()
+            head_metric_accumulators = _init_head_metric_accumulators(head_indices)
+            head_loss_totals: dict[int, float] = {
+                int(head_idx): 0.0 for head_idx in head_indices
+            }
+            head_graph_counts: dict[int, float] = {
+                int(head_idx): 0.0 for head_idx in head_indices
+            }
         for item in epoch_batches_iter:
             if device_prefetch_active:
                 graph, padding = item
@@ -732,9 +1052,22 @@ def train(
             num_updates += 1
             num_updates_value = jnp.asarray(num_updates, dtype=jnp.int32)
             start_time = time.time()
-            loss, params, optimizer_state, ema_params, n_graphs = update_fn(
-                params, optimizer_state, ema_params, num_updates_value, graph
-            )
+            if metrics_enabled:
+                (
+                    loss,
+                    params,
+                    optimizer_state,
+                    ema_params,
+                    n_graphs,
+                    batch_metrics,
+                    head_metrics,
+                ) = update_fn(
+                    params, optimizer_state, ema_params, num_updates_value, graph
+                )
+            else:
+                loss, params, optimizer_state, ema_params, n_graphs = update_fn(
+                    params, optimizer_state, ema_params, num_updates_value, graph
+                )
             loss = float(loss)
             n_graphs_value = float(n_graphs)
             if is_primary and n_graphs_value == 0.0:
@@ -742,6 +1075,40 @@ def train(
                     'Batch %s contains no valid graphs; gradients are zero.',
                     num_updates,
                 )
+            if metrics_enabled:
+                batch_metrics = data.unreplicate_from_local_devices(batch_metrics)
+
+                def _squeeze(value):
+                    if value is None:
+                        return None
+                    arr = np.asarray(value)
+                    if arr.ndim == 0:
+                        return value
+                    if arr.shape[0] == 1:
+                        return arr[0]
+                    return value
+
+                batch_metrics = jax.tree_util.tree_map(
+                    _squeeze, batch_metrics, is_leaf=lambda x: x is None
+                )
+                train_total_loss += float(batch_metrics['loss'])
+                train_num_graphs += float(batch_metrics['graph_count'])
+                _update_metric_accumulators(metric_accumulators, batch_metrics)
+
+                if head_metrics:
+                    head_metrics = data.unreplicate_from_local_devices(head_metrics)
+                    head_metrics = jax.tree_util.tree_map(
+                        _squeeze, head_metrics, is_leaf=lambda x: x is None
+                    )
+                    for head_idx, per_head_metrics in zip(head_indices, head_metrics):
+                        head_loss_totals[int(head_idx)] += float(
+                            per_head_metrics['loss']
+                        )
+                        head_graph_counts[int(head_idx)] += float(
+                            per_head_metrics['graph_count']
+                        )
+                        head_acc = head_metric_accumulators[int(head_idx)]
+                        _update_metric_accumulators(head_acc, per_head_metrics)
             if is_primary:
                 p_bar.set_postfix({'loss': f'{loss:7.3f}'})
             p_bar.update(1)
@@ -752,17 +1119,21 @@ def train(
         p_bar.close()
         if is_primary and padding_stats['node_cap'] > 0:
             if getattr(train_loader, 'streaming', False):
-                logging.info(
-                    'Streaming padding: batches=%s nodes avg_pad=%.1f (%.1f%%) '
-                    'edges avg_pad=%.1f (%.1f%%) graphs avg_pad=%.2f (%.1f%%)',
-                    batches_in_epoch,
-                    padding_stats['pad_nodes'] / batches_in_epoch,
-                    100.0 * padding_stats['pad_nodes'] / padding_stats['node_cap'],
-                    padding_stats['pad_edges'] / batches_in_epoch,
-                    100.0 * padding_stats['pad_edges'] / padding_stats['edge_cap'],
-                    padding_stats['pad_graphs'] / batches_in_epoch,
-                    100.0 * padding_stats['pad_graphs'] / padding_stats['graph_cap'],
-                )
+                if not padding_logged and epoch == 0:
+                    logging.info(
+                        'Streaming padding: batches=%s nodes avg_pad=%.1f (%.1f%%) '
+                        'edges avg_pad=%.1f (%.1f%%) graphs avg_pad=%.2f (%.1f%%)',
+                        batches_in_epoch,
+                        padding_stats['pad_nodes'] / batches_in_epoch,
+                        100.0 * padding_stats['pad_nodes'] / padding_stats['node_cap'],
+                        padding_stats['pad_edges'] / batches_in_epoch,
+                        100.0 * padding_stats['pad_edges'] / padding_stats['edge_cap'],
+                        padding_stats['pad_graphs'] / batches_in_epoch,
+                        100.0
+                        * padding_stats['pad_graphs']
+                        / padding_stats['graph_cap'],
+                    )
+                    padding_logged = True
             else:
                 logging.debug(
                     'Epoch %s padding: nodes=%.6f%% edges=%.6f%% graphs=%.2f%%',
@@ -796,7 +1167,36 @@ def train(
         if schedule_free_eval_fn is not None:
             eval_params = schedule_free_eval_fn(optimizer_state, params)
 
-        yield epoch + 1, params, optimizer_state, eval_params
+        if metrics_enabled:
+            if train_num_graphs <= 0:
+                logging.warning(
+                    'No graphs in data_loader ! Returning 0.0 for train metrics'
+                )
+                train_metrics = {}
+            else:
+                avg_loss = train_total_loss / train_num_graphs
+                train_metrics = _init_metrics_payload(
+                    avg_loss, time.time() - train_metrics_start
+                )
+                _apply_metrics_map(train_metrics, metric_accumulators)
+                if head_metric_accumulators:
+                    train_metrics['head_metrics'] = {}
+                    for head_idx, head_acc in head_metric_accumulators.items():
+                        head_graphs = head_graph_counts.get(head_idx, 0.0)
+                        if head_graphs <= 0:
+                            continue
+                        head_loss = head_loss_totals.get(head_idx, 0.0) / head_graphs
+                        head_metrics = _init_metrics_payload(
+                            head_loss, time.time() - train_metrics_start
+                        )
+                        _apply_metrics_map(head_metrics, head_acc)
+                        head_name = head_name_by_index.get(int(head_idx))
+                        if head_name is None:
+                            head_name = str(head_idx)
+                        train_metrics['head_metrics'][head_name] = head_metrics
+            yield epoch + 1, params, optimizer_state, eval_params, train_metrics
+        else:
+            yield epoch + 1, params, optimizer_state, eval_params
 
 
 def evaluate(
@@ -807,6 +1207,7 @@ def evaluate(
     name: str = 'Evaluation',
     progress_bar: bool = True,
     device_prefetch_batches: int | None = None,
+    log_padding: bool = False,
 ) -> tuple[float, dict[str, Any]]:
     r"""Evaluate the predictor on the given data loader.
 
@@ -819,6 +1220,7 @@ def evaluate(
         progress_bar: Whether to display a progress bar.
         device_prefetch_batches: Optional number of batches to prefetch to devices.
             Defaults to max(loader prefetch, 2) when None.
+        log_padding: Whether to log padding statistics for streaming loaders.
 
     Returns:
         Tuple of (average_loss, metrics_dict) aggregated over the dataset.
@@ -829,18 +1231,7 @@ def evaluate(
     total_loss = 0.0
     num_graphs = 0.0
 
-    metric_accumulators = {
-        'energy': _MetricAccumulator(),
-        'energy_per_atom': _MetricAccumulator(),
-        'forces': _MetricAccumulator(),
-        'stress': _MetricAccumulator(),
-        'virials': _MetricAccumulator(),
-        'virials_per_atom': _MetricAccumulator(),
-        'dipole': _MetricAccumulator(),
-        'dipole_per_atom': _MetricAccumulator(),
-        'polar': _MetricAccumulator(),
-        'polar_per_atom': _MetricAccumulator(),
-    }
+    metric_accumulators = _init_metric_accumulators()
     batch_metrics_fn = _make_eval_batch_metrics(loss_fn)
 
     padding_stats = {
@@ -982,24 +1373,7 @@ def evaluate(
         )
         total_loss += float(batch_metrics['loss'])
         num_graphs += float(batch_metrics['graph_count'])
-        metric_accumulators['energy'].update(batch_metrics.get('energy'))
-        metric_accumulators['energy_per_atom'].update(
-            batch_metrics.get('energy_per_atom')
-        )
-        metric_accumulators['forces'].update(batch_metrics.get('forces'))
-        metric_accumulators['stress'].update(batch_metrics.get('stress'))
-        metric_accumulators['virials'].update(batch_metrics.get('virials'))
-        metric_accumulators['virials_per_atom'].update(
-            batch_metrics.get('virials_per_atom')
-        )
-        metric_accumulators['dipole'].update(batch_metrics.get('dipole'))
-        metric_accumulators['dipole_per_atom'].update(
-            batch_metrics.get('dipole_per_atom')
-        )
-        metric_accumulators['polar'].update(batch_metrics.get('polar'))
-        metric_accumulators['polar_per_atom'].update(
-            batch_metrics.get('polar_per_atom')
-        )
+        _update_metric_accumulators(metric_accumulators, batch_metrics)
         if p_bar is not None:
             p_bar.set_postfix({'n': int(num_graphs)})
 
@@ -1032,6 +1406,7 @@ def evaluate(
         desc=name,
         total=total_hint,
         disable=not (progress_bar and is_primary),
+        leave=False,
     )
 
     batches_seen = 0
@@ -1051,7 +1426,7 @@ def evaluate(
         logging.warning(f'No graphs in data_loader ! Returning 0.0 for {name}')
         return 0.0, {}
 
-    if padding_stats['node_cap'] > 0:
+    if log_padding and padding_stats['node_cap'] > 0:
         if getattr(data_loader, 'streaming', False):
             logging.info(
                 'Streaming padding: batches=%s nodes avg_pad=%.1f (%.1f%%) '
@@ -1075,88 +1450,8 @@ def evaluate(
 
     avg_loss = total_loss / num_graphs
 
-    aux = {
-        'loss': avg_loss,
-        'time': time.time() - start_time,
-        'mae_e': None,
-        'rel_mae_e': None,
-        'mae_e_per_atom': None,
-        'rel_mae_e_per_atom': None,
-        'rmse_e': None,
-        'rel_rmse_e': None,
-        'rmse_e_per_atom': None,
-        'rel_rmse_e_per_atom': None,
-        'mae_f': None,
-        'rel_mae_f': None,
-        'rmse_f': None,
-        'rel_rmse_f': None,
-        'mae_s': None,
-        'rel_mae_s': None,
-        'rmse_s': None,
-        'rel_rmse_s': None,
-        'mae_stress': None,
-        'rel_mae_stress': None,
-        'rmse_stress': None,
-        'rel_rmse_stress': None,
-        'mae_virials': None,
-        'rmse_virials': None,
-        'rmse_virials_per_atom': None,
-        'mae_mu': None,
-        'mae_mu_per_atom': None,
-        'rel_mae_mu': None,
-        'rmse_mu': None,
-        'rmse_mu_per_atom': None,
-        'rel_rmse_mu': None,
-        'mae_polarizability': None,
-        'mae_polarizability_per_atom': None,
-        'rmse_polarizability': None,
-        'rmse_polarizability_per_atom': None,
-    }
-
-    metric_map = [
-        ('energy', 'mae_e', 'rel_mae_e', 'rmse_e', 'rel_rmse_e'),
-        (
-            'energy_per_atom',
-            'mae_e_per_atom',
-            'rel_mae_e_per_atom',
-            'rmse_e_per_atom',
-            'rel_rmse_e_per_atom',
-        ),
-        ('forces', 'mae_f', 'rel_mae_f', 'rmse_f', 'rel_rmse_f'),
-        ('stress', 'mae_s', 'rel_mae_s', 'rmse_s', 'rel_rmse_s'),
-        ('virials', 'mae_virials', None, 'rmse_virials', None),
-        ('virials_per_atom', None, None, 'rmse_virials_per_atom', None),
-        ('dipole', 'mae_mu', 'rel_mae_mu', 'rmse_mu', 'rel_rmse_mu'),
-        ('dipole_per_atom', 'mae_mu_per_atom', None, 'rmse_mu_per_atom', None),
-        (
-            'polar',
-            'mae_polarizability',
-            None,
-            'rmse_polarizability',
-            None,
-        ),
-        (
-            'polar_per_atom',
-            'mae_polarizability_per_atom',
-            None,
-            'rmse_polarizability_per_atom',
-            None,
-        ),
-    ]
-    for key, mae_key, rel_mae_key, rmse_key, rel_rmse_key in metric_map:
-        _apply_metric_stats(
-            aux,
-            metric_accumulators[key].finalize(),
-            mae_key=mae_key,
-            rel_mae_key=rel_mae_key,
-            rmse_key=rmse_key,
-            rel_rmse_key=rel_rmse_key,
-        )
-    if aux['mae_s'] is not None:
-        aux['mae_stress'] = aux['mae_s']
-        aux['rel_mae_stress'] = aux['rel_mae_s']
-        aux['rmse_stress'] = aux['rmse_s']
-        aux['rel_rmse_stress'] = aux['rel_rmse_s']
+    aux = _init_metrics_payload(avg_loss, time.time() - start_time)
+    _apply_metrics_map(aux, metric_accumulators)
 
     return avg_loss, aux
 
@@ -1345,6 +1640,7 @@ def predict_streaming(
         desc=name,
         total=total_hint or None,
         disable=not (progress_bar and is_primary),
+        leave=False,
     )
 
     def _select_device_output(value, device_idx):

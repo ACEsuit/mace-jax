@@ -464,7 +464,7 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
         action='store_const',
         const=True,
         default=None,
-        help='Evaluate on the training set each interval.',
+        help='Log training metrics each interval.',
     )
     parser.add_argument(
         '--no-eval-train',
