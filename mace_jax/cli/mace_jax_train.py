@@ -981,6 +981,11 @@ def _apply_optimizer_options(args: argparse.Namespace) -> None:
             'mace_jax.tools.gin_functions.reduce_on_plateau.patience',
             args.scheduler_patience,
         )
+    if getattr(args, 'scheduler_threshold', None) is not None:
+        gin.bind_parameter(
+            'mace_jax.tools.gin_functions.reduce_on_plateau.threshold',
+            args.scheduler_threshold,
+        )
 
 
 def _apply_loss_options(args: argparse.Namespace) -> None:

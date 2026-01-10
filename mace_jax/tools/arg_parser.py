@@ -442,6 +442,13 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
         help='Number of evaluations without improvement before plateau scheduler steps.',
     )
     parser.add_argument(
+        '--scheduler-threshold',
+        '--scheduler_threshold',
+        type=float,
+        default=None,
+        help='Minimum improvement needed to reset the plateau scheduler.',
+    )
+    parser.add_argument(
         '--max-epochs',
         '--max_epochs',
         '--max-num-epochs',
