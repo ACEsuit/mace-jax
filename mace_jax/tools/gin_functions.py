@@ -793,8 +793,8 @@ def optimizer(
             k: any(('linear_down' in ki) or ('symmetric_contraction' in ki) for ki in k)
             for k in params
         }
-        assert any(any(('linear_down' in ki) for ki in k) for k in params)
-        assert any(any(('symmetric_contraction' in ki) for ki in k) for k in params)
+        if not any(mask.values()):
+            mask = {k: getattr(v, 'ndim', 0) > 1 for k, v in params.items()}
         return tools.unflatten_dict(mask)
 
     step_scale = int(interval_length) if interval_length and interval_length > 0 else 1
