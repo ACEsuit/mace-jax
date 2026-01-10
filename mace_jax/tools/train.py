@@ -392,6 +392,19 @@ def _graph_mask(graph: jraph.GraphsTuple) -> jnp.ndarray:
     return mask
 
 
+def _apply_property_weight_mask(
+    graph_mask: jnp.ndarray, graph: jraph.GraphsTuple, weight_name: str
+) -> jnp.ndarray:
+    """Apply an optional per-property weight mask to the graph mask."""
+    weights = getattr(graph.globals, weight_name, None)
+    if weights is None:
+        return graph_mask
+    weights_arr = jnp.asarray(weights)
+    if weights_arr.shape != graph_mask.shape:
+        weights_arr = weights_arr.reshape(graph_mask.shape)
+    return graph_mask * (weights_arr > 0).astype(graph_mask.dtype)
+
+
 def _compute_eval_batch_metrics(
     loss_fn,
     graph,
@@ -417,15 +430,30 @@ def _compute_eval_batch_metrics(
     if mask_override is not None:
         override = jnp.asarray(mask_override, dtype=jnp.float32)
         graph_mask = graph_mask * override
-    node_mask = jraph.get_node_padding_mask(graph).astype(jnp.float32)
-    total_nodes = node_mask.shape[0]
+    node_padding_mask = jraph.get_node_padding_mask(graph).astype(jnp.float32)
+    total_nodes = node_padding_mask.shape[0]
     nodes_per_graph_mask = jnp.repeat(
         graph_mask,
         graph.n_node,
         axis=0,
         total_repeat_length=total_nodes,
     )
-    node_mask = node_mask * nodes_per_graph_mask
+    node_mask = node_padding_mask * nodes_per_graph_mask
+    energy_mask = _apply_property_weight_mask(graph_mask, graph, 'energy_weight')
+    force_graph_mask = _apply_property_weight_mask(graph_mask, graph, 'forces_weight')
+    force_nodes_per_graph_mask = jnp.repeat(
+        force_graph_mask,
+        graph.n_node,
+        axis=0,
+        total_repeat_length=total_nodes,
+    )
+    force_node_mask = node_padding_mask * force_nodes_per_graph_mask
+    stress_mask = _apply_property_weight_mask(graph_mask, graph, 'stress_weight')
+    virials_mask = _apply_property_weight_mask(graph_mask, graph, 'virials_weight')
+    dipole_mask = _apply_property_weight_mask(graph_mask, graph, 'dipole_weight')
+    polar_mask = _apply_property_weight_mask(
+        graph_mask, graph, 'polarizability_weight'
+    )
     atom_counts = jnp.maximum(jnp.asarray(graph.n_node), 1.0)
 
     per_graph_loss = loss_fn(graph, pred_outputs)
@@ -461,11 +489,11 @@ def _compute_eval_batch_metrics(
         ref_energy = jnp.asarray(ref_energy)
         pred_energy = jnp.asarray(pred_energy)
         delta_energy = ref_energy - pred_energy
-        energy_stats = _metric_stats(delta_energy, ref_energy, graph_mask)
+        energy_stats = _metric_stats(delta_energy, ref_energy, energy_mask)
         atom_counts_safe = atom_counts.astype(delta_energy.dtype)
         per_atom_delta = delta_energy / atom_counts_safe
         per_atom_ref = ref_energy / atom_counts_safe
-        energy_pa_stats = _metric_stats(per_atom_delta, per_atom_ref, graph_mask)
+        energy_pa_stats = _metric_stats(per_atom_delta, per_atom_ref, energy_mask)
         result['energy'] = energy_stats
         result['energy_per_atom'] = energy_pa_stats
 
@@ -475,7 +503,7 @@ def _compute_eval_batch_metrics(
         ref_forces = jnp.asarray(ref_forces)
         pred_forces = jnp.asarray(pred_forces)
         delta_forces = ref_forces - pred_forces
-        force_stats = _metric_stats(delta_forces, ref_forces, node_mask[:, None])
+        force_stats = _metric_stats(delta_forces, ref_forces, force_node_mask[:, None])
         result['forces'] = force_stats
 
     ref_stress = getattr(graph.globals, 'stress', None)
@@ -485,7 +513,7 @@ def _compute_eval_batch_metrics(
         pred_stress = jnp.asarray(pred_stress)
         delta_stress = ref_stress - pred_stress
         stress_stats = _metric_stats(
-            delta_stress, ref_stress, graph_mask[:, None, None]
+            delta_stress, ref_stress, stress_mask[:, None, None]
         )
         result['stress'] = stress_stats
 
@@ -496,13 +524,13 @@ def _compute_eval_batch_metrics(
         pred_virials = jnp.asarray(pred_virials)
         delta_virials = ref_virials - pred_virials
         virial_stats = _metric_stats(
-            delta_virials, ref_virials, graph_mask[:, None, None]
+            delta_virials, ref_virials, virials_mask[:, None, None]
         )
         atoms_matrix = atom_counts[:, None, None].astype(delta_virials.dtype)
         delta_virials_per_atom = delta_virials / atoms_matrix
         ref_virials_per_atom = ref_virials / atoms_matrix
         virial_pa_stats = _metric_stats(
-            delta_virials_per_atom, ref_virials_per_atom, graph_mask[:, None, None]
+            delta_virials_per_atom, ref_virials_per_atom, virials_mask[:, None, None]
         )
         result['virials'] = virial_stats
         result['virials_per_atom'] = virial_pa_stats
@@ -513,12 +541,12 @@ def _compute_eval_batch_metrics(
         ref_dipole = jnp.asarray(ref_dipole)
         pred_dipole = jnp.asarray(pred_dipole)
         delta_dipole = ref_dipole - pred_dipole
-        dipole_stats = _metric_stats(delta_dipole, ref_dipole, graph_mask[:, None])
+        dipole_stats = _metric_stats(delta_dipole, ref_dipole, dipole_mask[:, None])
         atoms_vector = atom_counts[:, None].astype(delta_dipole.dtype)
         delta_dipole_per_atom = delta_dipole / atoms_vector
         ref_dipole_per_atom = ref_dipole / atoms_vector
         dipole_pa_stats = _metric_stats(
-            delta_dipole_per_atom, ref_dipole_per_atom, graph_mask[:, None]
+            delta_dipole_per_atom, ref_dipole_per_atom, dipole_mask[:, None]
         )
         result['dipole'] = dipole_stats
         result['dipole_per_atom'] = dipole_pa_stats
@@ -529,12 +557,12 @@ def _compute_eval_batch_metrics(
         ref_polar = jnp.asarray(ref_polar)
         pred_polar = jnp.asarray(pred_polar)
         delta_polar = ref_polar - pred_polar
-        polar_stats = _metric_stats(delta_polar, ref_polar, graph_mask[:, None, None])
+        polar_stats = _metric_stats(delta_polar, ref_polar, polar_mask[:, None, None])
         atoms_matrix = atom_counts[:, None, None].astype(delta_polar.dtype)
         delta_polar_per_atom = delta_polar / atoms_matrix
         ref_polar_per_atom = ref_polar / atoms_matrix
         polar_pa_stats = _metric_stats(
-            delta_polar_per_atom, ref_polar_per_atom, graph_mask[:, None, None]
+            delta_polar_per_atom, ref_polar_per_atom, polar_mask[:, None, None]
         )
         result['polar'] = polar_stats
         result['polar_per_atom'] = polar_pa_stats

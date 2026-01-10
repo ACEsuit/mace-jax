@@ -1119,7 +1119,18 @@ def train(
         graphs = getattr(loader, 'graphs', None)
         if graphs is None:
             return True
-        return len(graphs) > 0
+        if len(graphs) > 0:
+            return True
+        if getattr(loader, 'streaming', False):
+            dataset_lengths = getattr(loader, '_dataset_lengths', None)
+            if dataset_lengths is not None:
+                total_graphs = sum(int(length) for length in dataset_lengths)
+            else:
+                total_graphs = getattr(loader, 'total_graphs', None)
+            if total_graphs is None:
+                return True
+            return int(total_graphs) > 0
+        return False
 
     def _split_loader_by_heads(loader):
         """Split a loader into per-head sub-loaders if supported."""
@@ -1403,7 +1414,9 @@ def train(
             for head_name, loader in _enumerate_eval_targets(
                 valid_loader, valid_head_loaders, epoch
             ):
-                last_valid_loss = eval_and_print(loader, 'valid', head_name=head_name)
+                last_valid_loss = eval_and_print(
+                    loader, 'eval_valid', head_name=head_name
+                )
 
         improved = False
         if last_valid_loss is not None and is_primary:

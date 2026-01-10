@@ -6,6 +6,8 @@ tagged with a stable global graph_id so prediction outputs can be reordered to
 match the original HDF5 order. The loader supports deterministic per-epoch
 shuffling, per-process round-robin sharding for distributed runs, and optional
 multi-process workers that build batches directly from the HDF5 files.
+Workers can be kept alive across epochs (see keep_workers_alive) to avoid
+process spawn and repeated HDF5 open costs.
 
 Primary API:
 - StreamingDatasetSpec: per-shard metadata (head name, property keys, weights).
@@ -34,6 +36,9 @@ from .utils import AtomicNumberTable, config_from_atoms, graph_from_configuratio
 _RESULT_BATCH = 'batch'
 _RESULT_DONE = 'done'
 _RESULT_ERROR = 'error'
+_INDEX_GRAPH = 'graph'
+_INDEX_DONE = 'done'
+_INDEX_STOP = 'stop'
 
 
 class BatchIteratorWrapper:
@@ -322,8 +327,14 @@ def _graph_worker_main(
     def _result_put(item):
         result_queue.put(item)
 
-    def _flush():
+    def _reset():
         nonlocal graphs, nodes_sum, edges_sum, graph_count
+        graphs = []
+        nodes_sum = 0
+        edges_sum = 0
+        graph_count = 0
+
+    def _flush():
         if not graphs:
             return
         batched = jraph.batch_np(graphs)
@@ -335,10 +346,16 @@ def _graph_worker_main(
         )
         batch = _mark_padding_graph_ids(batch, graph_count)
         _result_put((_RESULT_BATCH, batch, graph_count))
-        graphs = []
-        nodes_sum = 0
-        edges_sum = 0
-        graph_count = 0
+        _reset()
+
+    def _parse_index_message(message):
+        if message is None:
+            return _INDEX_STOP, None
+        if isinstance(message, tuple) and len(message) == 2:
+            tag, payload = message
+            if tag in (_INDEX_GRAPH, _INDEX_DONE, _INDEX_STOP):
+                return tag, payload
+        return _INDEX_GRAPH, message
 
     try:
         if total_graphs <= 0:
@@ -347,12 +364,20 @@ def _graph_worker_main(
             if stop_event is not None and stop_event.is_set():
                 break
             try:
-                graph_id = index_queue.get(timeout=1.0)
+                message = index_queue.get(timeout=1.0)
             except Empty:
                 continue
-            if graph_id is None:
+            tag, payload = _parse_index_message(message)
+            if tag == _INDEX_STOP:
+                _flush()
+                _result_put((_RESULT_DONE, worker_id, None))
                 break
-            graph_id = int(graph_id)
+            if tag == _INDEX_DONE:
+                _flush()
+                _result_put((_RESULT_DONE, worker_id, None))
+                _reset()
+                continue
+            graph_id = int(payload)
             if graph_id < 0 or graph_id >= total_graphs:
                 continue
             ds_idx = bisect_right(dataset_offsets, graph_id) - 1
@@ -418,6 +443,8 @@ class StreamingGraphDataLoader:
     packs graphs into batches until a padding cap is reached, and then pads the
     batch to fixed shapes suitable for JAX/XLA compilation. It supports optional
     deterministic shuffling and per-process sharding (round-robin by graph_id).
+    When keep_workers_alive is enabled, a persistent worker pool is reused
+    across epochs.
 
     Key methods:
     - iter_batches(epoch, seed, process_count, process_index): yield batches for
@@ -443,6 +470,7 @@ class StreamingGraphDataLoader:
         num_workers: int | None = None,
         pad_graphs: int | None = None,
         shuffle: bool = False,
+        keep_workers_alive: bool = True,
     ):
         if not datasets:
             raise ValueError('Expected at least one dataset.')
@@ -470,6 +498,7 @@ class StreamingGraphDataLoader:
         self._niggli_reduce = bool(niggli_reduce)
         self._max_batches = max_batches
         self._shuffle = bool(shuffle)
+        self._keep_workers_alive = bool(keep_workers_alive)
         worker_count = int(num_workers or 0)
         worker_count = max(0, worker_count)
         self._num_workers = worker_count
@@ -513,6 +542,12 @@ class StreamingGraphDataLoader:
         self._fixed_pad_edges = int(self._n_edge)
         self._fixed_pad_graphs = int(self._n_graph)
         self._last_padding_summary: dict[str, int] | None = None
+        self._mp_ctx = None
+        self._index_queue = None
+        self._result_queue = None
+        self._stop_event = None
+        self._worker_procs: list[mp.Process] = []
+        self._worker_pool_started = False
 
         for dataset in self._datasets:
             dataset.close()
@@ -628,29 +663,27 @@ class StreamingGraphDataLoader:
         if flushed is not None:
             yield flushed
 
-    def _iter_multi_process(
-        self,
-        *,
-        graph_ids: Sequence[int],
-    ) -> Iterator[tuple[jraph.GraphsTuple, int]]:
-        """Yield batches from worker processes that read HDF5 directly."""
+    def _ensure_worker_pool(self) -> None:
+        """Start a persistent worker pool if configured."""
+        if self._worker_pool_started or self._num_workers <= 0:
+            return
         ctx = mp.get_context('spawn')
+        self._mp_ctx = ctx
         worker_count = max(self._num_workers, 1)
         index_queue_capacity = max(worker_count * 64, 1)
-        index_queue = ctx.Queue(index_queue_capacity)
         result_queue_capacity = max(worker_count * 32, 1)
-        result_queue = ctx.Queue(result_queue_capacity)
-        stop_event = ctx.Event()
-
-        worker_procs: list[mp.Process] = []
+        self._index_queue = ctx.Queue(index_queue_capacity)
+        self._result_queue = ctx.Queue(result_queue_capacity)
+        self._stop_event = ctx.Event()
+        self._worker_procs = []
         for worker_id in range(worker_count):
             proc = ctx.Process(
                 target=_graph_worker_main,
                 args=(worker_id,),
                 kwargs={
-                    'index_queue': index_queue,
-                    'result_queue': result_queue,
-                    'stop_event': stop_event,
+                    'index_queue': self._index_queue,
+                    'result_queue': self._result_queue,
+                    'stop_event': self._stop_event,
                     'dataset_specs': self._dataset_specs,
                     'dataset_offsets': self._dataset_offsets,
                     'dataset_lengths': self._dataset_lengths,
@@ -665,24 +698,95 @@ class StreamingGraphDataLoader:
             )
             proc.daemon = True
             proc.start()
-            worker_procs.append(proc)
+            self._worker_procs.append(proc)
+        self._worker_pool_started = True
+
+    def _shutdown_worker_pool(self) -> None:
+        """Stop any persistent workers and clean up queues."""
+        if not self._worker_pool_started:
+            return
+        if self._stop_event is not None:
+            self._stop_event.set()
+        if self._index_queue is not None:
+            for _ in range(max(self._num_workers, 1)):
+                try:
+                    self._index_queue.put((_INDEX_STOP, None), timeout=1.0)
+                except Full:
+                    pass
+        for proc in self._worker_procs:
+            proc.join(timeout=1.0)
+        if self._index_queue is not None:
+            self._index_queue.close()
+        if self._result_queue is not None:
+            self._result_queue.close()
+        self._mp_ctx = None
+        self._index_queue = None
+        self._result_queue = None
+        self._stop_event = None
+        self._worker_procs = []
+        self._worker_pool_started = False
+
+    def _iter_multi_process(
+        self,
+        *,
+        graph_ids: Sequence[int],
+    ) -> Iterator[tuple[jraph.GraphsTuple, int]]:
+        """Yield batches from worker processes that read HDF5 directly."""
+        worker_count = max(self._num_workers, 1)
+        if self._keep_workers_alive:
+            self._ensure_worker_pool()
+            index_queue = self._index_queue
+            result_queue = self._result_queue
+            stop_event = self._stop_event
+            worker_procs = self._worker_procs
+        else:
+            ctx = mp.get_context('spawn')
+            index_queue_capacity = max(worker_count * 64, 1)
+            index_queue = ctx.Queue(index_queue_capacity)
+            result_queue_capacity = max(worker_count * 32, 1)
+            result_queue = ctx.Queue(result_queue_capacity)
+            stop_event = ctx.Event()
+            worker_procs = []
+            for worker_id in range(worker_count):
+                proc = ctx.Process(
+                    target=_graph_worker_main,
+                    args=(worker_id,),
+                    kwargs={
+                        'index_queue': index_queue,
+                        'result_queue': result_queue,
+                        'stop_event': stop_event,
+                        'dataset_specs': self._dataset_specs,
+                        'dataset_offsets': self._dataset_offsets,
+                        'dataset_lengths': self._dataset_lengths,
+                        'z_table': self._z_table,
+                        'r_max': self._cutoff,
+                        'head_to_index': self._head_to_index,
+                        'niggli_reduce': self._niggli_reduce,
+                        'n_node': self._n_node,
+                        'n_edge': self._n_edge,
+                        'n_graph': self._n_graph,
+                    },
+                )
+                proc.daemon = True
+                proc.start()
+                worker_procs.append(proc)
 
         def _index_feeder():
             for graph_id in graph_ids:
                 while True:
-                    if stop_event.is_set():
+                    if stop_event is not None and stop_event.is_set():
                         return
                     try:
-                        index_queue.put(int(graph_id), timeout=1.0)
+                        index_queue.put((_INDEX_GRAPH, int(graph_id)), timeout=1.0)
                         break
                     except Full:
                         continue
             for _ in range(worker_count):
                 while True:
-                    if stop_event.is_set():
+                    if stop_event is not None and stop_event.is_set():
                         return
                     try:
-                        index_queue.put(None, timeout=1.0)
+                        index_queue.put((_INDEX_DONE, None), timeout=1.0)
                         break
                     except Full:
                         continue
@@ -697,7 +801,10 @@ class StreamingGraphDataLoader:
                 exit_code = proc.exitcode
                 if exit_code is None:
                     continue
-                stop_event.set()
+                if stop_event is not None:
+                    stop_event.set()
+                if self._keep_workers_alive:
+                    self._shutdown_worker_pool()
                 raise RuntimeError(
                     f'Graph worker {idx} exited unexpectedly with code {exit_code}.'
                 )
@@ -708,7 +815,7 @@ class StreamingGraphDataLoader:
                 try:
                     tag, payload_a, payload_b = result_queue.get(timeout=1.0)
                 except Empty:
-                    if stop_event.is_set():
+                    if stop_event is not None and stop_event.is_set():
                         break
                     _check_worker_health()
                     continue
@@ -716,14 +823,19 @@ class StreamingGraphDataLoader:
                     finished_workers += 1
                     continue
                 if tag == _RESULT_ERROR:
-                    stop_event.set()
+                    if stop_event is not None:
+                        stop_event.set()
+                    if self._keep_workers_alive:
+                        self._shutdown_worker_pool()
                     raise RuntimeError(f'Graph worker {payload_a} failed: {payload_b}')
                 if tag == _RESULT_BATCH:
                     yield payload_a, payload_b
         finally:
-            stop_event.set()
-            for proc in worker_procs:
-                proc.join(timeout=1)
+            if not self._keep_workers_alive and stop_event is not None:
+                stop_event.set()
+            if not self._keep_workers_alive:
+                for proc in worker_procs:
+                    proc.join(timeout=1)
             feeder.join(timeout=1)
 
     def iter_batches(
@@ -889,6 +1001,7 @@ class StreamingGraphDataLoader:
                 num_workers=self._num_workers,
                 pad_graphs=self._n_graph,
                 shuffle=self._shuffle,
+                keep_workers_alive=self._keep_workers_alive,
             )
             cached_graphs = getattr(self, 'graphs', None)
             if cached_graphs is not None:
@@ -916,6 +1029,7 @@ class StreamingGraphDataLoader:
 
     def close(self) -> None:
         """Close datasets and release cached resources."""
+        self._shutdown_worker_pool()
         for dataset in self._datasets:
             dataset.close()
         self._datasets = []
@@ -936,6 +1050,7 @@ def get_hdf5_dataloader(
     dataset_specs: Sequence[StreamingDatasetSpec] | None = None,
     head_to_index: dict[str, int] | None = None,
     shuffle: bool = False,
+    keep_workers_alive: bool = True,
 ) -> StreamingGraphDataLoader:
     """Create a StreamingGraphDataLoader from one or more HDF5 files.
 
@@ -953,6 +1068,7 @@ def get_hdf5_dataloader(
         dataset_specs: Optional StreamingDatasetSpec list per shard.
         head_to_index: Optional head-name to index mapping.
         shuffle: Deterministic per-epoch shuffle toggle.
+        keep_workers_alive: Keep worker processes alive across epochs.
 
     Returns:
         StreamingGraphDataLoader configured for the provided shards.
@@ -980,6 +1096,7 @@ def get_hdf5_dataloader(
         num_workers=num_workers,
         pad_graphs=max_graphs,
         shuffle=shuffle,
+        keep_workers_alive=keep_workers_alive,
     )
 
 

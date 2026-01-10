@@ -37,6 +37,12 @@ class Configuration:
     virials: Stress | None = None  # eV
     dipole: np.ndarray | None = None  # eÅ
     polarizability: np.ndarray | None = None  # eÅ²/V
+    energy_weight: float | None = None
+    forces_weight: float | None = None
+    stress_weight: float | None = None
+    virials_weight: float | None = None
+    dipole_weight: float | None = None
+    polarizability_weight: float | None = None
     cell: Cell | None = None
     pbc: Pbc | None = None
 
@@ -100,11 +106,13 @@ def config_from_atoms(
         config_type_weights = DEFAULT_CONFIG_TYPE_WEIGHTS
 
     energy = atoms.info.get(energy_key, None)  # eV
+    energy_present = energy is not None
     if energy is None:
         try:
             energy = atoms.get_potential_energy()
         except Exception:
             energy = None
+    energy_present = energy is not None
     if energy is None:
         energy = np.array(0.0)
 
@@ -146,6 +154,21 @@ def config_from_atoms(
     polarizability = atoms.info.get(polarizability_key, None)
     if polarizability is not None:
         polarizability = np.asarray(polarizability)
+
+    def _get_weight(key: str, present: bool) -> float:
+        value = atoms.info.get(f'{key}_weight', None)
+        if value is None:
+            return 1.0 if present else 0.0
+        return float(np.asarray(value).reshape(()))
+
+    energy_weight = _get_weight('energy', energy_present)
+    forces_weight = _get_weight('forces', forces is not None)
+    stress_weight = _get_weight('stress', stress is not None)
+    virials_weight = _get_weight('virials', virials is not None)
+    dipole_weight = _get_weight('dipole', dipole is not None)
+    polarizability_weight = _get_weight(
+        'polarizability', polarizability is not None
+    )
     atomic_numbers = np.array(
         [ase.data.atomic_numbers[symbol] for symbol in atoms.symbols]
     )
@@ -164,6 +187,12 @@ def config_from_atoms(
         virials=virials,
         dipole=dipole,
         polarizability=polarizability,
+        energy_weight=energy_weight,
+        forces_weight=forces_weight,
+        stress_weight=stress_weight,
+        virials_weight=virials_weight,
+        dipole_weight=dipole_weight,
+        polarizability_weight=polarizability_weight,
         weight=weight,
         config_type=config_type,
         pbc=pbc,
@@ -400,14 +429,17 @@ def save_configurations_as_HDF5(configurations: Configurations, _, h5_file) -> N
             properties_subgrp['polarizability'] = write_value(config.polarizability)
         weights_subgrp = subgroup.create_group('property_weights')
         for name, value in (
-            ('energy', config.energy),
-            ('forces', config.forces),
-            ('stress', config.stress),
-            ('virials', config.virials),
-            ('dipole', config.dipole),
-            ('polarizability', config.polarizability),
+            ('energy', (config.energy, config.energy_weight)),
+            ('forces', (config.forces, config.forces_weight)),
+            ('stress', (config.stress, config.stress_weight)),
+            ('virials', (config.virials, config.virials_weight)),
+            ('dipole', (config.dipole, config.dipole_weight)),
+            ('polarizability', (config.polarizability, config.polarizability_weight)),
         ):
-            weights_subgrp[name] = write_value(1.0 if value is not None else 0.0)
+            prop_value, weight_value = value
+            if weight_value is None:
+                weight_value = 1.0 if prop_value is not None else 0.0
+            weights_subgrp[name] = write_value(float(weight_value))
 
 
 def write_value(value):
@@ -434,6 +466,12 @@ class GraphGlobals(NamedTuple):
     dipole: np.ndarray | None = None
     polarizability: np.ndarray | None = None
     graph_id: np.ndarray | None = None
+    energy_weight: np.ndarray | None = None
+    forces_weight: np.ndarray | None = None
+    stress_weight: np.ndarray | None = None
+    virials_weight: np.ndarray | None = None
+    dipole_weight: np.ndarray | None = None
+    polarizability_weight: np.ndarray | None = None
 
 
 def graph_from_configuration(
@@ -491,6 +529,36 @@ def graph_from_configuration(
                 virials=config.virials,
                 dipole=config.dipole,
                 polarizability=config.polarizability,
+                energy_weight=(
+                    None
+                    if config.energy_weight is None
+                    else np.asarray(config.energy_weight)
+                ),
+                forces_weight=(
+                    None
+                    if config.forces_weight is None
+                    else np.asarray(config.forces_weight)
+                ),
+                stress_weight=(
+                    None
+                    if config.stress_weight is None
+                    else np.asarray(config.stress_weight)
+                ),
+                virials_weight=(
+                    None
+                    if config.virials_weight is None
+                    else np.asarray(config.virials_weight)
+                ),
+                dipole_weight=(
+                    None
+                    if config.dipole_weight is None
+                    else np.asarray(config.dipole_weight)
+                ),
+                polarizability_weight=(
+                    None
+                    if config.polarizability_weight is None
+                    else np.asarray(config.polarizability_weight)
+                ),
             ),
         ),
         receivers=receivers,
