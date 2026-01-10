@@ -957,6 +957,12 @@ def _apply_optimizer_options(args: argparse.Namespace) -> None:
     elif args.beta is not None:
         gin.bind_parameter('adam.b1', args.beta)
         gin.bind_parameter('amsgrad.b1', args.beta)
+    if args.beta2 is not None:
+        gin.bind_parameter('adam.b2', args.beta2)
+        gin.bind_parameter('amsgrad.b2', args.beta2)
+    if args.epsilon is not None:
+        gin.bind_parameter('adam.eps', args.epsilon)
+        gin.bind_parameter('amsgrad.eps', args.epsilon)
     _bind_if_not_none('mace_jax.tools.gin_functions.optimizer.lr', args.lr)
     _bind_if_not_none(
         'mace_jax.tools.gin_functions.optimizer.weight_decay', args.weight_decay

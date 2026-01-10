@@ -387,6 +387,20 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
         help='Optimizer beta parameter (mirrors Torch CLI).',
     )
     parser.add_argument(
+        '--beta2',
+        '--beta_2',
+        type=float,
+        default=None,
+        help='Optimizer beta2 parameter (Adam/AMSGrad).',
+    )
+    parser.add_argument(
+        '--epsilon',
+        '--eps',
+        type=float,
+        default=None,
+        help='Optimizer epsilon parameter (Adam/AMSGrad).',
+    )
+    parser.add_argument(
         '--lr',
         type=float,
         default=None,
