@@ -170,45 +170,118 @@ def compute_mean_std_atomic_inter_energy(
     graphs: list[jraph.GraphsTuple],
     atomic_energies: np.ndarray,
 ) -> tuple[float, float]:
-    # atomic_energies = torch.from_numpy(atomic_energies)
+    energies = np.asarray(atomic_energies, dtype=np.float64)
+    if energies.ndim == 1:
+        energies = energies[None, :]
+    num_heads = energies.shape[0]
 
-    # atom_energy_list = []
+    per_head: list[list[float]] = [[] for _ in range(num_heads)]
+    for graph in graphs:
+        if graph.nodes is None:
+            continue
+        species = np.asarray(graph.nodes.species, dtype=int)
+        if species.size == 0:
+            continue
+        energy_value = getattr(graph.globals, 'energy', None)
+        if energy_value is None:
+            continue
+        head = getattr(graph.globals, 'head', None)
+        if head is None:
+            head_index = 0
+        else:
+            head_values = np.asarray(head).reshape(-1)
+            head_index = int(head_values[0]) if head_values.size else 0
+        if head_index >= energies.shape[0]:
+            raise ValueError(
+                f'Head index {head_index} exceeds atomic_energies heads '
+                f'({energies.shape[0]}).'
+            )
+        e0_sum = float(energies[head_index, species].sum())
+        energy_scalar = float(np.asarray(energy_value).reshape(-1)[0])
+        per_head[head_index].append((energy_scalar - e0_sum) / float(species.size))
 
-    # for batch in data_loader:
-    #     node_e0 = atomic_energies[batch.node_species]
-    #     graph_e0s = scatter_sum(
-    #         src=node_e0, index=batch.batch, dim=-1, dim_size=batch.num_graphs
-    #     )
-    #     graph_sizes = batch.ptr[1:] - batch.ptr[:-1]
-    #     atom_energy_list.append(
-    #         (batch.energy - graph_e0s) / graph_sizes
-    #     )  # {[n_graphs], }
+    if not any(per_head):
+        return 0.0, 1.0
 
-    # atom_energies = torch.cat(atom_energy_list, dim=0)  # [total_n_graphs]
+    means = np.array(
+        [float(np.mean(values)) if values else 0.0 for values in per_head],
+        dtype=np.float64,
+    )
+    stds = np.array(
+        [float(np.std(values)) if values else 0.0 for values in per_head],
+        dtype=np.float64,
+    )
+    if np.any(stds == 0.0):
+        logging.warning(
+            'Standard deviation of the scaling is zero, changing to no scaling.'
+        )
+        stds = np.where(stds == 0.0, 1.0, stds)
 
-    # mean = to_numpy(torch.mean(atom_energies)).item()
-    # std = to_numpy(torch.std(atom_energies)).item()
-
-    # return mean, std
-    raise NotImplementedError
+    if num_heads == 1:
+        return float(means[0]), float(stds[0])
+    return means, stds
 
 
 def compute_mean_rms_energy_forces(
     graphs: list[jraph.GraphsTuple],
     atomic_energies: np.ndarray,
 ) -> tuple[float, float]:
-    # mean, _ = compute_mean_std_atomic_inter_energy(data_loader, atomic_energies)
+    energies = np.asarray(atomic_energies, dtype=np.float64)
+    if energies.ndim == 1:
+        energies = energies[None, :]
+    num_heads = energies.shape[0]
 
-    # atomic_energies = torch.from_numpy(atomic_energies)
+    per_head: list[list[float]] = [[] for _ in range(num_heads)]
+    force_sq_sum = np.zeros(num_heads, dtype=np.float64)
+    force_count = np.zeros(num_heads, dtype=np.int64)
 
-    # forces = torch.cat(
-    #     [batch.forces for batch in data_loader], dim=0
-    # )  # [total_n_graphs * n_atoms, 3]
+    for graph in graphs:
+        if graph.nodes is None:
+            continue
+        species = np.asarray(graph.nodes.species, dtype=int)
+        if species.size == 0:
+            continue
 
-    # rms = torch.sqrt(torch.mean(torch.square(forces))).item()
+        energy_value = getattr(graph.globals, 'energy', None)
+        head = getattr(graph.globals, 'head', None)
+        if head is None:
+            head_index = 0
+        else:
+            head_values = np.asarray(head).reshape(-1)
+            head_index = int(head_values[0]) if head_values.size else 0
+        if head_index >= energies.shape[0]:
+            raise ValueError(
+                f'Head index {head_index} exceeds atomic_energies heads '
+                f'({energies.shape[0]}).'
+            )
 
-    # return mean, rms
-    raise NotImplementedError
+        if energy_value is not None:
+            e0_sum = float(energies[head_index, species].sum())
+            energy_scalar = float(np.asarray(energy_value).reshape(-1)[0])
+            per_head[head_index].append((energy_scalar - e0_sum) / float(species.size))
+
+        forces = getattr(graph.nodes, 'forces', None)
+        if forces is not None:
+            forces_array = np.asarray(forces, dtype=np.float64)
+            force_sq_sum[head_index] += float(np.sum(np.square(forces_array)))
+            force_count[head_index] += int(forces_array.size)
+
+    means = np.array(
+        [float(np.mean(values)) if values else 0.0 for values in per_head],
+        dtype=np.float64,
+    )
+    rms = np.ones(num_heads, dtype=np.float64)
+    nonzero = force_count > 0
+    rms[nonzero] = np.sqrt(force_sq_sum[nonzero] / force_count[nonzero])
+    if np.any(rms == 0.0):
+        logging.warning(
+            'Standard deviation of the scaling is zero, changing to no scaling.'
+        )
+        rms = np.where(rms == 0.0, 1.0, rms)
+
+    if num_heads == 1:
+        return float(means[0]), float(rms[0])
+    return means, rms
 
 
 def compute_avg_num_neighbors(graphs: list[jraph.GraphsTuple]) -> float:

@@ -237,6 +237,15 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
         help='Path to a statistics JSON file (populates atomic numbers, E0s, scaling, neighbors).',
     )
     parser.add_argument(
+        '--scaling',
+        choices=['std_scaling', 'rms_forces_scaling', 'no_scaling'],
+        default=None,
+        help=(
+            'Scaling strategy for model outputs; overrides statistics-file scaling '
+            '(binds mace_jax.tools.gin_model.model.scaling).'
+        ),
+    )
+    parser.add_argument(
         '--energy-key',
         '--energy_key',
         type=str,

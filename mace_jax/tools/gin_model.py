@@ -622,8 +622,13 @@ def model(
         mean, std = 0.0, 1.0
     else:
         mean, std = scaling(train_graphs, atomic_energies)
+        mean_repr = np.asarray(mean)
+        std_repr = np.asarray(std)
         logging.info(
-            f'Scaling with {scaling.__qualname__}: mean={mean:.2f}, std={std:.2f}'
+            'Scaling with %s: mean=%s, std=%s',
+            getattr(scaling, '__qualname__', str(scaling)),
+            mean_repr,
+            std_repr,
         )
 
     if learnable_atomic_energies:
@@ -814,19 +819,42 @@ def model(
 
         # Apply optional rescaling consistent with the historical Haiku version.
         num_nodes = graph.n_node.astype(default_dtype())
+        graph_heads = getattr(graph.globals, 'head', None)
+        if graph_heads is None:
+            graph_heads = jnp.zeros_like(graph.n_node, dtype=jnp.int32)
+        else:
+            graph_heads = jnp.asarray(graph_heads, dtype=jnp.int32).reshape(-1)
+
+        mean_arr = jnp.asarray(mean, dtype=default_dtype())
+        std_arr = jnp.asarray(std, dtype=default_dtype())
+        if mean_arr.ndim == 0:
+            mean_graph = mean_arr
+        else:
+            mean_graph = mean_arr[graph_heads]
+        if std_arr.ndim == 0:
+            std_graph = std_arr
+        else:
+            std_graph = std_arr[graph_heads]
+
         energy = outputs['energy']
         if energy is not None:
-            energy = std * jnp.nan_to_num(energy) + mean * num_nodes
+            energy = std_graph * jnp.nan_to_num(energy) + mean_graph * num_nodes
             energy = energy * graph_mask
 
         forces = outputs['forces']
         if forces is not None:
-            forces = std * jnp.nan_to_num(forces)
+            if std_arr.ndim == 0:
+                forces = std_graph * jnp.nan_to_num(forces)
+            else:
+                node_scale = jnp.repeat(
+                    std_graph, graph.n_node, total_repeat_length=forces.shape[0]
+                )
+                forces = node_scale[:, None] * jnp.nan_to_num(forces)
             forces = forces * node_mask[:, None]
 
         stress = outputs['stress']
         if stress is not None:
-            stress = std * jnp.nan_to_num(stress)
+            stress = std_graph * jnp.nan_to_num(stress)
             stress = stress * graph_mask[:, None, None]
 
         return {

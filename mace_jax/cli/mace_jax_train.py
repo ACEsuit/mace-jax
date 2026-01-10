@@ -772,6 +772,19 @@ def _apply_dataset_options(args: argparse.Namespace) -> None:
                 'mace_jax.tools.gin_model.model.scaling',
                 gin_model.constant_scaling,
             )
+    if getattr(args, 'scaling', None):
+        if args.scaling == 'no_scaling':
+            gin.bind_parameter('mace_jax.tools.gin_model.model.scaling', None)
+        elif args.scaling == 'std_scaling':
+            gin.bind_parameter(
+                'mace_jax.tools.gin_model.model.scaling',
+                tools.compute_mean_std_atomic_inter_energy,
+            )
+        elif args.scaling == 'rms_forces_scaling':
+            gin.bind_parameter(
+                'mace_jax.tools.gin_model.model.scaling',
+                tools.compute_mean_rms_energy_forces,
+            )
     if getattr(args, 'batch_max_edges', None) is not None:
         limit = _parse_batch_limit_option(args.batch_max_edges)
         gin.bind_parameter('mace_jax.tools.gin_datasets.datasets.n_edge', limit)
