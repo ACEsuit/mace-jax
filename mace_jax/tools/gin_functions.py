@@ -733,7 +733,7 @@ def reduce_on_plateau(
         state['num_bad'] += 1
         if state['num_bad'] >= patience:
             new_lr = max(state['current_lr'] * factor, state['min_lr'])
-            if new_lr < state['current_lr'] - threshold:
+            if new_lr < state['current_lr']:
                 logging.info(
                     'Plateau scheduler triggered: lr %.3e -> %.3e',
                     state['current_lr'],
@@ -1489,7 +1489,15 @@ def train(
         _save_checkpoint(epoch, trainable_params, optimizer_state, eval_params)
         _log_info('-' * 80)
 
-        if stop_after_epoch or last_epoch:
+        stop_signal = stop_after_epoch or last_epoch
+        if process_count > 1:
+            synced = multihost_utils.broadcast_one_to_all(
+                jnp.array(int(stop_signal), dtype=jnp.int32),
+                is_source=is_primary,
+            )
+            stop_signal = bool(np.asarray(synced))
+
+        if stop_signal:
             break
 
     if process_count > 1:
