@@ -1016,6 +1016,7 @@ def train(
         return Path(directory) / 'checkpoints'
 
     start_interval = 0
+    resume_eval_params = None
     if resume_path is not None:
         if not resume_path.exists():
             raise FileNotFoundError(
@@ -1028,6 +1029,9 @@ def train(
         )
         trainable_params, static_config = _split_config(params)
         optimizer_state = resume_state.get('optimizer_state', optimizer_state)
+        resume_eval_params = resume_state.get('eval_params', None)
+        if resume_eval_params is not None:
+            resume_eval_params, _ = _split_config(resume_eval_params)
         lowest_loss = resume_state.get('lowest_loss', lowest_loss)
         patience_counter = resume_state.get('patience_counter', patience_counter)
         start_interval = resume_state.get('epoch', 0)
@@ -1325,6 +1329,7 @@ def train(
         metrics_predictor=predictor_with_config,
         metrics_loss_fn=loss_fn,
         metrics_required_targets=required_by_loss if eval_train else None,
+        initial_eval_params=resume_eval_params,
         **kwargs,
     ):
         if len(train_item) == 5:
@@ -1414,9 +1419,7 @@ def train(
             for head_name, loader in _enumerate_eval_targets(
                 valid_loader, valid_head_loaders, epoch
             ):
-                last_valid_loss = eval_and_print(
-                    loader, 'eval_valid', head_name=head_name
-                )
+                last_valid_loss = eval_and_print(loader, 'valid', head_name=head_name)
 
         improved = False
         if last_valid_loss is not None and is_primary:

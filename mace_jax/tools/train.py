@@ -451,9 +451,7 @@ def _compute_eval_batch_metrics(
     stress_mask = _apply_property_weight_mask(graph_mask, graph, 'stress_weight')
     virials_mask = _apply_property_weight_mask(graph_mask, graph, 'virials_weight')
     dipole_mask = _apply_property_weight_mask(graph_mask, graph, 'dipole_weight')
-    polar_mask = _apply_property_weight_mask(
-        graph_mask, graph, 'polarizability_weight'
-    )
+    polar_mask = _apply_property_weight_mask(graph_mask, graph, 'polarizability_weight')
     atom_counts = jnp.maximum(jnp.asarray(graph.n_node), 1.0)
 
     per_graph_loss = loss_fn(graph, pred_outputs)
@@ -656,6 +654,7 @@ def train(
     metrics_predictor: Callable | None = None,
     metrics_loss_fn: Any | None = None,
     metrics_required_targets: set[str] | None = None,
+    initial_eval_params: Any | None = None,
 ):
     """Yield training state for each epoch while updating parameters.
 
@@ -685,13 +684,14 @@ def train(
         metrics_predictor: Predictor callable used to compute training metrics.
         metrics_loss_fn: Loss function used to compute training metrics.
         metrics_required_targets: Optional set of target names to include in metrics.
+        initial_eval_params: Optional initial EMA/eval params (used when resuming).
 
     Yields:
         Tuple of (epoch, trainable_params, optimizer_state, eval_params).
     """
     num_updates = 0
-    ema_params = params
-    eval_params = params
+    ema_params = initial_eval_params if initial_eval_params is not None else params
+    eval_params = ema_params
     swa_state = None
     if swa_config is not None:
         swa_state = {'params': None, 'count': 0}

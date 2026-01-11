@@ -831,6 +831,10 @@ class StreamingGraphDataLoader:
                 if tag == _RESULT_BATCH:
                     yield payload_a, payload_b
         finally:
+            if self._keep_workers_alive and finished_workers < worker_count:
+                if stop_event is not None:
+                    stop_event.set()
+                self._shutdown_worker_pool()
             if not self._keep_workers_alive and stop_event is not None:
                 stop_event.set()
             if not self._keep_workers_alive:

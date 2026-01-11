@@ -166,9 +166,7 @@ def config_from_atoms(
     stress_weight = _get_weight('stress', stress is not None)
     virials_weight = _get_weight('virials', virials is not None)
     dipole_weight = _get_weight('dipole', dipole is not None)
-    polarizability_weight = _get_weight(
-        'polarizability', polarizability is not None
-    )
+    polarizability_weight = _get_weight('polarizability', polarizability is not None)
     atomic_numbers = np.array(
         [ase.data.atomic_numbers[symbol] for symbol in atoms.symbols]
     )
