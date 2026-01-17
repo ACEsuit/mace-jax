@@ -9,11 +9,11 @@ logs.directory = "results"
 datasets.train_path = "data/hdf5/train"
 datasets.valid_path = "data/hdf5/val"
 datasets.test_path = None
-datasets.r_max = 5.0
 datasets.n_edge = 2048
 
 
 
+model.r_max = 5.0
 model.radial_basis = @bessel_basis
 bessel_basis.number = 8
 

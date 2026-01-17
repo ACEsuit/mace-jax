@@ -671,6 +671,13 @@ def _apply_run_options(args: argparse.Namespace) -> None:
 
 
 def _apply_dataset_options(args: argparse.Namespace) -> None:
+    def _log_primary(message: str, *values) -> None:
+        process_index = args.process_index
+        if process_index is None:
+            process_index = int(os.environ.get('JAX_PROCESS_INDEX', '0'))
+        if int(process_index) == 0:
+            logging.info(message, *values)
+
     stats_data = None
     stats_path: Path | None = None
     if getattr(args, 'statistics_file', None):
@@ -678,7 +685,7 @@ def _apply_dataset_options(args: argparse.Namespace) -> None:
         if not stats_path.exists():
             raise FileNotFoundError(f'Statistics file {stats_path} not found.')
         stats_data = _load_statistics_file(stats_path)
-        logging.info('Loaded dataset statistics from %s', stats_path)
+        _log_primary('Loaded dataset statistics from %s', stats_path)
         gin.bind_parameter(
             'mace_jax.tools.gin_datasets.datasets.statistics_metadata_path',
             str(stats_path),
@@ -720,7 +727,7 @@ def _apply_dataset_options(args: argparse.Namespace) -> None:
             stats_atomic_numbers = parsed
         atomic_numbers_source = tuple(int(z) for z in stats_atomic_numbers)
         if stats_path:
-            logging.info('Using atomic numbers from statistics file %s', stats_path)
+            _log_primary('Using atomic numbers from statistics file %s', stats_path)
     if atomic_numbers_source:
         gin.bind_parameter(
             'mace_jax.tools.gin_datasets.datasets.atomic_numbers',
@@ -740,7 +747,7 @@ def _apply_dataset_options(args: argparse.Namespace) -> None:
         elif isinstance(value, dict):
             e0_override = {int(k): float(v) for k, v in value.items()}
         if e0_override and stats_path:
-            logging.info('Using E0s from statistics file %s', stats_path)
+            _log_primary('Using E0s from statistics file %s', stats_path)
     if e0_override:
         gin.bind_parameter(
             'mace_jax.tools.gin_datasets.datasets.atomic_energies_override',
@@ -802,6 +809,11 @@ def _apply_dataset_options(args: argparse.Namespace) -> None:
         gin.bind_parameter(
             'mace_jax.tools.gin_datasets.datasets.stream_train_node_percentile',
             float(args.stream_train_node_percentile),
+        )
+    if getattr(args, 'num_workers', None) is not None:
+        gin.bind_parameter(
+            'mace_jax.tools.gin_datasets.datasets.num_workers',
+            int(args.num_workers),
         )
 
 
@@ -1367,6 +1379,11 @@ def run_training() -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s %(levelname)s: %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S',
+    )
     args, remaining = parse_args(argv)
     try:
         exit_code = _launch_local_processes(args)

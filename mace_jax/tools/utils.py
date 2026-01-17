@@ -410,6 +410,7 @@ def setup_logger(
     filename: str | None = None,
     directory: str | None = None,
     name: str | None = None,
+    include_timestamp: bool = True,
     stream: bool = True,
 ):
     logger = logging.getLogger()
@@ -419,9 +420,10 @@ def setup_logger(
     for handler in logger.handlers:
         logger.removeHandler(handler)
 
-    fmt = '%(asctime)s.%(msecs)03d %(levelname)s: %(message)s'
-    if name is not None:
-        fmt = f'{name} {fmt}'
+    if include_timestamp:
+        fmt = '%(asctime)s.%(msecs)03d %(levelname)s: %(message)s'
+    else:
+        fmt = '%(levelname)s: %(message)s'
     formatter = logging.Formatter(fmt, datefmt='%Y-%m-%d %H:%M:%S')
 
     if stream:

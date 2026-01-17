@@ -270,6 +270,16 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        '--num-workers',
+        '--num_workers',
+        type=int,
+        default=None,
+        help=(
+            'Number of streaming worker processes per training process '
+            '(binds mace_jax.tools.gin_datasets.datasets.num_workers).'
+        ),
+    )
+    parser.add_argument(
         '--stream-train-max-batches',
         '--stream_train_max_batches',
         type=int,

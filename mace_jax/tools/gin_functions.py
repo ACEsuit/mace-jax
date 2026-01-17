@@ -440,6 +440,7 @@ def logs(
     name: str = None,
     level=logging.INFO,
     directory: str = 'results',
+    include_timestamp: bool = True,
 ):
     """Configure logging and return a metrics logger.
 
@@ -447,6 +448,7 @@ def logs(
         name: Optional run name; random name is generated if omitted.
         level: Logging level for the run.
         directory: Output directory for logs and metrics files.
+        include_timestamp: Whether to include timestamps in log output.
 
     Returns:
         Tuple of (directory, tag, logger) used throughout training.
@@ -468,6 +470,7 @@ def logs(
         directory=directory,
         filename=f'{tag}{suffix}.log',
         name=name,
+        include_timestamp=include_timestamp,
         stream=process_index == 0,
     )
     logger = tools.MetricsLogger(directory=directory, filename=f'{tag}{suffix}.metrics')
@@ -1199,8 +1202,7 @@ def train(
         if loss_value is None:
             loss_value = float('nan')
         _log_info(
-            f'Epoch {epoch}: {eval_mode}: '
-            f'loss={float(loss_value):.4e}'
+            f'{eval_mode}: loss={float(loss_value):.4e}'
             + (f', {metrics_blob}' if metrics_blob else '')
         )
         if wandb_run is not None and is_primary:
@@ -1419,7 +1421,9 @@ def train(
             for head_name, loader in _enumerate_eval_targets(
                 valid_loader, valid_head_loaders, epoch
             ):
-                last_valid_loss = eval_and_print(loader, 'valid', head_name=head_name)
+                last_valid_loss = eval_and_print(
+                    loader, 'eval_valid', head_name=head_name
+                )
 
         improved = False
         if last_valid_loss is not None and is_primary:
@@ -1461,7 +1465,7 @@ def train(
             )
 
             _log_info(
-                f'Epoch {epoch}: Time per epoch: {avg_interval_time:.1f}s '
+                f'Time per epoch: {avg_interval_time:.1f}s '
                 f'(train {avg_train_time:.1f}s, eval {avg_eval_time:.1f}s).'
             )
             if wandb_run is not None:

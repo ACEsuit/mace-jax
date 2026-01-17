@@ -14,6 +14,7 @@ import logging
 import math
 import threading
 import time
+import traceback
 from collections import deque
 from collections.abc import Callable, Sequence
 from functools import partial
@@ -114,6 +115,8 @@ def _prefetch_to_device(iterator, capacity: int, device_put_fn: Callable[[Any], 
         return iterator
     queue: Queue = Queue(maxsize=capacity)
     sentinel = object()
+    error_sentinel = object()
+    error_info: dict[str, str | BaseException] = {}
     total_hint = getattr(iterator, 'total_batches_hint', 0)
 
     def _producer():
@@ -121,6 +124,10 @@ def _prefetch_to_device(iterator, capacity: int, device_put_fn: Callable[[Any], 
         try:
             for item in iterator:
                 queue.put(device_put_fn(item))
+        except Exception as exc:  # pragma: no cover - propagate through main thread
+            error_info['exception'] = exc
+            error_info['traceback'] = traceback.format_exc()
+            queue.put(error_sentinel)
         finally:
             queue.put(sentinel)
 
@@ -143,6 +150,15 @@ def _prefetch_to_device(iterator, capacity: int, device_put_fn: Callable[[Any], 
             if self._done:
                 raise StopIteration
             item = queue.get()
+            if item is error_sentinel:
+                self._done = True
+                exc = error_info.get('exception')
+                tb = error_info.get('traceback')
+                if tb:
+                    raise RuntimeError(f'Prefetch worker failed:\n{tb}') from exc
+                if exc is not None:
+                    raise exc
+                raise RuntimeError('Prefetch worker failed with unknown error.')
             if item is sentinel:
                 self._done = True
                 raise StopIteration
@@ -1009,7 +1025,9 @@ def train(
         if is_primary:
             lr_value = _resolve_lr(num_updates)
             if lr_value is not None:
-                logging.info('Epoch %s learning rate %.6e', epoch + 1, lr_value)
+                logging.info('Epoch %s (learning rate %.6e)', epoch + 1, lr_value)
+            else:
+                logging.info('Epoch %s', epoch + 1)
         host_prefetch_cap = int(getattr(train_loader, '_prefetch_batches', 0) or 0)
         device_prefetch_cap = device_prefetch_batches
         if device_prefetch_cap is None:

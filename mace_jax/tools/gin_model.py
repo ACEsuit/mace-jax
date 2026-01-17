@@ -34,12 +34,8 @@ gin.register('identity')(lambda x: x)
 gin.register('std_scaling')(tools.compute_mean_std_atomic_inter_energy)
 gin.register('rms_forces_scaling')(tools.compute_mean_rms_energy_forces)
 gin.external_configurable(CuEquivarianceConfig)
-gin.external_configurable(
-    modules.RealAgnosticDensityInteractionBlock, module='mace_jax.modules'
-)
-gin.external_configurable(
-    modules.RealAgnosticDensityResidualInteractionBlock, module='mace_jax.modules'
-)
+for _cls in modules.interaction_classes.values():
+    gin.external_configurable(_cls, module='mace_jax.modules')
 gin.external_configurable(modules.UniversalLoss, module='mace_jax.modules')
 
 

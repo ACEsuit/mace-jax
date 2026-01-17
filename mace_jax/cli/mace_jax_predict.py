@@ -516,7 +516,11 @@ def _predict_hdf5(
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = _parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format='%(message)s')
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s %(levelname)s: %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S',
+    )
 
     bundle = bundle_tools.load_model_bundle(args.model, args.dtype or '')
     head_name, head_to_index = _resolve_head_mapping(bundle.config, args.head)

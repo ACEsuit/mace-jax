@@ -32,6 +32,13 @@ from mace_jax.data.streaming_stats_cache import (
 from mace_jax.tools.utils import log_info_primary, pt_head_first
 
 
+def _is_primary_process() -> bool:
+    try:
+        return getattr(jax, 'process_index', lambda: 0)() == 0
+    except Exception:
+        return True
+
+
 def _ensure_list(value) -> list[str]:
     """Normalize a scalar/sequence into a list of strings.
 
@@ -565,7 +572,7 @@ def _unique_atomic_numbers_from_hdf5(paths: Sequence[Path]) -> list[int]:
             iterator = tqdm(
                 range(dataset_len),
                 desc=f'Extracting atomic species ({path.name})',
-                disable=dataset_len < 1024,
+                disable=dataset_len < 1024 or not _is_primary_process(),
                 leave=False,
             )
             for idx in iterator:
@@ -739,6 +746,7 @@ def _compute_streaming_stats(
                 progress = tqdm(
                     iterator,
                     desc=f'Computing streaming stats ({dataset_path.name})',
+                    disable=not _is_primary_process(),
                     leave=False,
                 )
                 iterator = progress
@@ -805,7 +813,7 @@ def _compute_streaming_stats(
         progress_queue = None
         progress = None
         progress_every = None
-        if dataset_len >= 1024:
+        if dataset_len >= 1024 and _is_primary_process():
             progress = tqdm(
                 total=dataset_len,
                 desc=f'Computing streaming stats ({dataset_path.name})',
@@ -1121,7 +1129,7 @@ def _build_streaming_train_loader(
     seed: int,
     head_to_index: dict[str, int],
     stream_prefetch: int | None,
-    stream_workers: int,
+    num_workers: int,
     stream_stats_workers: int | None = None,
     max_batches: int | None = None,
     shuffle: bool = True,
@@ -1139,7 +1147,7 @@ def _build_streaming_train_loader(
         seed: Random seed for downstream training utilities.
         head_to_index: Mapping from head names to indices.
         stream_prefetch: Prefetch batch count.
-        stream_workers: Worker count for streaming loader.
+        num_workers: Worker count for streaming loader.
         stream_stats_workers: Optional worker count for streaming stats scans.
         max_batches: Optional cap on the number of batches per epoch.
         shuffle: Whether to shuffle training samples each epoch.
@@ -1192,7 +1200,7 @@ def _build_streaming_train_loader(
 
     node_percentile = _normalize_node_percentile(node_percentile)
     if stream_stats_workers is None:
-        stream_stats_workers = stream_workers
+        stream_stats_workers = num_workers
     if max_batches is not None:
         max_batches = int(max_batches)
         if max_batches <= 0:
@@ -1278,7 +1286,7 @@ def _build_streaming_train_loader(
         niggli_reduce=False,
         max_batches=max_batches,
         prefetch_batches=None if stream_prefetch is None else int(stream_prefetch),
-        num_workers=int(stream_workers or 0),
+        num_workers=int(num_workers or 0),
         pad_graphs=n_graphs,
         shuffle=bool(shuffle),
     )
@@ -1465,7 +1473,7 @@ def _build_eval_streaming_loader(
         seed=int(seed),
         head_to_index=head_to_index,
         stream_prefetch=stream_prefetch,
-        stream_workers=num_workers,
+        num_workers=num_workers,
         stream_stats_workers=stream_stats_workers,
         max_batches=max_batches,
         shuffle=shuffle,
@@ -1479,7 +1487,7 @@ def _build_eval_streaming_loader(
 @gin.configurable
 def datasets(
     *,
-    r_max: float,
+    r_max: float | None = None,
     train_path: str,
     config_type_weights: dict = None,
     valid_path: str = None,
@@ -1493,12 +1501,11 @@ def datasets(
     heads: Sequence[str] = ('Default',),
     head_configs: dict[str, dict] | None = None,
     stream_train_prefetch: int | None = None,
-    stream_train_workers: int = 0,
     stream_train_stats_workers: int | None = None,
     stream_train_max_batches: int | None = None,
     stream_train_shuffle: bool = True,
     stream_train_node_percentile: float = 90.0,
-    num_workers: int | None = None,
+    num_workers: int = 0,
     atomic_numbers: Sequence[int] | None = None,
     atomic_energies_override: dict[int, float] | str | None = None,
     statistics_metadata_path: str | None = None,
@@ -1512,7 +1519,8 @@ def datasets(
     """Load datasets for gin, streaming the training split directly from HDF5.
 
     Args:
-        r_max: Cutoff used for neighbor construction.
+        r_max: Cutoff used for neighbor construction. When None, uses the
+            model cutoff (mace_jax.tools.gin_model.model.r_max) if available.
         train_path: Training HDF5 path(s).
         config_type_weights: Optional per-config-type weights.
         valid_path: Validation HDF5 path(s).
@@ -1526,12 +1534,11 @@ def datasets(
         heads: Head names for multihead datasets.
         head_configs: Optional per-head configuration overrides.
         stream_train_prefetch: Prefetch batch count.
-        stream_train_workers: Worker count (per process/device).
         stream_train_stats_workers: Optional worker count for streaming stats scans.
         stream_train_max_batches: Optional cap on streaming batches per epoch.
         stream_train_shuffle: Whether to shuffle training samples each epoch.
         stream_train_node_percentile: Percentile for node padding cap (min is max graph size).
-        num_workers: Optional alias overriding ``stream_train_workers``.
+        num_workers: Worker count (per process/device).
         atomic_numbers: Optional explicit atomic numbers list.
         atomic_energies_override: Optional atomic energies override.
         statistics_metadata_path: Optional stats path for logging context.
@@ -1544,12 +1551,20 @@ def datasets(
     happens once and remains stable across epochs and evaluation runs.
     """
 
+    if r_max is None:
+        try:
+            r_max = float(gin.query_parameter('mace_jax.tools.gin_model.model.r_max'))
+        except Exception as exc:
+            raise ValueError(
+                'datasets.r_max is required unless '
+                'mace_jax.tools.gin_model.model.r_max is configured.'
+            ) from exc
+
     head_names = tuple(heads) if heads else ('Default',)
     head_names = pt_head_first(head_names)
     head_to_index = {name: idx for idx, name in enumerate(head_names)}
     local_device_count = getattr(jax, 'local_device_count', lambda: 1)()
-    worker_setting = stream_train_workers if num_workers is None else num_workers
-    effective_workers = int(worker_setting or 0)
+    effective_workers = int(num_workers or 0)
     if local_device_count > 1 and effective_workers > 0:
         effective_workers *= int(local_device_count)
     stats_workers = stream_train_stats_workers
@@ -1588,7 +1603,7 @@ def datasets(
         seed=seed,
         head_to_index=head_to_index,
         stream_prefetch=stream_train_prefetch,
-        stream_workers=effective_workers,
+        num_workers=effective_workers,
         stream_stats_workers=stats_workers,
         max_batches=stream_train_max_batches,
         shuffle=stream_train_shuffle,
@@ -1612,9 +1627,9 @@ def datasets(
         n_edge=effective_n_edge,
         head_to_index=head_to_index,
         base_z_table=base_z_table,
-        num_workers=effective_workers,
         seed=seed,
         stream_prefetch=stream_train_prefetch,
+        num_workers=effective_workers,
         stream_stats_workers=stats_workers,
         max_batches=stream_train_max_batches,
         shuffle=False,
@@ -1627,9 +1642,9 @@ def datasets(
         n_edge=effective_n_edge,
         head_to_index=head_to_index,
         base_z_table=base_z_table,
-        num_workers=effective_workers,
         seed=seed,
         stream_prefetch=stream_train_prefetch,
+        num_workers=effective_workers,
         stream_stats_workers=stats_workers,
         max_batches=stream_train_max_batches,
         shuffle=False,
