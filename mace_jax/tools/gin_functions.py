@@ -1421,9 +1421,7 @@ def train(
             for head_name, loader in _enumerate_eval_targets(
                 valid_loader, valid_head_loaders, epoch
             ):
-                last_valid_loss = eval_and_print(
-                    loader, 'eval_valid', head_name=head_name
-                )
+                last_valid_loss = eval_and_print(loader, 'valid', head_name=head_name)
 
         improved = False
         if last_valid_loss is not None and is_primary:
