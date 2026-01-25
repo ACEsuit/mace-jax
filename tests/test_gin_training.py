@@ -487,7 +487,7 @@ def test_train_evaluates_each_head(monkeypatch, tmp_path):
     monkeypatch.setattr(gin_functions.tools, 'evaluate', _fake_evaluate)
     _run_gin_training(tmp_path)
 
-    valid_calls = [heads for name, heads in eval_calls if name.startswith('eval_valid')]
+    valid_calls = [heads for name, heads in eval_calls if name.startswith('valid')]
     assert set(valid_calls) == {('Default',), ('Surface',)}
 
 
@@ -517,7 +517,7 @@ def test_eval_interval_controls_frequency(monkeypatch, dataset_paths):
 
     monkeypatch.setattr(gin_functions.tools, 'evaluate', _fake_evaluate)
     _run_gin_training(Path(dataset_paths['valid']).parent)
-    assert eval_calls.count('eval_valid') == 2
+    assert eval_calls.count('valid') == 2
 
 
 def test_streaming_loader_auto_estimates_caps():

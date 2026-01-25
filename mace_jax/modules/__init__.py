@@ -1,4 +1,4 @@
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import jax
 
@@ -84,7 +84,7 @@ readout_classes: dict[str, type[LinearReadoutBlock]] = {
     'NonLinearBiasReadoutBlock': NonLinearBiasReadoutBlock,
 }
 
-gate_dict: dict[str, Optional[Callable]] = {
+gate_dict: dict[str, Callable | None] = {
     'abs': jax.numpy.abs,
     'tanh': jax.nn.tanh,
     'silu': jax.nn.silu,

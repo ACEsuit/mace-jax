@@ -124,9 +124,7 @@ def load_dataframe(paths: Iterable[Path]) -> pd.DataFrame:
     if 'mode' not in frame:
         raise KeyError("Metrics files do not contain a 'mode' field.")
     mode_split = frame['mode'].astype(str).str.split(':', n=1, expand=True)
-    frame['mode_base'] = mode_split[0].replace(
-        {'eval': 'eval_valid', 'eval_train': 'train'}
-    )
+    frame['mode_base'] = mode_split[0].replace({'eval': 'valid', 'eval_train': 'train'})
     if mode_split.shape[1] > 1:
         frame['head'] = mode_split[1].fillna('')
     else:
@@ -184,7 +182,7 @@ def plot_run(
             )
 
     loss_ax = axes[0]
-    eval_data = data[data['mode_base'] == 'eval_valid']
+    eval_data = data[data['mode_base'] == 'valid']
     train_data = data[data['mode_base'].isin(['train', 'eval_train'])]
 
     if not eval_data.empty:
@@ -215,7 +213,7 @@ def plot_run(
         if column_mean not in data.columns:
             logging.debug("Metric '%s' not present in metrics file; skipping.", key)
             continue
-        series = data[data['mode_base'] == 'eval_valid']
+        series = data[data['mode_base'] == 'valid']
         if series.empty:
             continue
         for head_idx, (head, head_series) in enumerate(series.groupby('head')):

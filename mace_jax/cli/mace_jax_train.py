@@ -1063,8 +1063,8 @@ def _resolve_swa_loss_factory(
 
 
 def _load_foundation_model(name: str, *, default_dtype: str | None = None):
-    from mace.calculators import foundations_models
-    from mace.calculators.foundations_models import mace_mp_names
+    from mace.calculators import foundations_models  # noqa: PLC0415
+    from mace.calculators.foundations_models import mace_mp_names  # noqa: PLC0415
 
     name = name.lower()
     dtype = default_dtype or 'float32'

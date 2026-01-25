@@ -282,7 +282,7 @@ mace-jax-train-plot --path results --keys rmse_e_per_atom,rmse_f --output-format
 ```
 
 The command accepts either a directory (all `.metrics` files are processed) or a single metrics file. It plots
-`eval_valid` and `train` loss curves (with per-head suffixes like `eval_valid:Surface` when present), plus the
+`valid` and `train` loss curves (with per-head suffixes like `valid:Surface` when present), plus the
 extra metric keys requested via `--keys`.
 
 #### `mace-jax-hdf5-info`

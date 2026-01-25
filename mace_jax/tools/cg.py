@@ -271,6 +271,6 @@ class O3_e3nn(cue.O3):
 
     @classmethod
     def iterator(cls) -> Iterator['O3_e3nn']:
-        for l in itertools.count(0):
-            yield O3_e3nn(l=l, p=1 * (-1) ** l)
-            yield O3_e3nn(l=l, p=-1 * (-1) ** l)
+        for li in itertools.count(0):
+            yield O3_e3nn(l=li, p=1 * (-1) ** li)
+            yield O3_e3nn(l=li, p=-1 * (-1) ** li)

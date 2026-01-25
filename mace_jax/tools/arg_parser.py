@@ -862,7 +862,7 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
 
 def build_preprocess_arg_parser() -> argparse.ArgumentParser:
     try:
-        import configargparse
+        import configargparse  # noqa: PLC0415
 
         parser = configargparse.ArgumentParser(
             config_file_parser_class=configargparse.YAMLConfigFileParser,

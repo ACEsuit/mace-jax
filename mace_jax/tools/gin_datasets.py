@@ -728,7 +728,6 @@ def _compute_streaming_stats(
     total_graphs = 0
     total_nodes = 0
     total_edges = 0
-    total_batches = 0
     max_graph_edges = 0
     graph_sizes: list[tuple[int, int]] = []
     dataset = data.HDF5Dataset(dataset_path)

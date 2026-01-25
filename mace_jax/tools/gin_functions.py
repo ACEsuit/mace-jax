@@ -347,7 +347,7 @@ def _assert_required_targets(
 
 @gin.configurable('loss')
 def loss(
-    loss_cls=modules.WeightedEnergyForcesStressLoss,
+    loss_cls=modules.WeightedHuberEnergyForcesStressLoss,
     energy_weight: float | None = None,
     forces_weight: float | None = None,
     stress_weight: float | None = None,
@@ -920,7 +920,7 @@ def train(
     checkpoint_best: bool = False,
     resume_from: str | None = None,
     data_seed: int | None = None,
-    lr_scale_by_graphs: bool = True,
+    lr_scale_by_graphs: bool = False,
     model_config: dict | None = None,
     **kwargs,
 ):

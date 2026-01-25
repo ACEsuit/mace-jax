@@ -448,13 +448,6 @@ def _compute_eval_batch_metrics(
         graph_mask = graph_mask * override
     node_padding_mask = jraph.get_node_padding_mask(graph).astype(jnp.float32)
     total_nodes = node_padding_mask.shape[0]
-    nodes_per_graph_mask = jnp.repeat(
-        graph_mask,
-        graph.n_node,
-        axis=0,
-        total_repeat_length=total_nodes,
-    )
-    node_mask = node_padding_mask * nodes_per_graph_mask
     energy_mask = _apply_property_weight_mask(graph_mask, graph, 'energy_weight')
     force_graph_mask = _apply_property_weight_mask(graph_mask, graph, 'forces_weight')
     force_nodes_per_graph_mask = jnp.repeat(
@@ -664,7 +657,7 @@ def train(
     *,
     start_interval: int = 0,
     data_seed: int | None = None,
-    lr_scale_by_graphs: bool = True,
+    lr_scale_by_graphs: bool = False,
     device_prefetch_batches: int | None = None,
     collect_metrics: bool = False,
     metrics_predictor: Callable | None = None,
@@ -822,7 +815,6 @@ def train(
         """Compute per-device loss and gradients for a sharded batch."""
         # graph is assumed to be padded by jraph.pad_with_graphs
         mask = _graph_mask(graph)
-
         if metrics_enabled:
 
             def _loss_fn(trainable):
@@ -850,19 +842,22 @@ def train(
                         head_metrics = tuple(per_head)
                 return loss, (batch_metrics, head_metrics)
 
-            (loss, (batch_metrics, head_metrics)), grad = jax.value_and_grad(
-                _loss_fn, has_aux=True
-            )(params)
-            batch_metrics = _psum_metrics(batch_metrics)
-            if head_metrics:
-                head_metrics = tuple(_psum_metrics(metrics) for metrics in head_metrics)
         else:
 
             def _loss_fn(trainable):
                 """Compute masked total loss for gradient evaluation."""
-                return jnp.sum(jnp.where(mask, total_loss_fn(trainable, graph), 0.0))
+                per_graph_loss = total_loss_fn(trainable, graph)
+                loss = jnp.sum(jnp.where(mask, per_graph_loss, 0.0))
+                return loss, (None, ())
 
-            loss, grad = jax.value_and_grad(_loss_fn)(params)
+        (loss, (batch_metrics, head_metrics)), grad = jax.value_and_grad(
+            _loss_fn, has_aux=True
+        )(params)
+        if metrics_enabled:
+            batch_metrics = _psum_metrics(batch_metrics)
+            if head_metrics:
+                head_metrics = tuple(_psum_metrics(metrics) for metrics in head_metrics)
+        else:
             batch_metrics = None
             head_metrics = ()
         loss = jax.lax.psum(loss, 'devices')
@@ -871,88 +866,49 @@ def train(
         return num_graphs, loss, grad, batch_metrics, head_metrics
 
     # jit-of-pmap is not recommended but so far it seems faster
-    if metrics_enabled:
+    @jax.jit
+    def update_fn(
+        params,
+        optimizer_state,
+        ema_params,
+        num_updates: int,
+        graph: jraph.GraphsTuple,
+    ) -> tuple[float, Any, Any, Any, jnp.ndarray, dict | None, tuple]:
+        """Apply one optimizer step and update EMA parameters."""
+        n, loss, grad, batch_metrics, head_metrics = grad_fn(params, graph)
+        loss = loss / n
+        grad = jax.tree_util.tree_map(lambda x: x / n, grad)
+        if lr_scale_by_graphs:
+            grad = jax.tree_util.tree_map(lambda g: g * n, grad)
+        grad = _sanitize_grads(grad)
 
-        @jax.jit
-        def update_fn(
+        if max_grad_norm is not None:
+            grad_norm = jnp.sqrt(
+                sum(jnp.sum(jnp.square(x)) for x in jax.tree_util.tree_leaves(grad))
+            )
+            clip_coef = jnp.minimum(1.0, max_grad_norm / (grad_norm + 1e-12))
+            grad = jax.tree_util.tree_map(lambda g: g * clip_coef, grad)
+
+        updates, optimizer_state = gradient_transform.update(
+            grad, optimizer_state, params
+        )
+        params = optax.apply_updates(params, updates)
+        if ema_decay is not None:
+            decay = jnp.minimum(ema_decay, (1 + num_updates) / (10 + num_updates))
+            ema_params = jax.tree_util.tree_map(
+                lambda x, y: x * decay + y * (1 - decay), ema_params, params
+            )
+        else:
+            ema_params = params
+        return (
+            loss,
             params,
             optimizer_state,
             ema_params,
-            num_updates: int,
-            graph: jraph.GraphsTuple,
-        ) -> tuple[float, Any, Any, Any, jnp.ndarray, dict | None, tuple]:
-            """Apply one optimizer step and update EMA parameters."""
-            n, loss, grad, batch_metrics, head_metrics = grad_fn(params, graph)
-            loss = loss / n
-            grad = jax.tree_util.tree_map(lambda x: x / n, grad)
-            if lr_scale_by_graphs:
-                grad = jax.tree_util.tree_map(lambda g: g * n, grad)
-            grad = _sanitize_grads(grad)
-
-            if max_grad_norm is not None:
-                grad_norm = jnp.sqrt(
-                    sum(jnp.sum(jnp.square(x)) for x in jax.tree_util.tree_leaves(grad))
-                )
-                clip_coef = jnp.minimum(1.0, max_grad_norm / (grad_norm + 1e-12))
-                grad = jax.tree_util.tree_map(lambda g: g * clip_coef, grad)
-
-            updates, optimizer_state = gradient_transform.update(
-                grad, optimizer_state, params
-            )
-            params = optax.apply_updates(params, updates)
-            if ema_decay is not None:
-                decay = jnp.minimum(ema_decay, (1 + num_updates) / (10 + num_updates))
-                ema_params = jax.tree_util.tree_map(
-                    lambda x, y: x * decay + y * (1 - decay), ema_params, params
-                )
-            else:
-                ema_params = params
-            return (
-                loss,
-                params,
-                optimizer_state,
-                ema_params,
-                n,
-                batch_metrics,
-                head_metrics,
-            )
-    else:
-
-        @jax.jit
-        def update_fn(
-            params,
-            optimizer_state,
-            ema_params,
-            num_updates: int,
-            graph: jraph.GraphsTuple,
-        ) -> tuple[float, Any, Any, Any, jnp.ndarray]:
-            """Apply one optimizer step and update EMA parameters."""
-            n, loss, grad, _, _ = grad_fn(params, graph)
-            loss = loss / n
-            grad = jax.tree_util.tree_map(lambda x: x / n, grad)
-            if lr_scale_by_graphs:
-                grad = jax.tree_util.tree_map(lambda g: g * n, grad)
-            grad = _sanitize_grads(grad)
-
-            if max_grad_norm is not None:
-                grad_norm = jnp.sqrt(
-                    sum(jnp.sum(jnp.square(x)) for x in jax.tree_util.tree_leaves(grad))
-                )
-                clip_coef = jnp.minimum(1.0, max_grad_norm / (grad_norm + 1e-12))
-                grad = jax.tree_util.tree_map(lambda g: g * clip_coef, grad)
-
-            updates, optimizer_state = gradient_transform.update(
-                grad, optimizer_state, params
-            )
-            params = optax.apply_updates(params, updates)
-            if ema_decay is not None:
-                decay = jnp.minimum(ema_decay, (1 + num_updates) / (10 + num_updates))
-                ema_params = jax.tree_util.tree_map(
-                    lambda x, y: x * decay + y * (1 - decay), ema_params, params
-                )
-            else:
-                ema_params = params
-            return loss, params, optimizer_state, ema_params, n
+            n,
+            batch_metrics,
+            head_metrics,
+        )
 
     process_index = getattr(jax, 'process_index', lambda: 0)()
     is_primary = process_index == 0
@@ -1097,23 +1053,15 @@ def train(
                 graph = _prepare_graph_for_devices(graph)
             num_updates += 1
             num_updates_value = jnp.asarray(num_updates, dtype=jnp.int32)
-            start_time = time.time()
-            if metrics_enabled:
-                (
-                    loss,
-                    params,
-                    optimizer_state,
-                    ema_params,
-                    n_graphs,
-                    batch_metrics,
-                    head_metrics,
-                ) = update_fn(
-                    params, optimizer_state, ema_params, num_updates_value, graph
-                )
-            else:
-                loss, params, optimizer_state, ema_params, n_graphs = update_fn(
-                    params, optimizer_state, ema_params, num_updates_value, graph
-                )
+            (
+                loss,
+                params,
+                optimizer_state,
+                ema_params,
+                n_graphs,
+                batch_metrics,
+                head_metrics,
+            ) = update_fn(params, optimizer_state, ema_params, num_updates_value, graph)
             loss = float(loss)
             n_graphs_value = float(n_graphs)
             if is_primary and n_graphs_value == 0.0:
@@ -1716,9 +1664,9 @@ def predict_streaming(
                 is_leaf=lambda x: x is None,
             )
             ids, per_graph = _split_prediction_outputs(device_outputs, device_graph)
-            for key in batch_outputs:
+            for key, values in list(batch_outputs.items()):
                 if key not in per_graph:
-                    batch_outputs[key].extend([None] * len(ids))
+                    values.extend([None] * len(ids))
             for key, values in per_graph.items():
                 if key not in batch_outputs:
                     batch_outputs[key] = [None] * len(batch_graph_ids)
@@ -1727,9 +1675,9 @@ def predict_streaming(
         return batch_graph_ids, batch_outputs
 
     def _accumulate(batch_graph_ids, batch_outputs, graph_ids, outputs):
-        for key in outputs:
+        for key, values in list(outputs.items()):
             if key not in batch_outputs:
-                outputs[key].extend([None] * len(batch_graph_ids))
+                values.extend([None] * len(batch_graph_ids))
         for key, values in batch_outputs.items():
             if key not in outputs:
                 outputs[key] = [None] * len(graph_ids)
