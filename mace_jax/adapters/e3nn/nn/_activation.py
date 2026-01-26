@@ -28,10 +28,7 @@ class Activation:
         acts: Sequence[Callable | None],
         *,
         normalize_act: bool = True,
-        name: str | None = None,
     ) -> None:
-        del name  # preserved for backward compatibility
-
         self.irreps_in = Irreps(irreps_in)
 
         # Map common Torch activations to their JAX equivalents so we can apply

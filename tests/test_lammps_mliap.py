@@ -1,6 +1,8 @@
 import os
 from contextlib import ExitStack
 
+from mace_jax.nnx_utils import state_to_pure_dict
+
 os.environ.setdefault('JAX_PLATFORM_NAME', 'cpu')
 
 import jax
@@ -8,6 +10,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from e3nn_jax import Irreps
+from flax import nnx
 
 from mace_jax import modules
 from mace_jax.calculators.lammps_mliap_mace import (
@@ -159,6 +162,7 @@ def _build_test_model(num_interactions: int = 1):
         distance_transform='None',
         atomic_inter_scale=np.asarray(1.0),
         atomic_inter_shift=np.asarray(0.0),
+        rngs=nnx.Rngs(0),
     )
 
 
@@ -232,14 +236,10 @@ def test_lammps_mliap_wrapper_matches_direct_model(lammps_runtime):
 
     lammps_batch = _build_lammps_batch(vectors, pair_i, pair_j, natoms=2)
 
-    variables = model.init(
-        jax.random.PRNGKey(0),
-        lammps_batch,
-        lammps_mliap=True,
-    )
+    graphdef, params_state = nnx.split(model)
+    params = state_to_pure_dict(params_state)
 
-    direct_out = model.apply(
-        variables,
+    direct_out, _ = graphdef.apply(params)(
         lammps_batch,
         lammps_mliap=True,
     )
@@ -247,8 +247,7 @@ def test_lammps_mliap_wrapper_matches_direct_model(lammps_runtime):
     def energy_with_vectors(edge_vectors):
         batch = dict(lammps_batch)
         batch['vectors'] = edge_vectors
-        out = model.apply(
-            variables,
+        out, _ = graphdef.apply(params)(
             batch,
             lammps_mliap=True,
         )
@@ -257,7 +256,7 @@ def test_lammps_mliap_wrapper_matches_direct_model(lammps_runtime):
     grad_vectors = jax.grad(energy_with_vectors)(lammps_batch['vectors'])
     expected_pair_forces = -np.asarray(grad_vectors)
 
-    calculator = LAMMPS_MLIAP_MACE(model, variables)
+    calculator = LAMMPS_MLIAP_MACE(graphdef, params)
 
     dummy_data = DummyLAMMPSData(
         elems=[0, 0],
@@ -295,19 +294,15 @@ def test_create_lammps_factory_returns_working_wrapper(lammps_runtime):
 
     lammps_batch = _build_lammps_batch(vectors, pair_i, pair_j, natoms=2)
 
-    variables = model.init(
-        jax.random.PRNGKey(0),
+    graphdef, params_state = nnx.split(model)
+    params = state_to_pure_dict(params_state)
+
+    direct_out, _ = graphdef.apply(params)(
         lammps_batch,
         lammps_mliap=True,
     )
 
-    direct_out = model.apply(
-        variables,
-        lammps_batch,
-        lammps_mliap=True,
-    )
-
-    wrapper = create_lammps_mliap_calculator(model, variables)
+    wrapper = create_lammps_mliap_calculator(graphdef, params)
 
     dummy_data = DummyLAMMPSData(
         elems=[0, 0],
@@ -343,11 +338,8 @@ def test_lammps_mliap_wrapper_handles_ghost_atoms(lammps_runtime):
         vectors, pair_i, pair_j, natoms=n_real, n_ghosts=n_ghosts
     )
 
-    variables = model.init(
-        jax.random.PRNGKey(0),
-        lammps_batch,
-        lammps_mliap=True,
-    )
+    graphdef, params_state = nnx.split(model)
+    params = state_to_pure_dict(params_state)
 
     class _ExchangeStub:
         def forward_exchange(self, src, dst, vec_len):
@@ -355,8 +347,7 @@ def test_lammps_mliap_wrapper_handles_ghost_atoms(lammps_runtime):
 
     exchange_stub = _ExchangeStub()
 
-    direct_out = model.apply(
-        variables,
+    direct_out, _ = graphdef.apply(params)(
         lammps_batch,
         lammps_mliap=True,
         lammps_class=exchange_stub,
@@ -365,8 +356,7 @@ def test_lammps_mliap_wrapper_handles_ghost_atoms(lammps_runtime):
     def energy_with_vectors(edge_vectors):
         batch = dict(lammps_batch)
         batch['vectors'] = edge_vectors
-        out = model.apply(
-            variables,
+        out, _ = graphdef.apply(params)(
             batch,
             lammps_mliap=True,
             lammps_class=exchange_stub,
@@ -376,7 +366,7 @@ def test_lammps_mliap_wrapper_handles_ghost_atoms(lammps_runtime):
     grad_vectors = jax.grad(energy_with_vectors)(lammps_batch['vectors'])
     expected_pair_forces = -np.asarray(grad_vectors)
 
-    calculator = LAMMPS_MLIAP_MACE(model, variables)
+    calculator = LAMMPS_MLIAP_MACE(graphdef, params)
 
     dummy_data = DummyLAMMPSData(
         elems=[0, 0],
@@ -415,12 +405,9 @@ def test_prepare_batch_uses_lammps_geometry_metadata(lammps_runtime):
     pair_j = jnp.asarray([1, 0], dtype=jnp.int32)
     vectors = jnp.asarray([[0.8, 0.0, 0.0], [-0.8, 0.0, 0.0]], dtype=jnp.float64)
 
-    variables = model.init(
-        jax.random.PRNGKey(0),
-        _build_lammps_batch(vectors, pair_i, pair_j, natoms=2),
-        lammps_mliap=True,
-    )
-    calculator = LAMMPS_MLIAP_MACE(model, variables)
+    graphdef, params_state = nnx.split(model)
+    params = state_to_pure_dict(params_state)
+    calculator = LAMMPS_MLIAP_MACE(graphdef, params)
 
     cell = np.array(
         [
@@ -524,14 +511,10 @@ def test_lammps_mliap_wrapper_periodic_image_example(lammps_runtime):
         cell=cell,
     )
 
-    variables = model.init(
-        jax.random.PRNGKey(0),
-        lammps_batch,
-        lammps_mliap=True,
-    )
+    graphdef, params_state = nnx.split(model)
+    params = state_to_pure_dict(params_state)
 
-    direct_out = model.apply(
-        variables,
+    direct_out, _ = graphdef.apply(params)(
         lammps_batch,
         lammps_mliap=True,
     )
@@ -539,8 +522,7 @@ def test_lammps_mliap_wrapper_periodic_image_example(lammps_runtime):
     def energy_with_vectors(edge_vectors):
         batch = dict(lammps_batch)
         batch['vectors'] = edge_vectors
-        out = model.apply(
-            variables,
+        out, _ = graphdef.apply(params)(
             batch,
             lammps_mliap=True,
         )
@@ -549,7 +531,7 @@ def test_lammps_mliap_wrapper_periodic_image_example(lammps_runtime):
     grad_vectors = jax.grad(energy_with_vectors)(lammps_batch['vectors'])
     expected_pair_forces = -np.asarray(grad_vectors)
 
-    calculator = LAMMPS_MLIAP_MACE(model, variables)
+    calculator = LAMMPS_MLIAP_MACE(graphdef, params)
 
     dummy_data = DummyLAMMPSData(
         elems=[0, 0],
@@ -594,13 +576,10 @@ def test_lammps_calculator_respects_force_cpu(monkeypatch):
 
     lammps_batch = _build_lammps_batch(vectors, pair_i, pair_j, natoms=1)
 
-    variables = model.init(
-        jax.random.PRNGKey(0),
-        lammps_batch,
-        lammps_mliap=True,
-    )
+    graphdef, params_state = nnx.split(model)
+    params = state_to_pure_dict(params_state)
 
-    calculator = LAMMPS_MLIAP_MACE(model, variables)
+    calculator = LAMMPS_MLIAP_MACE(graphdef, params)
     assert calculator.device.platform == 'cpu'
 
 
@@ -611,12 +590,9 @@ def test_compute_forces_registers_jax_ffi_handles(monkeypatch):
     vectors = jnp.asarray([[0.5, 0.0, 0.0], [-0.5, 0.0, 0.0]], dtype=jnp.float64)
 
     lammps_batch = _build_lammps_batch(vectors, pair_i, pair_j, natoms=2)
-    variables = model.init(
-        jax.random.PRNGKey(0),
-        lammps_batch,
-        lammps_mliap=True,
-    )
-    calculator = LAMMPS_MLIAP_MACE(model, variables)
+    graphdef, params_state = nnx.split(model)
+    params = state_to_pure_dict(params_state)
+    calculator = LAMMPS_MLIAP_MACE(graphdef, params)
 
     class _FFIDummy(DummyLAMMPSData):
         def __init__(self, **kwargs):

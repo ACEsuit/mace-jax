@@ -6,21 +6,21 @@ import cuequivariance_jax as cuex
 import jax
 import jax.numpy as jnp
 from e3nn_jax import Irreps  # type: ignore
-from flax import linen as fnn
-from flax.core import freeze, unfreeze
+from flax import nnx
 
 import cuequivariance as cue
-from mace_jax.adapters.flax.torch import (
+from mace_jax.adapters.nnx.torch import (
     _resolve_scope,
-    auto_import_from_torch_flax,
-    register_import_mapper,
+    nxx_auto_import_from_torch,
+    nxx_register_import_mapper,
 )
+from mace_jax.tools.dtype import default_dtype
 
 from .utility import ir_mul_to_mul_ir, mul_ir_to_ir_mul
 
 
-@auto_import_from_torch_flax(allow_missing_mapper=True)
-class FullyConnectedTensorProduct(fnn.Module):
+@nxx_auto_import_from_torch(allow_missing_mapper=True)
+class FullyConnectedTensorProduct(nnx.Module):
     """Cue-equivariant fully connected tensor product implemented in Flax.
 
     This adapter mirrors the behaviour of both the e3nn and cue Torch tensor
@@ -37,13 +37,24 @@ class FullyConnectedTensorProduct(fnn.Module):
     internal_weights: bool = True
     group: object = cue.O3
 
-    def setup(self) -> None:
-        """Prepare cue descriptors and cache Irreps metadata for evaluation.
-
-        Raises:
-            ValueError: If ``internal_weights`` is requested without enabling
-                ``shared_weights`` (which mirrors the Torch constraint).
-        """
+    def __init__(
+        self,
+        irreps_in1: Irreps,
+        irreps_in2: Irreps,
+        irreps_out: Irreps,
+        shared_weights: bool = True,
+        internal_weights: bool = True,
+        group: object = cue.O3,
+        *,
+        rngs: nnx.Rngs | None = None,
+    ) -> None:
+        self.irreps_in1 = irreps_in1
+        self.irreps_in2 = irreps_in2
+        self.irreps_out = irreps_out
+        self.shared_weights = shared_weights
+        self.internal_weights = internal_weights
+        self.group = group
+        # Prepare cue descriptors and cache Irreps metadata for evaluation.
         if self.internal_weights and not self.shared_weights:
             raise ValueError(
                 'FullyConnectedTensorProduct requires shared_weights=True when internal_weights=True'
@@ -69,6 +80,18 @@ class FullyConnectedTensorProduct(fnn.Module):
         self.weight_numel = descriptor.polynomial.operands[0].size
         descriptor_out_irreps = Irreps(str(descriptor.outputs[0].irreps))
         self.descriptor_out_dim = descriptor_out_irreps.dim
+        if self._internal_weights:
+            if rngs is None:
+                raise ValueError('rngs is required when internal_weights=True')
+            self.weight = nnx.Param(
+                jax.random.normal(
+                    rngs(),
+                    (1, self.weight_numel),
+                    dtype=default_dtype(),
+                )
+            )
+        else:
+            self.weight = None
 
     def _weight_param(self) -> jnp.ndarray:
         """Return the learnable weight parameter initialised with Gaussian noise.
@@ -76,8 +99,9 @@ class FullyConnectedTensorProduct(fnn.Module):
         Returns:
             ``(1, weight_numel)`` array stored in the Flax parameter tree.
         """
-        init = lambda rng: jax.random.normal(rng, (1, self.weight_numel))
-        return self.param('weight', init)
+        if self.weight is None:
+            raise ValueError('Internal weights are not initialized for FCTP.')
+        return self.weight
 
     def _input_rep(
         self,
@@ -189,7 +213,6 @@ class FullyConnectedTensorProduct(fnn.Module):
 
         return weights
 
-    @fnn.compact
     def __call__(
         self,
         x1: jnp.ndarray,
@@ -239,19 +262,9 @@ class FullyConnectedTensorProduct(fnn.Module):
         return out_mul_ir
 
 
-def _fctp_import_from_torch(cls, torch_module, flax_variables):
-    """Copy Torch fully connected tensor product weights into Flax variables.
-
-    Args:
-        cls: The Flax module class (ignored, present for ``classmethod``).
-        torch_module: Source Torch module.
-        flax_variables: Destination FrozenDict produced by ``Module.init``.
-
-    Returns:
-        FrozenDict mirroring ``flax_variables`` with weight parameters imported.
-    """
-    variables = unfreeze(flax_variables)
-    params = variables.setdefault('params', {})
+def _fctp_import_from_torch(cls, torch_module, variables):
+    """Copy Torch fully connected tensor product weights into NNX variables."""
+    params = variables
 
     if (
         getattr(torch_module, 'internal_weights', False)
@@ -264,15 +277,14 @@ def _fctp_import_from_torch(cls, torch_module, flax_variables):
         dtype = existing.dtype if existing is not None else weight_np.dtype
         params['weight'] = jnp.asarray(weight_np, dtype=dtype)
 
-    variables['params'] = params
-    return freeze(variables)
+    return params
 
 
 FullyConnectedTensorProduct.import_from_torch = classmethod(_fctp_import_from_torch)
 
 
-@register_import_mapper('e3nn.o3._tensor_product._sub.FullyConnectedTensorProduct')
-@register_import_mapper(
+@nxx_register_import_mapper('e3nn.o3._tensor_product._sub.FullyConnectedTensorProduct')
+@nxx_register_import_mapper(
     'cuequivariance_torch.operations.fully_connected_tensor_product.FullyConnectedTensorProduct'
 )
 def _map_fctp(module, variables, scope) -> None:
@@ -284,8 +296,7 @@ def _map_fctp(module, variables, scope) -> None:
         scope: Sequence describing where within the tree to copy parameters.
     """
     target = _resolve_scope(variables, scope)
-    wrapped = freeze({'params': target})
-    updated = FullyConnectedTensorProduct.import_from_torch(module, wrapped)
-    updated_params = unfreeze(updated).get('params', {})
-    target.clear()
-    target.update(updated_params)
+    updated = FullyConnectedTensorProduct.import_from_torch(module, target)
+    if updated is not None and updated is not target:
+        target.clear()
+        target.update(updated)

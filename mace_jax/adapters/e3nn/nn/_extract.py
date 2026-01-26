@@ -15,9 +15,7 @@ class Extract:
         irreps_outs: Sequence[Irreps],
         instructions: Sequence[tuple[int, ...]],
         squeeze_out: bool = False,
-        name: str | None = None,
     ):
-        del name  # kept for backward-compatible signature
         self.irreps_in = Irreps(irreps_in)
         self.irreps_outs = [Irreps(ir) for ir in irreps_outs]
         self.instructions = [tuple(ins) for ins in instructions]

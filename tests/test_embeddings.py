@@ -2,12 +2,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import torch
+from flax import nnx
 from mace.modules.embeddings import GenericJointEmbedding as TorchGenericJointEmbedding
 
-from mace_jax.adapters.flax.torch import init_from_torch
+from mace_jax.adapters.nnx.torch import init_from_torch
 from mace_jax.modules.embeddings import (
     GenericJointEmbedding as FlaxGenericJointEmbedding,
 )
+from mace_jax.nnx_utils import state_to_pure_dict
 
 
 def _tf32_precision_in_use() -> bool:
@@ -114,16 +116,12 @@ class TestGenericJointEmbedding:
             base_dim=base_dim,
             embedding_specs=embedding_specs,
             out_dim=out_dim,
+            rngs=nnx.Rngs(0),
         )
-        flax_module, variables = init_from_torch(
-            flax_module,
-            torch_module,
-            jax.random.PRNGKey(0),
-            jnp.asarray(batch_np),
-            features_jax,
-        )
-
-        out_flax = flax_module.apply(variables, jnp.asarray(batch_np), features_jax)
+        flax_module, _ = init_from_torch(flax_module, torch_module)
+        graphdef, state = nnx.split(flax_module)
+        variables = state_to_pure_dict(state)
+        out_flax, _ = graphdef.apply(variables)(jnp.asarray(batch_np), features_jax)
         out_flax_np = np.asarray(out_flax)
 
         rtol = 1e-5

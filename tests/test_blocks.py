@@ -7,6 +7,7 @@ import pytest
 import torch
 from e3nn import o3
 from e3nn_jax import Irreps, IrrepsArray
+from flax import nnx
 from mace.modules.blocks import (
     EquivariantProductBasisBlock as EquivariantProductBasisBlockTorch,
 )
@@ -35,7 +36,7 @@ from mace.modules.blocks import (
 )
 from mace.modules.wrapper_ops import CuEquivarianceConfig as CuEquivarianceConfigTorch
 
-from mace_jax.adapters.flax.torch import init_from_torch
+from mace_jax.adapters.nnx.torch import init_from_torch
 from mace_jax.modules.blocks import (
     EquivariantProductBasisBlock as EquivariantProductBasisBlockJAX,
 )
@@ -163,15 +164,11 @@ class TestLinearNodeEmbeddingBlock:
         module = LinearNodeEmbeddingBlockJAX(
             irreps_in=irreps_in_obj,
             irreps_out=irreps_out_obj,
+            rngs=nnx.Rngs(42),
         )
-        module, variables = init_from_torch(
-            module,
-            torch_model,
-            jax.random.PRNGKey(42),
-            x_jax,
-        )
-
-        out_jax = module.apply(variables, x_jax)
+        module, _ = init_from_torch(module, torch_model)
+        graphdef, state = nnx.split(module)
+        out_jax, _ = graphdef.apply(state)(x_jax)
 
         # --- Compare ---
         np.testing.assert_allclose(
@@ -212,15 +209,11 @@ class TestLinearReadoutBlock:
         module = LinearReadoutBlockJAX(
             irreps_in=irreps_in_obj,
             irrep_out=irrep_out_obj,
+            rngs=nnx.Rngs(42),
         )
-        module, variables = init_from_torch(
-            module,
-            torch_model,
-            jax.random.PRNGKey(42),
-            x_jax,
-        )
-
-        out_jax = module.apply(variables, x_jax)
+        module, _ = init_from_torch(module, torch_model)
+        graphdef, state = nnx.split(module)
+        out_jax, _ = graphdef.apply(state)(x_jax)
 
         # --- Compare ---
         np.testing.assert_allclose(
@@ -270,15 +263,11 @@ class TestNonLinearReadoutBlock:
             gate=jax.nn.silu,
             irrep_out=irrep_out_obj,
             num_heads=num_heads,
+            rngs=nnx.Rngs(42),
         )
-        module, variables = init_from_torch(
-            module,
-            torch_model,
-            jax.random.PRNGKey(42),
-            x_ir,
-        )
-
-        out_jax = module.apply(variables, x_ir)
+        module, _ = init_from_torch(module, torch_model)
+        graphdef, state = nnx.split(module)
+        out_jax, _ = graphdef.apply(state)(x_ir)
 
         np.testing.assert_allclose(
             _to_numpy(out_jax),
@@ -389,6 +378,7 @@ class TestEquivariantProductBasisBlock:
             num_elements=num_elements,
             use_reduced_cg=True,
             cueq_config=CuEquivarianceConfigJAX(**cue_config_kwargs),
+            rngs=nnx.Rngs(42),
         )
         torch_model = torch_model.to('cpu')
         x_torch = x_torch.cpu()
@@ -396,16 +386,9 @@ class TestEquivariantProductBasisBlock:
             sc_torch = sc_torch.cpu()
         attrs_torch = attrs_torch.cpu()
 
-        module, variables = init_from_torch(
-            module,
-            torch_model,
-            jax.random.PRNGKey(42),
-            x_jax,
-            sc_jax,
-            attrs_jax,
-        )
-
-        out_jax = module.apply(variables, x_jax, sc_jax, attrs_jax)
+        module, _ = init_from_torch(module, torch_model)
+        graphdef, state = nnx.split(module)
+        out_jax, _ = graphdef.apply(state)(x_jax, sc_jax, attrs_jax)
 
         # --- Compare ---
         np.testing.assert_allclose(
@@ -531,15 +514,11 @@ class TestRealAgnosticBlocks:
             hidden_irreps=irreps,
             avg_num_neighbors=3.0,
             cueq_config=cue_config_jax,
+            rngs=nnx.Rngs(42),
         )
-        module, variables = init_from_torch(
-            module,
-            torch_module,
-            jax.random.PRNGKey(42),
-            *jax_inputs,
-        )
-
-        jax_out = module.apply(variables, *jax_inputs)
+        module, _ = init_from_torch(module, torch_module)
+        graphdef, state = nnx.split(module)
+        jax_out, _ = graphdef.apply(state)(*jax_inputs)
 
         # === Compare Outputs ===
         if multi_output == 1:

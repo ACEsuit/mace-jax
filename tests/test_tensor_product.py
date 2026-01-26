@@ -10,11 +10,13 @@ from cuequivariance_torch.operations.tp_channel_wise import (
 from e3nn import o3
 from e3nn.o3 import TensorProduct as TensorProductTorch
 from e3nn_jax import Irreps
+from flax import nnx
 from mace.modules.irreps_tools import tp_out_irreps_with_instructions
 
 from mace_jax.adapters.cuequivariance.tensor_product import (
     TensorProduct as TensorProductJAX,
 )
+from mace_jax.adapters.nnx.torch import init_from_torch
 
 
 class TestTensorProductImport:
@@ -153,12 +155,13 @@ class TestTensorProductImport:
             shared_weights=shared_weights,
             internal_weights=internal_weights,
             instructions=instructions,
+            rngs=nnx.Rngs(key),
         )
 
         if internal_weights:
-            variables = module.init(key, x1_jax, x2_jax)
-            variables = TensorProductJAX.import_from_torch(torch_module, variables)
-            out_jax = module.apply(variables, x1_jax, x2_jax)
+            module, _ = init_from_torch(module, torch_module)
+            graphdef, state = nnx.split(module)
+            out_jax, _ = graphdef.apply(state)(x1_jax, x2_jax)
             weights_torch = None
         else:
             if shared_weights:
@@ -170,8 +173,8 @@ class TestTensorProductImport:
                 weights_np = self.rng.standard_normal((self.batch, weight_numel))
 
             weights_jax = jnp.array(weights_np)
-            variables = module.init(key, x1_jax, x2_jax, weights=weights_jax)
-            out_jax = module.apply(variables, x1_jax, x2_jax, weights=weights_jax)
+            graphdef, state = nnx.split(module)
+            out_jax, _ = graphdef.apply(state)(x1_jax, x2_jax, weights=weights_jax)
             weights_torch = torch.tensor(weights_np)
 
         x1_torch = torch.tensor(x1_np)

@@ -8,6 +8,7 @@ from typing import Optional
 import cuequivariance as cue
 import jax.numpy as jnp
 from e3nn_jax import Irreps  # type: ignore
+from flax import nnx
 
 from mace_jax.adapters.cuequivariance import (
     FullyConnectedTensorProduct as CueFullyConnectedTensorProduct,
@@ -93,12 +94,11 @@ class Linear:
         shared_weights: bool = True,
         internal_weights: bool = True,
         cueq_config: CuEquivarianceConfig | None = None,
-        name: str | None = None,
+        rngs: nnx.Rngs | None = None,
     ):
         group_value = getattr(cueq_config, 'group', None) if cueq_config else None
         _validate_cue_group(group_value, context='Linear')
         group = _resolve_cue_group(cueq_config) if cueq_config else None
-
         layout = (
             getattr(cueq_config, 'layout', 'mul_ir')
             if cueq_config is not None
@@ -109,7 +109,6 @@ class Linear:
             shared_weights=shared_weights,
             internal_weights=internal_weights,
             layout=layout,
-            name=name,
         )
         if group is not None:
             linear_kwargs['group'] = group
@@ -117,6 +116,7 @@ class Linear:
         return CueLinear(
             irreps_in,
             irreps_out,
+            rngs=rngs,
             **linear_kwargs,
         )
 
@@ -133,7 +133,7 @@ class TensorProduct:
         shared_weights: bool = False,
         internal_weights: bool = False,
         cueq_config=None,
-        name: str | None = None,
+        rngs: nnx.Rngs | None = None,
     ):
         conv_fusion = False
         group_value = getattr(cueq_config, 'group', None) if cueq_config else None
@@ -141,13 +141,11 @@ class TensorProduct:
         group = _resolve_cue_group(cueq_config) if cueq_config else None
         if cueq_config is not None:
             conv_fusion = bool(getattr(cueq_config, 'conv_fusion', False))
-
         tp_kwargs = dict(
             instructions=instructions,
             shared_weights=shared_weights,
             internal_weights=internal_weights,
             conv_fusion=conv_fusion,
-            name=name,
         )
         if group is not None:
             tp_kwargs['group'] = group
@@ -156,6 +154,7 @@ class TensorProduct:
             irreps_in1,
             irreps_in2,
             irreps_out,
+            rngs=rngs,
             **tp_kwargs,
         )
 
@@ -167,7 +166,7 @@ def FullyConnectedTensorProduct(
     shared_weights: bool = True,
     internal_weights: bool = True,
     cueq_config: CuEquivarianceConfig | None = None,
-    name: str | None = None,
+    rngs: nnx.Rngs | None = None,
 ):
     """
     Wrapper around o3.FullyConnectedTensorProduct (JAX version).
@@ -193,7 +192,6 @@ def FullyConnectedTensorProduct(
     fctp_kwargs = dict(
         shared_weights=shared_weights,
         internal_weights=internal_weights,
-        name=name,
     )
     if group is not None:
         fctp_kwargs['group'] = group
@@ -202,6 +200,7 @@ def FullyConnectedTensorProduct(
         irreps_in1,
         irreps_in2,
         irreps_out,
+        rngs=rngs,
         **fctp_kwargs,
     )
 
@@ -213,7 +212,7 @@ def SymmetricContractionWrapper(
     num_elements: int | None = None,
     cueq_config: Optional['CuEquivarianceConfig'] = None,
     use_reduced_cg: bool = True,
-    name: str | None = None,
+    rngs: nnx.Rngs | None = None,
 ):
     """
     JAX implementation of SymmetricContraction powered by cuequivariance-jax.
@@ -233,17 +232,14 @@ def SymmetricContractionWrapper(
 
     input_layout = 'mul_ir'
     if use_cue:
-        if cueq_config.layout_str == 'mul_ir':
-            input_layout = 'ir_mul'
-        elif cueq_config.layout_str == 'ir_mul':
-            input_layout = 'mul_ir'
+        # cuet.SymmetricContraction expects ir_mul inputs regardless of output layout.
+        input_layout = 'ir_mul'
 
     sc_kwargs = dict(
         correlation=correlation,
         num_elements=num_elements,
         use_reduced_cg=use_reduced_cg,
         input_layout=input_layout,
-        name=name,
     )
     if group is not None:
         sc_kwargs['group'] = group
@@ -251,6 +247,7 @@ def SymmetricContractionWrapper(
     return CueSymmetricContraction(
         irreps_in=irreps_in,
         irreps_out=irreps_out,
+        rngs=rngs,
         **sc_kwargs,
     )
 

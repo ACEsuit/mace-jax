@@ -5,8 +5,10 @@ import pytest
 import torch
 from e3nn import o3
 from e3nn_jax import Irreps
+from flax import nnx
 
 from mace_jax.adapters.cuequivariance.symmetric_contraction import SymmetricContraction
+from mace_jax.adapters.nnx.torch import init_from_torch
 from mace_jax.tools.device import configure_torch_runtime
 
 try:  # pragma: no cover - optional cue torch backend
@@ -86,24 +88,23 @@ def torch_device(request):
 
 
 @pytest.fixture
-def module_and_params():
+def module_and_state():
     module = SymmetricContraction(
         irreps_in=Irreps('1x0e'),
         irreps_out=Irreps('1x0e'),
         correlation=1,
         num_elements=2,
+        rngs=nnx.Rngs(0),
     )
-    inputs = jnp.zeros((1, 1, 1), dtype=_jax_float_dtype())
-    indices = jnp.zeros((1,), dtype=jnp.int32)
-    params = module.init(jax.random.PRNGKey(0), inputs, indices)
-    return module, params
+    graphdef, state = nnx.split(module)
+    return module, graphdef, state
 
 
 class TestSymmetricContractionImport:
-    def test_forward_matches_cue_torch(self, module_and_params, torch_device):
+    def test_forward_matches_cue_torch(self, module_and_state, torch_device):
         if torch_device.type != 'cuda':
             pytest.skip('cue-equivariance requires CUDA backend.')
-        module, params = module_and_params
+        module, _, _ = module_and_state
 
         torch_module = (
             SymmetricContractionWrapper(
@@ -122,7 +123,8 @@ class TestSymmetricContractionImport:
         )
         dtype = _module_dtype(torch_module)
 
-        variables = module.import_from_torch(torch_module, params)
+        module, _ = init_from_torch(module, torch_module)
+        graphdef, state = nnx.split(module)
 
         irreps_in = Irreps(module.irreps_in)
         mul = irreps_in[0].mul
@@ -136,7 +138,7 @@ class TestSymmetricContractionImport:
         )
         indices = jnp.array([0, 1, 0, 1, 0], dtype=jnp.int32)
 
-        jax_output = module.apply(variables, inputs, indices)
+        jax_output, _ = graphdef.apply(state)(inputs, indices)
         jax_output_np = np.asarray(jax_output).reshape(batch, -1)
 
         inputs_ir_mul = np.swapaxes(inputs, 1, 2)
@@ -167,13 +169,11 @@ class TestSymmetricContractionImport:
             correlation=correlation,
             num_elements=num_elements,
             use_reduced_cg=True,
+            rngs=nnx.Rngs(0),
         )
 
         mul = irreps_in[0].mul
         feature_dim = sum(term.ir.dim for term in irreps_in)
-        init_inputs = jnp.zeros((1, mul, feature_dim), dtype=_jax_float_dtype())
-        init_indices = jnp.zeros((1,), dtype=jnp.int32)
-        params = module.init(jax.random.PRNGKey(0), init_inputs, init_indices)
 
         torch_module = (
             SymmetricContractionWrapper(
@@ -188,7 +188,8 @@ class TestSymmetricContractionImport:
         )
         dtype = _module_dtype(torch_module)
 
-        variables = module.import_from_torch(torch_module, params)
+        module, _ = init_from_torch(module, torch_module)
+        graphdef, state = nnx.split(module)
 
         batch = 4
         rng_feats, rng_indices = jax.random.split(jax.random.PRNGKey(2))
@@ -204,7 +205,7 @@ class TestSymmetricContractionImport:
             num_elements,
         ).astype(jnp.int32)
 
-        jax_output = module.apply(variables, inputs, indices)
+        jax_output, _ = graphdef.apply(state)(inputs, indices)
         jax_output_np = np.asarray(jax_output).reshape(batch, -1)
 
         torch_inputs = torch.tensor(
@@ -242,14 +243,11 @@ class TestSymmetricContractionImport:
             irreps_out=irreps_out,
             correlation=correlation,
             num_elements=num_elements,
+            rngs=nnx.Rngs(0),
         )
 
         mul = irreps_in[0].mul
         feature_dim = sum(term.ir.dim for term in irreps_in)
-
-        init_inputs = jnp.zeros((1, mul, feature_dim), dtype=_jax_float_dtype())
-        init_indices = jnp.zeros((1,), dtype=jnp.int32)
-        params = module.init(jax.random.PRNGKey(0), init_inputs, init_indices)
 
         torch_module = (
             SymmetricContractionWrapper(
@@ -268,7 +266,8 @@ class TestSymmetricContractionImport:
         )
         dtype = _module_dtype(torch_module)
 
-        variables = module.import_from_torch(torch_module, params)
+        module, _ = init_from_torch(module, torch_module)
+        graphdef, state = nnx.split(module)
 
         batch = 3
         rng_feats, rng_indices = jax.random.split(jax.random.PRNGKey(1))
@@ -284,7 +283,7 @@ class TestSymmetricContractionImport:
             num_elements,
         ).astype(jnp.int32)
 
-        jax_output = module.apply(variables, inputs, indices)
+        jax_output, _ = graphdef.apply(state)(inputs, indices)
         jax_output_np = np.asarray(jax_output).reshape(batch, -1)
 
         inputs_ir_mul = np.swapaxes(inputs, 1, 2)
@@ -320,14 +319,11 @@ class TestSymmetricContractionImport:
             irreps_out=irreps_out,
             correlation=correlation,
             num_elements=num_elements,
+            rngs=nnx.Rngs(0),
         )
 
         mul = irreps_in[0].mul
         feature_dim = sum(term.ir.dim for term in irreps_in)
-
-        init_inputs = jnp.zeros((1, mul, feature_dim), dtype=_jax_float_dtype())
-        init_indices = jnp.zeros((1,), dtype=jnp.int32)
-        params = module.init(jax.random.PRNGKey(0), init_inputs, init_indices)
 
         torch_module = (
             SymmetricContractionWrapper(
@@ -341,7 +337,8 @@ class TestSymmetricContractionImport:
         )
         dtype = _module_dtype(torch_module)
 
-        variables = module.import_from_torch(torch_module, params)
+        module, _ = init_from_torch(module, torch_module)
+        graphdef, state = nnx.split(module)
 
         batch = 4
         rng_feats, rng_indices = jax.random.split(jax.random.PRNGKey(1))
@@ -357,7 +354,7 @@ class TestSymmetricContractionImport:
             num_elements,
         ).astype(jnp.int32)
 
-        jax_output = module.apply(variables, inputs, indices)
+        jax_output, _ = graphdef.apply(state)(inputs, indices)
         jax_output_np = np.asarray(jax_output).reshape(batch, -1)
 
         torch_inputs = torch.tensor(
@@ -392,14 +389,11 @@ class TestSymmetricContractionImport:
             correlation=correlation,
             num_elements=num_elements,
             use_reduced_cg=False,
+            rngs=nnx.Rngs(0),
         )
 
         mul = irreps_in[0].mul
         feature_dim = sum(term.ir.dim for term in irreps_in)
-
-        init_inputs = jnp.zeros((1, mul, feature_dim), dtype=_jax_float_dtype())
-        init_indices = jnp.zeros((1,), dtype=jnp.int32)
-        params = module.init(jax.random.PRNGKey(0), init_inputs, init_indices)
 
         torch_module = (
             SymmetricContractionWrapper(
@@ -414,7 +408,8 @@ class TestSymmetricContractionImport:
         )
         dtype = _module_dtype(torch_module)
 
-        variables = module.import_from_torch(torch_module, params)
+        module, _ = init_from_torch(module, torch_module)
+        graphdef, state = nnx.split(module)
 
         batch = 3
         rng_feats, rng_indices = jax.random.split(jax.random.PRNGKey(1))
@@ -430,7 +425,7 @@ class TestSymmetricContractionImport:
             num_elements,
         ).astype(jnp.int32)
 
-        jax_output = module.apply(variables, inputs, indices)
+        jax_output, _ = graphdef.apply(state)(inputs, indices)
         jax_output_np = np.asarray(jax_output).reshape(batch, -1)
 
         torch_inputs = torch.tensor(

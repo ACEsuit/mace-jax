@@ -1,8 +1,10 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
+from flax import nnx
 
 from mace_jax.modules.blocks import ScaleShiftBlock
+from mace_jax.nnx_utils import state_to_pure_dict
 
 
 class TestScaleShiftBlock:
@@ -11,15 +13,16 @@ class TestScaleShiftBlock:
         x = jnp.asarray([1.0, 2.0], dtype=jnp.float64)
         head = jnp.asarray([0, 0], dtype=jnp.int32)
 
-        params = block.init(jax.random.PRNGKey(0), x, head)
+        graphdef, state = nnx.split(block)
+        params = state_to_pure_dict(state)
 
         def loss_fn(p):
-            y = block.apply(p, x, head)
+            y, _ = graphdef.apply(p)(x, head)
             return jnp.sum(y**2)
 
         grads = jax.grad(loss_fn)(params)
-        scale_grad = grads['params']['scale']
-        shift_grad = grads['params']['shift']
+        scale_grad = grads['scale']
+        shift_grad = grads['shift']
 
         assert jnp.all(scale_grad == 0.0)
         assert jnp.all(shift_grad == 0.0)
@@ -29,17 +32,18 @@ class TestScaleShiftBlock:
         x = jnp.asarray([3.0, 4.0], dtype=jnp.float64)
         head = jnp.asarray([1, 1], dtype=jnp.int32)
 
-        params = block.init(jax.random.PRNGKey(1), x, head)
-        original_scale = params['params']['scale']
-        original_shift = params['params']['shift']
+        graphdef, state = nnx.split(block)
+        params = state_to_pure_dict(state)
+        original_scale = params['scale']
+        original_shift = params['shift']
 
         def loss_fn(p):
-            y = block.apply(p, x, head)
+            y, _ = graphdef.apply(p)(x, head)
             return jnp.sum(y**2)
 
         grads = jax.grad(loss_fn)(params)
         updates = jax.tree_util.tree_map(lambda g: -0.1 * g, grads)
         updated = jax.tree_util.tree_map(lambda p, u: p + u, params, updates)
 
-        assert jnp.array_equal(updated['params']['scale'], original_scale)
-        assert jnp.array_equal(updated['params']['shift'], original_shift)
+        assert jnp.array_equal(updated['scale'], original_scale)
+        assert jnp.array_equal(updated['shift'], original_shift)

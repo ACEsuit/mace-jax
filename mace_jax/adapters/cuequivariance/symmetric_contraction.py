@@ -22,31 +22,31 @@ from __future__ import annotations
 
 from functools import cache
 
-import cuequivariance as cue
 import cuequivariance_jax as cuex
 import jax
 import jax.numpy as jnp
 import numpy as np
 import torch
+from e3nn_jax import Irreps
+from flax import nnx
+
+import cuequivariance as cue
 from cuequivariance.group_theory.experimental.mace.symmetric_contractions import (
     symmetric_contraction as cue_mace_symmetric_contraction,
 )
-from e3nn_jax import Irreps
-from flax import linen as fnn
-from flax.core import freeze, unfreeze
-
-from mace_jax.adapters.flax.torch import (
+from mace_jax.adapters.nnx.torch import (
     _resolve_scope,
-    auto_import_from_torch_flax,
-    register_import_mapper,
+    nxx_auto_import_from_torch,
+    nxx_register_import_mapper,
 )
+from mace_jax.nnx_utils import state_to_pure_dict
 from mace_jax.tools.dtype import default_dtype
 
 from .utility import ir_mul_to_mul_ir
 
 
-@auto_import_from_torch_flax(allow_missing_mapper=True)
-class SymmetricContraction(fnn.Module):
+@nxx_auto_import_from_torch(allow_missing_mapper=True)
+class SymmetricContraction(nnx.Module):
     """Symmetric contraction layer evaluated with cuequivariance-jax.
 
     Parameters
@@ -88,7 +88,18 @@ class SymmetricContraction(fnn.Module):
     input_layout: str = 'mul_ir'
     group: object = cue.O3
 
-    def setup(self) -> None:
+    def __init__(
+        self,
+        irreps_in: Irreps,
+        irreps_out: Irreps,
+        correlation: int,
+        num_elements: int,
+        use_reduced_cg: bool = True,
+        input_layout: str = 'mul_ir',
+        group: object = cue.O3,
+        *,
+        rngs: nnx.Rngs | None = None,
+    ) -> None:
         """Validate configuration and construct the cuEquivariance descriptor.
 
         The routine performs a number of sanity checks that mirror the Torch
@@ -96,6 +107,14 @@ class SymmetricContraction(fnn.Module):
         requested, and creates the cached descriptor that is reused on every
         forward pass.
         """
+        self.irreps_in = irreps_in
+        self.irreps_out = irreps_out
+        self.correlation = correlation
+        self.num_elements = num_elements
+        self.use_reduced_cg = use_reduced_cg
+        self.input_layout = input_layout
+        self.group = group
+
         if self.correlation <= 0:
             raise ValueError('correlation must be a positive integer')
         if self.num_elements <= 0:
@@ -146,6 +165,15 @@ class SymmetricContraction(fnn.Module):
             self.weight_basis_dim = self.projection.shape[0]
 
         self.weight_param_shape = (self.num_elements, self.weight_basis_dim, self.mul)
+        if rngs is None:
+            raise ValueError('rngs is required to initialize SymmetricContraction')
+        self.weight = nnx.Param(
+            jax.random.normal(
+                rngs(),
+                self.weight_param_shape,
+                dtype=default_dtype(),
+            )
+        )
 
     def _weight_param(self) -> jnp.ndarray:
         """Return the learnable basis weights initialised with Gaussian noise.
@@ -156,8 +184,7 @@ class SymmetricContraction(fnn.Module):
             Parameter tensor of shape ``(num_elements, basis_dim, mul)`` stored
             in the current Flax variable collection.
         """
-        init = lambda rng: jax.random.normal(rng, self.weight_param_shape)
-        return self.param('weight', init)
+        return self.weight
 
     def _ensure_mul_ir_layout(self, x: jnp.ndarray) -> jnp.ndarray:
         """Convert inputs to mul_ir layout if needed.
@@ -229,7 +256,6 @@ class SymmetricContraction(fnn.Module):
         )
         return cuex.RepArray(self.weight_irreps, selected, cue.ir_mul)
 
-    @fnn.compact
     def __call__(
         self,
         x: jnp.ndarray,
@@ -422,7 +448,7 @@ def _raise_invalid_indices(_: jnp.ndarray) -> None:
 ## ----------------------------------------------------------------------------
 
 
-@register_import_mapper(
+@nxx_register_import_mapper(
     'cuequivariance_torch.operations.symmetric_contraction.SymmetricContraction'
 )
 def _import_cue_symmetric_contraction(module, variables, scope) -> None:
@@ -440,7 +466,7 @@ def _import_cue_symmetric_contraction(module, variables, scope) -> None:
     target['weight'] = jnp.asarray(weight, dtype=dtype)
 
 
-@register_import_mapper('mace.modules.symmetric_contraction.SymmetricContraction')
+@nxx_register_import_mapper('mace.modules.symmetric_contraction.SymmetricContraction')
 def _import_native_symmetric_contraction(module, variables, scope) -> None:
     """Import mapper that mirrors the native Torch module weight layout.
 
@@ -543,8 +569,13 @@ def _convert_native_weights(
                 'zau,ab->zbu', native_weight, reduced_projection, optimize=True
             )
         elif native_dim == full_dim:
+            transform = _compute_full_cg_transform(irreps_in, irreps_out, correlation)
+            transform = np.asarray(transform, dtype=native_weight.dtype)
+            canonical = np.einsum(
+                'ab,zbu->zau', transform, native_weight, optimize=True
+            )
             converted = np.einsum(
-                'zau,ab->zbu', native_weight, descriptor_projection, optimize=True
+                'zau,ab->zbu', canonical, descriptor_projection, optimize=True
             )
         else:
             raise ValueError(
@@ -695,6 +726,7 @@ def _cached_full_cg_transform(
         correlation=correlation,
         num_elements=1,
         use_reduced_cg=False,
+        rngs=nnx.Rngs(0),
     )
 
     mul = o3.Irreps(irreps_in_str)[0].mul
@@ -707,13 +739,10 @@ def _cached_full_cg_transform(
         num_elements=1,
     ).shape[1]
 
-    params = jax_module.init(
-        jax.random.PRNGKey(0),
-        jnp.zeros((1, mul, feature_dim)),
-        jnp.zeros((1,), dtype=jnp.int32),
-    )
+    graphdef, state = nnx.split(jax_module)
+    params = state_to_pure_dict(state)
     params_zero = _with_zero_weights(params)
-    canonical_dim = int(np.asarray(params_zero['params']['weight']).shape[1])
+    canonical_dim = int(np.asarray(params_zero['weight']).shape[1])
 
     batch = max(canonical_dim, native_dim)
     rng = np.random.default_rng(0)
@@ -723,7 +752,7 @@ def _cached_full_cg_transform(
     indices_jax = jnp.zeros((batch,), dtype=jnp.int32)
 
     canonical_matrix = _canonical_design_matrix(
-        jax_module,
+        graphdef,
         params_zero,
         inputs_jax,
         indices_jax,
@@ -741,15 +770,13 @@ def _cached_full_cg_transform(
 
 def _with_zero_weights(params: dict) -> dict:
     """Return a params pytree with all learnable weights zeroed."""
-    params_mutable = unfreeze(params)
-    params_mutable['params']['weight'] = jnp.zeros_like(
-        params_mutable['params']['weight']
-    )
-    return freeze(params_mutable)
+    params_mutable = dict(params)
+    params_mutable['weight'] = jnp.zeros_like(params_mutable['weight'])
+    return params_mutable
 
 
 def _canonical_design_matrix(
-    module: SymmetricContraction,
+    graphdef: nnx.GraphDef,
     params_zero: dict,
     inputs: jnp.ndarray,
     indices: jnp.ndarray,
@@ -767,7 +794,7 @@ def _canonical_design_matrix(
         Array with shape ``(output_dim, canonical_dim)`` capturing the response
         of the module to each canonical basis excitation.
     """
-    weight_shape = np.asarray(params_zero['params']['weight']).shape
+    weight_shape = np.asarray(params_zero['weight']).shape
     canonical_dim = weight_shape[1]
 
     outputs: list[np.ndarray] = []
@@ -775,11 +802,10 @@ def _canonical_design_matrix(
         weight = np.zeros(weight_shape, dtype=np.float32)
         weight[0, idx, 0] = 1.0
 
-        params_idx = unfreeze(params_zero)
-        params_idx['params']['weight'] = jnp.asarray(weight)
-        params_idx_frozen = freeze(params_idx)
+        params_idx = dict(params_zero)
+        params_idx['weight'] = jnp.asarray(weight)
 
-        out = module.apply(params_idx_frozen, inputs, indices)
+        out, _ = graphdef.apply(params_idx)(inputs, indices)
         outputs.append(np.asarray(out).reshape(-1))
 
     return np.stack(outputs, axis=1)

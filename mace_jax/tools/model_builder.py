@@ -7,8 +7,9 @@ from typing import Any
 import jax.numpy as jnp
 import numpy as np
 from e3nn_jax import Irreps
+from flax import nnx
 
-from mace_jax.adapters.flax.torch import resolve_gate_callable
+from mace_jax.adapters.nnx import resolve_gate_callable
 from mace_jax.data.utils import Configuration, graph_from_configuration
 from mace_jax.modules import interaction_classes, readout_classes
 from mace_jax.modules.models import MACE, ScaleShiftMACE
@@ -227,7 +228,10 @@ def _build_jax_model(
     *,
     cueq_config: CuEquivarianceConfig | None = None,
     init_normalize2mom_consts: bool = True,
+    rngs: nnx.Rngs | None = None,
 ):
+    if rngs is None:
+        rngs = nnx.Rngs(0)
     collapse_hidden_irreps = config.get('collapse_hidden_irreps', None)
     if collapse_hidden_irreps is None:
         try:
@@ -310,9 +314,10 @@ def _build_jax_model(
         return ScaleShiftMACE(
             atomic_inter_scale=np.asarray(config.get('atomic_inter_scale', 1.0)),
             atomic_inter_shift=np.asarray(config.get('atomic_inter_shift', 0.0)),
+            rngs=rngs,
             **common_kwargs,
         )
-    return MACE(**common_kwargs)
+    return MACE(rngs=rngs, **common_kwargs)
 
 
 __all__ = [

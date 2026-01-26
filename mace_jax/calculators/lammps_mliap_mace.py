@@ -9,6 +9,7 @@ import jax.dlpack as jdlpack
 import jax.numpy as jnp
 import numpy as np
 from ase.data import chemical_symbols
+from flax import nnx
 
 if TYPE_CHECKING:
     from jaxlib.xla_extension import Device
@@ -63,8 +64,8 @@ def timer(name: str, enabled: bool = False):
 class MACEEdgeForcesWrapper:
     """Wrapper that adds per-pair force computation to a MACE model."""
 
-    def __init__(self, model: Any, params: Any, **kwargs: Any) -> None:
-        self.model = model
+    def __init__(self, graphdef: Any, params: Any, **kwargs: Any) -> None:
+        self.graphdef = graphdef
 
         def _strip_meta(tree, in_meta=False):
             if isinstance(tree, dict):
@@ -79,13 +80,14 @@ class MACEEdgeForcesWrapper:
 
         self.params = _strip_meta(params)
 
-        self.atomic_numbers = np.asarray(model.atomic_numbers, dtype=np.int64)
-        self.r_max = float(model.r_max)
-        self.num_interactions = int(model.num_interactions)
+        module = nnx.merge(self.graphdef, self.params)
+        self.atomic_numbers = np.asarray(module.atomic_numbers, dtype=np.int64)
+        self.r_max = float(module.r_max)
+        self.num_interactions = int(module.num_interactions)
 
-        heads = getattr(model, '_heads', None)
+        heads = getattr(module, '_heads', None)
         if not heads:
-            heads = getattr(model, 'heads', None)
+            heads = getattr(module, 'heads', None)
         if not heads:
             heads = ('Default',)
         self.heads = tuple(heads)
@@ -94,14 +96,14 @@ class MACEEdgeForcesWrapper:
 
         def _apply_fn(p, d, lammps_class, lammps_natoms):
             data = d if lammps_natoms is None else dict(d, natoms=lammps_natoms)
-            return self.model.apply(
-                p,
+            outputs, _ = self.graphdef.apply(p)(
                 data,
                 compute_force=False,
                 compute_stress=False,
                 lammps_mliap=True,
                 lammps_class=lammps_class,
             )
+            return outputs
 
         self._apply = jax.jit(_apply_fn, static_argnums=(2, 3))
 
@@ -110,8 +112,7 @@ class MACEEdgeForcesWrapper:
             if lammps_natoms is not None:
                 batch['natoms'] = lammps_natoms
             batch['vectors'] = vectors
-            out = self.model.apply(
-                p,
+            out, _ = self.graphdef.apply(p)(
                 batch,
                 compute_force=False,
                 compute_stress=False,
@@ -159,10 +160,10 @@ class MACEEdgeForcesWrapper:
 class LAMMPS_MLIAP_MACE(MLIAPUnified):
     """MACE integration for LAMMPS using the MLIAP interface (JAX version)."""
 
-    def __init__(self, model: Any, params: Any, **kwargs: Any) -> None:
+    def __init__(self, graphdef: Any, params: Any, **kwargs: Any) -> None:
         super().__init__()
         self.config = MACELammpsConfig()
-        self.model = MACEEdgeForcesWrapper(model, params, **kwargs)
+        self.model = MACEEdgeForcesWrapper(graphdef, params, **kwargs)
 
         self.element_types = [
             chemical_symbols[int(z)] for z in self.model.atomic_numbers
@@ -420,7 +421,7 @@ class LAMMPS_MLIAP_MACE(MLIAPUnified):
 
 
 def create_lammps_mliap_calculator(
-    model: Any,
+    graphdef: Any,
     params: Any,
     **kwargs: Any,
 ) -> LAMMPS_MLIAP_MACE:
@@ -428,12 +429,12 @@ def create_lammps_mliap_calculator(
     Convenience factory mirroring the torch create_lammps_model helper.
 
     Args:
-        model: Instantiated Flax module (e.g. `MACE` or `ScaleShiftMACE`).
-        params: PyTree of trained parameters for `model`.
+        graphdef: NNX GraphDef for the model.
+        params: Pure dict state for the model (params + config).
         **kwargs: Optional keyword arguments such as `head`.
 
     Returns:
         Initialised `LAMMPS_MLIAP_MACE` wrapper ready for use inside LAMMPS.
     """
 
-    return LAMMPS_MLIAP_MACE(model, params, **kwargs)
+    return LAMMPS_MLIAP_MACE(graphdef, params, **kwargs)

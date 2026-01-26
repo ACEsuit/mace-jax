@@ -7,16 +7,18 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from e3nn_jax import Irreps, IrrepsArray  # type: ignore
-from flax import linen as fnn
+from flax import nnx
 
 import cuequivariance as cue
-from mace_jax.adapters.flax.torch import auto_import_from_torch_flax
+from mace_jax.adapters.nnx.torch import nxx_auto_import_from_torch
+from mace_jax.nnx_config import ConfigVar
+from mace_jax.tools.dtype import default_dtype
 
 from .utility import ir_mul_to_mul_ir, mul_ir_to_ir_mul
 
 
-@auto_import_from_torch_flax(allow_missing_mapper=True)
-class Linear(fnn.Module):
+@nxx_auto_import_from_torch(allow_missing_mapper=True)
+class Linear(nnx.Module):
     """Cue-equivariant linear map evaluated with cuequivariance-jax.
 
     The adapter mirrors the public API of the Torch module while delegating the
@@ -33,7 +35,23 @@ class Linear(fnn.Module):
     layout: object = 'mul_ir'
     group: object = cue.O3
 
-    def setup(self) -> None:
+    def __init__(
+        self,
+        irreps_in: Irreps,
+        irreps_out: Irreps,
+        shared_weights: bool | None = None,
+        internal_weights: bool | None = None,
+        layout: object = 'mul_ir',
+        group: object = cue.O3,
+        *,
+        rngs: nnx.Rngs | None = None,
+    ) -> None:
+        self.irreps_in = irreps_in
+        self.irreps_out = irreps_out
+        self.shared_weights = shared_weights
+        self.internal_weights = internal_weights
+        self.layout = layout
+        self.group = group
         """Resolve configuration flags and construct the cue descriptor."""
         shared_weights = True if self.shared_weights is None else self.shared_weights
         internal_weights = (
@@ -63,9 +81,22 @@ class Linear(fnn.Module):
         # Stash chosen layout for later validation (e.g., during Torch import).
         # Store as int code (0=mul_ir, 1=ir_mul) to keep the variables tree JIT-safe.
         layout_code = 0 if self._layout_str == 'mul_ir' else 1
-        self.variable(
-            'config', 'layout', lambda: jnp.asarray(layout_code, dtype=jnp.int32)
+        self.layout_config = ConfigVar(
+            jnp.asarray(layout_code, dtype=jnp.int32),
+            is_mutable=False,
         )
+        if self._internal_weights:
+            if rngs is None:
+                raise ValueError('rngs is required when internal_weights=True')
+            self.weight = nnx.Param(
+                jax.random.normal(
+                    rngs(),
+                    (1, self.weight_numel),
+                    dtype=default_dtype(),
+                )
+            )
+        else:
+            self.weight = None
 
     @staticmethod
     def _resolve_layout(layout_obj: object) -> tuple[cue.IrrepsLayout, str]:
@@ -88,9 +119,10 @@ class Linear(fnn.Module):
         )
 
     def _weight_param(self) -> jnp.ndarray:
-        """Initialise or fetch the internal weight parameter."""
-        init = lambda rng: jax.random.normal(rng, (1, self.weight_numel))
-        return self.param('weight', init)
+        """Return the internal weight parameter value."""
+        if self.weight is None:
+            raise ValueError('Internal weights are not initialized for this Linear.')
+        return self.weight
 
     def _extract_array(self, x: jnp.ndarray | IrrepsArray) -> tuple[jnp.ndarray, bool]:
         """Return the raw array for ``x`` and whether it carried Irreps metadata."""
@@ -173,7 +205,6 @@ class Linear(fnn.Module):
         # cue expects them as part of the evaluation input, so we return None.
         return None
 
-    @fnn.compact
     def __call__(
         self,
         x: jnp.ndarray | IrrepsArray,
@@ -217,14 +248,9 @@ class Linear(fnn.Module):
         return out_mul_ir
 
 
-def _linear_import_from_torch_with_layout(cls, torch_module, flax_variables):
+def _linear_import_from_torch_with_layout(cls, torch_module, variables):
     """Wrapper around the auto-generated import that enforces layout parity."""
-    cfg = flax_variables.get('config', {}) or flax_variables.get('meta', {})
-    expected_layout = None
-    if isinstance(cfg, dict):
-        expected_layout = cfg.get('layout', None)
-    elif hasattr(cfg, 'get'):
-        expected_layout = cfg.get('layout', None)
+    expected_layout = variables.get('layout_config', None)
 
     def _decode_layout(val):
         # Meta layout is stored as int code (0=mul_ir, 1=ir_mul) for JIT safety.
@@ -271,7 +297,7 @@ def _linear_import_from_torch_with_layout(cls, torch_module, flax_variables):
 
     return cls._import_from_torch_impl(
         torch_module,
-        flax_variables,
+        variables,
         skip_root=False,
     )
 

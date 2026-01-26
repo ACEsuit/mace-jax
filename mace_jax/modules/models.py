@@ -1,23 +1,22 @@
 from __future__ import annotations
 
-import warnings
 from collections.abc import Callable, Sequence
 from typing import Any
 
 import jax.numpy as jnp
 import numpy as np
 from e3nn_jax import Irrep, Irreps
-from flax import linen as fnn
-from flax import struct
+from flax import nnx
 
 from mace_jax.adapters.e3nn.math import (
     estimate_normalize2mom_const,
     register_normalize2mom_const,
 )
 from mace_jax.adapters.e3nn.o3 import SphericalHarmonics
-from mace_jax.adapters.flax.torch import auto_import_from_torch_flax
+from mace_jax.adapters.nnx.torch import nxx_auto_import_from_torch
 from mace_jax.modules.embeddings import GenericJointEmbedding
 from mace_jax.modules.radial import ZBLBasis
+from mace_jax.nnx_config import ConfigVar
 from mace_jax.tools.dtype import default_dtype
 from mace_jax.tools.lammps_exchange import forward_exchange as lammps_forward_exchange
 from mace_jax.tools.scatter import scatter_sum
@@ -61,91 +60,116 @@ def _as_tuple(value: Sequence[int] | int, repeats: int) -> tuple[int, ...]:
     return tuple(value)
 
 
-@auto_import_from_torch_flax(allow_missing_mapper=True)
-@add_output_interface
-class MACE(fnn.Module):
-    r_max: float
-    num_bessel: int
-    num_polynomial_cutoff: int
-    max_ell: int
-    interaction_cls: type[InteractionBlock] = struct.field(pytree_node=False)
-    interaction_cls_first: type[InteractionBlock] = struct.field(pytree_node=False)
-    atomic_energies: np.ndarray = struct.field(pytree_node=False)
-    atomic_numbers: tuple[int, ...] = struct.field(pytree_node=False)
-    num_interactions: int = 3
-    num_elements: int = 1
-    hidden_irreps: Irreps = Irreps('1x0e')
-    MLP_irreps: Irreps = Irreps('1x0e')
-    avg_num_neighbors: float = 1.0
-    correlation: int | Sequence[int] = 1
-    gate: Callable | None = struct.field(pytree_node=False, default=None)
-    pair_repulsion: bool = False
-    apply_cutoff: bool = True
-    use_reduced_cg: bool = True
-    use_so3: bool = False
-    use_agnostic_product: bool = False
-    use_last_readout_only: bool = False
-    use_embedding_readout: bool = False
-    collapse_hidden_irreps: bool = struct.field(pytree_node=False, default=True)
-    distance_transform: str = 'None'
-    edge_irreps: Irreps | None = None
-    radial_MLP: Sequence[int] | None = None
-    radial_type: str = 'bessel'
-    heads: Sequence[str] | None = struct.field(pytree_node=False, default=None)
-    cueq_config: dict[str, Any] | None = struct.field(pytree_node=False, default=None)
-    embedding_specs: dict[str, Any] | None = struct.field(
-        pytree_node=False, default=None
-    )
-    readout_cls: type[NonLinearReadoutBlock] = struct.field(
-        pytree_node=False, default=NonLinearReadoutBlock
-    )
-    normalize2mom_consts: dict[str, float] | None = struct.field(
-        pytree_node=False, default=None
-    )
-    normalize2mom_consts: dict[str, float] | None = struct.field(
-        pytree_node=False, default=None
-    )
-    init_normalize2mom_consts: bool = struct.field(pytree_node=False, default=True)
-
-    def __post_init__(self):
-        super().__post_init__()
-        consts = self.normalize2mom_consts
-        if consts is None and not self.init_normalize2mom_consts:
-            object.__setattr__(self, '_normalize2mom_consts', None)
-            return
-        if consts is None:
-            if self.init_normalize2mom_consts:
-                silu_value = estimate_normalize2mom_const('silu')
-                consts = {'silu': silu_value, 'swish': silu_value}
-            else:
-                consts = None
+def _prepare_normalize2mom_consts(
+    consts: dict[str, float] | None,
+    init_normalize2mom_consts: bool,
+) -> dict[str, float] | None:
+    if consts is None and not init_normalize2mom_consts:
+        return None
+    if consts is None:
+        if init_normalize2mom_consts:
+            silu_value = estimate_normalize2mom_const('silu')
+            consts = {'silu': silu_value, 'swish': silu_value}
         else:
-            consts = dict(consts)
-            if 'silu' not in consts:
-                if self.init_normalize2mom_consts:
-                    silu_value = estimate_normalize2mom_const('silu')
-                    consts['silu'] = silu_value
-                    consts.setdefault('swish', silu_value)
-                else:
-                    consts = None
-            if 'swish' not in consts:
-                consts['swish'] = consts['silu']
-        if consts is None:
-            object.__setattr__(self, '_normalize2mom_consts', None)
-            return
-        cleaned: dict[str, float] = {}
-        for key, val in consts.items():
-            try:
-                scalar_val = float(np.asarray(val))
-            except Exception as exc:
-                raise ValueError(
-                    f'normalize2mom_consts for {key} must be a concrete float.'
-                ) from exc
-            register_normalize2mom_const(key, scalar_val)
-            cleaned[key] = scalar_val
-        object.__setattr__(self, '_normalize2mom_consts', cleaned)
+            return None
+    else:
+        consts = dict(consts)
+        if 'silu' not in consts:
+            if init_normalize2mom_consts:
+                silu_value = estimate_normalize2mom_const('silu')
+                consts['silu'] = silu_value
+                consts.setdefault('swish', silu_value)
+            else:
+                return None
+        if 'swish' not in consts:
+            consts['swish'] = consts['silu']
+    cleaned: dict[str, float] = {}
+    for key, val in consts.items():
+        try:
+            scalar_val = float(np.asarray(val))
+        except Exception as exc:
+            raise ValueError(
+                f'normalize2mom_consts for {key} must be a concrete float.'
+            ) from exc
+        register_normalize2mom_const(key, scalar_val)
+        cleaned[key] = scalar_val
+    return cleaned
 
-    def setup(self) -> None:
+
+@nxx_auto_import_from_torch(allow_missing_mapper=True)
+@add_output_interface
+class MACE(nnx.Module):
+    def __init__(
+        self,
+        *,
+        r_max: float,
+        num_bessel: int,
+        num_polynomial_cutoff: int,
+        max_ell: int,
+        interaction_cls: type[InteractionBlock],
+        interaction_cls_first: type[InteractionBlock],
+        atomic_energies: np.ndarray,
+        atomic_numbers: tuple[int, ...],
+        num_interactions: int = 3,
+        num_elements: int = 1,
+        hidden_irreps: Irreps = Irreps('1x0e'),
+        MLP_irreps: Irreps = Irreps('1x0e'),
+        avg_num_neighbors: float = 1.0,
+        correlation: int | Sequence[int] = 1,
+        gate: Callable | None = None,
+        pair_repulsion: bool = False,
+        apply_cutoff: bool = True,
+        use_reduced_cg: bool = True,
+        use_so3: bool = False,
+        use_agnostic_product: bool = False,
+        use_last_readout_only: bool = False,
+        use_embedding_readout: bool = False,
+        collapse_hidden_irreps: bool = True,
+        distance_transform: str = 'None',
+        edge_irreps: Irreps | None = None,
+        radial_MLP: Sequence[int] | None = None,
+        radial_type: str = 'bessel',
+        heads: Sequence[str] | None = None,
+        cueq_config: dict[str, Any] | None = None,
+        embedding_specs: dict[str, Any] | None = None,
+        readout_cls: type[NonLinearReadoutBlock] = NonLinearReadoutBlock,
+        normalize2mom_consts: dict[str, float] | None = None,
+        init_normalize2mom_consts: bool = True,
+        rngs: nnx.Rngs,
+    ) -> None:
+        self.r_max = r_max
+        self.num_bessel = num_bessel
+        self.num_polynomial_cutoff = num_polynomial_cutoff
+        self.max_ell = max_ell
+        self.interaction_cls = interaction_cls
+        self.interaction_cls_first = interaction_cls_first
+        self.atomic_energies = atomic_energies
+        self.atomic_numbers = tuple(atomic_numbers)
+        self.num_interactions = num_interactions
+        self.num_elements = num_elements
+        self.hidden_irreps = hidden_irreps
+        self.MLP_irreps = MLP_irreps
+        self.avg_num_neighbors = avg_num_neighbors
+        self.correlation = correlation
+        self.gate = gate
+        self.pair_repulsion = pair_repulsion
+        self.apply_cutoff = apply_cutoff
+        self.use_reduced_cg = use_reduced_cg
+        self.use_so3 = use_so3
+        self.use_agnostic_product = use_agnostic_product
+        self.use_last_readout_only = use_last_readout_only
+        self.use_embedding_readout = use_embedding_readout
+        self.collapse_hidden_irreps = collapse_hidden_irreps
+        self.distance_transform = distance_transform
+        self.edge_irreps = edge_irreps
+        self.radial_MLP = radial_MLP
+        self.radial_type = radial_type
+        self.heads = heads
+        self.cueq_config = cueq_config
+        self.embedding_specs = embedding_specs
+        self.readout_cls = readout_cls
+        self.init_normalize2mom_consts = init_normalize2mom_consts
+
         self._heads = tuple(self.heads) if self.heads is not None else ('Default',)
         correlation = _as_tuple(self.correlation, self.num_interactions)
         if len(correlation) != self.num_interactions:
@@ -175,29 +199,19 @@ class MACE(fnn.Module):
             if self.num_interactions == 1 and self.collapse_hidden_irreps
             else hidden_irreps
         )
-        # MACE (torch) collapses to the first irrep when num_interactions == 1;
-        # default to that behavior unless explicitly disabled for legacy models.
 
-        # Normalize2mom constants originate from the Torch model (or fall back
-        # to defaults) and are kept as scalar arrays for serialization.
-        consts = getattr(self, '_normalize2mom_consts', None)
-        if consts is None and self.init_normalize2mom_consts:
-            silu_value = estimate_normalize2mom_const('silu')
-            consts = {'silu': silu_value, 'swish': silu_value}
+        consts = _prepare_normalize2mom_consts(
+            normalize2mom_consts, self.init_normalize2mom_consts
+        )
+        self._normalize2mom_consts = consts
         if consts is not None:
+            dtype = default_dtype()
             const_arrays = {
-                key: jnp.asarray(val, dtype=jnp.float32) for key, val in consts.items()
+                key: jnp.asarray(val, dtype=dtype) for key, val in consts.items()
             }
-            # Keep normalize2mom constants in a dedicated config collection so they
-            # travel with exported bundles but stay out of the trainable params.
-            self.variable(
-                'config',
-                'normalize2mom_consts',
-                lambda: const_arrays,
-            )
-        # Also seed the e3nn normalize2mom cache at runtime to enforce those
-        # constants during forward passes (keeps Torch/JAX energy parity).
-        # Registration happens in __post_init__ with concrete values.
+            self._normalize2mom_consts_var = ConfigVar(const_arrays)
+        else:
+            self._normalize2mom_consts_var = None
 
         node_attr_irreps = Irreps([(self.num_elements, (0, 1))])
         scalar_mul = hidden_irreps.count(Irrep(0, 1))
@@ -207,24 +221,24 @@ class MACE(fnn.Module):
             irreps_in=node_attr_irreps,
             irreps_out=node_feats_irreps,
             cueq_config=self.cueq_config,
-            name='node_embedding',
+            rngs=rngs,
         )
 
         self._embedding_specs = self.embedding_specs or {}
+        self._embedding_names = tuple(self._embedding_specs.keys())
         if self._embedding_specs:
-            self._embedding_names = tuple(self._embedding_specs.keys())
             self.joint_embedding = GenericJointEmbedding(
                 base_dim=node_feats_irreps.count(Irrep(0, 1)),
                 embedding_specs=self._embedding_specs,
                 out_dim=node_feats_irreps.count(Irrep(0, 1)),
-                name='joint_embedding',
+                rngs=rngs,
             )
             if self.use_embedding_readout:
                 self.embedding_readout = LinearReadoutBlock(
                     node_feats_irreps,
                     Irreps(f'{len(self._heads)}x0e'),
                     self.cueq_config,
-                    name='embedding_readout',
+                    rngs=rngs,
                 )
 
         self.radial_embedding = RadialEmbeddingBlock(
@@ -234,14 +248,13 @@ class MACE(fnn.Module):
             radial_type=self.radial_type,
             distance_transform=self.distance_transform,
             apply_cutoff=self.apply_cutoff,
-            name='radial_embedding',
+            rngs=rngs,
         )
         edge_feats_irreps = Irreps(f'{self.radial_embedding.out_dim}x0e')
 
         if self.pair_repulsion:
             self.pair_repulsion_fn = ZBLBasis(
                 p=self.num_polynomial_cutoff,
-                name='pair_repulsion_fn',
             )
 
         if not self.use_so3:
@@ -266,17 +279,16 @@ class MACE(fnn.Module):
             sh_irreps,
             normalize=True,
             normalization='component',
-            name='spherical_harmonics',
         )
 
         radial_mlp = (
             list(self.radial_MLP) if self.radial_MLP is not None else [64, 64, 64]
         )
-        self.atomic_energies_fn = AtomicEnergiesBlock(self._atomic_energies)
+        self.atomic_energies_fn = AtomicEnergiesBlock(self._atomic_energies, rngs=rngs)
 
-        interactions = []
-        products = []
-        readouts = []
+        interactions: list[InteractionBlock] = []
+        products: list[EquivariantProductBasisBlock] = []
+        readouts: list[nnx.Module] = []
 
         interaction_first = self.interaction_cls_first(
             node_attrs_irreps=node_attr_irreps,
@@ -288,7 +300,7 @@ class MACE(fnn.Module):
             avg_num_neighbors=self.avg_num_neighbors,
             radial_MLP=radial_mlp,
             cueq_config=self.cueq_config,
-            name='interactions_0',
+            rngs=rngs,
         )
         interactions.append(interaction_first)
 
@@ -302,7 +314,7 @@ class MACE(fnn.Module):
             cueq_config=self.cueq_config,
             use_reduced_cg=self.use_reduced_cg,
             use_agnostic_product=self.use_agnostic_product,
-            name='products_0',
+            rngs=rngs,
         )
         products.append(product_first)
 
@@ -312,7 +324,7 @@ class MACE(fnn.Module):
                     hidden_irreps_out,
                     Irreps(f'{len(self._heads)}x0e'),
                     self.cueq_config,
-                    name=f'readouts_{len(readouts)}',
+                    rngs=rngs,
                 )
             )
 
@@ -333,7 +345,7 @@ class MACE(fnn.Module):
                 edge_irreps=self.edge_irreps,
                 radial_MLP=radial_mlp,
                 cueq_config=self.cueq_config,
-                name=f'interactions_{len(interactions)}',
+                rngs=rngs,
             )
             interactions.append(interaction)
 
@@ -346,7 +358,7 @@ class MACE(fnn.Module):
                 cueq_config=self.cueq_config,
                 use_reduced_cg=self.use_reduced_cg,
                 use_agnostic_product=self.use_agnostic_product,
-                name=f'products_{len(products)}',
+                rngs=rngs,
             )
             products.append(product)
 
@@ -359,7 +371,7 @@ class MACE(fnn.Module):
                         Irreps(f'{len(self._heads)}x0e'),
                         len(self._heads),
                         self.cueq_config,
-                        name=f'readouts_{len(readouts)}',
+                        rngs=rngs,
                     )
                 )
             elif not self.use_last_readout_only:
@@ -368,13 +380,13 @@ class MACE(fnn.Module):
                         hidden_irreps,
                         Irreps(f'{len(self._heads)}x0e'),
                         self.cueq_config,
-                        name=f'readouts_{len(readouts)}',
+                        rngs=rngs,
                     )
                 )
 
-        self.interactions = tuple(interactions)
-        self.products = tuple(products)
-        self.readouts = tuple(readouts)
+        self.interactions = nnx.List(interactions)
+        self.products = nnx.List(products)
+        self.readouts = nnx.List(readouts)
 
     def __call__(
         self,
@@ -558,14 +570,20 @@ class MACE(fnn.Module):
         }
 
 
-@auto_import_from_torch_flax(allow_missing_mapper=True)
+@nxx_auto_import_from_torch(allow_missing_mapper=True)
 @add_output_interface
 class ScaleShiftMACE(MACE):
-    atomic_inter_scale: float = 1.0
-    atomic_inter_shift: float = 0.0
-
-    def setup(self) -> None:
-        super().setup()
+    def __init__(
+        self,
+        *,
+        atomic_inter_scale: float = 1.0,
+        atomic_inter_shift: float = 0.0,
+        rngs: nnx.Rngs,
+        **kwargs,
+    ) -> None:
+        self.atomic_inter_scale = atomic_inter_scale
+        self.atomic_inter_shift = atomic_inter_shift
+        super().__init__(rngs=rngs, **kwargs)
         self.scale_shift = ScaleShiftBlock(
             scale=self.atomic_inter_scale,
             shift=self.atomic_inter_shift,

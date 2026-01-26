@@ -1,5 +1,7 @@
 import torch.serialization
 
+from mace_jax.nnx_utils import state_to_pure_dict
+
 # Allowlist slice objects for e3nn constants when importing modules.
 if hasattr(torch.serialization, 'add_safe_globals'):
     torch.serialization.add_safe_globals([slice])
@@ -7,6 +9,7 @@ if hasattr(torch.serialization, 'add_safe_globals'):
 import jax
 import jax.numpy as jnp
 import numpy as np
+from flax import nnx
 
 from mace_jax.modules.blocks import AtomicEnergiesBlock
 
@@ -16,14 +19,15 @@ class TestAtomicEnergiesBlock:
         block = AtomicEnergiesBlock(np.array([1.0, 2.0, 3.0], dtype=np.float64))
         x = jnp.eye(3, dtype=jnp.float64)
 
-        params = block.init(jax.random.PRNGKey(0), x)
+        graphdef, state = nnx.split(block)
+        params = state_to_pure_dict(state)
 
         def loss_fn(p):
-            y = block.apply(p, x)
+            y, _ = graphdef.apply(p)(x)
             return jnp.sum((y - 1.0) ** 2)
 
         grads = jax.grad(loss_fn)(params)
-        atomic_grad = grads['params']['atomic_energies']
+        atomic_grad = grads['atomic_energies']
 
         assert jnp.all(atomic_grad == 0.0)
 
@@ -31,15 +35,16 @@ class TestAtomicEnergiesBlock:
         block = AtomicEnergiesBlock(np.array([1.0, 2.0, 3.0], dtype=np.float64))
         x = jnp.eye(3, dtype=jnp.float64)
 
-        params = block.init(jax.random.PRNGKey(1), x)
-        original = params['params']['atomic_energies']
+        graphdef, state = nnx.split(block)
+        params = state_to_pure_dict(state)
+        original = params['atomic_energies']
 
         def loss_fn(p):
-            y = block.apply(p, x)
+            y, _ = graphdef.apply(p)(x)
             return jnp.sum((y - 1.0) ** 2)
 
         grads = jax.grad(loss_fn)(params)
         updates = jax.tree_util.tree_map(lambda g: -0.1 * g, grads)
         updated = jax.tree_util.tree_map(lambda p, u: p + u, params, updates)
 
-        assert jnp.all(updated['params']['atomic_energies'] == original)
+        assert jnp.all(updated['atomic_energies'] == original)

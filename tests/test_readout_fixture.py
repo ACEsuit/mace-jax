@@ -4,10 +4,13 @@ import numpy as np
 import torch
 from e3nn import o3
 from e3nn_jax import Irreps, IrrepsArray
+from flax import nnx
 from mace.modules.blocks import NonLinearReadoutBlock as TorchReadout
 from torch.serialization import add_safe_globals
 
+from mace_jax.adapters.nnx.torch import init_from_torch
 from mace_jax.modules.blocks import NonLinearReadoutBlock as JaxReadout
+from mace_jax.nnx_utils import state_to_pure_dict
 
 add_safe_globals([slice])
 
@@ -50,23 +53,16 @@ class TestReadoutFixture:
             MLP_irreps=irreps_out,
             gate=jax.nn.silu,
             num_heads=1,
+            rngs=nnx.Rngs(0),
         )
         prod_jax = _as_irreps_array(irreps_in, jnp.asarray(prod))
-        variables = jax_readout.init(jax.random.PRNGKey(0), prod_jax)
-        variables = JaxReadout.import_from_torch(torch_readout, variables)
+        jax_readout, _ = init_from_torch(jax_readout, torch_readout)
+        graphdef, state = nnx.split(jax_readout)
+        module = nnx.merge(graphdef, state)
 
-        def _call_linear1(mod, x):
-            return mod.linear_1(x)
-
-        def _call_activation(mod, x):
-            return mod.non_linearity(x)
-
-        def _call_linear2(mod, x):
-            return mod.linear_2(x)
-
-        lin1 = jax_readout.apply(variables, prod_jax, method=_call_linear1)
-        act = jax_readout.apply(variables, lin1, method=_call_activation)
-        out = jax_readout.apply(variables, act, method=_call_linear2)
+        lin1 = module.linear_1(prod_jax)
+        act = module.non_linearity(lin1)
+        out = module.linear_2(act)
 
         lin1_np = np.asarray(lin1.array if hasattr(lin1, 'array') else lin1)
         act_np = np.asarray(act.array if hasattr(act, 'array') else act)
@@ -111,28 +107,19 @@ class TestReadoutFixture:
             MLP_irreps=irreps_out,
             gate=jax.nn.silu,
             num_heads=1,
+            rngs=nnx.Rngs(0),
         )
         prod_jax = _as_irreps_array(irreps_in, jnp.asarray(prod))
-        variables = jax_readout.init(jax.random.PRNGKey(0), prod_jax)
-        # Align weights exactly
-        vars_params = variables['params']
-        if hasattr(vars_params, 'unfreeze'):
-            vars_params = vars_params.unfreeze()
-        else:
-            vars_params = dict(vars_params)
-        vars_params['linear_1']['weight'] = jnp.asarray(w1).reshape(
-            vars_params['linear_1']['weight'].shape
+        graphdef, state = nnx.split(jax_readout)
+        params = state_to_pure_dict(state)
+        params['linear_1']['weight'] = jnp.asarray(w1).reshape(
+            params['linear_1']['weight'].shape
         )
-        vars_params['linear_2']['weight'] = jnp.asarray(w2).reshape(
-            vars_params['linear_2']['weight'].shape
+        params['linear_2']['weight'] = jnp.asarray(w2).reshape(
+            params['linear_2']['weight'].shape
         )
-        if hasattr(variables, 'copy') and not isinstance(variables, dict):
-            variables = variables.copy({'params': vars_params})
-        else:
-            variables = dict(variables)
-            variables['params'] = vars_params
 
-        out_jax = jax_readout.apply(variables, prod_jax)
+        out_jax, _ = graphdef.apply(params)(prod_jax)
         out_jax_arr = np.asarray(
             out_jax.array if hasattr(out_jax, 'array') else out_jax
         )
@@ -163,12 +150,12 @@ class TestReadoutFixture:
             MLP_irreps=irreps_out,
             gate=jax.nn.silu,
             num_heads=1,
+            rngs=nnx.Rngs(0),
         )
         prod_jax = _as_irreps_array(irreps_in, jnp.asarray(prod))
-        variables = jax_readout.init(jax.random.PRNGKey(0), prod_jax)
-        variables = JaxReadout.import_from_torch(torch_readout, variables)
-
-        out_jax = jax_readout.apply(variables, prod_jax)
+        jax_readout, _ = init_from_torch(jax_readout, torch_readout)
+        graphdef, state = nnx.split(jax_readout)
+        out_jax, _ = graphdef.apply(state)(prod_jax)
         out_jax_arr = np.asarray(
             out_jax.array if hasattr(out_jax, 'array') else out_jax
         )
@@ -209,28 +196,19 @@ class TestReadoutFixture:
             MLP_irreps=irreps_out,
             gate=jax.nn.silu,
             num_heads=1,
+            rngs=nnx.Rngs(0),
         )
         prod_jax = _as_irreps_array(irreps_in, jnp.asarray(prod))
-        variables = jax_readout.init(jax.random.PRNGKey(0), prod_jax)
-        # Match JAX parameter shapes explicitly; shapes align with Torch but we reshape to be safe.
-        vars_params = variables['params']
-        if hasattr(vars_params, 'unfreeze'):
-            vars_params = vars_params.unfreeze()
-        else:
-            vars_params = dict(vars_params)
-        vars_params['linear_1']['weight'] = jnp.asarray(w1).reshape(
-            vars_params['linear_1']['weight'].shape
+        graphdef, state = nnx.split(jax_readout)
+        params = state_to_pure_dict(state)
+        params['linear_1']['weight'] = jnp.asarray(w1).reshape(
+            params['linear_1']['weight'].shape
         )
-        vars_params['linear_2']['weight'] = jnp.asarray(w2).reshape(
-            vars_params['linear_2']['weight'].shape
+        params['linear_2']['weight'] = jnp.asarray(w2).reshape(
+            params['linear_2']['weight'].shape
         )
-        if hasattr(variables, 'copy') and not isinstance(variables, dict):
-            variables = variables.copy({'params': vars_params})
-        else:
-            variables = dict(variables)
-            variables['params'] = vars_params
 
-        out_jax = jax_readout.apply(variables, prod_jax)
+        out_jax, _ = graphdef.apply(params)(prod_jax)
         out_jax_arr = np.asarray(
             out_jax.array if hasattr(out_jax, 'array') else out_jax
         )

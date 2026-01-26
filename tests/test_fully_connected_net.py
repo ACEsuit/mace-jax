@@ -5,8 +5,10 @@ import numpy as np
 import pytest
 import torch
 from e3nn.nn import FullyConnectedNet as FullyConnectedNetTorch
+from flax import nnx
 
 from mace_jax.adapters.e3nn.nn._fc import FullyConnectedNet as FullyConnectedNetJAX
+from mace_jax.nnx_utils import state_to_pure_dict
 
 
 class TestFullyConnectedNet:
@@ -49,10 +51,12 @@ class TestFullyConnectedNet:
             variance_in=variance_in,
             variance_out=variance_out,
             out_act=out_act,
+            rngs=nnx.Rngs(7),
         )
-        variables = flax_net.init(jax.random.PRNGKey(7), features_jax)
+        graphdef, state = nnx.split(flax_net)
+        variables = state_to_pure_dict(state)
         variables = FullyConnectedNetJAX.import_from_torch(torch_net, variables)
-        out_jax = flax_net.apply(variables, features_jax)
+        out_jax, _ = graphdef.apply(variables)(features_jax)
         out_jax_array = np.asarray(out_jax)
 
         np.testing.assert_allclose(

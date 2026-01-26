@@ -5,13 +5,15 @@ import pytest
 import torch
 from torch.serialization import add_safe_globals
 
+from mace_jax.nnx_utils import state_to_pure_dict
+
 add_safe_globals([slice])
 
 import cuequivariance as cue
-import jax
 import jax.numpy as jnp
 from e3nn import o3
 from e3nn_jax import Irreps, IrrepsArray
+from flax import nnx
 
 from mace_jax.adapters.cuequivariance.linear import Linear as JaxLinear
 from mace_jax.adapters.cuequivariance.utility import (
@@ -20,6 +22,7 @@ from mace_jax.adapters.cuequivariance.utility import (
 from mace_jax.adapters.cuequivariance.utility import (
     mul_ir_to_ir_mul as cue_mul_ir_to_ir_mul,
 )
+from mace_jax.adapters.nnx.torch import init_from_torch
 
 try:
     from cuequivariance_torch.operations.linear import Linear as CueLinearTorch
@@ -96,13 +99,12 @@ class TestLinearParity:
             irreps_in=Irreps(irreps_in),
             irreps_out=Irreps(irreps_out),
             shared_weights=True,
+            rngs=nnx.Rngs(0),
         )
         features_jax = _as_irreps_array(Irreps(irreps_in), jnp.asarray(features_np))
-
-        variables = jax_linear.init(jax.random.PRNGKey(0), features_jax)
-        variables = JaxLinear.import_from_torch(torch_linear, variables)
-
-        out_jax = jax_linear.apply(variables, features_jax)
+        jax_linear, _ = init_from_torch(jax_linear, torch_linear)
+        graphdef, state = nnx.split(jax_linear)
+        out_jax, _ = graphdef.apply(state)(features_jax)
         out_jax_arr = np.asarray(
             out_jax.array if hasattr(out_jax, 'array') else out_jax
         )
@@ -126,12 +128,12 @@ class TestLinearParity:
             irreps_in=Irreps(irreps_in),
             irreps_out=Irreps(irreps_out),
             shared_weights=True,
+            rngs=nnx.Rngs(0),
         )
         features_jax = _as_irreps_array(Irreps(irreps_in), jnp.asarray(features_np))
-        variables = jax_linear.init(jax.random.PRNGKey(0), features_jax)
-        variables = JaxLinear.import_from_torch(torch_linear, variables)
-
-        out_jax = jax_linear.apply(variables, features_jax)
+        jax_linear, _ = init_from_torch(jax_linear, torch_linear)
+        graphdef, state = nnx.split(jax_linear)
+        out_jax, _ = graphdef.apply(state)(features_jax)
         out_jax_arr = np.asarray(
             out_jax.array if hasattr(out_jax, 'array') else out_jax
         )
@@ -165,10 +167,11 @@ class TestLinearParity:
             irreps_in=Irreps(irreps_in),
             irreps_out=Irreps(irreps_out),
             shared_weights=True,
+            rngs=nnx.Rngs(0),
         )
-        variables = jax_linear.init(jax.random.PRNGKey(0), features_jax)
-        variables_e3nn = JaxLinear.import_from_torch(torch_linear_e3nn, variables)
-        out_jax = jax_linear.apply(variables_e3nn, features_jax)
+        jax_linear, _ = init_from_torch(jax_linear, torch_linear_e3nn)
+        graphdef, state = nnx.split(jax_linear)
+        out_jax, _ = graphdef.apply(state)(features_jax)
         out_jax_arr = np.asarray(
             out_jax.array if hasattr(out_jax, 'array') else out_jax
         )
@@ -195,8 +198,9 @@ class TestLinearParity:
         except NotImplementedError as exc:
             pytest.skip(f'cuequivariance torch backend unavailable: {exc}')
 
-        variables_cue = JaxLinear.import_from_torch(torch_linear_cue, variables)
-        out_jax = jax_linear.apply(variables_cue, features_jax)
+        jax_linear, _ = init_from_torch(jax_linear, torch_linear_cue)
+        graphdef, state = nnx.split(jax_linear)
+        out_jax, _ = graphdef.apply(state)(features_jax)
         out_jax_arr = np.asarray(
             out_jax.array if hasattr(out_jax, 'array') else out_jax
         )
@@ -232,10 +236,11 @@ class TestLinearParity:
             irreps_in=Irreps(irreps_in),
             irreps_out=Irreps(irreps_out),
             shared_weights=True,
+            rngs=nnx.Rngs(1),
         )
-        variables = jax_linear.init(jax.random.PRNGKey(1), features_jax)
-        variables_e3nn = JaxLinear.import_from_torch(torch_linear_e3nn, variables)
-        out_jax = jax_linear.apply(variables_e3nn, features_jax)
+        jax_linear, _ = init_from_torch(jax_linear, torch_linear_e3nn)
+        graphdef, state = nnx.split(jax_linear)
+        out_jax, _ = graphdef.apply(state)(features_jax)
         out_jax_arr = np.asarray(
             out_jax.array if hasattr(out_jax, 'array') else out_jax
         )
@@ -262,8 +267,9 @@ class TestLinearParity:
         except NotImplementedError as exc:
             pytest.skip(f'cuequivariance torch backend unavailable: {exc}')
 
-        variables_cue = JaxLinear.import_from_torch(torch_linear_cue, variables)
-        out_jax = jax_linear.apply(variables_cue, features_jax)
+        jax_linear, _ = init_from_torch(jax_linear, torch_linear_cue)
+        graphdef, state = nnx.split(jax_linear)
+        out_jax, _ = graphdef.apply(state)(features_jax)
         out_jax_arr = np.asarray(
             out_jax.array if hasattr(out_jax, 'array') else out_jax
         )
@@ -294,10 +300,11 @@ class TestLinearParity:
         module = JaxLinear(
             irreps_in=Irreps(irreps_in),
             irreps_out=Irreps(irreps_out),
+            rngs=nnx.Rngs(5),
         )
-        variables = module.init(jax.random.PRNGKey(5), features_jax)
-        variables = JaxLinear.import_from_torch(torch_layer, variables)
-        out_jax = module.apply(variables, features_jax)
+        module, _ = init_from_torch(module, torch_layer)
+        graphdef, state = nnx.split(module)
+        out_jax, _ = graphdef.apply(state)(features_jax)
 
         np.testing.assert_allclose(
             np.asarray(out_jax),
@@ -338,9 +345,10 @@ class TestLinearParity:
             irreps_in=Irreps(irreps_in),
             irreps_out=Irreps(irreps_out),
             layout='ir_mul',
+            rngs=nnx.Rngs(2),
         )
         features_jax = jnp.asarray(features_mul_ir)
-        variables = module.init(jax.random.PRNGKey(2), features_jax)
+        variables = state_to_pure_dict(nnx.state(module))
 
         # Import should raise due to layout mismatch between JAX (ir_mul)
         # and the torch module (mul_ir); this avoids silently copying weights.
@@ -369,8 +377,9 @@ class TestLinearParity:
             irreps_in=Irreps(irreps_in),
             irreps_out=Irreps(irreps_out),
             layout='ir_mul',
+            rngs=nnx.Rngs(0),
         )
-        variables = module.init(jax.random.PRNGKey(0), features_jax)
+        variables = state_to_pure_dict(nnx.state(module))
 
         with pytest.raises(ValueError, match='expected layout'):
             JaxLinear.import_from_torch(torch_layer, variables)

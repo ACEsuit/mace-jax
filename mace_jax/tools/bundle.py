@@ -11,9 +11,9 @@ from pathlib import Path
 import jax
 import numpy as np
 from e3nn_jax import Irrep, Irreps
-from flax import core as flax_core
-from flax import serialization
+from flax import nnx, serialization
 
+from mace_jax.nnx_utils import state_to_pure_dict, state_to_serializable_dict
 from mace_jax.tools import model_builder
 
 DEFAULT_CONFIG_NAME = 'config.json'
@@ -24,7 +24,7 @@ DEFAULT_PARAMS_NAME = 'params.msgpack'
 class ModelBundle:
     config: dict
     params: dict
-    module: object
+    graphdef: object
 
 
 def resolve_model_paths(model_arg: str) -> tuple[Path, Path]:
@@ -67,14 +67,27 @@ def _load_checkpoint_bundle(path: Path, dtype: str) -> ModelBundle:
             f'Checkpoint {path} does not include model_config; '
             're-run training with a newer mace-jax or export a model bundle.'
         )
-    params = payload.get('eval_params') or payload.get('params')
-    if params is None:
-        raise ValueError(f'Checkpoint {path} is missing params/eval_params.')
+    state_payload = (
+        payload.get('eval_state')
+        or payload.get('state')
+        or payload.get('eval_params')
+        or payload.get('params')
+    )
+    if state_payload is None:
+        raise ValueError(f'Checkpoint {path} is missing state/params payload.')
     model_config, _, _ = model_builder._normalize_atomic_config(model_config)
-    _validate_config_matches_params(model_config, params, context=str(path))
     _maybe_set_dtype(dtype)
-    module = model_builder._build_jax_model(model_config)
-    return ModelBundle(config=model_config, params=params, module=module)
+    module = model_builder._build_jax_model(model_config, rngs=nnx.Rngs(0))
+    graphdef, state = nnx.split(module)
+    state_template = state_to_serializable_dict(state)
+    if isinstance(state_payload, (bytes, bytearray)):
+        state_pure = serialization.from_bytes(state_template, state_payload)
+    else:
+        state_pure = state_payload
+    nnx.replace_by_pure_dict(state, state_pure)
+    state_pure = state_to_pure_dict(state)
+    _validate_config_matches_params(model_config, state_pure, context=str(path))
+    return ModelBundle(config=model_config, params=state_pure, graphdef=graphdef)
 
 
 def load_model_bundle(
@@ -97,24 +110,21 @@ def load_model_bundle(
         raise ValueError('mace-jax only supports the built-in MACE wrapper.')
 
     config, _, _ = model_builder._normalize_atomic_config(config)
-    module = model_builder._build_jax_model(config)
-    template = model_builder._prepare_template_data(config)
-    variables = module.init(jax.random.PRNGKey(0), template)
-    variables = serialization.from_bytes(variables, params_path.read_bytes())
-    variables = flax_core.freeze(variables)
-    _validate_config_matches_params(config, variables, context=str(params_path))
-    return ModelBundle(config=config, params=variables, module=module)
+    module = model_builder._build_jax_model(config, rngs=nnx.Rngs(0))
+    graphdef, state = nnx.split(module)
+    state_template = state_to_serializable_dict(state)
+    state_pure = serialization.from_bytes(state_template, params_path.read_bytes())
+    nnx.replace_by_pure_dict(state, state_pure)
+    state_pure = state_to_pure_dict(state)
+    _validate_config_matches_params(config, state_pure, context=str(params_path))
+    return ModelBundle(config=config, params=state_pure, graphdef=graphdef)
 
 
 def _find_param_leaf(tree, keys: Sequence[str]):
-    if isinstance(tree, flax_core.FrozenDict):
-        tree = flax_core.unfreeze(tree)
     for key in keys:
         if not isinstance(tree, dict) or key not in tree:
             return None
         tree = tree[key]
-        if isinstance(tree, flax_core.FrozenDict):
-            tree = flax_core.unfreeze(tree)
     if isinstance(tree, (np.ndarray, getattr(jax, 'Array', ()))):
         return tree
     return None

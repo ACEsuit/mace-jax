@@ -8,13 +8,13 @@ from typing import Any
 
 import jax.numpy as jnp
 from e3nn_jax import Irreps, spherical_harmonics
-from flax import linen as fnn
+from flax import nnx
 
-from mace_jax.adapters.flax.torch import auto_import_from_torch_flax
+from mace_jax.adapters.nnx.torch import nxx_auto_import_from_torch
 
 
-@auto_import_from_torch_flax(allow_missing_mapper=True)
-class SphericalHarmonics(fnn.Module):
+@nxx_auto_import_from_torch(allow_missing_mapper=True)
+class SphericalHarmonics(nnx.Module):
     """Evaluate spherical harmonics with cues that mirror the Torch layer API."""
 
     irreps_out: int | Sequence[int] | str | Irreps
@@ -22,8 +22,17 @@ class SphericalHarmonics(fnn.Module):
     normalization: str = 'integral'
     irreps_in: Any = None
 
-    def setup(self) -> None:
-        """Validate irreps configuration and cache descriptor metadata."""
+    def __init__(
+        self,
+        irreps_out: int | Sequence[int] | str | Irreps,
+        normalize: bool,
+        normalization: str = 'integral',
+        irreps_in: Any = None,
+    ) -> None:
+        self.irreps_out = irreps_out
+        self.normalize = normalize
+        self.normalization = normalization
+        self.irreps_in = irreps_in
         irreps_out_input = self.irreps_out
         if isinstance(irreps_out_input, str):
             irreps_out = Irreps(irreps_out_input)

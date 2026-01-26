@@ -7,6 +7,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from mace_jax.tools.dtype import default_dtype
+
 # Mirrors the Torch ``normalize2mom.cst`` cache keyed by activation identity.
 _CONST_OVERRIDES: dict[str, float] = {}
 # Tracks JAX wrappers created before Torch weights are imported so they can be
@@ -78,7 +80,10 @@ def register_normalize2mom_const(
 
 
 def moment(
-    f: Callable, n: int, key: jax.random.PRNGKey, dtype=jnp.float32
+    f: Callable,
+    n: int,
+    key: jax.random.PRNGKey,
+    dtype: jnp.dtype | None = None,
 ) -> jnp.ndarray:
     """Estimate the n-th raw moment ``E[f(z)^n]`` where ``z ~ Normal(0, 1)``.
 
@@ -91,6 +96,8 @@ def moment(
     Returns:
         The Monte-Carlo estimate of ``E[f(z)^n]`` as a scalar array.
     """
+    if dtype is None:
+        dtype = default_dtype()
     z = jax.random.normal(key, shape=(1_000_000,), dtype=dtype)
     return jnp.mean(jnp.power(f(z), n))
 
@@ -98,7 +105,7 @@ def moment(
 def normalize2mom(
     f: Callable,
     key: jax.random.PRNGKey = None,
-    dtype=jnp.float32,
+    dtype: jnp.dtype | None = None,
 ) -> Callable:
     """Scale an activation so its output variance under ``N(0, 1)`` equals one.
 
@@ -117,6 +124,8 @@ def normalize2mom(
 
     if key is None:
         key = jax.random.PRNGKey(0)
+    if dtype is None:
+        dtype = default_dtype()
 
     identifier = _activation_key(f)
     override = _CONST_OVERRIDES.get(identifier, None) if identifier else None

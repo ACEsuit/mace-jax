@@ -67,6 +67,15 @@ __all__ = [
     'ScaleShiftMACE',
 ]
 
+# Optional: dict-layout experimental model. Import lazily to avoid hard failures
+# when cuequivariance_jax backends are not available.
+try:  # pragma: no cover - optional dependency path
+    from .ir_dict_mace import MACEIrDict  # noqa: F401
+
+    __all__.append('MACEIrDict')
+except Exception:
+    pass
+
 interaction_classes: dict[str, type[InteractionBlock]] = {
     'RealAgnosticResidualInteractionBlock': RealAgnosticResidualInteractionBlock,
     'RealAgnosticAttResidualInteractionBlock': RealAgnosticAttResidualInteractionBlock,

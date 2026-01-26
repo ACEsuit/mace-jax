@@ -1,24 +1,23 @@
 """Fully connected network layers compatible with ``e3nn`` Torch modules."""
 
 from collections.abc import Callable, Sequence
-from typing import Optional
 
 import jax
 import jax.numpy as jnp
-from flax import linen as fnn
-from flax.core import freeze, unfreeze
+from flax import nnx
 
-from mace_jax.adapters.flax.torch import (
+from mace_jax.adapters.nnx.torch import (
     _resolve_scope,
-    auto_import_from_torch_flax,
-    register_import_mapper,
+    nxx_auto_import_from_torch,
+    nxx_register_import_mapper,
 )
+from mace_jax.tools.dtype import default_dtype
 
 from ..math import normalize2mom
 
 
-@auto_import_from_torch_flax(allow_missing_mapper=True)
-class Layer(fnn.Module):
+@nxx_auto_import_from_torch(allow_missing_mapper=True)
+class Layer(nnx.Module):
     """Flax version of e3nn.nn._fc._Layer."""
 
     h_in: int
@@ -34,7 +33,21 @@ class Layer(fnn.Module):
         )
         return f'{self.__class__.__name__}({self.h_in}->{self.h_out}, act={act_name})'
 
-    def setup(self) -> None:
+    def __init__(
+        self,
+        h_in: int,
+        h_out: int,
+        act: Callable | None,
+        var_in: float,
+        var_out: float,
+        *,
+        rngs: nnx.Rngs,
+    ) -> None:
+        self.h_in = h_in
+        self.h_out = h_out
+        self.act = act
+        self.var_in = var_in
+        self.var_out = var_out
         self._use_activation = self.act is not None
         if self._use_activation:
             normalized = normalize2mom(self.act)  # compute reference constant
@@ -44,26 +57,32 @@ class Layer(fnn.Module):
         else:
             self._act_fn = None
             self._act_scale_init = 1.0
+        self.weight = nnx.Param(
+            jax.random.normal(
+                rngs(),
+                (self.h_in, self.h_out),
+                dtype=default_dtype(),
+            )
+        )
+        if self._use_activation:
+            self.act_scale = nnx.Param(
+                jnp.asarray(self._act_scale_init, dtype=default_dtype()),
+                is_mutable=False,
+            )
+        else:
+            self.act_scale = None
 
-    @fnn.compact
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
-        def init(rng):
-            return jax.random.normal(rng, (self.h_in, self.h_out))
-
-        weight = self.param('weight', init)
+        weight = self.weight
 
         if self._use_activation:
             scaled = weight / jnp.sqrt(self.h_in * self.var_in)
             y = x @ scaled
-            act_scale = self.param(
-                'act_scale',
-                lambda rng: jnp.asarray(
-                    self._act_scale_init,
-                    dtype=weight.dtype,
-                ),
+            act_scale = (
+                jax.lax.stop_gradient(jnp.asarray(self.act_scale, dtype=y.dtype))
+                if self.act_scale is not None
+                else jnp.asarray(self._act_scale_init, dtype=y.dtype)
             )
-            # Torch stores this constant as a buffer; prevent training-time updates.
-            act_scale = jax.lax.stop_gradient(jnp.asarray(act_scale, dtype=y.dtype))
             y = self._act_fn(y) * act_scale
             y = y * jnp.sqrt(self.var_out)
             return y
@@ -72,8 +91,8 @@ class Layer(fnn.Module):
         return x @ scaled
 
 
-@auto_import_from_torch_flax(allow_missing_mapper=True)
-class FullyConnectedNet(fnn.Module):
+@nxx_auto_import_from_torch(allow_missing_mapper=True)
+class FullyConnectedNet(nnx.Module):
     """Stack of variance-aware dense layers compatible with ``e3nn``.
 
     The module mirrors the Torch ``e3nn.nn.FullyConnectedNet`` constructor so
@@ -100,7 +119,21 @@ class FullyConnectedNet(fnn.Module):
     variance_out: float = 1.0
     out_act: bool = False
 
-    def setup(self) -> None:
+    def __init__(
+        self,
+        hs: Sequence[int],
+        act: Callable | None = None,
+        variance_in: float = 1.0,
+        variance_out: float = 1.0,
+        out_act: bool = False,
+        *,
+        rngs: nnx.Rngs,
+    ) -> None:
+        self.hs = tuple(hs)
+        self.act = act
+        self.variance_in = variance_in
+        self.variance_out = variance_out
+        self.out_act = out_act
         if len(self.hs) < 2:
             raise ValueError('hs must contain at least input and output dimensions.')
 
@@ -121,12 +154,12 @@ class FullyConnectedNet(fnn.Module):
                 act=activation,
                 var_in=var_in,
                 var_out=var_out,
-                name=f'layer{idx}',
+                rngs=rngs,
             )
             layers.append(layer)
             var_in = var_out
 
-        self.layers = layers
+        self.layers = nnx.List(layers)
 
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
         """Apply each dense layer in sequence to the input array.
@@ -147,7 +180,7 @@ class FullyConnectedNet(fnn.Module):
         return f'{self.__class__.__name__}([{hs_str}])'
 
 
-@register_import_mapper('e3nn.nn._fc._Layer')
+@nxx_register_import_mapper('e3nn.nn._fc._Layer')
 def _import_e3nn_fc_layer(module, variables, scope):
     target = _resolve_scope(variables, scope)
     weight = jnp.asarray(module.weight.detach().cpu().numpy())
@@ -166,17 +199,31 @@ def _import_e3nn_fc_layer(module, variables, scope):
             target['bias'] = bias.astype(target['bias'].dtype, copy=False)
 
 
-@register_import_mapper('e3nn.nn._fc.FullyConnectedNet')
+@nxx_register_import_mapper('e3nn.nn._fc.FullyConnectedNet')
 def _import_e3nn_fc(module, variables, scope):
-    node = variables.setdefault('params', {})
-    for key in scope:
-        node = node.setdefault(key, {})
-    wrapped = freeze({'params': node})
-    import_impl = getattr(FullyConnectedNet, '_import_from_torch_impl', None)
-    if import_impl is None:
-        updated = FullyConnectedNet.import_from_torch(module, wrapped)
+    target = _resolve_scope(variables, scope)
+    layers = target.get('layers')
+    if isinstance(layers, dict):
+        for name, child in module.named_children():
+            if not name.startswith('layer'):
+                continue
+            suffix = name[len('layer') :]
+            if not suffix.isdigit():
+                continue
+            idx = int(suffix)
+            if idx not in layers:
+                continue
+            _import_e3nn_fc_layer(child, layers, [idx])
+        return
+
+    if hasattr(FullyConnectedNet, '_import_from_torch_impl'):
+        updated = FullyConnectedNet._import_from_torch_impl(
+            module,
+            target,
+            skip_root=True,
+        )
     else:
-        updated = import_impl(module, wrapped, skip_root=True)
-    updated_params = unfreeze(updated).get('params', {})
-    node.clear()
-    node.update(updated_params)
+        updated = FullyConnectedNet.import_from_torch(module, target)
+    if updated is not None and updated is not target:
+        target.clear()
+        target.update(updated)

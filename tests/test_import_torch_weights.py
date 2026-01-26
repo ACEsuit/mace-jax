@@ -4,8 +4,10 @@ import types
 
 import jax.numpy as jnp
 import pytest
+from flax import nnx
 
 from mace_jax.cli import mace_jax_from_torch as jax_from_torch
+from mace_jax.nnx_utils import state_to_pure_dict
 
 
 def _patch_common(monkeypatch, jax_model):
@@ -15,17 +17,15 @@ def _patch_common(monkeypatch, jax_model):
     monkeypatch.setattr(
         jax_from_torch, '_prepare_template_data', lambda config: {'dummy': 1}
     )
-    monkeypatch.setattr(jax_from_torch.jax.random, 'PRNGKey', lambda seed: 0)
 
 
-class _DummyJaxModel:
-    def __init__(self, use_reduced_cg: bool, import_impl):
+class _DummyJaxModel(nnx.Module):
+    def __init__(
+        self, use_reduced_cg: bool, import_impl, *, rngs: nnx.Rngs | None = None
+    ):
         self.use_reduced_cg = use_reduced_cg
         self._import_impl = import_impl
-
-    def init(self, rng, template):
-        del rng, template
-        return {'params': {'w': jnp.ones((1,), dtype=jnp.float32)}}
+        self.w = nnx.Param(jnp.ones((1,), dtype=jnp.float32))
 
     def import_from_torch(self, torch_model, variables):
         return self._import_impl(torch_model, variables)
@@ -57,17 +57,16 @@ def test_convert_model_detects_unimported_parameters(monkeypatch):
 
 def test_convert_model_success(monkeypatch):
     def _populate_params(_, variables):
-        variables['params']['w'] = jnp.array([42.0], dtype=jnp.float32)
+        variables['w'] = jnp.array([42.0], dtype=jnp.float32)
         return variables
 
     dummy_jax = _DummyJaxModel(use_reduced_cg=True, import_impl=_populate_params)
     _patch_common(monkeypatch, dummy_jax)
     torch_model = types.SimpleNamespace(use_reduced_cg=True)
 
-    model, variables, template = jax_from_torch.convert_model(torch_model, {'cfg': 1})
+    graphdef, state, template = jax_from_torch.convert_model(torch_model, {'cfg': 1})
 
-    assert model is dummy_jax
+    assert graphdef is not None
     assert template == {'dummy': 1}
-    assert jnp.array_equal(
-        variables['params']['w'], jnp.array([42.0], dtype=jnp.float32)
-    )
+    params = state_to_pure_dict(state)
+    assert jnp.array_equal(params['w'], jnp.array([42.0], dtype=jnp.float32))

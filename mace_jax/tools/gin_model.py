@@ -17,10 +17,13 @@ import jax
 import jax.numpy as jnp
 import jraph
 import numpy as np
+from flax import nnx
 
 from mace_jax import data, modules, tools
 from mace_jax.modules.blocks import RealAgnosticResidualInteractionBlock
 from mace_jax.modules.wrapper_ops import CuEquivarianceConfig
+from mace_jax.nnx_config import ConfigVar
+from mace_jax.nnx_utils import state_to_pure_dict
 from mace_jax.tools.dtype import default_dtype
 from mace_jax.tools.utils import pt_head_first
 
@@ -79,6 +82,20 @@ def _serialize_config_value(value):
     if callable(value):
         return _stringify_callable(value)
     return value
+
+
+def _merge_state_dicts(base: dict | None, updates: dict | None) -> dict | None:
+    if base is None:
+        return updates
+    if updates is None:
+        return base
+    merged = dict(base)
+    for key, value in updates.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge_state_dicts(merged.get(key), value)
+        else:
+            merged[key] = value
+    return merged
 
 
 def _export_model_config(mace_module: modules.MACE) -> dict:
@@ -429,17 +446,18 @@ def model(
         config['torch_model_class'] = torch_model.__class__.__name__
 
         logging.info('Converting Torch model to JAX representation')
-        jax_module, variables, _ = mace_jax_from_torch.convert_model(
-            torch_model, config
-        )
-
-        # Separate trainable params from config/state collections.
-        config_state = None
-        if isinstance(variables, dict) or hasattr(variables, 'get'):
-            config_state = variables.get('config') or variables.get('constants')
-            params = variables.get('params', variables)
+        graphdef, state, _ = mace_jax_from_torch.convert_model(torch_model, config)
+        if isinstance(state, nnx.State):
+            params_state, config_state, rest_state = nnx.split_state(
+                state, nnx.Param, ConfigVar, ...
+            )
+            if rest_state:
+                config_state = nnx.merge_state(config_state, rest_state)
+            params = state_to_pure_dict(params_state)
+            config_state = state_to_pure_dict(config_state) if config_state else None
         else:
-            params = variables
+            params = state
+            config_state = None
 
         if torch_param_dtype is not None:
             if torch_param_dtype not in {'float64', 'float32'}:
@@ -482,12 +500,6 @@ def model(
             compute_stress: bool = False,
         ) -> dict[str, jnp.ndarray]:
             """Apply the converted Torch model to a `GraphsTuple` input."""
-            variables_local = parameters
-            if config_state is not None and not (
-                isinstance(parameters, dict) and 'config' in parameters
-            ):
-                variables_local = {'params': parameters, 'config': config_state}
-
             data_dict = _graph_to_data(graph, num_species=num_species_local)
             if torch_head is not None:
                 head_names = config.get('heads') or []
@@ -497,8 +509,24 @@ def model(
                     )
                 head_index = head_names.index(torch_head)
                 data_dict['head'] = jnp.asarray([head_index], dtype=jnp.int32)
-            return jax_module.apply(
-                variables_local,
+
+            if isinstance(state, nnx.State):
+                params_local = parameters
+                cfg_local = config_state
+                if isinstance(parameters, dict) and 'params' in parameters:
+                    params_local = parameters.get('params')
+                    cfg_local = parameters.get('config', cfg_local)
+
+                state_local = _merge_state_dicts(cfg_local, params_local)
+                outputs, _ = graphdef.apply(state_local)(
+                    data_dict,
+                    compute_force=compute_force,
+                    compute_stress=compute_stress,
+                )
+                return outputs
+
+            return graphdef.apply(
+                parameters,
                 data_dict,
                 compute_force=compute_force,
                 compute_stress=compute_stress,
@@ -690,188 +718,218 @@ def model(
     kwargs.setdefault('interaction_cls', RealAgnosticResidualInteractionBlock)
     kwargs.setdefault('interaction_cls_first', RealAgnosticResidualInteractionBlock)
 
-    mace_module = modules.MACE(**kwargs)
-    model_config = _export_model_config(mace_module)
-    config_state = None
+    def _make_apply_fn(predict_fn, *, num_species_local: int, config_state_local=None):
+        def apply_fn(
+            params,
+            graph: jraph.GraphsTuple,
+            *,
+            compute_force: bool = True,
+            compute_stress: bool = False,
+        ) -> dict[str, jnp.ndarray]:
+            """Apply the MACE module to a (possibly padded) graph."""
+            e3nn.config('path_normalization', path_normalization)
+            e3nn.config('gradient_normalization', gradient_normalization)
 
-    def apply_fn(
-        params,
-        graph: jraph.GraphsTuple,
-        *,
-        compute_force: bool = True,
-        compute_stress: bool = False,
-    ) -> dict[str, jnp.ndarray]:
-        """Apply the MACE module to a (possibly padded) graph.
+            params_local = params
+            cfg_local = config_state_local
+            if isinstance(params, dict) and 'params' in params:
+                params_local = params.get('params')
+                cfg_local = params.get('config', cfg_local)
+            state_local = _merge_state_dicts(cfg_local, params_local)
 
-        Args:
-            params: Trainable parameters (and optional config state).
-            graph: Input batch as a `jraph.GraphsTuple`.
-            compute_force: Whether to compute forces from the energy prediction.
-            compute_stress: Whether to compute stress/virials from the energy prediction.
+            graph_mask = jraph.get_graph_padding_mask(graph).astype(default_dtype())
+            graph_mask_bool = graph_mask > 0.0
+            node_mask = jraph.get_node_padding_mask(graph).astype(default_dtype())
+            node_mask_bool = node_mask > 0.0
+            edge_mask = jraph.get_edge_padding_mask(graph).astype(default_dtype())
+            edge_mask_bool = edge_mask > 0.0
 
-        Returns:
-            Dict with `energy`, `forces`, and `stress` arrays (masked for padding).
-        """
-        e3nn.config('path_normalization', path_normalization)
-        e3nn.config('gradient_normalization', gradient_normalization)
+            def _sanitize(array, mask, expand_dims=0):
+                """Fill padded entries with a valid sentinel so masked values are stable."""
+                if array is None:
+                    return None
+                if array.shape[0] == 0:
+                    return array
+                fill = jnp.broadcast_to(array[:1], array.shape)
+                if expand_dims > 0:
+                    broadcast_mask = mask.reshape(mask.shape + (1,) * expand_dims)
+                else:
+                    broadcast_mask = mask
+                return jnp.where(broadcast_mask, array, fill)
 
-        variables_local = params
-        if config_state is not None and not (
-            isinstance(params, dict) and 'config' in params
-        ):
-            variables_local = {'params': params, 'config': config_state}
+            sanitized_nodes = graph.nodes.__class__(
+                positions=_sanitize(
+                    graph.nodes.positions, node_mask_bool, expand_dims=1
+                ),
+                forces=(
+                    _sanitize(graph.nodes.forces, node_mask_bool, expand_dims=1)
+                    if getattr(graph.nodes, 'forces', None) is not None
+                    else None
+                ),
+                species=_sanitize(graph.nodes.species, node_mask_bool),
+            )
+            sanitized_edges = graph.edges.__class__(
+                shifts=_sanitize(graph.edges.shifts, edge_mask_bool, expand_dims=1),
+                unit_shifts=(
+                    _sanitize(graph.edges.unit_shifts, edge_mask_bool, expand_dims=1)
+                    if getattr(graph.edges, 'unit_shifts', None) is not None
+                    else None
+                ),
+            )
+            sanitized_globals = graph.globals.__class__(
+                cell=(
+                    _sanitize(graph.globals.cell, graph_mask_bool, expand_dims=2)
+                    if getattr(graph.globals, 'cell', None) is not None
+                    else None
+                ),
+                energy=(
+                    _sanitize(graph.globals.energy, graph_mask_bool)
+                    if getattr(graph.globals, 'energy', None) is not None
+                    else None
+                ),
+                stress=(
+                    _sanitize(graph.globals.stress, graph_mask_bool, expand_dims=2)
+                    if getattr(graph.globals, 'stress', None) is not None
+                    else None
+                ),
+                weight=graph.globals.weight,
+                head=(
+                    _sanitize(graph.globals.head, graph_mask_bool)
+                    if getattr(graph.globals, 'head', None) is not None
+                    else None
+                ),
+                virials=(
+                    _sanitize(graph.globals.virials, graph_mask_bool, expand_dims=2)
+                    if getattr(graph.globals, 'virials', None) is not None
+                    else None
+                ),
+                dipole=(
+                    _sanitize(graph.globals.dipole, graph_mask_bool, expand_dims=1)
+                    if getattr(graph.globals, 'dipole', None) is not None
+                    else None
+                ),
+                polarizability=(
+                    _sanitize(
+                        graph.globals.polarizability, graph_mask_bool, expand_dims=2
+                    )
+                    if getattr(graph.globals, 'polarizability', None) is not None
+                    else None
+                ),
+                graph_id=(
+                    _sanitize(graph.globals.graph_id, graph_mask_bool)
+                    if getattr(graph.globals, 'graph_id', None) is not None
+                    else None
+                ),
+            )
+            sanitized_graph = graph._replace(
+                nodes=sanitized_nodes, edges=sanitized_edges, globals=sanitized_globals
+            )
 
-        graph_mask = jraph.get_graph_padding_mask(graph).astype(default_dtype())
-        graph_mask_bool = graph_mask > 0.0
-        node_mask = jraph.get_node_padding_mask(graph).astype(default_dtype())
-        node_mask_bool = node_mask > 0.0
-        edge_mask = jraph.get_edge_padding_mask(graph).astype(default_dtype())
-        edge_mask_bool = edge_mask > 0.0
+            data_dict = _graph_to_data(sanitized_graph, num_species=num_species_local)
+            outputs = predict_fn(
+                state_local,
+                data_dict,
+                compute_force=compute_force,
+                compute_stress=compute_stress,
+            )
 
-        def _sanitize(array, mask, expand_dims=0):
-            """Fill padded entries with a valid sentinel so masked values are stable."""
-            if array is None:
-                return None
-            if array.shape[0] == 0:
-                return array
-            fill = jnp.broadcast_to(array[:1], array.shape)
-            if expand_dims > 0:
-                broadcast_mask = mask.reshape(mask.shape + (1,) * expand_dims)
+            # Apply optional rescaling consistent with the historical Haiku version.
+            num_nodes = graph.n_node.astype(default_dtype())
+            graph_heads = getattr(graph.globals, 'head', None)
+            if graph_heads is None:
+                graph_heads = jnp.zeros_like(graph.n_node, dtype=jnp.int32)
             else:
-                broadcast_mask = mask
-            return jnp.where(broadcast_mask, array, fill)
+                graph_heads = jnp.asarray(graph_heads, dtype=jnp.int32).reshape(-1)
 
-        sanitized_nodes = graph.nodes.__class__(
-            positions=_sanitize(graph.nodes.positions, node_mask_bool, expand_dims=1),
-            forces=(
-                _sanitize(graph.nodes.forces, node_mask_bool, expand_dims=1)
-                if getattr(graph.nodes, 'forces', None) is not None
-                else None
-            ),
-            species=_sanitize(graph.nodes.species, node_mask_bool),
-        )
-        sanitized_edges = graph.edges.__class__(
-            shifts=_sanitize(graph.edges.shifts, edge_mask_bool, expand_dims=1),
-            unit_shifts=(
-                _sanitize(graph.edges.unit_shifts, edge_mask_bool, expand_dims=1)
-                if getattr(graph.edges, 'unit_shifts', None) is not None
-                else None
-            ),
-        )
-        sanitized_globals = graph.globals.__class__(
-            cell=(
-                _sanitize(graph.globals.cell, graph_mask_bool, expand_dims=2)
-                if getattr(graph.globals, 'cell', None) is not None
-                else None
-            ),
-            energy=(
-                _sanitize(graph.globals.energy, graph_mask_bool)
-                if getattr(graph.globals, 'energy', None) is not None
-                else None
-            ),
-            stress=(
-                _sanitize(graph.globals.stress, graph_mask_bool, expand_dims=2)
-                if getattr(graph.globals, 'stress', None) is not None
-                else None
-            ),
-            weight=graph.globals.weight,
-            head=(
-                _sanitize(graph.globals.head, graph_mask_bool)
-                if getattr(graph.globals, 'head', None) is not None
-                else None
-            ),
-            virials=(
-                _sanitize(graph.globals.virials, graph_mask_bool, expand_dims=2)
-                if getattr(graph.globals, 'virials', None) is not None
-                else None
-            ),
-            dipole=(
-                _sanitize(graph.globals.dipole, graph_mask_bool, expand_dims=1)
-                if getattr(graph.globals, 'dipole', None) is not None
-                else None
-            ),
-            polarizability=(
-                _sanitize(graph.globals.polarizability, graph_mask_bool, expand_dims=2)
-                if getattr(graph.globals, 'polarizability', None) is not None
-                else None
-            ),
-            graph_id=(
-                _sanitize(graph.globals.graph_id, graph_mask_bool)
-                if getattr(graph.globals, 'graph_id', None) is not None
-                else None
-            ),
-        )
-        sanitized_graph = graph._replace(
-            nodes=sanitized_nodes, edges=sanitized_edges, globals=sanitized_globals
-        )
+            mean_arr = jnp.asarray(mean, dtype=default_dtype())
+            std_arr = jnp.asarray(std, dtype=default_dtype())
+            if mean_arr.ndim == 0:
+                mean_graph = mean_arr
+            else:
+                mean_graph = mean_arr[graph_heads]
+            if std_arr.ndim == 0:
+                std_graph = std_arr
+            else:
+                std_graph = std_arr[graph_heads]
 
-        data_dict = _graph_to_data(sanitized_graph, num_species=num_species)
-        outputs = mace_module.apply(
-            variables_local,
+            energy = outputs.get('energy')
+            if energy is not None:
+                energy = std_graph * jnp.nan_to_num(energy) + mean_graph * num_nodes
+                energy = energy * graph_mask
+
+            forces = outputs.get('forces')
+            if forces is not None:
+                if std_arr.ndim == 0:
+                    forces = std_graph * jnp.nan_to_num(forces)
+                else:
+                    node_scale = jnp.repeat(
+                        std_graph, graph.n_node, total_repeat_length=forces.shape[0]
+                    )
+                    forces = node_scale[:, None] * jnp.nan_to_num(forces)
+                forces = forces * node_mask[:, None]
+
+            stress = outputs.get('stress')
+            if stress is not None:
+                stress = std_graph * jnp.nan_to_num(stress)
+                stress = stress * graph_mask[:, None, None]
+
+            return {
+                'energy': energy,
+                'forces': forces,
+                'stress': stress,
+            }
+
+        return apply_fn
+
+    rngs = nnx.Rngs(initialize_seed or 0)
+    mace_module = modules.MACE(rngs=rngs, **kwargs)
+    if isinstance(mace_module, nnx.Module):
+        graphdef, state = nnx.split(mace_module)
+        params_state, config_state, rest_state = nnx.split_state(
+            state, nnx.Param, ConfigVar, ...
+        )
+        if rest_state:
+            config_state = nnx.merge_state(config_state, rest_state)
+        params = state_to_pure_dict(params_state)
+        config_state = state_to_pure_dict(config_state) if config_state else None
+        params_bundle = (
+            {'params': params, 'config': config_state} if config_state else params
+        )
+        model_config = _export_model_config(mace_module)
+
+        def _predict(state_local, data_dict, *, compute_force, compute_stress):
+            outputs, _ = graphdef.apply(state_local)(
+                data_dict,
+                compute_force=compute_force,
+                compute_stress=compute_stress,
+            )
+            return outputs
+
+        apply_fn = _make_apply_fn(
+            _predict, num_species_local=num_species, config_state_local=config_state
+        )
+        apply_fn.model_config = model_config
+        return apply_fn, params_bundle, num_interactions
+
+    if not train_graphs:
+        raise ValueError('train_graphs is required to initialize non-NNX MACE modules.')
+
+    sample_graph = train_graphs[0]
+    data_dict = _graph_to_data(sample_graph, num_species=num_species)
+    params = mace_module.init(jax.random.PRNGKey(initialize_seed or 0), data_dict)
+    params_bundle = params
+    model_config = _export_model_config(mace_module)
+
+    def _predict(state_local, data_dict, *, compute_force, compute_stress):
+        return mace_module.apply(
+            state_local,
             data_dict,
             compute_force=compute_force,
             compute_stress=compute_stress,
         )
 
-        # Apply optional rescaling consistent with the historical Haiku version.
-        num_nodes = graph.n_node.astype(default_dtype())
-        graph_heads = getattr(graph.globals, 'head', None)
-        if graph_heads is None:
-            graph_heads = jnp.zeros_like(graph.n_node, dtype=jnp.int32)
-        else:
-            graph_heads = jnp.asarray(graph_heads, dtype=jnp.int32).reshape(-1)
-
-        mean_arr = jnp.asarray(mean, dtype=default_dtype())
-        std_arr = jnp.asarray(std, dtype=default_dtype())
-        if mean_arr.ndim == 0:
-            mean_graph = mean_arr
-        else:
-            mean_graph = mean_arr[graph_heads]
-        if std_arr.ndim == 0:
-            std_graph = std_arr
-        else:
-            std_graph = std_arr[graph_heads]
-
-        energy = outputs['energy']
-        if energy is not None:
-            energy = std_graph * jnp.nan_to_num(energy) + mean_graph * num_nodes
-            energy = energy * graph_mask
-
-        forces = outputs['forces']
-        if forces is not None:
-            if std_arr.ndim == 0:
-                forces = std_graph * jnp.nan_to_num(forces)
-            else:
-                node_scale = jnp.repeat(
-                    std_graph, graph.n_node, total_repeat_length=forces.shape[0]
-                )
-                forces = node_scale[:, None] * jnp.nan_to_num(forces)
-            forces = forces * node_mask[:, None]
-
-        stress = outputs['stress']
-        if stress is not None:
-            stress = std_graph * jnp.nan_to_num(stress)
-            stress = stress * graph_mask[:, None, None]
-
-        return {
-            'energy': energy,
-            'forces': forces,
-            'stress': stress,
-        }
-
-    params = None
-    if initialize_seed is not None and train_graphs:
-        example_graph = train_graphs[0]
-        example_data = _graph_to_data(example_graph, num_species=num_species)
-        variables = mace_module.init(jax.random.PRNGKey(initialize_seed), example_data)
-        if isinstance(variables, dict) or hasattr(variables, 'get'):
-            params = variables.get('params', variables)
-            config_state = variables.get('config')
-        else:
-            params = variables
-
-    params_bundle = (
-        {'params': params, 'config': config_state} if config_state else params
+    apply_fn = _make_apply_fn(
+        _predict, num_species_local=num_species, config_state_local=None
     )
     apply_fn.model_config = model_config
     return apply_fn, params_bundle, num_interactions

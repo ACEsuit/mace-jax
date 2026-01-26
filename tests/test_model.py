@@ -10,6 +10,7 @@ import torch
 from ase import Atoms
 from ase.build import bulk
 from e3nn_jax import Irreps
+from flax import nnx
 from mace.data.atomic_data import AtomicData
 from mace.data.utils import config_from_atoms
 from mace.tools import torch_geometric
@@ -27,6 +28,7 @@ except Exception as exc:  # pragma: no cover
     _TORCH_MODEL_IMPORT_ERROR = exc
 
 from mace_jax import modules
+from mace_jax.modules.wrapper_ops import CuEquivarianceConfig
 from mace_jax.tools.import_from_torch import import_from_torch
 
 
@@ -67,8 +69,30 @@ def configure_model_jax(
     z_table=None,
     model_foundation=None,
     head_configs=None,
+    rngs: nnx.Rngs | None = None,
 ):
     import ast  # noqa: PLC0415
+
+    if rngs is None:
+        rngs = nnx.Rngs(0)
+
+    cueq_config = None
+    if getattr(args, 'only_cueq', False):
+        cueq_config = CuEquivarianceConfig(
+            enabled=True,
+            layout='ir_mul',
+            group='O3_e3nn',
+            optimize_all=True,
+            conv_fusion=(getattr(args, 'device', None) == 'cuda'),
+        )
+    elif getattr(args, 'enable_cueq', False):
+        cueq_config = CuEquivarianceConfig(
+            enabled=True,
+            layout='mul_ir',
+            group='O3',
+            optimize_all=True,
+            conv_fusion=(getattr(args, 'device', None) == 'cuda'),
+        )
 
     model_config = dict(
         r_max=args.r_max,
@@ -86,7 +110,7 @@ def configure_model_jax(
         atomic_numbers=tuple(int(z) for z in z_table.zs),
         use_reduced_cg=args.use_reduced_cg,
         use_so3=args.use_so3,
-        cueq_config=None,
+        cueq_config=cueq_config,
     )
     return modules.ScaleShiftMACE(
         **model_config,
@@ -98,6 +122,7 @@ def configure_model_jax(
         MLP_irreps=Irreps(args.MLP_irreps),
         atomic_inter_scale=args.std,
         atomic_inter_shift=args.mean,
+        rngs=rngs,
         radial_MLP=ast.literal_eval(args.radial_MLP),
         radial_type=args.radial_type,
         heads=tuple(args.heads) if args.heads is not None else None,
@@ -216,20 +241,20 @@ class ModelEquivalenceTestBase:
             else None
         )
 
-        init_rng = jax.random.PRNGKey(0)
         cls.jax_model = configure_model_jax(
             cls.args,
             atomic_energies=cls.statistics['atomic_energies'],
             z_table=cls.statistics['atomic_numbers'],
+            rngs=nnx.Rngs(0),
         )
-        cls.jax_params = cls.jax_model.init(init_rng, cls.batch_jax)
+        cls.jax_params = nnx.state(cls.jax_model)
         cls.jax_params = import_from_torch(
             cls.jax_model,
             cls.torch_model,
             cls.jax_params,
         )
-        jax_output = cls.jax_model.apply(
-            cls.jax_params,
+        cls.jax_graphdef, cls.jax_params = nnx.split(cls.jax_model)
+        jax_output, _ = cls.jax_graphdef.apply(cls.jax_params)(
             cls.batch_jax,
             compute_stress=True,
         )
@@ -423,25 +448,9 @@ class ModelEquivalenceTestBase:
         # --- JAX side capture ---
         data_jax = cls.batch_jax
 
-        from mace_jax.modules.blocks import (  # noqa: PLC0415
-            EquivariantProductBasisBlock,
-            InteractionBlock,
+        from mace_jax.modules.utils import (  # noqa: PLC0415
+            prepare_graph as prepare_graph_jax,
         )
-
-        def _capture_filter(module, _):
-            return isinstance(
-                module,
-                (InteractionBlock, EquivariantProductBasisBlock),
-            )
-
-        _, intermediates = cls.jax_model.apply(
-            cls.jax_params,
-            data_jax,
-            compute_stress=True,
-            capture_intermediates=_capture_filter,
-            mutable=['intermediates'],
-        )
-        intermediate_store = intermediates['intermediates']
 
         def _to_numpy(value):
             if isinstance(value, tuple):
@@ -450,28 +459,74 @@ class ModelEquivalenceTestBase:
                 return np.asarray(value.array)
             return np.asarray(value)
 
-        num_blocks = len(torch_products)
+        model = nnx.merge(cls.jax_graphdef, cls.jax_params)
+        ctx_jax = prepare_graph_jax(data_jax)
+
+        node_attrs = data_jax['node_attrs']
+        need_node_attrs_index = model.pair_repulsion or model.distance_transform in {
+            'Agnesi',
+            'Soft',
+        }
+        if model.cueq_config is not None and getattr(
+            model.cueq_config, 'enabled', False
+        ):
+            need_node_attrs_index = need_node_attrs_index or bool(
+                getattr(model.cueq_config, 'optimize_all', False)
+                or getattr(model.cueq_config, 'optimize_symmetric', False)
+            )
+        node_attrs_index = data_jax.get('node_attrs_index')
+        if node_attrs_index is None:
+            node_attrs_index = data_jax.get('node_type')
+        if node_attrs_index is None:
+            node_attrs_index = data_jax.get('species')
+        if node_attrs_index is not None and getattr(node_attrs_index, 'ndim', 1) != 1:
+            node_attrs_index = None
+        if node_attrs_index is None and need_node_attrs_index:
+            node_attrs_index = jnp.argmax(node_attrs, axis=1)
+        if node_attrs_index is not None:
+            node_attrs_index = jnp.asarray(node_attrs_index, dtype=jnp.int32)
+
+        node_feats = model.node_embedding(node_attrs)
+        edge_attrs = model.spherical_harmonics(ctx_jax.vectors)
+        edge_feats, cutoff = model.radial_embedding(
+            ctx_jax.lengths,
+            node_attrs,
+            data_jax['edge_index'],
+            model._atomic_numbers,
+            node_attrs_index=node_attrs_index,
+        )
+
+        if model._embedding_specs:
+            embedding_features = {
+                name: data_jax[name] for name in model._embedding_names
+            }
+            node_feats = node_feats + model.joint_embedding(
+                data_jax['batch'], embedding_features
+            )
+
         jax_interactions: list[np.ndarray] = []
         jax_products: list[np.ndarray] = []
-        for idx in range(num_blocks):
-            int_key = f'interactions_{idx}'
-            prod_key = f'products_{idx}'
-            if int_key not in intermediate_store or prod_key not in intermediate_store:
-                raise AssertionError(f'Missing captured intermediates for block {idx}.')
-            int_container = intermediate_store[int_key]
-            prod_container = intermediate_store[prod_key]
-
-            def _extract_call(container):
-                if isinstance(container, dict):
-                    container = container.get('__call__', container)
-                if isinstance(container, (list, tuple)):
-                    return container[0]
-                return container
-
-            int_output = _extract_call(int_container)
-            prod_output = _extract_call(prod_container)
-            jax_interactions.append(_to_numpy(int_output))
-            jax_products.append(_to_numpy(prod_output))
+        for idx, (interaction, product) in enumerate(
+            zip(model.interactions, model.products)
+        ):
+            node_feats, sc = interaction(
+                node_attrs=node_attrs,
+                node_feats=node_feats,
+                edge_attrs=edge_attrs,
+                edge_feats=edge_feats,
+                edge_index=data_jax['edge_index'],
+                cutoff=cutoff,
+                n_real=None,
+                first_layer=(idx == 0),
+            )
+            jax_interactions.append(_to_numpy(node_feats))
+            node_feats = product(
+                node_feats=node_feats,
+                sc=sc,
+                node_attrs=node_attrs,
+                node_attrs_index=node_attrs_index,
+            )
+            jax_products.append(_to_numpy(node_feats))
 
         def _align_to_reference(
             j_block: np.ndarray, ref_block: np.ndarray
@@ -686,13 +741,16 @@ class TestModelEquivalenceSmallJitted(TestModelEquivalenceSmall):
 
     def test_jitted_apply_matches_eager(self):
         """Ensure the jitted apply produces identical outputs to eager mode."""
-        jitted = jax.jit(self.jax_model.apply)
+
+        def apply_fn(params, batch, compute_stress=False):
+            outputs, _ = self.jax_graphdef.apply(params)(
+                batch, compute_stress=compute_stress
+            )
+            return outputs
+
+        jitted = jax.jit(apply_fn)
         traced = jitted(self.jax_params, self.batch_jax, compute_stress=False)
-        eager = self.jax_model.apply(
-            self.jax_params,
-            self.batch_jax,
-            compute_stress=False,
-        )
+        eager = apply_fn(self.jax_params, self.batch_jax, compute_stress=False)
         for key, eager_value in eager.items():
             traced_value = traced[key]
             if eager_value is None or traced_value is None:

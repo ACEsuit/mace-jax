@@ -12,6 +12,7 @@ from flax import serialization
 from mace.tools.scripts_utils import extract_config_mace_model
 
 from mace_jax.calculators.lammps_mliap_mace import create_lammps_mliap_calculator
+from mace_jax.nnx_utils import state_to_pure_dict
 
 from .mace_jax_from_torch import convert_model
 
@@ -70,13 +71,14 @@ def main() -> None:
         raise RuntimeError(config['error'])
     config['torch_model_class'] = torch_model.__class__.__name__
 
-    jax_model, variables, _ = convert_model(torch_model, config)
+    graphdef, state, _ = convert_model(torch_model, config)
+    variables = state_to_pure_dict(state)
 
     if args.dtype == 'float32':
         variables = jax.tree_util.tree_map(lambda x: x.astype('float32'), variables)
 
     lammps_wrapper = create_lammps_mliap_calculator(
-        jax_model,
+        graphdef,
         variables,
         head=args.head,
     )
@@ -103,10 +105,11 @@ def main() -> None:
     print(
         '  from mace_jax.calculators.lammps_mliap_mace import create_lammps_mliap_calculator'
     )
+    print('  from flax import nnx')
     print('  artifact = pickle.load(open(path, "rb"))')
-    print('  jax_model, variables, _ = convert_model(torch_model, artifact["config"])')
+    print('  graphdef, state, _ = convert_model(torch_model, artifact["config"])')
     print(
-        '  wrapper = create_lammps_mliap_calculator(jax_model, variables, head=artifact["head"])'
+        '  wrapper = create_lammps_mliap_calculator(graphdef, state_to_pure_dict(state), head=artifact["head"])'
     )
     if args.device != 'auto':
         print(

@@ -1,12 +1,13 @@
-import jax
 import jax.numpy as jnp
 import numpy as np
 import torch
 from e3nn import o3
 from e3nn.nn import Gate as GateTorch
 from e3nn_jax import Irreps, IrrepsArray
+from flax import nnx
 
 from mace_jax.adapters.e3nn.nn._gate import Gate as GateJAX
+from mace_jax.nnx_utils import state_to_pure_dict
 
 
 class TestGate:
@@ -54,9 +55,10 @@ class TestGate:
             irreps_gated=Irreps(irreps_gated),
         )
 
-        variables = gate_flax.init(jax.random.PRNGKey(42), features_jax)
+        graphdef, state = nnx.split(gate_flax)
+        variables = state_to_pure_dict(state)
         variables = GateJAX.import_from_torch(gate_torch, variables)
-        out_jax = gate_flax.apply(variables, features_jax)
+        out_jax, _ = graphdef.apply(variables)(features_jax)
         out_jax_array = np.asarray(
             out_jax.array if hasattr(out_jax, 'array') else out_jax
         )

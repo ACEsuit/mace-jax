@@ -1,15 +1,15 @@
-import flax.linen as fnn
 import jax
 import jax.numpy as jnp
 import numpy as np
 import torch
 from e3nn_jax import Irreps
+from flax import nnx
 from mace.modules.blocks import (
     LinearNodeEmbeddingBlock as TorchLinearNodeEmbeddingBlock,
 )
 from mace.modules.blocks import ScaleShiftBlock as TorchScaleShiftBlock
 
-from mace_jax.adapters.flax.torch import init_from_torch
+from mace_jax.adapters.nnx.torch import init_from_torch
 from mace_jax.modules.blocks import (
     LinearNodeEmbeddingBlock as FlaxLinearNodeEmbeddingBlock,
 )
@@ -34,13 +34,8 @@ class TestScaleShiftImport:
         torch_module = TorchScaleShiftBlock(scale=scale, shift=shift).float().eval()
 
         flax_module = FlaxScaleShiftBlock(scale=scale, shift=shift)
-        flax_module, variables = init_from_torch(
-            flax_module,
-            torch_module,
-            jax.random.PRNGKey(0),
-            jnp.asarray([0.0, 0.0], dtype=jnp.float32),
-            jnp.asarray([0, 1], dtype=jnp.int32),
-        )
+        flax_module, _ = init_from_torch(flax_module, torch_module)
+        graphdef, state = nnx.split(flax_module)
 
         x_np = np.array([0.8, -1.2], dtype=np.float32)
         head_np = np.array([0, 1], dtype=np.int32)
@@ -48,8 +43,7 @@ class TestScaleShiftImport:
             torch.tensor(x_np, dtype=torch.float32),
             torch.tensor(head_np, dtype=torch.long),
         )
-        flax_out = flax_module.apply(
-            variables,
+        flax_out, _ = graphdef.apply(state)(
             jnp.asarray(x_np),
             jnp.asarray(head_np),
         )
@@ -68,34 +62,32 @@ class TestLinearEmbeddingImport:
         torch_module.eval()
 
         flax_module = FlaxLinearNodeEmbeddingBlock(
-            irreps_in=irreps_in, irreps_out=irreps_out
+            irreps_in=irreps_in, irreps_out=irreps_out, rngs=nnx.Rngs(0)
         )
 
-        rng = jax.random.PRNGKey(123)
         x_np = (
             np.random.default_rng(0)
             .standard_normal((5, irreps_in.dim))
             .astype(np.float32)
         )
 
-        flax_module, variables = init_from_torch(
-            flax_module,
-            torch_module,
-            rng,
-            jnp.asarray(x_np),
-        )
+        flax_module, _ = init_from_torch(flax_module, torch_module)
+        graphdef, state = nnx.split(flax_module)
 
         torch_out = torch_module(torch.tensor(x_np, dtype=torch.float32))
-        flax_out = flax_module.apply(variables, jnp.asarray(x_np))
+        flax_out, _ = graphdef.apply(state)(jnp.asarray(x_np))
 
         np.testing.assert_allclose(_np(flax_out), _np(torch_out), atol=1e-5, rtol=1e-5)
 
 
 @add_output_interface
-class _HookeModel(fnn.Module):
+class _HookeModel(nnx.Module):
     """Simple quadratic energy to exercise get_outputs."""
 
     stiffness: float = 2.0
+
+    def __init__(self, stiffness: float = 2.0) -> None:
+        self.stiffness = stiffness
 
     def __call__(self, data):
         energy = 0.5 * self.stiffness * jnp.sum(data['positions'] ** 2, axis=-1)
@@ -119,17 +111,19 @@ class TestOutputInterface:
         model = _HookeModel(stiffness=1.5)
         data = self._graph()
 
-        variables = model.init(jax.random.PRNGKey(0), data)
+        graphdef, state = nnx.split(model)
 
-        outputs = model.apply(variables, data, compute_force=True, compute_stress=False)
+        outputs, _ = graphdef.apply(state)(
+            data, compute_force=True, compute_stress=False
+        )
         expected_forces = -model.stiffness * data['positions']
         np.testing.assert_allclose(
             _np(outputs['forces']), _np(expected_forces), atol=1e-6, rtol=1e-6
         )
         assert outputs['stress'] is None
 
-        outputs_stress = model.apply(
-            variables, data, compute_force=False, compute_stress=True
+        outputs_stress, _ = graphdef.apply(state)(
+            data, compute_force=False, compute_stress=True
         )
         assert outputs_stress['forces'] is not None
         stress = _np(outputs_stress['stress'])
@@ -141,7 +135,8 @@ class TestOutputInterface:
                 new_data['shifts'] = shifts
             if cell_override is not None:
                 new_data['cell'] = cell_override
-            return model.apply(variables, new_data, method=model._energy_fn)
+            out, _ = graphdef.apply(state)._energy_fn(new_data)
+            return out
 
         forces_direct, stress_direct = compute_forces_and_stress(
             energy_core,
@@ -169,12 +164,18 @@ class TestOutputInterface:
     def test_jitted_apply_handles_optional_outputs(self):
         model = _HookeModel(stiffness=1.5)
         data = self._graph()
-        variables = model.init(jax.random.PRNGKey(0), data)
+        graphdef, state = nnx.split(model)
 
-        compiled_apply = jax.jit(model.apply)
+        def _apply_fn(p, d, compute_force=False, compute_stress=False):
+            out, _ = graphdef.apply(p)(
+                d, compute_force=compute_force, compute_stress=compute_stress
+            )
+            return out
+
+        compiled_apply = jax.jit(_apply_fn)
 
         energy_only = compiled_apply(
-            variables,
+            state,
             data,
             compute_force=False,
             compute_stress=False,
@@ -186,7 +187,7 @@ class TestOutputInterface:
         assert energy_only['forces'].shape == data['positions'].shape
 
         full_outputs = compiled_apply(
-            variables,
+            state,
             data,
             compute_force=True,
             compute_stress=True,

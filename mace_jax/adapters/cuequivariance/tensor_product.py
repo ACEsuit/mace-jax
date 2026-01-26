@@ -6,12 +6,12 @@ import cuequivariance_jax as cuex
 import jax
 import jax.numpy as jnp
 from e3nn_jax import Irreps  # type: ignore
-from flax import linen as fnn
-from flax.core import freeze, unfreeze
+from flax import nnx
 
 import cuequivariance as cue
-from mace_jax.adapters.flax.torch import auto_import_from_torch_flax
+from mace_jax.adapters.nnx.torch import nxx_auto_import_from_torch
 from mace_jax.tools.cg import O3_e3nn
+from mace_jax.tools.dtype import default_dtype
 from mace_jax.tools.scatter import scatter_sum
 
 from .utility import collapse_ir_mul_segments, ir_mul_to_mul_ir, mul_ir_to_ir_mul
@@ -82,8 +82,8 @@ def _normalise_instruction(inst) -> tuple[int, int, int, str, bool, float]:
     )
 
 
-@auto_import_from_torch_flax(allow_missing_mapper=True)
-class TensorProduct(fnn.Module):
+@nxx_auto_import_from_torch(allow_missing_mapper=True)
+class TensorProduct(nnx.Module):
     """Channel-wise tensor product evaluated with cuequivariance-jax.
 
     This module wraps the cue channel-wise tensor product descriptor, taking two
@@ -103,14 +103,28 @@ class TensorProduct(fnn.Module):
     conv_fusion: bool = False
     group: object = O3_e3nn
 
-    def setup(self) -> None:
-        """Initialise cue descriptors and validate the instruction template.
-
-        Raises:
-            ValueError: If the requested output irreps cannot be produced by the
-                channel-wise descriptor, or if user-specified instructions are
-                incompatible with the e3nn-generated pattern.
-        """
+    def __init__(
+        self,
+        irreps_in1: Irreps,
+        irreps_in2: Irreps,
+        irreps_out: Irreps,
+        shared_weights: bool = False,
+        internal_weights: bool = False,
+        instructions: list[tuple[int, int, int, str, bool, float]] | None = None,
+        conv_fusion: bool = False,
+        group: object = O3_e3nn,
+        *,
+        rngs: nnx.Rngs | None = None,
+    ) -> None:
+        self.irreps_in1 = irreps_in1
+        self.irreps_in2 = irreps_in2
+        self.irreps_out = irreps_out
+        self.shared_weights = shared_weights
+        self.internal_weights = internal_weights
+        self.instructions = instructions
+        self.conv_fusion = conv_fusion
+        self.group = group
+        # Initialise cue descriptors and validate the instruction template.
         if self.internal_weights and not self.shared_weights:
             raise ValueError(
                 'TensorProduct requires shared_weights=True when internal_weights=True'
@@ -153,8 +167,8 @@ class TensorProduct(fnn.Module):
                     f'{self.instructions!r}'
                 )
 
-        object.__setattr__(self, '_conv_fusion', bool(self.conv_fusion))
-        object.__setattr__(self, '_conv_method', 'naive')
+        self._conv_fusion = bool(self.conv_fusion)
+        self._conv_method = 'naive'
 
         conv_polynomial = None
         if self._conv_fusion:
@@ -171,12 +185,25 @@ class TensorProduct(fnn.Module):
                 conv_polynomial = conv_descriptor.polynomial
             except ValueError:
                 conv_polynomial = None
-        object.__setattr__(self, '_conv_polynomial', conv_polynomial)
+        self._conv_polynomial = conv_polynomial
+        if self._internal_weights:
+            if rngs is None:
+                raise ValueError('rngs is required when internal_weights=True')
+            self.weight = nnx.Param(
+                jax.random.normal(
+                    rngs(),
+                    (1, self.weight_numel),
+                    dtype=default_dtype(),
+                )
+            )
+        else:
+            self.weight = None
 
     def _weight_param(self) -> jnp.ndarray:
         """Create the shared/internal weight parameter."""
-        init = lambda rng: jax.random.normal(rng, (1, self.weight_numel))
-        return self.param('weight', init)
+        if self.weight is None:
+            raise ValueError('Internal weights are not initialized for TensorProduct.')
+        return self.weight
 
     def _as_rep(
         self,
@@ -235,7 +262,6 @@ class TensorProduct(fnn.Module):
 
         return tensor
 
-    @fnn.compact
     def __call__(
         self,
         x1: jnp.ndarray,
@@ -401,10 +427,9 @@ class TensorProduct(fnn.Module):
         return ir_mul_to_mul_ir(out_ir_mul, irreps_out)
 
 
-def _tensor_product_import_from_torch(cls, torch_module, flax_variables):
-    """Copy Torch tensor product weights into the Flax parameter tree."""
-    variables = unfreeze(flax_variables)
-    params = variables.setdefault('params', {})
+def _tensor_product_import_from_torch(cls, torch_module, variables):
+    """Copy Torch tensor product weights into the NNX parameter dict."""
+    params = variables
 
     if (
         getattr(torch_module, 'internal_weights', False)
@@ -417,8 +442,7 @@ def _tensor_product_import_from_torch(cls, torch_module, flax_variables):
         dtype = existing.dtype if existing is not None else weight_np.dtype
         params['weight'] = jnp.asarray(weight_np, dtype=dtype)
 
-    variables['params'] = params
-    return freeze(variables)
+    return params
 
 
 TensorProduct.import_from_torch = classmethod(_tensor_product_import_from_torch)

@@ -11,41 +11,54 @@ import ase
 import jax
 import jax.numpy as jnp
 import numpy as np
-from flax import linen as fnn
+from flax import nnx
 
-from mace_jax.adapters.flax.torch import (
-    auto_import_from_torch_flax,
-)
+from mace_jax.adapters.nnx.torch import nxx_auto_import_from_torch
 from mace_jax.tools.dtype import default_dtype
 from mace_jax.tools.scatter import scatter_sum
 
 from .special import chebyshev_polynomial_t
 
 
-@auto_import_from_torch_flax(allow_missing_mapper=True)
-class BesselBasis(fnn.Module):
+@nxx_auto_import_from_torch(allow_missing_mapper=True)
+class BesselBasis(nnx.Module):
     """Flax implementation of the Bessel basis from MACE."""
 
     r_max: float
     num_basis: int = 8
     trainable: bool = False
 
-    @fnn.compact
-    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
-        x = jnp.asarray(x)
-        dtype = x.dtype
+    def __init__(
+        self,
+        r_max: float,
+        num_basis: int = 8,
+        trainable: bool = False,
+        *,
+        rngs: nnx.Rngs | None = None,
+    ) -> None:
+        self.r_max = r_max
+        self.num_basis = num_basis
+        self.trainable = trainable
         init_bessel = (
             np.pi
             / float(self.r_max)
             * jnp.linspace(1.0, self.num_basis, self.num_basis, dtype=default_dtype())
         )
-
+        self._bessel_weights = init_bessel
         if self.trainable:
-            bessel_weights = self.param(
-                'bessel_weights', lambda rng: init_bessel
-            ).astype(dtype)
+            if rngs is None:
+                raise ValueError('rngs is required for trainable BesselBasis')
+            self.bessel_weights = nnx.Param(init_bessel)
         else:
-            bessel_weights = init_bessel.astype(dtype)
+            self.bessel_weights = None
+
+    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+        x = jnp.asarray(x)
+        dtype = x.dtype
+        if self.trainable and self.bessel_weights is not None:
+            bessel_weights = jnp.asarray(self.bessel_weights, dtype=dtype)
+        else:
+            bessel_weights = jnp.asarray(self._bessel_weights, dtype=dtype)
 
         prefactor = jnp.sqrt(2.0 / jnp.asarray(self.r_max, dtype=dtype))
 
@@ -68,12 +81,16 @@ class BesselBasis(fnn.Module):
         )
 
 
-@auto_import_from_torch_flax(allow_missing_mapper=True)
-class ChebychevBasis(fnn.Module):
+@nxx_auto_import_from_torch(allow_missing_mapper=True)
+class ChebychevBasis(nnx.Module):
     """Flax implementation of the Chebyshev polynomial basis."""
 
     r_max: float
     num_basis: int = 8
+
+    def __init__(self, r_max: float, num_basis: int = 8) -> None:
+        self.r_max = r_max
+        self.num_basis = num_basis
 
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
         dtype = x.dtype
@@ -87,27 +104,42 @@ class ChebychevBasis(fnn.Module):
         )
 
 
-@auto_import_from_torch_flax(allow_missing_mapper=True)
-class GaussianBasis(fnn.Module):
+@nxx_auto_import_from_torch(allow_missing_mapper=True)
+class GaussianBasis(nnx.Module):
     """Gaussian radial basis functions."""
 
     r_max: float
     num_basis: int = 128
     trainable: bool = False
 
-    @fnn.compact
-    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
-        dtype = x.dtype
+    def __init__(
+        self,
+        r_max: float,
+        num_basis: int = 128,
+        trainable: bool = False,
+        *,
+        rngs: nnx.Rngs | None = None,
+    ) -> None:
+        self.r_max = r_max
+        self.num_basis = num_basis
+        self.trainable = trainable
         init_gaussians = jnp.linspace(
             0.0, float(self.r_max), self.num_basis, dtype=default_dtype()
         )
-
+        self._gaussian_weights = init_gaussians
         if self.trainable:
-            gaussian_weights = self.param(
-                'gaussian_weights', lambda rng: init_gaussians
-            ).astype(dtype)
+            if rngs is None:
+                raise ValueError('rngs is required for trainable GaussianBasis')
+            self.gaussian_weights = nnx.Param(init_gaussians)
         else:
-            gaussian_weights = init_gaussians.astype(dtype)
+            self.gaussian_weights = None
+
+    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+        dtype = x.dtype
+        if self.trainable and self.gaussian_weights is not None:
+            gaussian_weights = jnp.asarray(self.gaussian_weights, dtype=dtype)
+        else:
+            gaussian_weights = jnp.asarray(self._gaussian_weights, dtype=dtype)
 
         spacing = float(self.r_max) / float(self.num_basis - 1)
         coeff = jnp.asarray(-0.5 / (spacing**2), dtype=dtype)
@@ -115,11 +147,15 @@ class GaussianBasis(fnn.Module):
         return jnp.exp(coeff * jnp.square(shifted))
 
 
-class PolynomialCutoff(fnn.Module):
+class PolynomialCutoff(nnx.Module):
     """Polynomial cutoff function that goes from 1 to 0 as r approaches r_max."""
 
     r_max: float
     p: int = 6
+
+    def __init__(self, r_max: float, p: int = 6) -> None:
+        self.r_max = r_max
+        self.p = p
 
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
         r_max = jnp.asarray(self.r_max, dtype=x.dtype)
@@ -145,15 +181,25 @@ class PolynomialCutoff(fnn.Module):
         return f'{self.__class__.__name__}(p={self.p}, r_max={self.r_max})'
 
 
-@auto_import_from_torch_flax(allow_missing_mapper=True)
-class ZBLBasis(fnn.Module):
+@nxx_auto_import_from_torch(allow_missing_mapper=True)
+class ZBLBasis(nnx.Module):
     """Ziegler-Biersack-Littmark (ZBL) potential with polynomial cutoff."""
 
     p: int = 6
     trainable: bool = False
     r_max: float | None = None  # kept for backward compatibility
 
-    def setup(self):
+    def __init__(
+        self,
+        p: int = 6,
+        trainable: bool = False,
+        r_max: float | None = None,
+        *,
+        rngs: nnx.Rngs | None = None,
+    ) -> None:
+        self.p = p
+        self.trainable = trainable
+        self.r_max = r_max
         if self.r_max is not None:
             logging.warning(
                 'r_max is deprecated. r_max is determined from the covalent radii.'
@@ -167,8 +213,15 @@ class ZBLBasis(fnn.Module):
             ase.data.covalent_radii,
             dtype=default_dtype(),
         )
+        if self.trainable:
+            if rngs is None:
+                raise ValueError('rngs is required for trainable ZBLBasis')
+            self.a_exp = nnx.Param(jnp.array(0.300, dtype=default_dtype()))
+            self.a_prefactor = nnx.Param(jnp.array(0.4543, dtype=default_dtype()))
+        else:
+            self.a_exp = None
+            self.a_prefactor = None
 
-    @fnn.compact
     def __call__(
         self,
         x: jnp.ndarray,
@@ -187,15 +240,9 @@ class ZBLBasis(fnn.Module):
         Z_u = node_atomic_numbers[sender].astype(jnp.int32)
         Z_v = node_atomic_numbers[receiver].astype(jnp.int32)
 
-        if self.trainable:
-            a_exp = self.param(
-                'a_exp',
-                lambda rng: jnp.array(0.300, dtype=default_dtype()),
-            )
-            a_prefactor = self.param(
-                'a_prefactor',
-                lambda rng: jnp.array(0.4543, dtype=default_dtype()),
-            )
+        if self.trainable and self.a_exp is not None and self.a_prefactor is not None:
+            a_exp = jnp.asarray(self.a_exp, dtype=x.dtype)
+            a_prefactor = jnp.asarray(self.a_prefactor, dtype=x.dtype)
         else:
             a_exp = jnp.array(0.300, dtype=x.dtype)
             a_prefactor = jnp.array(0.4543, dtype=x.dtype)
@@ -232,8 +279,8 @@ class ZBLBasis(fnn.Module):
         return f'{self.__class__.__name__}(c={self._c})'
 
 
-@auto_import_from_torch_flax(allow_missing_mapper=True)
-class AgnesiTransform(fnn.Module):
+@nxx_auto_import_from_torch(allow_missing_mapper=True)
+class AgnesiTransform(nnx.Module):
     """Agnesi transform used for radial scaling."""
 
     q: float = 0.9183
@@ -241,13 +288,34 @@ class AgnesiTransform(fnn.Module):
     a: float = 1.0805
     trainable: bool = False
 
-    def setup(self):
+    def __init__(
+        self,
+        q: float = 0.9183,
+        p: float = 4.5791,
+        a: float = 1.0805,
+        trainable: bool = False,
+        *,
+        rngs: nnx.Rngs | None = None,
+    ) -> None:
+        self.q = q
+        self.p = p
+        self.a = a
+        self.trainable = trainable
         self._covalent_radii = jnp.array(
             ase.data.covalent_radii,
             dtype=default_dtype(),
         )
+        if self.trainable:
+            if rngs is None:
+                raise ValueError('rngs is required for trainable AgnesiTransform')
+            self.a_param = nnx.Param(jnp.array(self.a, dtype=default_dtype()))
+            self.q_param = nnx.Param(jnp.array(self.q, dtype=default_dtype()))
+            self.p_param = nnx.Param(jnp.array(self.p, dtype=default_dtype()))
+        else:
+            self.a_param = None
+            self.q_param = None
+            self.p_param = None
 
-    @fnn.compact
     def __call__(
         self,
         x: jnp.ndarray,
@@ -266,10 +334,10 @@ class AgnesiTransform(fnn.Module):
         Z_u = node_atomic_numbers[sender].astype(jnp.int32)
         Z_v = node_atomic_numbers[receiver].astype(jnp.int32)
 
-        if self.trainable:
-            a = self.param('a', lambda rng: jnp.array(self.a, dtype=default_dtype()))
-            q = self.param('q', lambda rng: jnp.array(self.q, dtype=default_dtype()))
-            p = self.param('p', lambda rng: jnp.array(self.p, dtype=default_dtype()))
+        if self.trainable and self.a_param is not None:
+            a = jnp.asarray(self.a_param, dtype=x.dtype)
+            q = jnp.asarray(self.q_param, dtype=x.dtype)
+            p = jnp.asarray(self.p_param, dtype=x.dtype)
         else:
             dtype = x.dtype
             a = jnp.array(self.a, dtype=dtype)
@@ -294,15 +362,29 @@ class AgnesiTransform(fnn.Module):
         )
 
 
-@auto_import_from_torch_flax(allow_missing_mapper=True)
-class SoftTransform(fnn.Module):
+@nxx_auto_import_from_torch(allow_missing_mapper=True)
+class SoftTransform(nnx.Module):
     """Soft transform with a learnable alpha parameter."""
 
     alpha: float = 4.0
     trainable: bool = False
 
-    def setup(self):
+    def __init__(
+        self,
+        alpha: float = 4.0,
+        trainable: bool = False,
+        *,
+        rngs: nnx.Rngs | None = None,
+    ) -> None:
+        self.alpha = alpha
+        self.trainable = trainable
         self._covalent_radii = jnp.array(ase.data.covalent_radii, dtype=default_dtype())
+        if self.trainable:
+            if rngs is None:
+                raise ValueError('rngs is required for trainable SoftTransform')
+            self.alpha_param = nnx.Param(jnp.array(self.alpha, dtype=default_dtype()))
+        else:
+            self.alpha_param = None
 
     def compute_r_0(
         self,
@@ -321,7 +403,6 @@ class SoftTransform(fnn.Module):
         Z_v = node_atomic_numbers[receiver].astype(jnp.int32)
         return self._covalent_radii[Z_u] + self._covalent_radii[Z_v]
 
-    @fnn.compact
     def __call__(
         self,
         x: jnp.ndarray,
@@ -337,10 +418,8 @@ class SoftTransform(fnn.Module):
         p_0 = (3.0 / 4.0) * r_0
         p_1 = (4.0 / 3.0) * r_0
         m = 0.5 * (p_0 + p_1)
-        if self.trainable:
-            alpha_param = self.param(
-                'alpha', lambda rng: jnp.array(self.alpha, dtype=default_dtype())
-            )
+        if self.trainable and self.alpha_param is not None:
+            alpha_param = jnp.asarray(self.alpha_param, dtype=dtype)
         else:
             alpha_param = jnp.array(self.alpha, dtype=dtype)
         alpha = alpha_param.astype(dtype) / (p_1 - p_0)
@@ -351,44 +430,66 @@ class SoftTransform(fnn.Module):
         return f'{self.__class__.__name__}(alpha={self.alpha:.4f}, trainable={self.trainable})'
 
 
-@auto_import_from_torch_flax(allow_missing_mapper=True)
-class _RadialSequential(fnn.Module):
+@nxx_auto_import_from_torch(allow_missing_mapper=True)
+class _RadialSequential(nnx.Module):
     channels: Sequence[int]
 
-    @fnn.compact
-    def __call__(self, inputs: jnp.ndarray) -> jnp.ndarray:
+    def __init__(self, channels: Sequence[int], *, rngs: nnx.Rngs) -> None:
+        self.channels = tuple(channels)
         if len(self.channels) < 2:
             raise ValueError('channels must have length >= 2 for RadialMLP')
 
-        x = inputs
+        self.layers = nnx.Dict()
+        self._layer_order: list[tuple[str, str | None]] = []
         last_idx = len(self.channels) - 1
         layer_idx = 0
         for idx, out_channels in enumerate(self.channels[1:], start=1):
-            x = fnn.Dense(out_channels, use_bias=True, name=str(layer_idx))(x)
+            key = str(layer_idx)
+            self.layers[key] = nnx.Linear(
+                self.channels[idx - 1],
+                out_channels,
+                use_bias=True,
+                rngs=rngs,
+            )
+            self._layer_order.append(('linear', key))
             layer_idx += 1
             if idx != last_idx:
-                x = fnn.LayerNorm(
+                key = str(layer_idx)
+                self.layers[key] = nnx.LayerNorm(
+                    num_features=out_channels,
                     use_bias=True,
                     use_scale=True,
                     reduction_axes=-1,
                     feature_axes=-1,
                     epsilon=1e-5,
-                    name=str(layer_idx),
-                )(x)
+                    rngs=rngs,
+                )
+                self._layer_order.append(('norm', key))
                 layer_idx += 1
+                self._layer_order.append(('act', None))
+                layer_idx += 1
+
+    def __call__(self, inputs: jnp.ndarray) -> jnp.ndarray:
+        x = inputs
+        for kind, key in self._layer_order:
+            if kind == 'act':
                 x = jax.nn.silu(x)
-                layer_idx += 1
+                continue
+            if key is None:
+                raise ValueError('Missing layer key for radial sequential block')
+            x = self.layers[key](x)
         return x
 
 
-@auto_import_from_torch_flax(allow_missing_mapper=True)
-class RadialMLP(fnn.Module):
+@nxx_auto_import_from_torch(allow_missing_mapper=True)
+class RadialMLP(nnx.Module):
     """Wrapper that aligns with the Torch RadialMLP parameter layout."""
 
     channels: Sequence[int]
 
-    def setup(self) -> None:
-        self.net = _RadialSequential(tuple(self.channels), name='net')
+    def __init__(self, channels: Sequence[int], *, rngs: nnx.Rngs) -> None:
+        self.channels = tuple(channels)
+        self.net = _RadialSequential(self.channels, rngs=rngs)
 
     def __call__(self, inputs: jnp.ndarray) -> jnp.ndarray:
         return self.net(inputs)

@@ -1,16 +1,16 @@
 import abc
 from collections.abc import Callable, Sequence
 
-import flax.linen as fnn
 import jax
 import jax.numpy as jnp
 import numpy as np
 from e3nn_jax import Irrep, Irreps, IrrepsArray
+from flax import nnx
 
 from mace_jax.adapters.e3nn import nn
-from mace_jax.adapters.flax.torch import (
-    auto_import_from_torch_flax,
-    register_flax_module,
+from mace_jax.adapters.nnx.torch import (
+    nxx_auto_import_from_torch,
+    nxx_register_module,
 )
 from mace_jax.modules.wrapper_ops import (
     CuEquivarianceConfig,
@@ -35,21 +35,31 @@ from .radial import (
 )
 
 
-@register_flax_module('mace.modules.blocks.LinearNodeEmbeddingBlock')
-@auto_import_from_torch_flax(allow_missing_mapper=True)
-class LinearNodeEmbeddingBlock(fnn.Module):
+@nxx_register_module('mace.modules.blocks.LinearNodeEmbeddingBlock')
+@nxx_auto_import_from_torch(allow_missing_mapper=True)
+class LinearNodeEmbeddingBlock(nnx.Module):
     """Flax version of LinearNodeEmbeddingBlock."""
 
     irreps_in: Irreps
     irreps_out: Irreps
     cueq_config: CuEquivarianceConfig | None = None
 
-    def setup(self) -> None:
+    def __init__(
+        self,
+        irreps_in: Irreps,
+        irreps_out: Irreps,
+        cueq_config: CuEquivarianceConfig | None = None,
+        *,
+        rngs: nnx.Rngs,
+    ) -> None:
+        self.irreps_in = Irreps(irreps_in)
+        self.irreps_out = Irreps(irreps_out)
+        self.cueq_config = cueq_config
         self.linear = Linear(
             irreps_in=self.irreps_in,
             irreps_out=self.irreps_out,
             cueq_config=self.cueq_config,
-            name='linear',
+            rngs=rngs,
         )
 
     def __call__(self, node_attrs: jnp.ndarray) -> jnp.ndarray:
@@ -62,21 +72,31 @@ class LinearNodeEmbeddingBlock(fnn.Module):
         )
 
 
-@register_flax_module('mace.modules.blocks.LinearReadoutBlock')
-@auto_import_from_torch_flax(allow_missing_mapper=True)
-class LinearReadoutBlock(fnn.Module):
+@nxx_register_module('mace.modules.blocks.LinearReadoutBlock')
+@nxx_auto_import_from_torch(allow_missing_mapper=True)
+class LinearReadoutBlock(nnx.Module):
     """Flax version of LinearReadoutBlock."""
 
     irreps_in: Irreps
     irrep_out: Irreps = Irreps('0e')
     cueq_config: CuEquivarianceConfig | None = None
 
-    def setup(self) -> None:
+    def __init__(
+        self,
+        irreps_in: Irreps,
+        irrep_out: Irreps = Irreps('0e'),
+        cueq_config: CuEquivarianceConfig | None = None,
+        *,
+        rngs: nnx.Rngs,
+    ) -> None:
+        self.irreps_in = Irreps(irreps_in)
+        self.irrep_out = Irreps(irrep_out)
+        self.cueq_config = cueq_config
         self.linear = Linear(
             irreps_in=self.irreps_in,
             irreps_out=self.irrep_out,
             cueq_config=self.cueq_config,
-            name='linear',
+            rngs=rngs,
         )
 
     def __call__(
@@ -94,9 +114,9 @@ class LinearReadoutBlock(fnn.Module):
         )
 
 
-@register_flax_module('mace.modules.blocks.NonLinearReadoutBlock')
-@auto_import_from_torch_flax(allow_missing_mapper=True)
-class NonLinearReadoutBlock(fnn.Module):
+@nxx_register_module('mace.modules.blocks.NonLinearReadoutBlock')
+@nxx_auto_import_from_torch(allow_missing_mapper=True)
+class NonLinearReadoutBlock(nnx.Module):
     """Two-layer readout with optional multi-head masking."""
 
     irreps_in: Irreps
@@ -106,24 +126,39 @@ class NonLinearReadoutBlock(fnn.Module):
     num_heads: int = 1
     cueq_config: CuEquivarianceConfig | None = None
 
-    def setup(self) -> None:
+    def __init__(
+        self,
+        irreps_in: Irreps,
+        MLP_irreps: Irreps,
+        gate: Callable | None,
+        irrep_out: Irreps = Irreps('0e'),
+        num_heads: int = 1,
+        cueq_config: CuEquivarianceConfig | None = None,
+        *,
+        rngs: nnx.Rngs,
+    ) -> None:
+        self.irreps_in = Irreps(irreps_in)
+        self.MLP_irreps = Irreps(MLP_irreps)
+        self.gate = gate
+        self.irrep_out = Irreps(irrep_out)
+        self.num_heads = num_heads
+        self.cueq_config = cueq_config
         self.hidden_irreps = self.MLP_irreps
         self.linear_1 = Linear(
             irreps_in=self.irreps_in,
             irreps_out=self.hidden_irreps,
             cueq_config=self.cueq_config,
-            name='linear_1',
+            rngs=rngs,
         )
         self.non_linearity = nn.Activation(
             irreps_in=self.hidden_irreps,
             acts=[self.gate],
-            name='non_linearity',
         )
         self.linear_2 = Linear(
             irreps_in=self.hidden_irreps,
             irreps_out=self.irrep_out,
             cueq_config=self.cueq_config,
-            name='linear_2',
+            rngs=rngs,
         )
 
     def __call__(
@@ -137,9 +172,9 @@ class NonLinearReadoutBlock(fnn.Module):
         return self.linear_2(x)
 
 
-@register_flax_module('mace.modules.blocks.NonLinearBiasReadoutBlock')
-@auto_import_from_torch_flax(allow_missing_mapper=True)
-class NonLinearBiasReadoutBlock(fnn.Module):
+@nxx_register_module('mace.modules.blocks.NonLinearBiasReadoutBlock')
+@nxx_auto_import_from_torch(allow_missing_mapper=True)
+class NonLinearBiasReadoutBlock(nnx.Module):
     """Non-linear readout with intermediate bias linear layers."""
 
     irreps_in: Irreps
@@ -149,35 +184,49 @@ class NonLinearBiasReadoutBlock(fnn.Module):
     num_heads: int = 1
     cueq_config: CuEquivarianceConfig | None = None
 
-    def setup(self) -> None:
+    def __init__(
+        self,
+        irreps_in: Irreps,
+        MLP_irreps: Irreps,
+        gate: Callable | None,
+        irrep_out: Irreps = Irreps('0e'),
+        num_heads: int = 1,
+        cueq_config: CuEquivarianceConfig | None = None,
+        *,
+        rngs: nnx.Rngs,
+    ) -> None:
+        self.irreps_in = Irreps(irreps_in)
+        self.MLP_irreps = Irreps(MLP_irreps)
+        self.gate = gate
+        self.irrep_out = Irreps(irrep_out)
+        self.num_heads = num_heads
+        self.cueq_config = cueq_config
         self.hidden_irreps = self.MLP_irreps
         self.linear_1 = Linear(
             irreps_in=self.irreps_in,
             irreps_out=self.hidden_irreps,
             cueq_config=self.cueq_config,
-            name='linear_1',
+            rngs=rngs,
         )
         self.non_linearity_1 = nn.Activation(
             irreps_in=self.hidden_irreps,
             acts=[self.gate],
-            name='activation_1',
         )
         self.linear_mid = Linear(
             irreps_in=self.hidden_irreps,
             irreps_out=self.hidden_irreps,
             cueq_config=self.cueq_config,
-            name='linear_mid',
+            rngs=rngs,
         )
         self.non_linearity_2 = nn.Activation(
             irreps_in=self.hidden_irreps,
             acts=[self.gate],
-            name='activation_2',
         )
         self.linear_2 = Linear(
             irreps_in=self.hidden_irreps,
             irreps_out=self.irrep_out,
             cueq_config=self.cueq_config,
-            name='linear_2',
+            rngs=rngs,
         )
 
     def __call__(
@@ -192,16 +241,26 @@ class NonLinearBiasReadoutBlock(fnn.Module):
         return self.linear_2(x)
 
 
-@register_flax_module('mace.modules.blocks.LinearDipoleReadoutBlock')
-@auto_import_from_torch_flax(allow_missing_mapper=True)
-class LinearDipoleReadoutBlock(fnn.Module):
+@nxx_register_module('mace.modules.blocks.LinearDipoleReadoutBlock')
+@nxx_auto_import_from_torch(allow_missing_mapper=True)
+class LinearDipoleReadoutBlock(nnx.Module):
     """Linear readout block for dipoles or scalar+dipole."""
 
     irreps_in: Irreps
     dipole_only: bool = False
     cueq_config: CuEquivarianceConfig | None = None
 
-    def setup(self) -> None:
+    def __init__(
+        self,
+        irreps_in: Irreps,
+        dipole_only: bool = False,
+        cueq_config: CuEquivarianceConfig | None = None,
+        *,
+        rngs: nnx.Rngs,
+    ) -> None:
+        self.irreps_in = Irreps(irreps_in)
+        self.dipole_only = dipole_only
+        self.cueq_config = cueq_config
         if self.dipole_only:
             self.irreps_out = Irreps('1x1o')
         else:
@@ -211,16 +270,16 @@ class LinearDipoleReadoutBlock(fnn.Module):
             irreps_in=self.irreps_in,
             irreps_out=self.irreps_out,
             cueq_config=self.cueq_config,
-            name='linear',
+            rngs=rngs,
         )
 
     def __call__(self, x: IrrepsArray) -> IrrepsArray:
         return self.linear(x)
 
 
-@register_flax_module('mace.modules.blocks.NonLinearDipoleReadoutBlock')
-@auto_import_from_torch_flax(allow_missing_mapper=True)
-class NonLinearDipoleReadoutBlock(fnn.Module):
+@nxx_register_module('mace.modules.blocks.NonLinearDipoleReadoutBlock')
+@nxx_auto_import_from_torch(allow_missing_mapper=True)
+class NonLinearDipoleReadoutBlock(nnx.Module):
     """Non-linear readout block for dipoles or scalar+dipole."""
 
     irreps_in: Irreps
@@ -229,7 +288,21 @@ class NonLinearDipoleReadoutBlock(fnn.Module):
     dipole_only: bool = False
     cueq_config: CuEquivarianceConfig | None = None
 
-    def setup(self) -> None:
+    def __init__(
+        self,
+        irreps_in: Irreps,
+        MLP_irreps: Irreps,
+        gate: Callable,
+        dipole_only: bool = False,
+        cueq_config: CuEquivarianceConfig | None = None,
+        *,
+        rngs: nnx.Rngs,
+    ) -> None:
+        self.irreps_in = Irreps(irreps_in)
+        self.MLP_irreps = Irreps(MLP_irreps)
+        self.gate = gate
+        self.dipole_only = dipole_only
+        self.cueq_config = cueq_config
         self.hidden_irreps = self.MLP_irreps
         if self.dipole_only:
             self.irreps_out = Irreps('1x1o')
@@ -265,13 +338,13 @@ class NonLinearDipoleReadoutBlock(fnn.Module):
             irreps_in=self.irreps_in,
             irreps_out=self.irreps_nonlin,
             cueq_config=self.cueq_config,
-            name='linear_1',
+            rngs=rngs,
         )
         self.linear_2 = Linear(
             irreps_in=self.hidden_irreps,
             irreps_out=self.irreps_out,
             cueq_config=self.cueq_config,
-            name='linear_2',
+            rngs=rngs,
         )
 
     def __call__(self, x: IrrepsArray) -> IrrepsArray:
@@ -279,16 +352,26 @@ class NonLinearDipoleReadoutBlock(fnn.Module):
         return self.linear_2(x)
 
 
-@register_flax_module('mace.modules.blocks.LinearDipolePolarReadoutBlock')
-@auto_import_from_torch_flax(allow_missing_mapper=True)
-class LinearDipolePolarReadoutBlock(fnn.Module):
+@nxx_register_module('mace.modules.blocks.LinearDipolePolarReadoutBlock')
+@nxx_auto_import_from_torch(allow_missing_mapper=True)
+class LinearDipolePolarReadoutBlock(nnx.Module):
     """Linear readout for dipole and polarizability."""
 
     irreps_in: Irreps
     use_polarizability: bool = True
     cueq_config: CuEquivarianceConfig | None = None
 
-    def setup(self) -> None:
+    def __init__(
+        self,
+        irreps_in: Irreps,
+        use_polarizability: bool = True,
+        cueq_config: CuEquivarianceConfig | None = None,
+        *,
+        rngs: nnx.Rngs,
+    ) -> None:
+        self.irreps_in = Irreps(irreps_in)
+        self.use_polarizability = use_polarizability
+        self.cueq_config = cueq_config
         if not self.use_polarizability:
             raise ValueError(
                 'LinearDipolePolarReadoutBlock requires use_polarizability=True.'
@@ -298,16 +381,16 @@ class LinearDipolePolarReadoutBlock(fnn.Module):
             irreps_in=self.irreps_in,
             irreps_out=self.irreps_out,
             cueq_config=self.cueq_config,
-            name='linear',
+            rngs=rngs,
         )
 
     def __call__(self, x: IrrepsArray) -> IrrepsArray:
         return self.linear(x)
 
 
-@register_flax_module('mace.modules.blocks.NonLinearDipolePolarReadoutBlock')
-@auto_import_from_torch_flax(allow_missing_mapper=True)
-class NonLinearDipolePolarReadoutBlock(fnn.Module):
+@nxx_register_module('mace.modules.blocks.NonLinearDipolePolarReadoutBlock')
+@nxx_auto_import_from_torch(allow_missing_mapper=True)
+class NonLinearDipolePolarReadoutBlock(nnx.Module):
     """Non-linear readout for dipole and polarizability with equivariant gate."""
 
     irreps_in: Irreps
@@ -316,7 +399,21 @@ class NonLinearDipolePolarReadoutBlock(fnn.Module):
     use_polarizability: bool = True
     cueq_config: CuEquivarianceConfig | None = None
 
-    def setup(self) -> None:
+    def __init__(
+        self,
+        irreps_in: Irreps,
+        MLP_irreps: Irreps,
+        gate: Callable,
+        use_polarizability: bool = True,
+        cueq_config: CuEquivarianceConfig | None = None,
+        *,
+        rngs: nnx.Rngs,
+    ) -> None:
+        self.irreps_in = Irreps(irreps_in)
+        self.MLP_irreps = Irreps(MLP_irreps)
+        self.gate = gate
+        self.use_polarizability = use_polarizability
+        self.cueq_config = cueq_config
         self.hidden_irreps = self.MLP_irreps
         if not self.use_polarizability:
             raise ValueError(
@@ -353,13 +450,13 @@ class NonLinearDipolePolarReadoutBlock(fnn.Module):
             irreps_in=self.irreps_in,
             irreps_out=self.irreps_nonlin,
             cueq_config=self.cueq_config,
-            name='linear_1',
+            rngs=rngs,
         )
         self.linear_2 = Linear(
             irreps_in=self.hidden_irreps,
             irreps_out=self.irreps_out,
             cueq_config=self.cueq_config,
-            name='linear_2',
+            rngs=rngs,
         )
 
     def __call__(self, x: IrrepsArray) -> IrrepsArray:
@@ -367,22 +464,25 @@ class NonLinearDipolePolarReadoutBlock(fnn.Module):
         return self.linear_2(x)
 
 
-@register_flax_module('mace.modules.blocks.AtomicEnergiesBlock')
-@auto_import_from_torch_flax(allow_missing_mapper=True)
-class AtomicEnergiesBlock(fnn.Module):
+@nxx_register_module('mace.modules.blocks.AtomicEnergiesBlock')
+@nxx_auto_import_from_torch(allow_missing_mapper=True)
+class AtomicEnergiesBlock(nnx.Module):
     """Block that returns atomic energies from one-hot element vectors."""
 
     atomic_energies_init: np.ndarray | jnp.ndarray
 
-    @fnn.compact
-    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+    def __init__(
+        self,
+        atomic_energies_init: np.ndarray | jnp.ndarray,
+        *,
+        rngs: nnx.Rngs | None = None,
+    ) -> None:
+        self.atomic_energies_init = atomic_energies_init
         init_values = jnp.asarray(self.atomic_energies_init, dtype=default_dtype())
+        self.atomic_energies = nnx.Param(init_values)
 
-        atomic_energies = self.param(
-            'atomic_energies',
-            lambda rng: init_values,
-        )
-
+    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+        atomic_energies = self.atomic_energies
         # Prevent atomic reference energies from receiving gradients during training.
         atomic_energies = jax.lax.stop_gradient(atomic_energies)
         energies = jnp.atleast_2d(atomic_energies)
@@ -397,9 +497,9 @@ class AtomicEnergiesBlock(fnn.Module):
         return f'{self.__class__.__name__}(energies=[{formatted_energies}])'
 
 
-@register_flax_module('mace.modules.blocks.RadialEmbeddingBlock')
-@auto_import_from_torch_flax(allow_missing_mapper=True)
-class RadialEmbeddingBlock(fnn.Module):
+@nxx_register_module('mace.modules.blocks.RadialEmbeddingBlock')
+@nxx_auto_import_from_torch(allow_missing_mapper=True)
+class RadialEmbeddingBlock(nnx.Module):
     """Radial basis embedding block for edges."""
 
     r_max: float
@@ -409,20 +509,44 @@ class RadialEmbeddingBlock(fnn.Module):
     distance_transform: str = 'None'
     apply_cutoff: bool = True
 
-    def setup(self) -> None:
+    def __init__(
+        self,
+        r_max: float,
+        num_bessel: int,
+        num_polynomial_cutoff: int,
+        radial_type: str = 'bessel',
+        distance_transform: str = 'None',
+        apply_cutoff: bool = True,
+        *,
+        rngs: nnx.Rngs | None = None,
+    ) -> None:
+        self.r_max = r_max
+        self.num_bessel = num_bessel
+        self.num_polynomial_cutoff = num_polynomial_cutoff
+        self.radial_type = radial_type
+        self.distance_transform = distance_transform
+        self.apply_cutoff = apply_cutoff
         if self.radial_type == 'bessel':
-            self.basis_fn = BesselBasis(r_max=self.r_max, num_basis=self.num_bessel)
+            self.basis_fn = BesselBasis(
+                r_max=self.r_max,
+                num_basis=self.num_bessel,
+                rngs=rngs,
+            )
         elif self.radial_type == 'gaussian':
-            self.basis_fn = GaussianBasis(r_max=self.r_max, num_basis=self.num_bessel)
+            self.basis_fn = GaussianBasis(
+                r_max=self.r_max,
+                num_basis=self.num_bessel,
+                rngs=rngs,
+            )
         elif self.radial_type == 'chebyshev':
             self.basis_fn = ChebychevBasis(r_max=self.r_max, num_basis=self.num_bessel)
         else:
             raise ValueError(f'Unknown radial_type: {self.radial_type}')
 
         if self.distance_transform == 'Agnesi':
-            self.distance_transform_module = AgnesiTransform()
+            self.distance_transform_module = AgnesiTransform(rngs=rngs)
         elif self.distance_transform == 'Soft':
-            self.distance_transform_module = SoftTransform()
+            self.distance_transform_module = SoftTransform(rngs=rngs)
         else:
             self.distance_transform_module = None
 
@@ -458,9 +582,9 @@ class RadialEmbeddingBlock(fnn.Module):
         return radial, cutoff
 
 
-@register_flax_module('mace.modules.blocks.EquivariantProductBasisBlock')
-@auto_import_from_torch_flax(allow_missing_mapper=True)
-class EquivariantProductBasisBlock(fnn.Module):
+@nxx_register_module('mace.modules.blocks.EquivariantProductBasisBlock')
+@nxx_auto_import_from_torch(allow_missing_mapper=True)
+class EquivariantProductBasisBlock(nnx.Module):
     node_feats_irreps: Irreps
     target_irreps: Irreps
     correlation: int
@@ -470,19 +594,40 @@ class EquivariantProductBasisBlock(fnn.Module):
     use_reduced_cg: bool | None = None
     cueq_config: CuEquivarianceConfig | None = None
 
-    def setup(self) -> None:
-        num_elements = self.num_elements
+    def __init__(
+        self,
+        node_feats_irreps: Irreps,
+        target_irreps: Irreps,
+        correlation: int,
+        use_sc: bool = True,
+        num_elements: int | None = None,
+        use_agnostic_product: bool = False,
+        use_reduced_cg: bool | None = None,
+        cueq_config: CuEquivarianceConfig | None = None,
+        *,
+        rngs: nnx.Rngs,
+    ) -> None:
+        self.node_feats_irreps = Irreps(node_feats_irreps)
+        self.target_irreps = Irreps(target_irreps)
+        self.correlation = correlation
+        self.use_sc = use_sc
+        self.num_elements = num_elements
+        self.use_agnostic_product = use_agnostic_product
+        self.use_reduced_cg = use_reduced_cg
+        self.cueq_config = cueq_config
+
+        num_elements_local = self.num_elements
         if self.use_agnostic_product:
-            num_elements = 1
+            num_elements_local = 1
 
         self.symmetric_contractions = SymmetricContractionWrapper(
             irreps_in=self.node_feats_irreps,
             irreps_out=self.target_irreps,
             correlation=self.correlation,
-            num_elements=num_elements,
+            num_elements=num_elements_local,
             use_reduced_cg=self.use_reduced_cg,
             cueq_config=self.cueq_config,
-            name='symmetric_contractions',
+            rngs=rngs,
         )
 
         self.linear = Linear(
@@ -491,7 +636,7 @@ class EquivariantProductBasisBlock(fnn.Module):
             internal_weights=True,
             shared_weights=True,
             cueq_config=self.cueq_config,
-            name='linear',
+            rngs=rngs,
         )
 
     def __call__(
@@ -536,7 +681,7 @@ class EquivariantProductBasisBlock(fnn.Module):
         return self.linear(node_feats)
 
 
-class InteractionBlock(fnn.Module, metaclass=abc.ABCMeta):
+class InteractionBlock(nnx.Module, metaclass=abc.ABCMeta):
     """Abstract base class for interaction blocks in equivariant GNNs."""
 
     node_attrs_irreps: Irreps
@@ -550,34 +695,47 @@ class InteractionBlock(fnn.Module, metaclass=abc.ABCMeta):
     radial_MLP: Sequence[int] | None = None
     cueq_config: CuEquivarianceConfig | None = None
 
-    def setup(self) -> None:
-        object.__setattr__(self, 'node_attrs_irreps', Irreps(self.node_attrs_irreps))
-        object.__setattr__(self, 'node_feats_irreps', Irreps(self.node_feats_irreps))
-        object.__setattr__(self, 'edge_attrs_irreps', Irreps(self.edge_attrs_irreps))
-        object.__setattr__(self, 'edge_feats_irreps', Irreps(self.edge_feats_irreps))
-        object.__setattr__(self, 'target_irreps', Irreps(self.target_irreps))
-        object.__setattr__(self, 'hidden_irreps', Irreps(self.hidden_irreps))
+    def __init__(
+        self,
+        node_attrs_irreps: Irreps,
+        node_feats_irreps: Irreps,
+        edge_attrs_irreps: Irreps,
+        edge_feats_irreps: Irreps,
+        target_irreps: Irreps,
+        hidden_irreps: Irreps,
+        avg_num_neighbors: float,
+        edge_irreps: Irreps | None = None,
+        radial_MLP: Sequence[int] | None = None,
+        cueq_config: CuEquivarianceConfig | None = None,
+        *,
+        rngs: nnx.Rngs,
+    ) -> None:
+        self.node_attrs_irreps = Irreps(node_attrs_irreps)
+        self.node_feats_irreps = Irreps(node_feats_irreps)
+        self.edge_attrs_irreps = Irreps(edge_attrs_irreps)
+        self.edge_feats_irreps = Irreps(edge_feats_irreps)
+        self.target_irreps = Irreps(target_irreps)
+        self.hidden_irreps = Irreps(hidden_irreps)
+        self.avg_num_neighbors = avg_num_neighbors
+        self.cueq_config = cueq_config
 
-        if self.radial_MLP is not None:
-            radial = list(self.radial_MLP)
+        if radial_MLP is not None:
+            self.radial_MLP = list(radial_MLP)
         else:
-            radial = [64, 64, 64]
-        object.__setattr__(self, 'radial_MLP', radial)
+            self.radial_MLP = [64, 64, 64]
 
-        edge_irreps = (
-            Irreps(self.edge_irreps)
-            if self.edge_irreps is not None
-            else Irreps(self.node_feats_irreps)
-        )
-        object.__setattr__(self, 'edge_irreps', edge_irreps)
+        if edge_irreps is not None:
+            self.edge_irreps = Irreps(edge_irreps)
+        else:
+            self.edge_irreps = Irreps(self.node_feats_irreps)
 
         if self.cueq_config and getattr(self.cueq_config, 'conv_fusion', None):
             self.conv_fusion = self.cueq_config.conv_fusion
 
-        self._setup()
+        self._setup(rngs)
 
     @abc.abstractmethod
-    def _setup(self) -> None:
+    def _setup(self, rngs: nnx.Rngs) -> None:
         raise NotImplementedError
 
     def truncate_ghosts(
@@ -588,8 +746,6 @@ class InteractionBlock(fnn.Module, metaclass=abc.ABCMeta):
         return tensor[:n_real] if n_real is not None else tensor
 
     @abc.abstractmethod
-    @fnn.compact
-    @fnn.compact
     def __call__(
         self,
         node_attrs: jnp.ndarray,
@@ -601,10 +757,10 @@ class InteractionBlock(fnn.Module, metaclass=abc.ABCMeta):
         raise NotImplementedError
 
 
-@register_flax_module('mace.modules.blocks.RealAgnosticInteractionBlock')
-@auto_import_from_torch_flax(allow_missing_mapper=True)
+@nxx_register_module('mace.modules.blocks.RealAgnosticInteractionBlock')
+@nxx_auto_import_from_torch(allow_missing_mapper=True)
 class RealAgnosticInteractionBlock(InteractionBlock):
-    def _setup(self) -> None:
+    def _setup(self, rngs: nnx.Rngs) -> None:
         # First linear
         self.linear_up = Linear(
             self.node_feats_irreps,
@@ -612,7 +768,7 @@ class RealAgnosticInteractionBlock(InteractionBlock):
             internal_weights=True,
             shared_weights=True,
             cueq_config=self.cueq_config,
-            name='linear_up',
+            rngs=rngs,
         )
 
         # TensorProduct
@@ -629,7 +785,7 @@ class RealAgnosticInteractionBlock(InteractionBlock):
             shared_weights=False,
             internal_weights=False,
             cueq_config=self.cueq_config,
-            name='conv_tp',
+            rngs=rngs,
         )
 
         # Convolution weights network
@@ -638,7 +794,7 @@ class RealAgnosticInteractionBlock(InteractionBlock):
             + list(self.radial_MLP)
             + [self.conv_tp.weight_numel],
             act=jax.nn.silu,
-            name='conv_tp_weights',
+            rngs=rngs,
         )
 
         # Linear
@@ -649,7 +805,7 @@ class RealAgnosticInteractionBlock(InteractionBlock):
             internal_weights=True,
             shared_weights=True,
             cueq_config=self.cueq_config,
-            name='linear',
+            rngs=rngs,
         )
 
         # Selector TensorProduct
@@ -658,7 +814,7 @@ class RealAgnosticInteractionBlock(InteractionBlock):
             self.node_attrs_irreps,
             self.irreps_out,
             cueq_config=self.cueq_config,
-            name='skip_tp',
+            rngs=rngs,
         )
         self.reshape = reshape_irreps(self.irreps_out, cueq_config=self.cueq_config)
 
@@ -702,10 +858,10 @@ class RealAgnosticInteractionBlock(InteractionBlock):
         return self.reshape(message), None
 
 
-@register_flax_module('mace.modules.blocks.RealAgnosticResidualInteractionBlock')
-@auto_import_from_torch_flax(allow_missing_mapper=True)
+@nxx_register_module('mace.modules.blocks.RealAgnosticResidualInteractionBlock')
+@nxx_auto_import_from_torch(allow_missing_mapper=True)
 class RealAgnosticResidualInteractionBlock(InteractionBlock):
-    def _setup(self) -> None:
+    def _setup(self, rngs: nnx.Rngs) -> None:
         # First linear
         self.linear_up = Linear(
             self.node_feats_irreps,
@@ -713,7 +869,7 @@ class RealAgnosticResidualInteractionBlock(InteractionBlock):
             internal_weights=True,
             shared_weights=True,
             cueq_config=self.cueq_config,
-            name='linear_up',
+            rngs=rngs,
         )
 
         # TensorProduct
@@ -730,7 +886,7 @@ class RealAgnosticResidualInteractionBlock(InteractionBlock):
             shared_weights=False,
             internal_weights=False,
             cueq_config=self.cueq_config,
-            name='conv_tp',
+            rngs=rngs,
         )
 
         # Convolution weights network
@@ -739,7 +895,7 @@ class RealAgnosticResidualInteractionBlock(InteractionBlock):
             + list(self.radial_MLP)
             + [self.conv_tp.weight_numel],
             act=jax.nn.silu,
-            name='conv_tp_weights',
+            rngs=rngs,
         )
 
         # Linear
@@ -750,7 +906,7 @@ class RealAgnosticResidualInteractionBlock(InteractionBlock):
             internal_weights=True,
             shared_weights=True,
             cueq_config=self.cueq_config,
-            name='linear',
+            rngs=rngs,
         )
 
         # Selector TensorProduct (skip connection)
@@ -759,7 +915,7 @@ class RealAgnosticResidualInteractionBlock(InteractionBlock):
             self.node_attrs_irreps,
             self.hidden_irreps,
             cueq_config=self.cueq_config,
-            name='skip_tp',
+            rngs=rngs,
         )
         self.reshape = reshape_irreps(self.irreps_out, cueq_config=self.cueq_config)
 
@@ -809,10 +965,10 @@ class RealAgnosticResidualInteractionBlock(InteractionBlock):
         return self.reshape(message), sc
 
 
-@register_flax_module('mace.modules.blocks.RealAgnosticDensityInteractionBlock')
-@auto_import_from_torch_flax(allow_missing_mapper=True)
+@nxx_register_module('mace.modules.blocks.RealAgnosticDensityInteractionBlock')
+@nxx_auto_import_from_torch(allow_missing_mapper=True)
 class RealAgnosticDensityInteractionBlock(InteractionBlock):
-    def _setup(self) -> None:
+    def _setup(self, rngs: nnx.Rngs) -> None:
         # First linear
         self.linear_up = Linear(
             self.node_feats_irreps,
@@ -820,7 +976,7 @@ class RealAgnosticDensityInteractionBlock(InteractionBlock):
             internal_weights=True,
             shared_weights=True,
             cueq_config=self.cueq_config,
-            name='linear_up',
+            rngs=rngs,
         )
 
         # TensorProduct
@@ -837,7 +993,7 @@ class RealAgnosticDensityInteractionBlock(InteractionBlock):
             shared_weights=False,
             internal_weights=False,
             cueq_config=self.cueq_config,
-            name='conv_tp',
+            rngs=rngs,
         )
 
         # Convolution weights network
@@ -846,7 +1002,7 @@ class RealAgnosticDensityInteractionBlock(InteractionBlock):
             + list(self.radial_MLP)
             + [self.conv_tp.weight_numel],
             act=jax.nn.silu,
-            name='conv_tp_weights',
+            rngs=rngs,
         )
 
         # Linear projection
@@ -857,7 +1013,7 @@ class RealAgnosticDensityInteractionBlock(InteractionBlock):
             internal_weights=True,
             shared_weights=True,
             cueq_config=self.cueq_config,
-            name='linear',
+            rngs=rngs,
         )
 
         # Selector TensorProduct (skip connection)
@@ -866,14 +1022,14 @@ class RealAgnosticDensityInteractionBlock(InteractionBlock):
             self.node_attrs_irreps,
             self.irreps_out,
             cueq_config=self.cueq_config,
-            name='skip_tp',
+            rngs=rngs,
         )
 
         # Density normalization network
         self.density_fn = nn.FullyConnectedNet(
             hs=[self.edge_feats_irreps.num_irreps, 1],
             act=jax.nn.silu,
-            name='density_fn',
+            rngs=rngs,
         )
 
         # Reshape output
@@ -933,10 +1089,10 @@ class RealAgnosticDensityInteractionBlock(InteractionBlock):
         return self.reshape(message), None
 
 
-@register_flax_module('mace.modules.blocks.RealAgnosticDensityResidualInteractionBlock')
-@auto_import_from_torch_flax(allow_missing_mapper=True)
+@nxx_register_module('mace.modules.blocks.RealAgnosticDensityResidualInteractionBlock')
+@nxx_auto_import_from_torch(allow_missing_mapper=True)
 class RealAgnosticDensityResidualInteractionBlock(InteractionBlock):
-    def _setup(self) -> None:
+    def _setup(self, rngs: nnx.Rngs) -> None:
         # First linear
         self.linear_up = Linear(
             self.node_feats_irreps,
@@ -944,7 +1100,7 @@ class RealAgnosticDensityResidualInteractionBlock(InteractionBlock):
             internal_weights=True,
             shared_weights=True,
             cueq_config=self.cueq_config,
-            name='linear_up',
+            rngs=rngs,
         )
 
         # TensorProduct
@@ -961,7 +1117,7 @@ class RealAgnosticDensityResidualInteractionBlock(InteractionBlock):
             shared_weights=False,
             internal_weights=False,
             cueq_config=self.cueq_config,
-            name='conv_tp',
+            rngs=rngs,
         )
 
         # Convolution weights network
@@ -970,7 +1126,7 @@ class RealAgnosticDensityResidualInteractionBlock(InteractionBlock):
             + list(self.radial_MLP)
             + [self.conv_tp.weight_numel],
             act=jax.nn.silu,
-            name='conv_tp_weights',
+            rngs=rngs,
         )
 
         # Linear projection
@@ -981,7 +1137,7 @@ class RealAgnosticDensityResidualInteractionBlock(InteractionBlock):
             internal_weights=True,
             shared_weights=True,
             cueq_config=self.cueq_config,
-            name='linear',
+            rngs=rngs,
         )
 
         # Selector TensorProduct (skip connection)
@@ -990,14 +1146,14 @@ class RealAgnosticDensityResidualInteractionBlock(InteractionBlock):
             self.node_attrs_irreps,
             self.hidden_irreps,
             cueq_config=self.cueq_config,
-            name='skip_tp',
+            rngs=rngs,
         )
 
         # Density normalization network
         self.density_fn = nn.FullyConnectedNet(
             hs=[self.edge_feats_irreps.num_irreps, 1],
             act=jax.nn.silu,
-            name='density_fn',
+            rngs=rngs,
         )
 
         # Reshape output
@@ -1060,10 +1216,10 @@ class RealAgnosticDensityResidualInteractionBlock(InteractionBlock):
         return self.reshape(message), sc
 
 
-@register_flax_module('mace.modules.blocks.RealAgnosticAttResidualInteractionBlock')
-@auto_import_from_torch_flax(allow_missing_mapper=True)
+@nxx_register_module('mace.modules.blocks.RealAgnosticAttResidualInteractionBlock')
+@nxx_auto_import_from_torch(allow_missing_mapper=True)
 class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
-    def _setup(self) -> None:
+    def _setup(self, rngs: nnx.Rngs) -> None:
         # Downsample irreps
         object.__setattr__(self, 'node_feats_down_irreps', Irreps('64x0e'))
 
@@ -1074,7 +1230,7 @@ class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
             internal_weights=True,
             shared_weights=True,
             cueq_config=self.cueq_config,
-            name='linear_up',
+            rngs=rngs,
         )
 
         # TensorProduct
@@ -1091,7 +1247,7 @@ class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
             shared_weights=False,
             internal_weights=False,
             cueq_config=self.cueq_config,
-            name='conv_tp',
+            rngs=rngs,
         )
 
         # Linear (down)
@@ -1101,7 +1257,7 @@ class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
             internal_weights=True,
             shared_weights=True,
             cueq_config=self.cueq_config,
-            name='linear_down',
+            rngs=rngs,
         )
 
         # Convolution weights network
@@ -1112,7 +1268,7 @@ class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
         self.conv_tp_weights = nn.FullyConnectedNet(
             hs=[input_dim] + [256, 256, 256] + [self.conv_tp.weight_numel],
             act=jax.nn.silu,
-            name='conv_tp_weights',
+            rngs=rngs,
         )
 
         # Linear output
@@ -1123,7 +1279,7 @@ class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
             internal_weights=True,
             shared_weights=True,
             cueq_config=self.cueq_config,
-            name='linear',
+            rngs=rngs,
         )
 
         # Output reshape
@@ -1134,7 +1290,7 @@ class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
             self.node_feats_irreps,
             self.hidden_irreps,
             cueq_config=self.cueq_config,
-            name='skip_linear',
+            rngs=rngs,
         )
 
     def __call__(
@@ -1185,12 +1341,12 @@ class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
         return self.reshape(message), sc
 
 
-@register_flax_module(
+@nxx_register_module(
     'mace.modules.blocks.RealAgnosticResidualNonLinearInteractionBlock'
 )
-@auto_import_from_torch_flax(allow_missing_mapper=True)
+@nxx_auto_import_from_torch(allow_missing_mapper=True)
 class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
-    def _setup(self) -> None:
+    def _setup(self, rngs: nnx.Rngs) -> None:
         # Compute scalar irreps
         node_scalar_irreps = Irreps(
             [(self.node_feats_irreps.count(Irrep(0, 1)), (0, 1))]
@@ -1203,7 +1359,7 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
             internal_weights=True,
             shared_weights=True,
             cueq_config=self.cueq_config,
-            name='source_embedding',
+            rngs=rngs,
         )
         self.target_embedding = Linear(
             self.node_attrs_irreps,
@@ -1211,7 +1367,7 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
             internal_weights=True,
             shared_weights=True,
             cueq_config=self.cueq_config,
-            name='target_embedding',
+            rngs=rngs,
         )
 
         # First linear
@@ -1221,7 +1377,7 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
             internal_weights=True,
             shared_weights=True,
             cueq_config=self.cueq_config,
-            name='linear_up',
+            rngs=rngs,
         )
 
         # TensorProduct
@@ -1238,7 +1394,7 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
             shared_weights=False,
             internal_weights=False,
             cueq_config=self.cueq_config,
-            name='conv_tp',
+            rngs=rngs,
         )
 
         # Convolution weights (Radial MLP)
@@ -1247,7 +1403,7 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
             [input_dim + 2 * node_scalar_irreps.dim]
             + self.radial_MLP
             + [self.conv_tp.weight_numel],
-            name='conv_tp_weights',
+            rngs=rngs,
         )
 
         # Output irreps
@@ -1258,7 +1414,7 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
             self.node_feats_irreps,
             self.hidden_irreps,
             cueq_config=self.cueq_config,
-            name='skip_tp',
+            rngs=rngs,
         )
 
         # Reshape
@@ -1274,7 +1430,6 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
             irreps_gates=irreps_gates,
             act_gates=[jax.nn.sigmoid] * len(irreps_gates),
             irreps_gated=irreps_gated,
-            name='equivariant_nonlin',
         )
         self.irreps_nonlin = self.equivariant_nonlin.irreps_in.simplify()
 
@@ -1285,7 +1440,7 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
             internal_weights=True,
             shared_weights=True,
             cueq_config=self.cueq_config,
-            name='linear_res',
+            rngs=rngs,
         )
 
         # Linear blocks
@@ -1295,7 +1450,7 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
             internal_weights=True,
             shared_weights=True,
             cueq_config=self.cueq_config,
-            name='linear_1',
+            rngs=rngs,
         )
         self.linear_2 = Linear(
             self.irreps_out,
@@ -1303,13 +1458,17 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
             internal_weights=True,
             shared_weights=True,
             cueq_config=self.cueq_config,
-            name='linear_2',
+            rngs=rngs,
         )
 
         # Density normalization
         self.density_fn = RadialMLP(
-            [input_dim + 2 * node_scalar_irreps.dim, 64, 1], name='density_fn'
+            [input_dim + 2 * node_scalar_irreps.dim, 64, 1],
+            rngs=rngs,
         )
+
+        self.alpha = nnx.Param(jnp.array(20.0, dtype=default_dtype()))
+        self.beta = nnx.Param(jnp.zeros((), dtype=default_dtype()))
 
         # Transpose wrappers
         self.transpose_mul_ir = TransposeIrrepsLayoutWrapper(
@@ -1325,7 +1484,6 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
             cueq_config=self.cueq_config,
         )
 
-    @fnn.compact
     def __call__(
         self,
         node_attrs: jnp.ndarray,
@@ -1388,18 +1546,8 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
         node_feats_res = self.truncate_ghosts(node_feats_res, n_real)
 
         # Linear + normalization
-        alpha_var = self.variable(
-            'params',
-            'alpha',
-            lambda: jnp.array(20.0, dtype=default_dtype()),
-        )
-        beta_var = self.variable(
-            'params',
-            'beta',
-            lambda: jnp.zeros((), dtype=default_dtype()),
-        )
-        alpha = alpha_var.value
-        beta = beta_var.value
+        alpha = jnp.asarray(self.alpha, dtype=message.dtype)
+        beta = jnp.asarray(self.beta, dtype=message.dtype)
 
         message = self.linear_1(message) / (density * beta + alpha)
         message = message + node_feats_res
@@ -1418,23 +1566,17 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
         return self.reshape(message), sc
 
 
-@register_flax_module('mace.modules.blocks.ScaleShiftBlock')
-@auto_import_from_torch_flax(allow_missing_mapper=True)
-class ScaleShiftBlock(fnn.Module):
-    scale: float | jnp.ndarray
-    shift: float | jnp.ndarray
+@nxx_register_module('mace.modules.blocks.ScaleShiftBlock')
+@nxx_auto_import_from_torch(allow_missing_mapper=True)
+class ScaleShiftBlock(nnx.Module):
+    def __init__(self, scale: float | jnp.ndarray, shift: float | jnp.ndarray) -> None:
+        self.scale = nnx.Param(jnp.asarray(scale, dtype=default_dtype()))
+        self.shift = nnx.Param(jnp.asarray(shift, dtype=default_dtype()))
 
-    @fnn.compact
     def __call__(self, x: jnp.ndarray, head: jnp.ndarray) -> jnp.ndarray:
-        scale_init = jnp.asarray(self.scale, dtype=default_dtype())
-        shift_init = jnp.asarray(self.shift, dtype=default_dtype())
-
-        scale = self.param('scale', lambda rng: scale_init)
-        shift = self.param('shift', lambda rng: shift_init)
-
         # Match Torch behaviour (buffers) by keeping scale/shift constants during training.
-        scale = jax.lax.stop_gradient(scale)
-        shift = jax.lax.stop_gradient(shift)
+        scale = jax.lax.stop_gradient(self.scale)
+        shift = jax.lax.stop_gradient(self.shift)
 
         scale_h = jnp.atleast_1d(scale)[head]
         shift_h = jnp.atleast_1d(shift)[head]

@@ -10,10 +10,10 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
-import jax
 import numpy as np
 
 from mace_jax.modules.wrapper_ops import CuEquivarianceConfig
+from mace_jax.nnx_utils import state_to_pure_dict
 
 warnings.filterwarnings(
     'ignore',
@@ -22,11 +22,11 @@ warnings.filterwarnings(
 )
 
 import torch
-from flax import core as flax_core
-from flax import serialization
+from flax import nnx, serialization
 from mace.calculators import foundations_models
 from mace.tools.scripts_utils import extract_config_mace_model
 
+from mace_jax.nnx_utils import state_to_serializable_dict
 from mace_jax.tools.import_from_torch import import_from_torch
 from mace_jax.tools.model_builder import (
     _as_irreps,
@@ -159,21 +159,6 @@ def convert_model(
     *,
     cueq_config: CuEquivarianceConfig | None = None,
 ):
-    def _ensure_nontrainable_collections(
-        vars_imported: flax_core.FrozenDict, template_vars: flax_core.FrozenDict
-    ) -> flax_core.FrozenDict:
-        # import_from_torch only populates parameter leaves; unless we copy the
-        # template’s auxiliary collections (config/constants) back in, the
-        # exported bundle won’t carry normalize2mom/layout metadata, breaking
-        # parity when reloading. This keeps the non-trainable collections from
-        # the template alongside the imported params.
-        merged = flax_core.unfreeze(vars_imported)
-        template_unfrozen = flax_core.unfreeze(template_vars)
-        for collection in ('config', 'constants', 'meta'):
-            if collection not in merged and collection in template_unfrozen:
-                merged[collection] = template_unfrozen[collection]
-        return flax_core.freeze(merged)
-
     _maybe_update_hidden_irreps_from_torch(torch_model, config)
 
     try:
@@ -181,29 +166,29 @@ def convert_model(
             config,
             cueq_config=cueq_config,
             init_normalize2mom_consts=False,
+            rngs=nnx.Rngs(0),
         )
     except TypeError as exc:
         if 'cueq_config' in str(exc):
             jax_model = _build_jax_model(
                 config,
                 init_normalize2mom_consts=False,
+                rngs=nnx.Rngs(0),
             )
         else:
             raise
     template_data = _prepare_template_data(config)
-    template_vars = jax_model.init(jax.random.PRNGKey(0), template_data)
-
-    variables = import_from_torch(jax_model, torch_model, template_vars)
-    variables = _ensure_nontrainable_collections(variables, template_vars)
+    graphdef, state = nnx.split(jax_model)
+    import_from_torch(jax_model, torch_model, state)
+    variables = state_to_serializable_dict(state)
     consts_loaded = None
     if isinstance(variables, dict) or hasattr(variables, 'get'):
-        config_coll = variables.get('config', {}) or variables.get('constants', {})
-        consts_loaded = config_coll.get('normalize2mom_consts', None)
+        consts_loaded = variables.get('_normalize2mom_consts_var')
     if consts_loaded:
         config['normalize2mom_consts'] = {
             key: float(np.asarray(val)) for key, val in consts_loaded.items()
         }
-    return jax_model, variables, template_data
+    return graphdef, state, template_data
 
 
 def main():
@@ -263,7 +248,8 @@ def main():
         raise RuntimeError(config['error'])
     config['torch_model_class'] = torch_model.__class__.__name__
 
-    jax_model, variables, template_data = convert_model(torch_model, config)
+    _, state, _ = convert_model(torch_model, config)
+    variables = state_to_pure_dict(state)
 
     params_bytes = serialization.to_bytes(variables)
     output_path.write_bytes(params_bytes)

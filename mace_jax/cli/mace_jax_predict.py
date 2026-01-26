@@ -259,7 +259,7 @@ def _write_predictions(
 
 
 def _build_predictor(
-    module,
+    graphdef,
     *,
     model_config: dict[str, Any],
     compute_forces: bool,
@@ -280,8 +280,7 @@ def _build_predictor(
             keep_keys.update({'stress', 'virials'})
 
     def _predict(params, graph):
-        outputs = module.apply(
-            params,
+        outputs, _ = graphdef.apply(params)(
             gin_model._graph_to_data(graph, num_species=num_species),
             compute_force=compute_forces,
             compute_stress=compute_stress,
@@ -525,7 +524,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     bundle = bundle_tools.load_model_bundle(args.model, args.dtype or '')
     head_name, head_to_index = _resolve_head_mapping(bundle.config, args.head)
     predictor = _build_predictor(
-        bundle.module,
+        bundle.graphdef,
         model_config=bundle.config,
         compute_forces=args.compute_forces,
         compute_stress=args.compute_stress,

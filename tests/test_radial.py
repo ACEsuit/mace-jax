@@ -1,8 +1,10 @@
-import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 import torch
+from flax import nnx
+
+from mace_jax.nnx_utils import state_to_pure_dict
 
 try:  # pragma: no cover - optional torch dependency for parity tests
     from mace.modules.radial import BesselBasis as BesselBasisTorch
@@ -21,6 +23,11 @@ from mace_jax.modules.radial import RadialMLP as RadialMLPJax
 from mace_jax.modules.radial import ZBLBasis as ZBLBasisJAX
 
 
+def _split_module(module):
+    graphdef, state = nnx.split(module)
+    return graphdef, state_to_pure_dict(state)
+
+
 class TestBesselBasisParity:
     @pytest.mark.parametrize('trainable', [False, True])
     @pytest.mark.parametrize('num_basis', [4, 8])
@@ -36,16 +43,17 @@ class TestBesselBasisParity:
         x_t = 0.1 + (r_max - 0.1) * torch.rand(batch, 1)
         out_t = torch_module(x_t).detach().cpu().numpy()
 
+        rngs = nnx.Rngs(0) if trainable else None
         model = BesselBasisJAX(
             r_max=r_max,
             num_basis=num_basis,
             trainable=trainable,
+            rngs=rngs,
         )
-        key = jax.random.PRNGKey(0)
         x_j = jnp.array(x_t.detach().cpu().numpy())
-        variables = model.init(key, x_j)
+        graphdef, variables = _split_module(model)
         variables = BesselBasisJAX.import_from_torch(torch_module, variables)
-        out_j = model.apply(variables, x_j)
+        out_j, _ = graphdef.apply(variables)(x_j)
 
         assert out_t.shape == out_j.shape
         np.testing.assert_allclose(out_t, np.array(out_j), rtol=1e-6, atol=1e-6)
@@ -63,11 +71,11 @@ class TestBesselBasisParity:
         out_t = torch_module(x_t).detach().cpu().numpy()
 
         model = BesselBasisJAX(r_max=r_max, num_basis=num_basis, trainable=False)
-        key = jax.random.PRNGKey(0)
         x_j = jnp.array(x_t.detach().cpu().numpy())
-        variables = model.init(key, x_j)
+        graphdef, variables = _split_module(model)
         variables = BesselBasisJAX.import_from_torch(torch_module, variables)
-        out_j = np.array(model.apply(variables, x_j))
+        out_j, _ = graphdef.apply(variables)(x_j)
+        out_j = np.array(out_j)
 
         np.testing.assert_allclose(out_t, out_j, rtol=1e-6, atol=1e-6)
         assert np.all(np.isfinite(out_j))
@@ -76,10 +84,10 @@ class TestBesselBasisParity:
         r_max = 5.0
         num_basis = 6
         model = BesselBasisJAX(r_max=r_max, num_basis=num_basis, trainable=False)
-        key = jax.random.PRNGKey(0)
         x_j = jnp.zeros((3, 1), dtype=jnp.float64)
-        variables = model.init(key, x_j)
-        out_j = np.array(model.apply(variables, x_j))
+        graphdef, variables = _split_module(model)
+        out_j, _ = graphdef.apply(variables)(x_j)
+        out_j = np.array(out_j)
 
         prefactor = np.sqrt(2.0 / r_max)
         init_bessel = (
@@ -107,10 +115,10 @@ class TestChebychevBasisParity:
         out_torch = model_torch(x_torch).detach().cpu().numpy()
 
         model = ChebychevBasisJAX(r_max=r_max, num_basis=num_basis)
-        key = jax.random.PRNGKey(0)
         x_jax = jnp.array(x_torch.detach().cpu().numpy())
-        variables = model.init(key, x_jax)
-        out_jax = np.array(model.apply(variables, x_jax))
+        graphdef, variables = _split_module(model)
+        out_jax, _ = graphdef.apply(variables)(x_jax)
+        out_jax = np.array(out_jax)
 
         assert out_torch.shape == out_jax.shape
         np.testing.assert_allclose(out_jax, out_torch, rtol=1e-5, atol=1e-6)
@@ -135,11 +143,10 @@ class TestRadialMLP:
         torch_model = RadialMLPTorch(channels_list)
         out_torch = torch_model(x_torch)
 
-        rng = jax.random.PRNGKey(42)
-        model = RadialMLPJax(channels_list)
-        variables = model.init(rng, x_jax)
+        model = RadialMLPJax(channels_list, rngs=nnx.Rngs(42))
+        graphdef, variables = _split_module(model)
         variables = RadialMLPJax.import_from_torch(torch_model, variables)
-        out_jax = model.apply(variables, x_jax)
+        out_jax, _ = graphdef.apply(variables)(x_jax)
 
         np.testing.assert_allclose(
             np.array(out_jax),
@@ -189,14 +196,13 @@ class TestZBLBasis:
             .numpy()
         )
 
-        model = ZBLBasisJAX(trainable=trainable, name='zbl_basis')
-        rng = jax.random.PRNGKey(42)
-        variables = model.init(
-            rng, x_jax, node_attrs_jax, edge_index_jax, atomic_numbers_jax
+        model = ZBLBasisJAX(
+            trainable=trainable, rngs=nnx.Rngs(42) if trainable else None
         )
+        graphdef, variables = _split_module(model)
         variables = ZBLBasisJAX.import_from_torch(torch_model, variables)
-        jax_out = model.apply(
-            variables, x_jax, node_attrs_jax, edge_index_jax, atomic_numbers_jax
+        jax_out, _ = graphdef.apply(variables)(
+            x_jax, node_attrs_jax, edge_index_jax, atomic_numbers_jax
         )
         jax_out = np.array(jax_out)
 

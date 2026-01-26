@@ -12,10 +12,12 @@ from e3nn.o3._tensor_product._sub import (
     FullyConnectedTensorProduct as FullyConnectedTensorProductTorch,
 )
 from e3nn_jax import Irreps
+from flax import nnx
 
 from mace_jax.adapters.cuequivariance.fully_connected_tensor_product import (
     FullyConnectedTensorProduct as FullyConnectedTensorProductJAX,
 )
+from mace_jax.adapters.nnx.torch import init_from_torch
 
 
 class TestFullyConnectedTensorProductImport:
@@ -126,14 +128,13 @@ class TestFullyConnectedTensorProductImport:
             ir_out,
             shared_weights=shared_weights,
             internal_weights=internal_weights,
+            rngs=nnx.Rngs(key),
         )
 
         if internal_weights:
-            variables = module.init(key, x1_jax, x2_jax)
-            variables = FullyConnectedTensorProductJAX.import_from_torch(
-                torch_module, variables
-            )
-            out_jax = module.apply(variables, x1_jax, x2_jax)
+            module, _ = init_from_torch(module, torch_module)
+            graphdef, state = nnx.split(module)
+            out_jax, _ = graphdef.apply(state)(x1_jax, x2_jax)
             weights_torch = None
         else:
             if shared_weights:
@@ -145,8 +146,8 @@ class TestFullyConnectedTensorProductImport:
                 weights_np = self.rng.standard_normal((self.batch, weight_numel))
 
             weights_jax = jnp.array(weights_np)
-            variables = module.init(key, x1_jax, x2_jax, weights=weights_jax)
-            out_jax = module.apply(variables, x1_jax, x2_jax, weights=weights_jax)
+            graphdef, state = nnx.split(module)
+            out_jax, _ = graphdef.apply(state)(x1_jax, x2_jax, weights=weights_jax)
             weights_torch = torch.tensor(weights_np)
 
         x1_torch = torch.tensor(x1_np)

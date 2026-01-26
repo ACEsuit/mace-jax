@@ -7,9 +7,9 @@ from collections.abc import Callable, Sequence
 import e3nn_jax as e3nn
 import jax.numpy as jnp
 from e3nn_jax import Irreps, IrrepsArray
-from flax import linen as fnn
+from flax import nnx
 
-from mace_jax.adapters.flax.torch import auto_import_from_torch_flax
+from mace_jax.adapters.nnx.torch import nxx_auto_import_from_torch
 
 from ._activation import Activation
 from ._extract import Extract
@@ -72,8 +72,8 @@ def _as_irreps(value) -> Irreps:
     return value if isinstance(value, Irreps) else Irreps(value)
 
 
-@auto_import_from_torch_flax(allow_missing_mapper=True)
-class Gate(fnn.Module):
+@nxx_auto_import_from_torch(allow_missing_mapper=True)
+class Gate(nnx.Module):
     """Combine scalar activations with gated higher-order features.
 
     The gate expects its input features to be organised as the concatenation of
@@ -106,12 +106,22 @@ class Gate(fnn.Module):
     irreps_gated: Irreps
     normalize_act: bool = True
 
-    def __post_init__(self) -> None:
-        super().__post_init__()
-        object.__setattr__(self, 'act_scalars', tuple(self.act_scalars))
-        object.__setattr__(self, 'act_gates', tuple(self.act_gates))
+    def __init__(
+        self,
+        irreps_scalars: Irreps,
+        act_scalars: Sequence[Callable | None],
+        irreps_gates: Irreps,
+        act_gates: Sequence[Callable | None],
+        irreps_gated: Irreps,
+        normalize_act: bool = True,
+    ) -> None:
+        self.irreps_scalars = irreps_scalars
+        self.act_scalars = tuple(act_scalars)
+        self.irreps_gates = irreps_gates
+        self.act_gates = tuple(act_gates)
+        self.irreps_gated = irreps_gated
+        self.normalize_act = normalize_act
 
-    def setup(self) -> None:
         irreps_scalars = Irreps(self.irreps_scalars).simplify()
         irreps_gates = Irreps(self.irreps_gates).simplify()
         irreps_gated = Irreps(self.irreps_gated).simplify()

@@ -4,6 +4,7 @@ import argparse
 import time
 from dataclasses import dataclass
 from typing import Any
+from mace_jax.nnx_utils import state_to_pure_dict
 
 import ase
 import jax
@@ -11,6 +12,7 @@ import jax.numpy as jnp
 import numpy as np
 import torch
 from ase.build import bulk
+from flax import nnx
 from mace.calculators import foundations_models
 from mace.data.atomic_data import AtomicData
 from mace.data.utils import config_from_atoms
@@ -154,8 +156,8 @@ def run_torch_inference(
 
 
 def run_jax_inference(
-    jax_model,
-    variables,
+    graphdef,
+    params,
     batch_jax: dict[str, jnp.ndarray],
     *,
     repeats: int,
@@ -163,24 +165,23 @@ def run_jax_inference(
     compute_force: bool,
     compute_stress: bool,
 ) -> tuple[BenchmarkResult, dict[str, Any]]:
-    apply_fn = jax.jit(
-        lambda params, data: jax_model.apply(
-            params,
-            data,
-            compute_force=compute_force,
-            compute_stress=compute_stress,
+    def _apply(p, data):
+        outputs, _ = graphdef.apply(p)(
+            data, compute_force=compute_force, compute_stress=compute_stress
         )
-    )
+        return outputs
+
+    apply_fn = jax.jit(_apply)
 
     for _ in range(warmup):
-        outputs = apply_fn(variables, batch_jax)
+        outputs = apply_fn(params, batch_jax)
         jax.block_until_ready(outputs['energy'])
 
     timings: list[float] = []
     outputs: dict[str, Any] | None = None
     for _ in range(repeats):
         start = time.perf_counter()
-        outputs = apply_fn(variables, batch_jax)
+        outputs = apply_fn(params, batch_jax)
         jax.block_until_ready(outputs['energy'])
         timings.append(time.perf_counter() - start)
 
@@ -257,11 +258,12 @@ def main() -> None:
             layout='mul_ir',
         )
 
-    jax_model, variables, _ = convert_model(
+    graphdef, state, _ = convert_model(
         torch_model,
         config,
         cueq_config=cue_config,
     )
+    params = state_to_pure_dict(state)
 
     torch_stats, torch_outputs = run_torch_inference(
         torch_model,
@@ -278,8 +280,8 @@ def main() -> None:
     )
 
     jax_stats, jax_outputs = run_jax_inference(
-        jax_model,
-        variables,
+        graphdef,
+        params,
         batch_jax,
         repeats=args.repeats,
         warmup=args.warmup,

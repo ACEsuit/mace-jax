@@ -6,6 +6,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from e3nn_jax import Irreps  # type: ignore
+from flax import nnx
 
 from mace_jax.modules.blocks import RealAgnosticInteractionBlock
 from mace_jax.modules.wrapper_ops import CuEquivarianceConfig, TensorProduct
@@ -49,6 +50,7 @@ def _make_module(conv_fusion: bool) -> TensorProduct:
         shared_weights=True,
         internal_weights=False,
         cueq_config=config,
+        rngs=nnx.Rngs(0),
     )
 
 
@@ -68,14 +70,12 @@ def _conv_method(module: TensorProduct, *, edge_index=None) -> str:
     dim = module.irreps_in1.dim  # type: ignore[attr-defined]
     x = jnp.ones((1, dim), dtype=jnp.float32)
     weights = jnp.ones((1, _WEIGHT_NUMEL), dtype=jnp.float32)
-    variables = module.init(
-        jax.random.PRNGKey(0),
-        x,
-        x,
-        weights=weights,
-        edge_index=edge_index,
+    graphdef, state = nnx.split(module)
+    _, (graphdef, state) = graphdef.apply(state)(
+        x, x, weights=weights, edge_index=edge_index
     )
-    return module.apply(variables, method=lambda mdl: mdl._conv_method)
+    module_after = nnx.merge(graphdef, state)
+    return module_after._conv_method
 
 
 class TestCueTensorProductFusion:
@@ -83,9 +83,9 @@ class TestCueTensorProductFusion:
         module = _make_module(conv_fusion=True)
         dim = module.irreps_in1.dim  # type: ignore[attr-defined]
         x = jnp.ones((1, dim), dtype=jnp.float32)
+        graphdef, state = nnx.split(module)
         with pytest.raises(ValueError):
-            module.init(
-                jax.random.PRNGKey(0),
+            graphdef.apply(state)(
                 x,
                 x,
                 weights=jnp.ones((1, _WEIGHT_NUMEL), dtype=jnp.float32),
@@ -127,15 +127,8 @@ class TestCueTensorProductFusion:
         edge_attrs = jax.random.normal(attr_key, (num_edges, dim_edge))
         weights = jax.random.normal(weight_key, (num_edges, _WEIGHT_NUMEL))
 
-        fused_variables = fused_module.init(
-            key,
-            node_feats,
-            edge_attrs,
-            weights,
-            edge_index=edge_index,
-        )
-        fused_out = fused_module.apply(
-            fused_variables,
+        fused_graphdef, fused_state = nnx.split(fused_module)
+        fused_out, _ = fused_graphdef.apply(fused_state)(
             node_feats,
             edge_attrs,
             weights,
@@ -145,14 +138,8 @@ class TestCueTensorProductFusion:
         sender = edge_index[0]
         receiver = edge_index[1]
 
-        baseline_variables = baseline_module.init(
-            key,
-            node_feats[sender],
-            edge_attrs,
-            weights,
-        )
-        mji = baseline_module.apply(
-            baseline_variables,
+        baseline_graphdef, baseline_state = nnx.split(baseline_module)
+        mji, _ = baseline_graphdef.apply(baseline_state)(
             node_feats[sender],
             edge_attrs,
             weights,
@@ -204,6 +191,7 @@ class TestWrapperBlockConvFusion:
             avg_num_neighbors=1.5,
             radial_MLP=[8],
             cueq_config=fused_config,
+            rngs=nnx.Rngs(0),
         )
         baseline_block = RealAgnosticInteractionBlock(
             node_attrs_irreps=irreps,
@@ -215,22 +203,28 @@ class TestWrapperBlockConvFusion:
             avg_num_neighbors=1.5,
             radial_MLP=[8],
             cueq_config=baseline_config,
+            rngs=nnx.Rngs(0),
         )
 
         init_args = (node_attrs, node_feats, edge_attrs, edge_feats, edge_index)
 
-        fused_variables = fused_block.init(key, *init_args)
-        baseline_variables = baseline_block.init(key, *init_args)
-
-        fused_out, _ = fused_block.apply(fused_variables, *init_args)
-        baseline_out, _ = baseline_block.apply(baseline_variables, *init_args)
-
-        fused_method = fused_block.apply(
-            fused_variables, method=lambda mdl: mdl.conv_tp._conv_method
+        fused_graphdef, fused_state = nnx.split(fused_block)
+        fused_out, (fused_graphdef, fused_state) = fused_graphdef.apply(fused_state)(
+            *init_args
         )
-        baseline_method = baseline_block.apply(
-            baseline_variables, method=lambda mdl: mdl.conv_tp._conv_method
-        )
+        baseline_graphdef, baseline_state = nnx.split(baseline_block)
+        baseline_out, (baseline_graphdef, baseline_state) = baseline_graphdef.apply(
+            baseline_state
+        )(*init_args)
+        if isinstance(fused_out, tuple):
+            fused_out = fused_out[0]
+        if isinstance(baseline_out, tuple):
+            baseline_out = baseline_out[0]
+
+        fused_method = nnx.merge(fused_graphdef, fused_state).conv_tp._conv_method
+        baseline_method = nnx.merge(
+            baseline_graphdef, baseline_state
+        ).conv_tp._conv_method
 
         if fused_method == 'uniform_1d':
             assert baseline_method == 'naive'
@@ -303,6 +297,7 @@ class TestConvFusionTorchParity:
             shared_weights=True,
             internal_weights=False,
             cueq_config=jax_config,
+            rngs=nnx.Rngs(0),
         )
 
         node_feats_j = jnp.asarray(node_feats)
@@ -310,26 +305,14 @@ class TestConvFusionTorchParity:
         weights_j = jnp.asarray(weights)
         edge_index_j = jnp.asarray(edge_index)
 
-        variables = jax_module.init(
-            jax.random.PRNGKey(0),
+        graphdef, state = nnx.split(jax_module)
+        jax_out, (graphdef, state) = graphdef.apply(state)(
             node_feats_j,
             edge_attrs_j,
             weights_j,
             edge_index=edge_index_j,
         )
-
-        def _apply_with_method(mdl, x1, x2, w, edge_index):
-            out = mdl(x1, x2, w, edge_index=edge_index)
-            return out, mdl._conv_method
-
-        jax_out, method = jax_module.apply(
-            variables,
-            node_feats_j,
-            edge_attrs_j,
-            weights_j,
-            edge_index=edge_index_j,
-            method=_apply_with_method,
-        )
+        method = nnx.merge(graphdef, state)._conv_method
 
         if method != 'uniform_1d':
             pytest.skip('JAX conv_fusion was not selected for this configuration.')
