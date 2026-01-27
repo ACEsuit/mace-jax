@@ -13,6 +13,7 @@ import numpy as np
 from e3nn_jax import Irrep, Irreps
 from flax import nnx, serialization
 
+from mace_jax.nnx_config import ConfigVar
 from mace_jax.nnx_utils import state_to_pure_dict, state_to_serializable_dict
 from mace_jax.tools import model_builder
 
@@ -84,7 +85,7 @@ def _load_checkpoint_bundle(path: Path, dtype: str) -> ModelBundle:
         state_pure = serialization.from_bytes(state_template, state_payload)
     else:
         state_pure = state_payload
-    nnx.replace_by_pure_dict(state, state_pure)
+    _replace_state_with_specials(state, state_pure)
     state_pure = state_to_pure_dict(state)
     _validate_config_matches_params(model_config, state_pure, context=str(path))
     return ModelBundle(config=model_config, params=state_pure, graphdef=graphdef)
@@ -114,7 +115,7 @@ def load_model_bundle(
     graphdef, state = nnx.split(module)
     state_template = state_to_serializable_dict(state)
     state_pure = serialization.from_bytes(state_template, params_path.read_bytes())
-    nnx.replace_by_pure_dict(state, state_pure)
+    _replace_state_with_specials(state, state_pure)
     state_pure = state_to_pure_dict(state)
     _validate_config_matches_params(config, state_pure, context=str(params_path))
     return ModelBundle(config=config, params=state_pure, graphdef=graphdef)
@@ -168,3 +169,17 @@ def _validate_config_matches_params(
 
 
 __all__ = ['ModelBundle', 'load_model_bundle', 'resolve_model_paths']
+
+
+def _replace_state_with_specials(state: nnx.State, state_pure: dict) -> None:
+    """Replace state while handling ConfigVar leaves that store dicts."""
+    normalize2mom = None
+    if isinstance(state_pure, dict) and '_normalize2mom_consts_var' in state_pure:
+        normalize2mom = state_pure.pop('_normalize2mom_consts_var')
+
+    nnx.replace_by_pure_dict(state, state_pure)
+
+    if normalize2mom is not None:
+        cfg = state.get('_normalize2mom_consts_var', None)
+        if isinstance(cfg, ConfigVar):
+            cfg.set_value(normalize2mom)

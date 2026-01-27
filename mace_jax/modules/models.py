@@ -62,25 +62,16 @@ def _as_tuple(value: Sequence[int] | int, repeats: int) -> tuple[int, ...]:
 
 def _prepare_normalize2mom_consts(
     consts: dict[str, float] | None,
-    init_normalize2mom_consts: bool,
-) -> dict[str, float] | None:
-    if consts is None and not init_normalize2mom_consts:
-        return None
+) -> dict[str, float]:
     if consts is None:
-        if init_normalize2mom_consts:
-            silu_value = estimate_normalize2mom_const('silu')
-            consts = {'silu': silu_value, 'swish': silu_value}
-        else:
-            return None
+        silu_value = estimate_normalize2mom_const('silu')
+        consts = {'silu': silu_value, 'swish': silu_value}
     else:
         consts = dict(consts)
         if 'silu' not in consts:
-            if init_normalize2mom_consts:
-                silu_value = estimate_normalize2mom_const('silu')
-                consts['silu'] = silu_value
-                consts.setdefault('swish', silu_value)
-            else:
-                return None
+            silu_value = estimate_normalize2mom_const('silu')
+            consts['silu'] = silu_value
+            consts.setdefault('swish', silu_value)
         if 'swish' not in consts:
             consts['swish'] = consts['silu']
     cleaned: dict[str, float] = {}
@@ -134,7 +125,6 @@ class MACE(nnx.Module):
         embedding_specs: dict[str, Any] | None = None,
         readout_cls: type[NonLinearReadoutBlock] = NonLinearReadoutBlock,
         normalize2mom_consts: dict[str, float] | None = None,
-        init_normalize2mom_consts: bool = True,
         rngs: nnx.Rngs,
     ) -> None:
         self.r_max = r_max
@@ -168,7 +158,6 @@ class MACE(nnx.Module):
         self.cueq_config = cueq_config
         self.embedding_specs = embedding_specs
         self.readout_cls = readout_cls
-        self.init_normalize2mom_consts = init_normalize2mom_consts
 
         self._heads = tuple(self.heads) if self.heads is not None else ('Default',)
         correlation = _as_tuple(self.correlation, self.num_interactions)
@@ -200,18 +189,13 @@ class MACE(nnx.Module):
             else hidden_irreps
         )
 
-        consts = _prepare_normalize2mom_consts(
-            normalize2mom_consts, self.init_normalize2mom_consts
-        )
+        consts = _prepare_normalize2mom_consts(normalize2mom_consts)
         self._normalize2mom_consts = consts
-        if consts is not None:
-            dtype = default_dtype()
-            const_arrays = {
-                key: jnp.asarray(val, dtype=dtype) for key, val in consts.items()
-            }
-            self._normalize2mom_consts_var = ConfigVar(const_arrays)
-        else:
-            self._normalize2mom_consts_var = None
+        dtype = default_dtype()
+        const_arrays = {
+            key: jnp.asarray(val, dtype=dtype) for key, val in consts.items()
+        }
+        self._normalize2mom_consts_var = ConfigVar(const_arrays)
 
         node_attr_irreps = Irreps([(self.num_elements, (0, 1))])
         scalar_mul = hidden_irreps.count(Irrep(0, 1))

@@ -165,14 +165,12 @@ def convert_model(
         jax_model = _build_jax_model(
             config,
             cueq_config=cueq_config,
-            init_normalize2mom_consts=False,
             rngs=nnx.Rngs(0),
         )
     except TypeError as exc:
         if 'cueq_config' in str(exc):
             jax_model = _build_jax_model(
                 config,
-                init_normalize2mom_consts=False,
                 rngs=nnx.Rngs(0),
             )
         else:

@@ -227,7 +227,6 @@ def _build_jax_model(
     config: dict[str, Any],
     *,
     cueq_config: CuEquivarianceConfig | None = None,
-    init_normalize2mom_consts: bool = True,
     rngs: nnx.Rngs | None = None,
 ):
     if rngs is None:
@@ -292,7 +291,6 @@ def _build_jax_model(
         readout_cls=_readout(config.get('readout_cls', None)),
         gate=resolve_gate_callable(config.get('gate', None)),
         cueq_config=cue_config_obj,
-        init_normalize2mom_consts=init_normalize2mom_consts,
     )
 
     if config.get('normalize2mom_consts') is not None:
