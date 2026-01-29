@@ -377,7 +377,6 @@ class TestSymmetricContractionImport:
 
     def test_forward_matches_native_high_correlation(self, torch_device):
         """Expected to fail until native high-order import is harmonised."""
-
         irreps_in = Irreps('2x0e + 2x1o + 2x2e')
         irreps_out = Irreps('2x0e + 2x1o')
         correlation = 2

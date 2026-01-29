@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 import torch
 from jax import config as jax_config
+from contextlib import contextmanager
 
 from mace_jax.data.utils import config_from_atoms
 
@@ -15,6 +16,28 @@ torch.serialization.add_safe_globals([slice])
 # Set default dtype for JAX and Torch
 jax_config.update('jax_enable_x64', True)
 torch.set_default_dtype(torch.float64)
+
+
+@contextmanager
+def preserve_jax_x64():
+    """Temporarily preserve the global jax_enable_x64 setting."""
+    prev = jax_config.jax_enable_x64
+    try:
+        yield
+    finally:
+        jax_config.update('jax_enable_x64', prev)
+
+
+@pytest.fixture(autouse=True)
+def _preserve_global_precisions_per_test():
+    """Ensure tests cannot leak global precision settings across the suite."""
+    prev_jax_x64 = jax_config.jax_enable_x64
+    prev_torch_dtype = torch.get_default_dtype()
+    try:
+        yield
+    finally:
+        jax_config.update('jax_enable_x64', prev_jax_x64)
+        torch.set_default_dtype(prev_torch_dtype)
 
 
 @pytest.fixture(scope='session')

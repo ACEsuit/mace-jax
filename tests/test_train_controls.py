@@ -15,8 +15,6 @@ from mace_jax.data import (
 from mace_jax.tools.train import train as train_loop
 from tests.conftest import _write_hdf5_from_configs
 
-jax.config.update('jax_enable_x64', True)
-
 
 @pytest.fixture(autouse=True)
 def _force_single_device(monkeypatch):
