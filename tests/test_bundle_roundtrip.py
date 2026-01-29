@@ -50,7 +50,7 @@ def test_bundle_roundtrip(tmp_path):
     config_path.write_text(json.dumps(config))
     params_path.write_bytes(serialization.to_bytes(params_payload))
 
-    bundle = bundle_tools.load_model_bundle(str(tmp_path), dtype='float32')
+    bundle = bundle_tools.load_model_bundle(str(tmp_path), dtype='float64')
 
     assert '_normalize2mom_consts_var' in bundle.params
     template = model_builder._prepare_template_data(config)

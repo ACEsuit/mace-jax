@@ -1,3 +1,5 @@
+import warnings
+from contextlib import contextmanager
 from pathlib import Path
 
 import ase.io
@@ -6,7 +8,6 @@ import numpy as np
 import pytest
 import torch
 from jax import config as jax_config
-from contextlib import contextmanager
 
 from mace_jax.data.utils import config_from_atoms
 
@@ -16,6 +17,13 @@ torch.serialization.add_safe_globals([slice])
 # Set default dtype for JAX and Torch
 jax_config.update('jax_enable_x64', True)
 torch.set_default_dtype(torch.float64)
+
+
+warnings.filterwarnings(
+    'ignore',
+    message=r"Method 'uniform_1d' requires CUDA, but platform is 'None'. Falling back to 'naive' implementation\.",
+    category=UserWarning,
+)
 
 
 @contextmanager
@@ -34,6 +42,9 @@ def _preserve_global_precisions_per_test():
     prev_jax_x64 = jax_config.jax_enable_x64
     prev_torch_dtype = torch.get_default_dtype()
     try:
+        # Default test precision: keep float64 enabled for JAX/Torch.
+        jax_config.update('jax_enable_x64', True)
+        torch.set_default_dtype(torch.float64)
         yield
     finally:
         jax_config.update('jax_enable_x64', prev_jax_x64)
