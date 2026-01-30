@@ -67,7 +67,7 @@ torch = None
 
 
 def _is_named_mp_foundation(name: str) -> bool:
-    from mace_jax.tools.foundation_models import get_mace_mp_names
+    from mace_jax.tools.foundation_models import get_mace_mp_names  # noqa: PLC0415
 
     normalized = name.lower()
     known = {m for m in get_mace_mp_names() if m}

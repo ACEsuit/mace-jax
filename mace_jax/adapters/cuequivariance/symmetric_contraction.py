@@ -707,8 +707,6 @@ def _cached_full_cg_transform(
     irreps_in_o3 = o3.Irreps(irreps_in_str)
     irreps_out_o3 = o3.Irreps(irreps_out_str)
 
-    import torch
-
     torch_module = (
         TorchSymmetricContraction(
             irreps_in=irreps_in_o3,
@@ -832,7 +830,7 @@ def _native_design_matrix(
         Array with shape ``(output_dim, basis_dim)`` whose columns capture the
         native module response for each basis vector.
     """
-    import torch
+    import torch  # noqa: PLC0415
 
     torch_inputs = torch.tensor(inputs_np, dtype=torch.float32)
     num_elements = torch_module.contractions[0].weights_max.shape[0]
@@ -865,7 +863,7 @@ def _assign_native_basis(
     expected native parameter size.
     """
     offset = 0
-    import torch
+    import torch  # noqa: PLC0415
 
     with torch.no_grad():
         for contraction in torch_module.contractions:

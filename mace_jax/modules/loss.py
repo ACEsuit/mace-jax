@@ -513,7 +513,6 @@ class UniversalLoss:
                 _graph_attribute(graph, 'weight', 1.0, dtype=jnp.float32)
                 * forces_weight,
             )
-            scaled_ref = graph.nodes.forces * per_node_weight[:, None]
             scaled_pred = predictions['forces'] * per_node_weight[:, None]
             loss += self.forces_weight * conditional_huber_forces(
                 graph, scaled_pred, self.huber_delta

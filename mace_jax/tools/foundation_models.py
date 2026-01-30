@@ -4,8 +4,8 @@ from typing import TYPE_CHECKING, Any
 
 
 def _load_foundation_modules():
-    from mace.calculators import foundations_models
-    from mace.calculators.foundations_models import mace_mp_names
+    from mace.calculators import foundations_models  # noqa: PLC0415
+    from mace.calculators.foundations_models import mace_mp_names  # noqa: PLC0415
 
     return foundations_models, mace_mp_names
 

@@ -77,7 +77,7 @@ def _hdf5_cache_path(source: Path, cache_dir: Path | None) -> Path:
 def _convert_xyz_to_hdf5(source: Path, target: Path) -> None:
     import h5py
 
-    from mace_jax.data import utils as data_utils
+    from mace_jax.data import utils as data_utils  # noqa: PLC0415
 
     _, configs = data_utils.load_from_xyz(source.as_posix())
     if not configs:
@@ -195,7 +195,7 @@ def main() -> None:
         logging.getLogger('jax._src.xla_bridge').setLevel(logging.CRITICAL)
 
     # Delay import until after environment hints are set.
-    from mace_jax.cli import mace_jax_train
+    from mace_jax.cli import mace_jax_train  # noqa: PLC0415
 
     config_path = _ensure_exists(Path(args.config), 'Gin config')
     cache_dir = Path(args.hdf5_cache_dir) if args.hdf5_cache_dir else None

@@ -47,6 +47,31 @@ Or locally:
 pip install -e .
 ```
 
+### Optional extras
+
+MACE-JAX defines a few optional dependency groups:
+
+- `gpu`: JAX CUDA build + cueq CUDA kernels (`jax[cuda12]`, `cuequivariance-ops-cu12`, `cuequivariance-ops-jax-cu12`)
+- `jax-cuda12`: only the JAX CUDA build (`jax[cuda12]`)
+- `torch`: torch + cueq torch ops (needed for torch checkpoint conversion)
+- `test`: pytest tooling
+- `plot`: matplotlib + pandas
+- `wandb`: Weights & Biases logging
+- `data`: pymatgen (Materials Project download helper)
+- `lammps`: LAMMPS Python bindings (MLIAP export helper)
+
+Example:
+
+```sh
+pip install -e .[gpu,torch,test]
+```
+
+If you only want the JAX CUDA build without cueq extras:
+
+```sh
+pip install -e .[jax-cuda12]
+```
+
 ## Quick start
 
 ```sh

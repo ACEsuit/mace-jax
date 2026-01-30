@@ -1,9 +1,9 @@
+import cuequivariance as cue
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 import torch
-import cuequivariance as cue
 from e3nn import o3
 from e3nn.o3 import TensorProduct as TensorProductTorch
 from e3nn_jax import Irreps
@@ -85,7 +85,7 @@ class TestTensorProductImport:
             irreps_out_str = str(target_irreps)
         elif backend == 'cue':
             try:
-                from cuequivariance_torch.operations.tp_channel_wise import (
+                from cuequivariance_torch.operations.tp_channel_wise import (  # noqa: PLC0415
                     ChannelWiseTensorProduct as CueTensorProductTorch,
                 )
             except Exception as exc:  # pragma: no cover - optional backend
