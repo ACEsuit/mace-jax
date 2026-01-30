@@ -23,7 +23,6 @@ warnings.filterwarnings(
 
 import torch
 from flax import nnx, serialization
-from mace.calculators import foundations_models
 from mace.tools.scripts_utils import extract_config_mace_model
 
 from mace_jax.nnx_utils import state_to_serializable_dict
@@ -33,42 +32,17 @@ from mace_jax.tools.model_builder import (
     _build_jax_model,
     _prepare_template_data,
 )
+from mace_jax.tools.foundation_models import load_foundation_torch_model
 
 
 def _load_torch_model_from_foundations(
     source: str, model: str | None
 ) -> torch.nn.Module:
-    source = source.lower()
-    if source not in {'mp', 'off', 'anicc', 'omol'}:
-        raise ValueError(
-            "Unknown foundation source. Supported values are 'mp', 'off', 'anicc', 'omol'."
-        )
-
-    loader_kwargs: dict[str, Any] = {'device': 'cpu'}
-    loader = None
-    if source in {'mp', 'off', 'omol'}:
-        loader = getattr(
-            foundations_models, f'mace_{"mp" if source == "mp" else source}'
-        )
-        if model is not None:
-            loader_kwargs['model'] = model
-    else:  # anicc
-        loader = foundations_models.mace_anicc
-        if model is not None:
-            loader_kwargs['model_path'] = model
-
-    try:
-        return loader(return_raw_model=True, **loader_kwargs)
-    except Exception:
-        calc = loader(return_raw_model=False, **loader_kwargs)
-        torch_model = getattr(calc, 'model', None)
-        if torch_model is None:
-            models_attr = getattr(calc, 'models', None)
-            if models_attr:
-                torch_model = models_attr[0]
-        if torch_model is None:
-            raise
-        return torch_model
+    return load_foundation_torch_model(
+        source=source,
+        model=model,
+        device='cpu',
+    )
 
 
 def _maybe_update_hidden_irreps_from_torch(

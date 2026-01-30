@@ -77,14 +77,14 @@ class MACEJAXCalculator(Calculator):
             config.atomic_numbers = self.z_table(config.atomic_numbers)
 
         graph_config = graph_from_configuration(config, cutoff=self.r_max)
-        if self.min_n_edge == 0 or self.min_n_edge <= graph_config.n_edge:
-            self.min_n_edge = graph_config.n_edge + max(
-                int(graph_config.n_edge // 10), 10
-            )
+        n_edge = int(np.asarray(graph_config.n_edge).item())
+        if self.min_n_edge == 0 or self.min_n_edge <= n_edge:
+            self.min_n_edge = n_edge + max(int(n_edge // 10), 10)
         # pad graph with dummy atoms
+        n_node = int(np.asarray(graph_config.n_node).item()) + 1
         graph = jraph.pad_with_graphs(
             graph_config,
-            n_node=graph_config.n_node + 1,
+            n_node=n_node,
             n_edge=self.min_n_edge,
             n_graph=2,
         )

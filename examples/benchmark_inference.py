@@ -13,7 +13,6 @@ import numpy as np
 import torch
 from ase.build import bulk
 from flax import nnx
-from mace.calculators import foundations_models
 from mace.data.atomic_data import AtomicData
 from mace.data.utils import config_from_atoms
 from mace.tools import torch_geometric
@@ -24,6 +23,7 @@ from mace.tools.torch_geometric.batch import Batch
 from mace_jax.cli.mace_jax_from_torch import convert_model
 from mace_jax.modules.wrapper_ops import CuEquivarianceConfig
 from mace_jax.tools.device import configure_torch_runtime, get_torch_device
+from mace_jax.tools.foundation_models import load_foundation_torch_model
 
 
 @dataclass
@@ -41,32 +41,11 @@ def load_foundation_model(
     """Return a pretrained Torch MACE foundation model on the specified device."""
 
     loader_kwargs: dict[str, Any] = {'device': device}
-    source_lower = source.lower()
-    if source_lower in {'mp', 'off', 'omol'}:
-        loader = getattr(foundations_models, f'mace_{source_lower}')
-        if variant is not None:
-            loader_kwargs['model'] = variant
-    elif source_lower == 'anicc':
-        loader = foundations_models.mace_anicc
-        if variant is not None:
-            loader_kwargs['model_path'] = variant
-    else:
-        raise ValueError(
-            "Unknown foundation source. Expected one of {'mp', 'off', 'anicc', 'omol'}."
-        )
-
-    try:
-        model = loader(return_raw_model=True, **loader_kwargs)
-    except Exception:  # pragma: no cover - loader API fallback
-        calculator = loader(return_raw_model=False, **loader_kwargs)
-        model = getattr(calculator, 'model', None)
-        if model is None:
-            models = getattr(calculator, 'models', None)
-            if models:
-                model = models[0]
-        if model is None:
-            raise
-
+    model = load_foundation_torch_model(
+        source=source_lower,
+        model=variant,
+        device=loader_kwargs['device'],
+    )
     return model.float().eval()
 
 

@@ -67,10 +67,10 @@ _FOUNDATION_TEMP_DIRS: list[Path] = []
 
 
 def _is_named_mp_foundation(name: str) -> bool:
-    from mace.calculators.foundations_models import mace_mp_names  # noqa: PLC0415
+    from mace_jax.tools.foundation_models import get_mace_mp_names
 
     normalized = name.lower()
-    known = {m for m in mace_mp_names if m}
+    known = {m for m in get_mace_mp_names() if m}
     known.update({'small', 'medium', 'large', 'small_off', 'medium_off', 'large_off'})
     return normalized in known
 
@@ -1063,27 +1063,29 @@ def _resolve_swa_loss_factory(
 
 
 def _load_foundation_model(name: str, *, default_dtype: str | None = None):
-    from mace.calculators import foundations_models  # noqa: PLC0415
-    from mace.calculators.foundations_models import mace_mp_names  # noqa: PLC0415
+    from mace_jax.tools.foundation_models import (
+        get_mace_mp_names,
+        load_foundation_torch_model,
+    )
 
     name = name.lower()
     dtype = default_dtype or 'float32'
-    mp_names = {m for m in mace_mp_names if m}
+    mp_names = {m for m in get_mace_mp_names() if m}
     if name in mp_names:
-        calc = foundations_models.mace_mp(
+        return load_foundation_torch_model(
+            source='mp',
             model=name,
             device='cpu',
             default_dtype=dtype,
         )
-        return calc.models[0]
     if name in {'small_off', 'medium_off', 'large_off'}:
         model_type = name.split('_')[0]
-        calc = foundations_models.mace_off(
+        return load_foundation_torch_model(
+            source='off',
             model=model_type,
             device='cpu',
             default_dtype=dtype,
         )
-        return calc.models[0]
     raise ValueError(
         f"Unknown foundation_model '{name}'. Provide a valid mace-mp/mace-off name or a checkpoint path."
     )
