@@ -12,38 +12,35 @@ from collections.abc import Iterator
 import cuequivariance as cue
 import jax.numpy as jnp
 import numpy as np
-import torch
-from e3nn import o3
 from e3nn_jax import Irrep, Irreps
 
 _TP = collections.namedtuple('_TP', 'op, args')
 _INPUT = collections.namedtuple('_INPUT', 'tensor, start, stop')
 
 
-def wigner_3j(l3: int, l1: int, l2: int, dtype=None) -> jnp.ndarray:
+def _o3():
+    from e3nn import o3  # noqa: PLC0415
+
+    return o3
+
+
+def wigner_3j(l1: int, l2: int, l3: int, dtype=None) -> jnp.ndarray:
     """
-    Return the Wigner-3j array for (l3, l1, l2) as a jax numpy array.
+    Return the Wigner-3j array for (l1, l2, l3) as a jax numpy array.
 
-    This calls e3nn.o3.wigner_3j(...) (PyTorch) and converts the result to jax.
+    This calls e3nn_jax.so3.clebsch_gordan(...) and ensures the requested dtype.
     """
+    # e3nn_jax uses a real CG basis that differs by a global sign for some
+    # permutations (e.g. 1,l,l with l>1). We intentionally use e3nn.o3's
+    # precomputed Wigner-3j tensors to stay consistent with the torch side.
+    o3 = _o3()
+    out = o3.wigner_3j(l1, l2, l3, dtype=None)
+    # Avoid global torch dependency; import locally for conversion.
+    import torch  # noqa: PLC0415
 
-    torch_dtype = None
-    # if user passed a jnp dtype, map to torch dtype conservatively
-    if dtype is jnp.float32:
-        torch_dtype = torch.float32
-    elif dtype is jnp.float64:
-        torch_dtype = torch.float64
-
-    C_t = o3.wigner_3j(l3, l1, l2, dtype=torch_dtype)
-
-    # Convert to numpy, then to jax
-    if isinstance(C_t, torch.Tensor):
-        C_np = C_t.detach().cpu().numpy()
-    else:
-        # Some older/newer APIs might already return numpy array
-        C_np = np.asarray(C_t)
-
-    return jnp.array(C_np, dtype=dtype)
+    if isinstance(out, torch.Tensor):
+        out = out.detach().cpu().numpy()
+    return jnp.asarray(out, dtype=dtype)
 
 
 def _wigner_nj(
@@ -258,7 +255,7 @@ class O3_e3nn(cue.O3):
         rep1, rep2, rep3 = cls._from(rep1), cls._from(rep2), cls._from(rep3)
 
         if rep1.p * rep2.p == rep3.p:
-            return o3.wigner_3j(rep1.l, rep2.l, rep3.l).numpy()[None] * np.sqrt(
+            return np.asarray(wigner_3j(rep1.l, rep2.l, rep3.l))[None] * np.sqrt(
                 rep3.dim
             )
         return np.zeros((0, rep1.dim, rep2.dim, rep3.dim))

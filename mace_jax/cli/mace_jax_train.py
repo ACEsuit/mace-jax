@@ -25,7 +25,6 @@ os.environ.setdefault('ABSL_MIN_LOG_LEVEL', '2')
 import gin
 import jax
 import optax
-import torch
 
 import mace_jax
 from mace_jax import modules, tools
@@ -64,6 +63,7 @@ _LOSS_FACTORIES = {
 }
 
 _FOUNDATION_TEMP_DIRS: list[Path] = []
+torch = None
 
 
 def _is_named_mp_foundation(name: str) -> bool:
@@ -1063,7 +1063,7 @@ def _resolve_swa_loss_factory(
 
 
 def _load_foundation_model(name: str, *, default_dtype: str | None = None):
-    from mace_jax.tools.foundation_models import (
+    from mace_jax.tools.foundation_models import (  # noqa: PLC0415
         get_mace_mp_names,
         load_foundation_torch_model,
     )
@@ -1113,6 +1113,16 @@ def _maybe_adjust_multihead_defaults(args: argparse.Namespace) -> None:
 
 
 def _prepare_foundation_checkpoint(args: argparse.Namespace) -> None:
+    global torch
+    if torch is None:
+        try:
+            import torch as torch_mod  # noqa: PLC0415
+        except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency
+            raise ModuleNotFoundError(
+                'Torch is required to load foundation models or torch checkpoints.'
+            ) from exc
+        torch = torch_mod
+
     foundation_spec = getattr(args, 'foundation_model', None)
     if not foundation_spec:
         return

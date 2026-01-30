@@ -49,8 +49,8 @@ def pt_head_first(
 
 
 def set_default_dtype(dtype: str) -> None:
-    if dtype == "float64":
-        jax_config.update("jax_enable_x64", True)
+    if dtype == 'float64':
+        jax_config.update('jax_enable_x64', True)
 
 
 class _EmptyNode:

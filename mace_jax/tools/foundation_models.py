@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 
 def _load_foundation_modules():
@@ -15,11 +15,15 @@ def get_mace_mp_names():
     return mace_mp_names
 
 
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    import torch
+
+
 def load_foundation_torch_model(
     *,
     source: str,
     model: str | None = None,
-    device: str | 'torch.device' = 'cpu',
+    device: str | torch.device = 'cpu',
     default_dtype: str | None = None,
 ) -> torch.nn.Module:
     """Load a Torch foundation model and return the raw torch.nn.Module.
@@ -27,9 +31,6 @@ def load_foundation_torch_model(
     This centralizes all interactions with mace.calculators so the rest of
     mace-jax can avoid importing the torch calculator API directly.
     """
-
-    import torch
-
     foundations_models, _ = _load_foundation_modules()
     source = source.lower()
     if source not in {'mp', 'off', 'anicc', 'omol'}:

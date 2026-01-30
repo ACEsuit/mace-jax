@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any
 
 import jax
-import torch
 from flax import serialization
 from mace.tools.scripts_utils import extract_config_mace_model
 
@@ -46,6 +45,12 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_torch_model(path: Path) -> Any:
+    try:
+        import torch  # noqa: PLC0415
+    except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency
+        raise ModuleNotFoundError(
+            'Torch is required to load torch checkpoints for LAMMPS export.'
+        ) from exc
     bundle = torch.load(path, map_location='cpu')
     if isinstance(bundle, dict) and 'model' in bundle:
         model = bundle['model']
