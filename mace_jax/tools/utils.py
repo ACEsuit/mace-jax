@@ -2,13 +2,15 @@ import json
 import logging
 import os
 import sys
-from typing import Any, Dict, List, Optional, Tuple, Union
+from collections.abc import Sequence
+from typing import Any
 
 import e3nn_jax as e3nn
 import jax
 import jax.numpy as jnp
 import jraph
 import numpy as np
+from jax import config as jax_config
 
 
 def count_parameters(parameters) -> int:
@@ -19,8 +21,36 @@ def set_seeds(seed: int) -> None:
     np.random.seed(seed)
 
 
+def is_primary_process() -> bool:
+    try:
+        return getattr(jax, 'process_index', lambda: 0)() == 0
+    except Exception:
+        return True
+
+
+def log_info_primary(message: str, *args) -> None:
+    if is_primary_process():
+        logging.info(message, *args)
+
+
+def pt_head_first(
+    heads: Sequence[str], pt_head_name: str = 'pt_head'
+) -> tuple[str, ...]:
+    if not heads:
+        return ()
+    head_list = [str(head) for head in heads]
+    if not pt_head_name:
+        return tuple(head_list)
+    pt_heads = [head for head in head_list if head == pt_head_name]
+    if not pt_heads:
+        return tuple(head_list)
+    rest = [head for head in head_list if head != pt_head_name]
+    return tuple(pt_heads + rest)
+
+
 def set_default_dtype(dtype: str) -> None:
-    jax.config.update("jax_enable_x64", dtype == "float64")
+    if dtype == 'float64':
+        jax_config.update('jax_enable_x64', True)
 
 
 class _EmptyNode:
@@ -66,7 +96,7 @@ def flatten_dict(xs, keep_empty_nodes=False, is_leaf=None, sep=None):
     Returns:
       The flattened dictionary.
     """
-    assert isinstance(xs, dict), "expected (frozen)dict"
+    assert isinstance(xs, dict), 'expected (frozen)dict'
 
     def _key(path):
         if sep is None:
@@ -115,7 +145,7 @@ def unflatten_dict(xs, sep=None):
     Returns:
       The nested dictionary.
     """
-    assert isinstance(xs, dict), "input is not a dict"
+    assert isinstance(xs, dict), 'input is not a dict'
     result = {}
     for path, value in xs.items():
         if sep is not None:
@@ -138,51 +168,124 @@ def safe_norm(x: jnp.ndarray, axis: int = None, keepdims=False) -> jnp.ndarray:
 
 
 def compute_mean_std_atomic_inter_energy(
-    graphs: List[jraph.GraphsTuple],
+    graphs: list[jraph.GraphsTuple],
     atomic_energies: np.ndarray,
-) -> Tuple[float, float]:
-    # atomic_energies = torch.from_numpy(atomic_energies)
+) -> tuple[float, float]:
+    energies = np.asarray(atomic_energies, dtype=np.float64)
+    if energies.ndim == 1:
+        energies = energies[None, :]
+    num_heads = energies.shape[0]
 
-    # atom_energy_list = []
+    per_head: list[list[float]] = [[] for _ in range(num_heads)]
+    for graph in graphs:
+        if graph.nodes is None:
+            continue
+        species = np.asarray(graph.nodes.species, dtype=int)
+        if species.size == 0:
+            continue
+        energy_value = getattr(graph.globals, 'energy', None)
+        if energy_value is None:
+            continue
+        head = getattr(graph.globals, 'head', None)
+        if head is None:
+            head_index = 0
+        else:
+            head_values = np.asarray(head).reshape(-1)
+            head_index = int(head_values[0]) if head_values.size else 0
+        if head_index >= energies.shape[0]:
+            raise ValueError(
+                f'Head index {head_index} exceeds atomic_energies heads '
+                f'({energies.shape[0]}).'
+            )
+        e0_sum = float(energies[head_index, species].sum())
+        energy_scalar = float(np.asarray(energy_value).reshape(-1)[0])
+        per_head[head_index].append((energy_scalar - e0_sum) / float(species.size))
 
-    # for batch in data_loader:
-    #     node_e0 = atomic_energies[batch.node_species]
-    #     graph_e0s = scatter_sum(
-    #         src=node_e0, index=batch.batch, dim=-1, dim_size=batch.num_graphs
-    #     )
-    #     graph_sizes = batch.ptr[1:] - batch.ptr[:-1]
-    #     atom_energy_list.append(
-    #         (batch.energy - graph_e0s) / graph_sizes
-    #     )  # {[n_graphs], }
+    if not any(per_head):
+        return 0.0, 1.0
 
-    # atom_energies = torch.cat(atom_energy_list, dim=0)  # [total_n_graphs]
+    means = np.array(
+        [float(np.mean(values)) if values else 0.0 for values in per_head],
+        dtype=np.float64,
+    )
+    stds = np.array(
+        [float(np.std(values)) if values else 0.0 for values in per_head],
+        dtype=np.float64,
+    )
+    if np.any(stds == 0.0):
+        logging.warning(
+            'Standard deviation of the scaling is zero, changing to no scaling.'
+        )
+        stds = np.where(stds == 0.0, 1.0, stds)
 
-    # mean = to_numpy(torch.mean(atom_energies)).item()
-    # std = to_numpy(torch.std(atom_energies)).item()
-
-    # return mean, std
-    raise NotImplementedError
+    if num_heads == 1:
+        return float(means[0]), float(stds[0])
+    return means, stds
 
 
 def compute_mean_rms_energy_forces(
-    graphs: List[jraph.GraphsTuple],
+    graphs: list[jraph.GraphsTuple],
     atomic_energies: np.ndarray,
-) -> Tuple[float, float]:
-    # mean, _ = compute_mean_std_atomic_inter_energy(data_loader, atomic_energies)
+) -> tuple[float, float]:
+    energies = np.asarray(atomic_energies, dtype=np.float64)
+    if energies.ndim == 1:
+        energies = energies[None, :]
+    num_heads = energies.shape[0]
 
-    # atomic_energies = torch.from_numpy(atomic_energies)
+    per_head: list[list[float]] = [[] for _ in range(num_heads)]
+    force_sq_sum = np.zeros(num_heads, dtype=np.float64)
+    force_count = np.zeros(num_heads, dtype=np.int64)
 
-    # forces = torch.cat(
-    #     [batch.forces for batch in data_loader], dim=0
-    # )  # [total_n_graphs * n_atoms, 3]
+    for graph in graphs:
+        if graph.nodes is None:
+            continue
+        species = np.asarray(graph.nodes.species, dtype=int)
+        if species.size == 0:
+            continue
 
-    # rms = torch.sqrt(torch.mean(torch.square(forces))).item()
+        energy_value = getattr(graph.globals, 'energy', None)
+        head = getattr(graph.globals, 'head', None)
+        if head is None:
+            head_index = 0
+        else:
+            head_values = np.asarray(head).reshape(-1)
+            head_index = int(head_values[0]) if head_values.size else 0
+        if head_index >= energies.shape[0]:
+            raise ValueError(
+                f'Head index {head_index} exceeds atomic_energies heads '
+                f'({energies.shape[0]}).'
+            )
 
-    # return mean, rms
-    raise NotImplementedError
+        if energy_value is not None:
+            e0_sum = float(energies[head_index, species].sum())
+            energy_scalar = float(np.asarray(energy_value).reshape(-1)[0])
+            per_head[head_index].append((energy_scalar - e0_sum) / float(species.size))
+
+        forces = getattr(graph.nodes, 'forces', None)
+        if forces is not None:
+            forces_array = np.asarray(forces, dtype=np.float64)
+            force_sq_sum[head_index] += float(np.sum(np.square(forces_array)))
+            force_count[head_index] += int(forces_array.size)
+
+    means = np.array(
+        [float(np.mean(values)) if values else 0.0 for values in per_head],
+        dtype=np.float64,
+    )
+    rms = np.ones(num_heads, dtype=np.float64)
+    nonzero = force_count > 0
+    rms[nonzero] = np.sqrt(force_sq_sum[nonzero] / force_count[nonzero])
+    if np.any(rms == 0.0):
+        logging.warning(
+            'Standard deviation of the scaling is zero, changing to no scaling.'
+        )
+        rms = np.where(rms == 0.0, 1.0, rms)
+
+    if num_heads == 1:
+        return float(means[0]), float(rms[0])
+    return means, rms
 
 
-def compute_avg_num_neighbors(graphs: List[jraph.GraphsTuple]) -> float:
+def compute_avg_num_neighbors(graphs: list[jraph.GraphsTuple]) -> float:
     num_neighbors = []
 
     for graph in graphs:
@@ -192,7 +295,7 @@ def compute_avg_num_neighbors(graphs: List[jraph.GraphsTuple]) -> float:
     return np.mean(np.concatenate(num_neighbors)).item()
 
 
-def compute_avg_min_neighbor_distance(graphs: List[jraph.GraphsTuple]) -> float:
+def compute_avg_min_neighbor_distance(graphs: list[jraph.GraphsTuple]) -> float:
     min_neighbor_distances = []
 
     for graph in graphs:
@@ -222,9 +325,9 @@ def get_edge_vectors(
     senders: np.ndarray,  # [n_edges]
     receivers: np.ndarray,  # [n_edges]
     shifts: np.ndarray,  # [n_edges, 3]
-    cell: Optional[np.ndarray],  # [n_graph, 3, 3]
+    cell: np.ndarray | None,  # [n_graph, 3, 3]
     n_edge: np.ndarray,  # [n_graph]
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray]:
     """Compute the positions of the sender and receiver nodes of each edge.
 
     This function assumes that the shift is done to the sender node.
@@ -248,7 +351,7 @@ def get_edge_vectors(
     if cell is not None:
         num_edges = receivers.shape[0]
         shifts = jnp.einsum(
-            "ei,eij->ej",
+            'ei,eij->ej',
             shifts,  # [n_edges, 3]
             jnp.repeat(
                 cell,  # [n_graph, 3, 3]
@@ -267,7 +370,7 @@ def get_edge_relative_vectors(
     senders: np.ndarray,  # [n_edges]
     receivers: np.ndarray,  # [n_edges]
     shifts: np.ndarray,  # [n_edges, 3]
-    cell: Optional[np.ndarray],  # [n_graph, 3, 3]
+    cell: np.ndarray | None,  # [n_graph, 3, 3]
     n_edge: np.ndarray,  # [n_graph]
 ) -> np.ndarray:
     vectors_senders, vectors_receivers = get_edge_vectors(
@@ -299,19 +402,17 @@ def compute_rel_rmse(delta: np.ndarray, target_val: np.ndarray) -> float:
     return np.sqrt(np.mean(np.square(delta))).item() / (target_norm + 1e-30)
 
 
-def compute_q95(delta: np.ndarray) -> float:
-    return np.percentile(np.abs(delta), q=95)
-
-
 def compute_c(delta: np.ndarray, eta: float) -> float:
     return np.mean(np.abs(delta) < eta).item()
 
 
 def setup_logger(
-    level: Union[int, str] = logging.INFO,
-    filename: Optional[str] = None,
-    directory: Optional[str] = None,
-    name: Optional[str] = None,
+    level: int | str = logging.INFO,
+    filename: str | None = None,
+    directory: str | None = None,
+    name: str | None = None,
+    include_timestamp: bool = True,
+    stream: bool = True,
 ):
     logger = logging.getLogger()
     logger.setLevel(level)
@@ -320,14 +421,16 @@ def setup_logger(
     for handler in logger.handlers:
         logger.removeHandler(handler)
 
-    fmt = "%(asctime)s.%(msecs)03d %(levelname)s: %(message)s"
-    if name is not None:
-        fmt = f"{name} {fmt}"
-    formatter = logging.Formatter(fmt, datefmt="%Y-%m-%d %H:%M:%S")
+    if include_timestamp:
+        fmt = '%(asctime)s.%(msecs)03d %(levelname)s: %(message)s'
+    else:
+        fmt = '%(levelname)s: %(message)s'
+    formatter = logging.Formatter(fmt, datefmt='%Y-%m-%d %H:%M:%S')
 
-    ch = logging.StreamHandler(stream=sys.stdout)
-    ch.setFormatter(formatter)
-    logger.addHandler(ch)
+    if stream:
+        ch = logging.StreamHandler(stream=sys.stdout)
+        ch.setFormatter(formatter)
+        logger.addHandler(ch)
 
     if (directory is not None) and (filename is not None):
         os.makedirs(name=directory, exist_ok=True)
@@ -355,9 +458,9 @@ class MetricsLogger:
         self.filename = filename
         self.path = os.path.join(self.directory, self.filename)
 
-    def log(self, d: Dict[str, Any]) -> None:
-        logging.debug(f"Saving info: {self.path}")
+    def log(self, d: dict[str, Any]) -> None:
+        logging.debug(f'Saving info: {self.path}')
         os.makedirs(name=self.directory, exist_ok=True)
-        with open(self.path, mode="a", encoding="utf-8") as f:
+        with open(self.path, mode='a', encoding='utf-8') as f:
             f.write(json.dumps(d, cls=UniversalEncoder))
-            f.write("\n")
+            f.write('\n')

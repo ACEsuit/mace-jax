@@ -6,41 +6,29 @@ flags.profile = False  # If True, profiles the execution time and normalization 
 
 logs.directory = "results"
 
-datasets.train_path = "data/rmd17_aspirin_train.xyz"  # in units of eV and Å
-datasets.test_path = "data/rmd17_aspirin_test.xyz"
-datasets.r_max = 5.0
-datasets.valid_fraction = 0.208
-datasets.n_node = 512
+datasets.train_path = "data/hdf5/train"
+datasets.valid_path = "data/hdf5/val"
+datasets.test_path = None
 datasets.n_edge = 2048
-datasets.n_graph = 6
-datasets.n_mantissa_bits = 2
 
 
 
+model.r_max = 5.0
 model.radial_basis = @bessel_basis
 bessel_basis.number = 8
 
 model.radial_envelope = @soft_envelope
 
-model.symmetric_tensor_product_basis = True  # symmetric is slightly worse but slightly faster
-model.off_diagonal = False
+model.num_bessel = 8
+model.num_polynomial_cutoff = 6
 model.max_ell = 3
 model.num_interactions = 2
 model.hidden_irreps = "256x0e + 256x1o"
-model.interaction_irreps = "o3_restricted"  # "o3_restricted" seems to be better than "o3_full"
-model.epsilon = 0.4  # set to None to use the default value of MACE, 1/sqrt(avg_num_neighbors)
+model.MLP_irreps = "16x0e"
 model.correlation = 3  # 4 is better but 5x slower
 model.gate = @silu
-model.readout_mlp_irreps = "16x0e"
-model.num_species = 11
 model.atomic_energies = "average"
 model.avg_num_neighbors = "average"
-# model.atomic_energies = {
-#     1: -13.587222780835477,
-#     6: -1029.4889999855063,
-#     7: -1484.9814568572233,
-#     8: -2041.9816003861047
-# }
 
 
 loss.energy_weight = 1.0
@@ -50,8 +38,7 @@ loss.stress_weight = 0.0
 
 optimizer.algorithm = @amsgrad  # @adam is slightly worse
 optimizer.lr = 0.01
-optimizer.steps_per_interval = 1024
-optimizer.max_num_intervals = 100
+optimizer.max_epochs = 100
 # optimizer.weight_decay = 5e-7
 # optimizer.scheduler = @piecewise_constant_schedule
 # piecewise_constant_schedule.boundaries_and_scales = {
@@ -61,6 +48,5 @@ optimizer.max_num_intervals = 100
 
 train.patience = 2048
 train.ema_decay = 0.99
-train.eval_train = False  # if True, evaluates the whole training set at each eval_interval
 train.eval_test = False
 train.log_errors = "PerAtomMAE"

@@ -1,0 +1,36 @@
+import mace_jax.modules
+import mace_jax.tools.gin_datasets
+import mace_jax.tools.gin_functions
+import mace_jax.tools.gin_model
+
+# Model configuration (maps from the Torch CLI example).
+mace_jax.tools.gin_model.model.r_max = 6.0
+mace_jax.tools.gin_model.model.num_interactions = 2
+mace_jax.tools.gin_model.model.correlation = 3
+mace_jax.tools.gin_model.model.max_ell = 3
+mace_jax.tools.gin_model.model.num_bessel = 10
+mace_jax.tools.gin_model.model.num_polynomial_cutoff = 5
+mace_jax.tools.gin_model.model.MLP_irreps = '16x0e'
+
+# Torch-style num_channels/max_L are represented by explicit irreps here.
+mace_jax.tools.gin_model.model.hidden_irreps = '128x0e + 128x1o'
+
+mace_jax.tools.gin_model.model.interaction_cls_first = (
+    @mace_jax.modules.RealAgnosticDensityInteractionBlock
+)
+mace_jax.tools.gin_model.model.interaction_cls = (
+    @mace_jax.modules.RealAgnosticDensityResidualInteractionBlock
+)
+mace_jax.tools.gin_model.model.pair_repulsion = True
+mace_jax.tools.gin_model.model.distance_transform = 'Agnesi'
+
+# Loss: mirror "universal" by selecting the UniversalLoss class explicitly.
+mace_jax.tools.gin_functions.loss.loss_cls = @mace_jax.modules.UniversalLoss
+
+# Dataset defaults (CLI overrides paths/caps).
+mace_jax.tools.gin_datasets.datasets.num_workers = 4
+
+# Training defaults (CLI overrides key values).
+mace_jax.tools.gin_functions.flags.debug = False
+mace_jax.tools.gin_functions.flags.seed = 0
+mace_jax.tools.gin_functions.flags.dtype = 'float64'
