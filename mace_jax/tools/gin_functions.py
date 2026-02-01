@@ -38,6 +38,7 @@ from unique_names_generator import get_random_name
 from unique_names_generator.data import ADJECTIVES, NAMES
 
 from mace_jax import modules, tools
+from mace_jax.nnx_utils import align_layout_config
 from mace_jax.tools import device as device_utils
 
 _PROFILE_HELPER = None
@@ -1030,10 +1031,24 @@ def train(
         params = resume_state.get(
             'params', _attach_config(trainable_params, static_config)
         )
+        if static_config is not None and isinstance(params, Mapping):
+            cfg = params.get('config', None)
+            if cfg is not None:
+                params = {
+                    **params,
+                    'config': align_layout_config(cfg, static_config),
+                }
         trainable_params, static_config = _split_config(params)
         optimizer_state = resume_state.get('optimizer_state', optimizer_state)
         resume_eval_params = resume_state.get('eval_params', None)
         if resume_eval_params is not None:
+            if static_config is not None and isinstance(resume_eval_params, Mapping):
+                cfg = resume_eval_params.get('config', None)
+                if cfg is not None:
+                    resume_eval_params = {
+                        **resume_eval_params,
+                        'config': align_layout_config(cfg, static_config),
+                    }
             resume_eval_params, _ = _split_config(resume_eval_params)
         lowest_loss = resume_state.get('lowest_loss', lowest_loss)
         patience_counter = resume_state.get('patience_counter', patience_counter)

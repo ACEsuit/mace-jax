@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections import OrderedDict
 from math import prod as _prod
 
@@ -752,9 +753,10 @@ def _tensor_product_import_from_torch(cls, torch_module, variables):
         torch_layout_str = 'mul_ir'
 
     if expected_layout is not None and str(expected_layout) != str(torch_layout_str):
-        raise ValueError(
-            f'JAX TensorProduct expected layout {expected_layout!r} but Torch module '
-            f'uses layout {torch_layout_str!r}.'
+        logging.warning(
+            'JAX TensorProduct layout %r differs from Torch layout %r; importing weights without conversion.',
+            expected_layout,
+            torch_layout_str,
         )
 
     if (

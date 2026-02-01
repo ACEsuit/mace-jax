@@ -1,3 +1,4 @@
+import logging
 import math
 
 import numpy as np
@@ -313,7 +314,7 @@ class TestLinearParity:
             atol=1e-6,
         )
 
-    def test_cue_linear_matches_torch_ir_mul(self, simple_xyz_features):
+    def test_cue_linear_matches_torch_ir_mul(self, simple_xyz_features, caplog):
         """Cue Linear adapter should mirror torch cuet.Linear in ir_mul layout."""
         _, _, CueLinearTorch = _require_cue_torch()
         if not _torch_cuda_available():
@@ -350,13 +351,15 @@ class TestLinearParity:
         features_jax = jnp.asarray(features_mul_ir)
         variables = state_to_pure_dict(nnx.state(module))
 
-        # Import should raise due to layout mismatch between JAX (ir_mul)
-        # and the torch module (mul_ir); this avoids silently copying weights.
-        with pytest.raises(ValueError, match='expected layout'):
+        # Import should warn about layout mismatch between JAX (ir_mul)
+        # and the torch module (mul_ir); weights are copied without conversion.
+        with caplog.at_level(logging.WARNING):
             JaxLinear.import_from_torch(torch_layer, variables)
+        messages = [record.getMessage() for record in caplog.records]
+        assert any('layout' in msg and 'Torch layout' in msg for msg in messages)
 
-    def test_import_rejects_layout_mismatch(self):
-        """Import should fail when Torch and JAX layouts disagree."""
+    def test_import_rejects_layout_mismatch(self, caplog):
+        """Import should warn when Torch and JAX layouts disagree."""
         _, _, CueLinearTorch = _require_cue_torch()
         if not _torch_cuda_available():
             pytest.skip('cuequivariance torch backend requires CUDA')
@@ -381,5 +384,7 @@ class TestLinearParity:
         )
         variables = state_to_pure_dict(nnx.state(module))
 
-        with pytest.raises(ValueError, match='expected layout'):
+        with caplog.at_level(logging.WARNING):
             JaxLinear.import_from_torch(torch_layer, variables)
+        messages = [record.getMessage() for record in caplog.records]
+        assert any('layout' in msg and 'Torch layout' in msg for msg in messages)

@@ -20,6 +20,7 @@ weights that is expected during the conversion.
 
 from __future__ import annotations
 
+import logging
 from functools import cache
 
 import cuequivariance_jax as cuex
@@ -555,14 +556,16 @@ def _symmetric_contraction_import_from_torch_with_layout(cls, torch_module, vari
         torch_output = 'mul_ir'
 
     if expected_input is not None and str(expected_input) != str(torch_input):
-        raise ValueError(
-            f'JAX SymmetricContraction expected input layout {expected_input!r} but '
-            f'Torch module uses layout {torch_input!r}.'
+        logging.warning(
+            'JAX SymmetricContraction input layout %r differs from Torch layout %r; importing weights without conversion.',
+            expected_input,
+            torch_input,
         )
     if expected_output is not None and str(expected_output) != str(torch_output):
-        raise ValueError(
-            f'JAX SymmetricContraction expected output layout {expected_output!r} but '
-            f'Torch module uses layout {torch_output!r}.'
+        logging.warning(
+            'JAX SymmetricContraction output layout %r differs from Torch layout %r; importing weights without conversion.',
+            expected_output,
+            torch_output,
         )
 
     return cls._import_from_torch_impl(

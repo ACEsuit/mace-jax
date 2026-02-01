@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import cuequivariance_jax as cuex
 import jax
 import jax.numpy as jnp
@@ -342,9 +344,10 @@ def _fctp_import_from_torch(cls, torch_module, variables):
         torch_layout_str = 'mul_ir'
 
     if expected_layout is not None and str(expected_layout) != str(torch_layout_str):
-        raise ValueError(
-            f'JAX FullyConnectedTensorProduct expected layout {expected_layout!r} but '
-            f'Torch module uses layout {torch_layout_str!r}.'
+        logging.warning(
+            'JAX FullyConnectedTensorProduct layout %r differs from Torch layout %r; importing weights without conversion.',
+            expected_layout,
+            torch_layout_str,
         )
 
     if (
