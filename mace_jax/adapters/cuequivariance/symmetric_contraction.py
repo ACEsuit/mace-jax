@@ -38,6 +38,7 @@ from mace_jax.adapters.nnx.torch import (
     nxx_auto_import_from_torch,
     nxx_register_import_mapper,
 )
+from mace_jax.nnx_config import ConfigVar
 from mace_jax.nnx_utils import state_to_pure_dict
 from mace_jax.tools.dtype import default_dtype
 
@@ -131,6 +132,17 @@ class SymmetricContraction(nnx.Module):
                 "output_layout must be either 'mul_ir' or 'ir_mul'; "
                 f'got {self.output_layout!r}'
             )
+
+        input_layout_code = 0 if self.input_layout == 'mul_ir' else 1
+        output_layout_code = 0 if self.output_layout == 'mul_ir' else 1
+        self.input_layout_config = ConfigVar(
+            jnp.asarray(input_layout_code, dtype=jnp.int32),
+            is_mutable=False,
+        )
+        self.output_layout_config = ConfigVar(
+            jnp.asarray(output_layout_code, dtype=jnp.int32),
+            is_mutable=False,
+        )
 
         irreps_in_o3 = Irreps(self.irreps_in)
         irreps_out_o3 = Irreps(self.irreps_out)
@@ -450,6 +462,83 @@ def _select_weights(
 
 def _raise_invalid_indices(_: jnp.ndarray) -> None:
     raise ValueError('indices out of range for the available elements')
+
+
+def _symmetric_contraction_import_from_torch_with_layout(cls, torch_module, variables):
+    """Wrapper around the auto-generated import that enforces layout parity."""
+    expected_input = variables.get('input_layout_config', None)
+    expected_output = variables.get('output_layout_config', None)
+
+    def _decode_layout(val):
+        if isinstance(val, jnp.ndarray):
+            try:
+                val_int = int(val)
+            except Exception:
+                return None
+            return 'mul_ir' if val_int == 0 else 'ir_mul'
+        if isinstance(val, (int, np.integer)):
+            return 'mul_ir' if int(val) == 0 else 'ir_mul'
+        return val
+
+    def _layout_str_from_obj(layout_obj) -> str | None:
+        if layout_obj is None:
+            return None
+        if isinstance(layout_obj, str):
+            return layout_obj
+        for attr in ('layout_str', 'name', '__name__'):
+            val = getattr(layout_obj, attr, None)
+            if val is not None:
+                return str(val)
+        return str(layout_obj)
+
+    expected_input = _decode_layout(expected_input)
+    expected_output = _decode_layout(expected_output)
+
+    torch_input = _layout_str_from_obj(getattr(torch_module, 'input_layout', None))
+    torch_output = _layout_str_from_obj(getattr(torch_module, 'output_layout', None))
+    if torch_input is None or torch_output is None:
+        descriptor = getattr(torch_module, 'descriptor', None) or getattr(
+            torch_module, '_descriptor', None
+        )
+        if descriptor is not None:
+            if torch_input is None:
+                try:
+                    torch_input = _layout_str_from_obj(descriptor.inputs[1].layout)
+                except Exception:
+                    torch_input = None
+            if torch_output is None:
+                try:
+                    torch_output = _layout_str_from_obj(descriptor.outputs[0].layout)
+                except Exception:
+                    torch_output = None
+
+    if torch_input is None:
+        torch_input = 'mul_ir'
+    if torch_output is None:
+        torch_output = 'mul_ir'
+
+    if expected_input is not None and str(expected_input) != str(torch_input):
+        raise ValueError(
+            f'JAX SymmetricContraction expected input layout {expected_input!r} but '
+            f'Torch module uses layout {torch_input!r}.'
+        )
+    if expected_output is not None and str(expected_output) != str(torch_output):
+        raise ValueError(
+            f'JAX SymmetricContraction expected output layout {expected_output!r} but '
+            f'Torch module uses layout {torch_output!r}.'
+        )
+
+    return cls._import_from_torch_impl(
+        torch_module,
+        variables,
+        skip_root=False,
+    )
+
+
+# Override the auto-generated import_from_torch with layout validation.
+SymmetricContraction.import_from_torch = classmethod(
+    _symmetric_contraction_import_from_torch_with_layout
+)
 
 
 ## Import functions

@@ -8,11 +8,13 @@ from math import prod as _prod
 import cuequivariance_jax as cuex
 import jax
 import jax.numpy as jnp
+import numpy as np
 from e3nn_jax import Irreps  # type: ignore
 from flax import nnx
 
 import cuequivariance as cue
 from mace_jax.adapters.nnx.torch import nxx_auto_import_from_torch
+from mace_jax.nnx_config import ConfigVar
 from mace_jax.tools.cg import O3_e3nn
 from mace_jax.tools.dtype import default_dtype
 from mace_jax.tools.scatter import scatter_sum
@@ -163,6 +165,11 @@ class TensorProduct(nnx.Module):
         self.descriptor_out_irreps_str = str(descriptor.outputs[0].irreps)
         self.output_segment_shapes = tuple(descriptor.polynomial.operands[-1].segments)
         self.descriptor_out_dim = Irreps(self.descriptor_out_irreps_str).dim
+        layout_code = 0 if self._layout_str == 'mul_ir' else 1
+        self.layout_config = ConfigVar(
+            jnp.asarray(layout_code, dtype=jnp.int32),
+            is_mutable=False,
+        )
 
         expected_irreps, expected_instructions = _expected_channelwise_instructions(
             self.irreps_in1_o3, self.irreps_in2_o3, self.irreps_out_o3
@@ -686,6 +693,49 @@ class TensorProduct(nnx.Module):
 def _tensor_product_import_from_torch(cls, torch_module, variables):
     """Copy Torch tensor product weights into the NNX parameter dict."""
     params = variables
+    expected_layout = params.get('layout_config', None)
+
+    def _decode_layout(val):
+        if isinstance(val, jnp.ndarray):
+            try:
+                val_int = int(val)
+            except Exception:
+                return None
+            return 'mul_ir' if val_int == 0 else 'ir_mul'
+        if isinstance(val, (int, np.integer)):
+            return 'mul_ir' if int(val) == 0 else 'ir_mul'
+        return val
+
+    def _layout_str_from_obj(layout_obj) -> str | None:
+        if layout_obj is None:
+            return None
+        if isinstance(layout_obj, str):
+            return layout_obj
+        for attr in ('layout_str', 'name', '__name__'):
+            val = getattr(layout_obj, attr, None)
+            if val is not None:
+                return str(val)
+        return str(layout_obj)
+
+    expected_layout = _decode_layout(expected_layout)
+    torch_layout_str = _layout_str_from_obj(getattr(torch_module, 'layout', None))
+    if torch_layout_str is None:
+        descriptor = getattr(torch_module, 'descriptor', None) or getattr(
+            torch_module, '_descriptor', None
+        )
+        if descriptor is not None:
+            try:
+                torch_layout_str = _layout_str_from_obj(descriptor.inputs[1].layout)
+            except Exception:
+                torch_layout_str = None
+    if torch_layout_str is None:
+        torch_layout_str = 'mul_ir'
+
+    if expected_layout is not None and str(expected_layout) != str(torch_layout_str):
+        raise ValueError(
+            f'JAX TensorProduct expected layout {expected_layout!r} but Torch module '
+            f'uses layout {torch_layout_str!r}.'
+        )
 
     if (
         getattr(torch_module, 'internal_weights', False)

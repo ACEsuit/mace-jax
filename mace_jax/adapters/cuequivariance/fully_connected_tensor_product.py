@@ -5,6 +5,7 @@ from __future__ import annotations
 import cuequivariance_jax as cuex
 import jax
 import jax.numpy as jnp
+import numpy as np
 from e3nn_jax import Irreps  # type: ignore
 from flax import nnx
 
@@ -14,6 +15,7 @@ from mace_jax.adapters.nnx.torch import (
     nxx_auto_import_from_torch,
     nxx_register_import_mapper,
 )
+from mace_jax.nnx_config import ConfigVar
 from mace_jax.tools.dtype import default_dtype
 
 from .utility import ir_mul_to_mul_ir, mul_ir_to_ir_mul
@@ -84,6 +86,11 @@ class FullyConnectedTensorProduct(nnx.Module):
         self.weight_numel = descriptor.polynomial.operands[0].size
         descriptor_out_irreps = Irreps(str(descriptor.outputs[0].irreps))
         self.descriptor_out_dim = descriptor_out_irreps.dim
+        layout_code = 0 if self._layout_str == 'mul_ir' else 1
+        self.layout_config = ConfigVar(
+            jnp.asarray(layout_code, dtype=jnp.int32),
+            is_mutable=False,
+        )
         if self._internal_weights:
             if rngs is None:
                 raise ValueError('rngs is required when internal_weights=True')
@@ -296,6 +303,49 @@ class FullyConnectedTensorProduct(nnx.Module):
 def _fctp_import_from_torch(cls, torch_module, variables):
     """Copy Torch fully connected tensor product weights into NNX variables."""
     params = variables
+    expected_layout = params.get('layout_config', None)
+
+    def _decode_layout(val):
+        if isinstance(val, jnp.ndarray):
+            try:
+                val_int = int(val)
+            except Exception:
+                return None
+            return 'mul_ir' if val_int == 0 else 'ir_mul'
+        if isinstance(val, (int, np.integer)):
+            return 'mul_ir' if int(val) == 0 else 'ir_mul'
+        return val
+
+    def _layout_str_from_obj(layout_obj) -> str | None:
+        if layout_obj is None:
+            return None
+        if isinstance(layout_obj, str):
+            return layout_obj
+        for attr in ('layout_str', 'name', '__name__'):
+            val = getattr(layout_obj, attr, None)
+            if val is not None:
+                return str(val)
+        return str(layout_obj)
+
+    expected_layout = _decode_layout(expected_layout)
+    torch_layout_str = _layout_str_from_obj(getattr(torch_module, 'layout', None))
+    if torch_layout_str is None:
+        descriptor = getattr(torch_module, 'descriptor', None) or getattr(
+            torch_module, '_descriptor', None
+        )
+        if descriptor is not None:
+            try:
+                torch_layout_str = _layout_str_from_obj(descriptor.inputs[1].layout)
+            except Exception:
+                torch_layout_str = None
+    if torch_layout_str is None:
+        torch_layout_str = 'mul_ir'
+
+    if expected_layout is not None and str(expected_layout) != str(torch_layout_str):
+        raise ValueError(
+            f'JAX FullyConnectedTensorProduct expected layout {expected_layout!r} but '
+            f'Torch module uses layout {torch_layout_str!r}.'
+        )
 
     if (
         getattr(torch_module, 'internal_weights', False)

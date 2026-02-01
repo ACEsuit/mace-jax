@@ -64,8 +64,8 @@ class CuEquivarianceConfig:
     """Configuration for cuequivariance acceleration"""
 
     enabled: bool = False
-    layout: str = 'mul_ir'  # One of: mul_ir, ir_mul
-    layout_str: str = 'mul_ir'
+    layout: str = 'ir_mul'  # One of: mul_ir, ir_mul
+    layout_str: str = 'ir_mul'
     group: str = 'O3'
     optimize_all: bool = False  # Set to True to enable all optimizations
     optimize_linear: bool = False
@@ -75,9 +75,17 @@ class CuEquivarianceConfig:
     conv_fusion: bool = False  # Set to True to enable conv fusion
 
     def __post_init__(self):
-        if self.enabled:
+        if isinstance(self.layout, str):
             self.layout_str = self.layout
-            self.layout = getattr(cue, self.layout)
+        else:
+            self.layout_str = getattr(self.layout, 'name', None) or getattr(
+                self.layout, '__name__', None
+            )
+            if self.layout_str is None:
+                self.layout_str = str(self.layout)
+        if self.enabled:
+            if isinstance(self.layout, str):
+                self.layout = getattr(cue, self.layout)
             self.group = (
                 O3_e3nn if self.group == 'O3_e3nn' else getattr(cue, self.group)
             )
