@@ -222,6 +222,31 @@ class SymmetricContraction(nnx.Module):
             return self._convert_ir_mul_to_mul_ir(x)
         return x
 
+    def _features_to_rep_ir_mul(
+        self, x: jnp.ndarray, dtype: jnp.dtype
+    ) -> cuex.RepArray:
+        """Pack ir_mul features into cue RepArray segments without layout conversion."""
+        segments: list[jnp.ndarray] = []
+        offset = 0
+        for mul_ir in self.irreps_in_cue_base:
+            width = mul_ir.ir.dim
+            seg = x[:, offset : offset + width, :]
+            if seg.shape[1] != width:
+                raise ValueError('Input feature dimension mismatch with irreps.')
+            segments.append(seg)
+            offset += width
+
+        if offset != x.shape[1]:
+            raise ValueError('Input feature dimension mismatch with irreps.')
+
+        return cuex.from_segments(
+            self.irreps_in_cue,
+            segments,
+            (x.shape[0], self.mul),
+            cue.ir_mul,
+            dtype=dtype,
+        )
+
     def _project_basis_weights(
         self, basis_weights: jnp.ndarray, dtype: jnp.dtype
     ) -> jnp.ndarray:
@@ -318,11 +343,14 @@ class SymmetricContraction(nnx.Module):
                 f'got rank {array.ndim}'
             )
 
-        array = self._ensure_mul_ir_layout(array)
-        _validate_features(array, self.mul, self.feature_dim)
-
         weight_rep = self._weight_rep_from_indices(indices, dtype)
-        x_rep = self._features_to_rep(array, dtype)
+        if self.input_layout == 'ir_mul':
+            _validate_features_ir_mul(array, self.mul, self.feature_dim)
+            x_rep = self._features_to_rep_ir_mul(array, dtype)
+        else:
+            array = self._ensure_mul_ir_layout(array)
+            _validate_features(array, self.mul, self.feature_dim)
+            x_rep = self._features_to_rep(array, dtype)
 
         out_rep = cuex.equivariant_polynomial(
             self.descriptor,
@@ -410,6 +438,15 @@ def _validate_features(x: jnp.ndarray, mul: int, feature_dim: int) -> None:
         raise ValueError(
             'SymmetricContraction expects input with shape '
             f'(batch, {mul}, {feature_dim}); got {tuple(x.shape)}'
+        )
+
+
+def _validate_features_ir_mul(x: jnp.ndarray, mul: int, feature_dim: int) -> None:
+    """Ensure the feature tensor shape matches the expected ir_mul layout."""
+    if x.ndim != 3 or x.shape[1] != feature_dim or x.shape[2] != mul:
+        raise ValueError(
+            'SymmetricContraction expects input with shape '
+            f'(batch, {feature_dim}, {mul}); got {tuple(x.shape)}'
         )
 
 

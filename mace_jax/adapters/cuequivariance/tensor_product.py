@@ -323,18 +323,21 @@ class TensorProduct(nnx.Module):
 
     def _prepare_ir_dict_inputs(
         self,
-        x1: jnp.ndarray,
+        x1: jnp.ndarray | dict,
         x2: dict,
     ) -> tuple[dict, dict]:
         """Convert mul_ir arrays to ir_dict inputs with per-irrep segmentation."""
         irreps_in1 = Irreps(self.irreps_in1_o3)
         irreps_in2 = Irreps(self.irreps_in2_o3)
-        x1_dict = mul_ir_to_ir_dict(
-            irreps_in1,
-            x1,
-            group=self.group,
-            layout_str=self._layout_str,
-        )
+        if is_ir_dict(x1):
+            x1_dict = x1
+        else:
+            x1_dict = mul_ir_to_ir_dict(
+                irreps_in1,
+                x1,
+                group=self.group,
+                layout_str=self._layout_str,
+            )
         if not is_ir_dict(x2):
             x2 = mul_ir_to_ir_dict(
                 irreps_in2,
@@ -418,7 +421,7 @@ class TensorProduct(nnx.Module):
 
     def __call__(
         self,
-        x1: jnp.ndarray,
+        x1: jnp.ndarray | dict,
         x2: jnp.ndarray | dict,
         weights: jnp.ndarray | None = None,
         edge_index: jnp.ndarray | None = None,
@@ -441,13 +444,20 @@ class TensorProduct(nnx.Module):
         Raises:
             ValueError: On weight shape mismatches or invalid sharing policy.
         """
-        dtype = x1.dtype
+        if is_ir_dict(x1):
+            sample = next(iter(x1.values()))
+            dtype = sample.dtype
+            batch_size = sample.shape[0]
+        else:
+            dtype = x1.dtype
+            batch_size = x1.shape[0]
 
         if not self._conv_fusion:
-            batch_size = x1.shape[0]
             weight_tensor = self._resolve_weight_tensor(
                 weights, dtype=dtype, batch_size=batch_size
             )
+            if is_ir_dict(x1) and not is_ir_dict(x2):
+                raise ValueError('TensorProduct expects ir_dict x2 when x1 is ir_dict.')
             if is_ir_dict(x2):
                 out = self._channelwise_apply_ir_dict(
                     x1,
@@ -476,14 +486,19 @@ class TensorProduct(nnx.Module):
 
         sender = jnp.asarray(edge_index[0])
         receiver = jnp.asarray(edge_index[1])
-        num_nodes = x1.shape[0]
+        num_nodes = batch_size
         edge_batch = sender.shape[0]
 
-        edge_x1 = x1[sender]
+        if is_ir_dict(x1):
+            edge_x1 = None
+        else:
+            edge_x1 = x1[sender]
         weight_tensor = self._resolve_weight_tensor(
             weights, dtype=dtype, batch_size=edge_batch
         )
 
+        if is_ir_dict(x1) and not is_ir_dict(x2):
+            raise ValueError('TensorProduct expects ir_dict x2 when x1 is ir_dict.')
         if is_ir_dict(x2):
             fused_out = self._conv_fused_apply_ir_dict(
                 node_feats=x1,
@@ -522,6 +537,10 @@ class TensorProduct(nnx.Module):
                 dtype=dtype,
             )
         else:
+            if edge_x1 is None:
+                raise ValueError(
+                    'TensorProduct array path requires array x1 when conv_fusion is disabled.'
+                )
             per_edge = self._channelwise_apply(
                 edge_x1,
                 x2,
@@ -564,7 +583,7 @@ class TensorProduct(nnx.Module):
 
     def _channelwise_apply_ir_dict(
         self,
-        x1: jnp.ndarray,
+        x1: jnp.ndarray | dict,
         x2: dict,
         weight_tensor: jnp.ndarray,
         *,
@@ -573,9 +592,10 @@ class TensorProduct(nnx.Module):
         """Evaluate tensor product using ir_dict inputs for edge attributes."""
         x1_dict, x2_dict = self._prepare_ir_dict_inputs(x1, x2)
         weights = self._reshape_weights_for_ir_dict(weight_tensor)
+        batch_size = next(iter(x1_dict.values())).shape[0]
         outputs = [
             jax.ShapeDtypeStruct(
-                (x1.shape[0], desc.num_segments) + tuple(desc.segment_shape),
+                (batch_size, desc.num_segments) + tuple(desc.segment_shape),
                 dtype,
             )
             for desc in self._ir_dict_poly.outputs

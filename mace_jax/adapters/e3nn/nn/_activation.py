@@ -33,8 +33,7 @@ class Activation:
         self.irreps_in = Irreps(irreps_in)
         if layout_str not in {'mul_ir', 'ir_mul'}:
             raise ValueError(
-                "layout_str must be either 'mul_ir' or 'ir_mul'; "
-                f'got {layout_str!r}.'
+                f"layout_str must be either 'mul_ir' or 'ir_mul'; got {layout_str!r}."
             )
         self.layout_str = layout_str
 
@@ -177,15 +176,25 @@ class Activation:
                     f'Invalid input shape: expected last dimension {self.irreps_in.dim}, '
                     f'got {array.shape[-1]}'
                 )
-
-            if self.layout_str == 'ir_mul':
-                from mace_jax.adapters.cuequivariance.utility import (
-                    ir_mul_to_mul_ir,
-                )
-
-                array = ir_mul_to_mul_ir(array, self.irreps_in)
-
-            irreps_array = e3nn.IrrepsArray(self.irreps_in, array)
+            segments = []
+            offset = 0
+            for (mul, ir), act in zip(self.irreps_in, self._acts):
+                size = mul * ir.dim
+                segment = array[..., offset : offset + size]
+                offset += size
+                if act is not None:
+                    if ir.l != 0:
+                        raise ValueError(
+                            'Activation can only apply non-linearities to scalar irreps.'
+                        )
+                    segment = act(segment)
+                segments.append(segment)
+            activated = (
+                jnp.concatenate(segments, axis=-1) if segments else array[..., :0]
+            )
+            if moved:
+                activated = jnp.moveaxis(activated, -1, axis)
+            return activated
 
         activated = scalar_activation(
             irreps_array,
@@ -193,14 +202,4 @@ class Activation:
             normalize_act=self._normalize_act,
         ).array
 
-        if isinstance(features, IrrepsArray):
-            return IrrepsArray(self.irreps_out, activated)
-
-        if self.layout_str == 'ir_mul':
-            from mace_jax.adapters.cuequivariance.utility import mul_ir_to_ir_mul
-
-            activated = mul_ir_to_ir_mul(activated, self.irreps_out)
-
-        if moved:
-            activated = jnp.moveaxis(activated, -1, axis)
-        return activated
+        return IrrepsArray(self.irreps_out, activated)

@@ -9,7 +9,6 @@ from e3nn_jax import Irrep, Irreps
 from flax import nnx
 
 from mace_jax.adapters.cuequivariance.ir_dict import mul_ir_to_ir_dict
-from mace_jax.adapters.cuequivariance.utility import mul_ir_to_ir_mul
 from mace_jax.adapters.e3nn.math import (
     estimate_normalize2mom_const,
     register_normalize2mom_const,
@@ -265,6 +264,9 @@ class MACE(nnx.Module):
             sh_irreps,
             normalize=True,
             normalization='component',
+            layout_str=getattr(self.cueq_config, 'layout_str', 'mul_ir')
+            if self.cueq_config is not None
+            else 'mul_ir',
         )
         self.edge_attrs_irreps = sh_irreps
 
@@ -438,17 +440,15 @@ class MACE(nnx.Module):
                         edge_attrs = mul_ir_to_ir_dict(
                             self.edge_attrs_irreps,
                             edge_attrs,
-                            layout_str='mul_ir',
+                            layout_str='ir_mul',
                         )
                     else:
                         edge_attrs = mul_ir_to_ir_dict(
                             self.edge_attrs_irreps,
                             edge_attrs,
                             group=group,
-                            layout_str='mul_ir',
+                            layout_str='ir_mul',
                         )
-                else:
-                    edge_attrs = mul_ir_to_ir_mul(edge_attrs, self.edge_attrs_irreps)
         edge_feats, cutoff = self.radial_embedding(
             ctx.lengths,
             node_attrs,
@@ -659,17 +659,15 @@ class ScaleShiftMACE(MACE):
                         edge_attrs = mul_ir_to_ir_dict(
                             self.edge_attrs_irreps,
                             edge_attrs,
-                            layout_str='mul_ir',
+                            layout_str='ir_mul',
                         )
                     else:
                         edge_attrs = mul_ir_to_ir_dict(
                             self.edge_attrs_irreps,
                             edge_attrs,
                             group=group,
-                            layout_str='mul_ir',
+                            layout_str='ir_mul',
                         )
-                else:
-                    edge_attrs = mul_ir_to_ir_mul(edge_attrs, self.edge_attrs_irreps)
         edge_feats, cutoff = self.radial_embedding(
             ctx.lengths,
             node_attrs,

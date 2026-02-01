@@ -46,11 +46,6 @@ def mul_ir_to_ir_dict(
     tensor = getattr(array, 'array', array)
     cue_irreps = _cue_irreps(irreps, group=group)
     layout = _layout(layout_str)
-    if layout == 'ir_mul':
-        # Convert ir_mul -> mul_ir for consistent block handling.
-        tensor = ir_mul_to_mul_ir(jnp.asarray(tensor), Irreps(irreps))
-        layout = 'mul_ir'
-
     return IR_DICT.flat_to_dict(cue_irreps, tensor, layout=layout)
 
 
