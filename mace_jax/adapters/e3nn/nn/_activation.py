@@ -28,8 +28,15 @@ class Activation:
         acts: Sequence[Callable | None],
         *,
         normalize_act: bool = True,
+        layout_str: str = 'mul_ir',
     ) -> None:
         self.irreps_in = Irreps(irreps_in)
+        if layout_str not in {'mul_ir', 'ir_mul'}:
+            raise ValueError(
+                "layout_str must be either 'mul_ir' or 'ir_mul'; "
+                f'got {layout_str!r}.'
+            )
+        self.layout_str = layout_str
 
         # Map common Torch activations to their JAX equivalents so we can apply
         # JAX-side normalisation while still honouring Torch-stored constants.
@@ -146,6 +153,10 @@ class Activation:
     ) -> jnp.ndarray:
         """Apply the configured scalar activations to ``features``."""
         if isinstance(features, IrrepsArray):
+            if self.layout_str != 'mul_ir':
+                raise ValueError(
+                    'Activation expects mul_ir layout when passing an IrrepsArray.'
+                )
             if features.irreps != self.irreps_in:
                 raise ValueError(
                     f'Activation expects irreps {self.irreps_in}, got {features.irreps}'
@@ -167,6 +178,13 @@ class Activation:
                     f'got {array.shape[-1]}'
                 )
 
+            if self.layout_str == 'ir_mul':
+                from mace_jax.adapters.cuequivariance.utility import (
+                    ir_mul_to_mul_ir,
+                )
+
+                array = ir_mul_to_mul_ir(array, self.irreps_in)
+
             irreps_array = e3nn.IrrepsArray(self.irreps_in, array)
 
         activated = scalar_activation(
@@ -177,6 +195,11 @@ class Activation:
 
         if isinstance(features, IrrepsArray):
             return IrrepsArray(self.irreps_out, activated)
+
+        if self.layout_str == 'ir_mul':
+            from mace_jax.adapters.cuequivariance.utility import mul_ir_to_ir_mul
+
+            activated = mul_ir_to_ir_mul(activated, self.irreps_out)
 
         if moved:
             activated = jnp.moveaxis(activated, -1, axis)

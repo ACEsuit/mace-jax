@@ -85,6 +85,7 @@ class SymmetricContraction(nnx.Module):
     num_elements: int
     use_reduced_cg: bool = True
     input_layout: str = 'mul_ir'
+    output_layout: str = 'mul_ir'
     group: object = cue.O3
 
     def __init__(
@@ -95,6 +96,7 @@ class SymmetricContraction(nnx.Module):
         num_elements: int,
         use_reduced_cg: bool = True,
         input_layout: str = 'mul_ir',
+        output_layout: str = 'mul_ir',
         group: object = cue.O3,
         *,
         rngs: nnx.Rngs | None = None,
@@ -112,6 +114,7 @@ class SymmetricContraction(nnx.Module):
         self.num_elements = num_elements
         self.use_reduced_cg = use_reduced_cg
         self.input_layout = input_layout
+        self.output_layout = output_layout
         self.group = group
 
         if self.correlation <= 0:
@@ -122,6 +125,11 @@ class SymmetricContraction(nnx.Module):
             raise ValueError(
                 "input_layout must be either 'mul_ir' or 'ir_mul'; "
                 f'got {self.input_layout!r}'
+            )
+        if self.output_layout not in {'mul_ir', 'ir_mul'}:
+            raise ValueError(
+                "output_layout must be either 'mul_ir' or 'ir_mul'; "
+                f'got {self.output_layout!r}'
             )
 
         irreps_in_o3 = Irreps(self.irreps_in)
@@ -313,11 +321,12 @@ class SymmetricContraction(nnx.Module):
 
         out_ir_mul = out_rep.change_layout(cue.ir_mul).array
 
-        out_mul_ir = ir_mul_to_mul_ir(
+        if self.output_layout == 'ir_mul':
+            return out_ir_mul
+        return ir_mul_to_mul_ir(
             out_ir_mul,
             Irreps(self.irreps_out_o3_str),
         )
-        return out_mul_ir
 
     def _features_to_rep(self, x: jnp.ndarray, dtype: jnp.dtype) -> cuex.RepArray:
         """Pack mul_ir features into cue RepArray segments.

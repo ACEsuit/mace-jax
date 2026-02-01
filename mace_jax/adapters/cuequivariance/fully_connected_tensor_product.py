@@ -36,6 +36,7 @@ class FullyConnectedTensorProduct(nnx.Module):
     shared_weights: bool = True
     internal_weights: bool = True
     group: object = cue.O3
+    layout: object = cue.mul_ir
 
     def __init__(
         self,
@@ -45,6 +46,7 @@ class FullyConnectedTensorProduct(nnx.Module):
         shared_weights: bool = True,
         internal_weights: bool = True,
         group: object = cue.O3,
+        layout: object = cue.mul_ir,
         *,
         rngs: nnx.Rngs | None = None,
     ) -> None:
@@ -54,6 +56,7 @@ class FullyConnectedTensorProduct(nnx.Module):
         self.shared_weights = shared_weights
         self.internal_weights = internal_weights
         self.group = group
+        self.layout = layout
         # Prepare cue descriptors and cache Irreps metadata for evaluation.
         if self.internal_weights and not self.shared_weights:
             raise ValueError(
@@ -65,6 +68,7 @@ class FullyConnectedTensorProduct(nnx.Module):
         self.irreps_in1_o3 = Irreps(self.irreps_in1)
         self.irreps_in2_o3 = Irreps(self.irreps_in2)
         self.irreps_out_o3 = Irreps(self.irreps_out)
+        self._api_layout, self._layout_str = self._resolve_layout(self.layout)
 
         self.irreps_in1_cue = cue.Irreps(self.group, self.irreps_in1_o3)
         self.irreps_in2_cue = cue.Irreps(self.group, self.irreps_in2_o3)
@@ -109,7 +113,7 @@ class FullyConnectedTensorProduct(nnx.Module):
         irreps_o3: Irreps,
         irreps_cue: cue.Irreps,
     ) -> cuex.RepArray:
-        """Convert an input in mul_ir layout to a cue RepArray.
+        """Convert an input in configured layout to a cue RepArray.
 
         Args:
             array: Input batch whose trailing dimension follows mul_ir ordering.
@@ -119,8 +123,34 @@ class FullyConnectedTensorProduct(nnx.Module):
         Returns:
             ``cuequivariance_jax.RepArray`` suitable for segmented polynomial evaluation.
         """
-        data = mul_ir_to_ir_mul(array, irreps_o3)
+        if self._api_layout == cue.mul_ir:
+            data = mul_ir_to_ir_mul(array, irreps_o3)
+        elif self._api_layout == cue.ir_mul:
+            data = array
+        else:
+            raise ValueError(
+                'FullyConnectedTensorProduct does not support layout '
+                f'{self._api_layout!r}.'
+            )
         return cuex.RepArray(irreps_cue, data, cue.ir_mul)
+
+    @staticmethod
+    def _resolve_layout(layout_obj: object) -> tuple[cue.IrrepsLayout, str]:
+        if isinstance(layout_obj, str):
+            if layout_obj not in {'mul_ir', 'ir_mul'}:
+                raise ValueError(
+                    'FullyConnectedTensorProduct received unsupported layout string '
+                    f"'{layout_obj}'."
+                )
+            return getattr(cue, layout_obj), layout_obj
+        if layout_obj == cue.mul_ir:
+            return layout_obj, 'mul_ir'
+        if layout_obj == cue.ir_mul:
+            return layout_obj, 'ir_mul'
+        raise ValueError(
+            'FullyConnectedTensorProduct received an unknown layout object; expected '
+            'cue.mul_ir or cue.ir_mul.'
+        )
 
     def _resolve_weight_rep(
         self,
@@ -258,8 +288,9 @@ class FullyConnectedTensorProduct(nnx.Module):
             math_dtype=dtype,
         )
 
-        out_mul_ir = ir_mul_to_mul_ir(out_ir_mul, irreps_out)
-        return out_mul_ir
+        if self._api_layout == cue.ir_mul:
+            return out_ir_mul
+        return ir_mul_to_mul_ir(out_ir_mul, irreps_out)
 
 
 def _fctp_import_from_torch(cls, torch_module, variables):

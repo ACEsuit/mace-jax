@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
+from math import prod as _prod
+
 import cuequivariance_jax as cuex
 import jax
 import jax.numpy as jnp
@@ -14,6 +17,7 @@ from mace_jax.tools.cg import O3_e3nn
 from mace_jax.tools.dtype import default_dtype
 from mace_jax.tools.scatter import scatter_sum
 
+from .ir_dict import IR_DICT, is_ir_dict, mul_ir_to_ir_dict
 from .utility import collapse_ir_mul_segments, ir_mul_to_mul_ir, mul_ir_to_ir_mul
 
 
@@ -102,6 +106,7 @@ class TensorProduct(nnx.Module):
     instructions: list[tuple[int, int, int, str, bool, float]] | None = None
     conv_fusion: bool = False
     group: object = O3_e3nn
+    layout: object = cue.mul_ir
 
     def __init__(
         self,
@@ -113,6 +118,7 @@ class TensorProduct(nnx.Module):
         instructions: list[tuple[int, int, int, str, bool, float]] | None = None,
         conv_fusion: bool = False,
         group: object = O3_e3nn,
+        layout: object = cue.mul_ir,
         *,
         rngs: nnx.Rngs | None = None,
     ) -> None:
@@ -124,6 +130,7 @@ class TensorProduct(nnx.Module):
         self.instructions = instructions
         self.conv_fusion = conv_fusion
         self.group = group
+        self.layout = layout
         # Initialise cue descriptors and validate the instruction template.
         if self.internal_weights and not self.shared_weights:
             raise ValueError(
@@ -135,6 +142,7 @@ class TensorProduct(nnx.Module):
         self.irreps_in1_o3 = Irreps(self.irreps_in1)
         self.irreps_in2_o3 = Irreps(self.irreps_in2)
         self.irreps_out_o3 = Irreps(self.irreps_out)
+        self._api_layout, self._layout_str = self._resolve_layout(self.layout)
 
         self.irreps_in1_cue = cue.Irreps(self.group, self.irreps_in1_o3)
         self.irreps_in2_cue = cue.Irreps(self.group, self.irreps_in2_o3)
@@ -144,6 +152,12 @@ class TensorProduct(nnx.Module):
             self.irreps_in1_cue, self.irreps_in2_cue, self.irreps_out_cue
         )
         self.descriptor = descriptor
+        self._ir_dict_poly = (
+            descriptor.split_operand_by_irrep(2)
+            .split_operand_by_irrep(1)
+            .split_operand_by_irrep(-1)
+            .polynomial
+        )
         self.weight_irreps = descriptor.inputs[0].irreps
         self.weight_numel = descriptor.polynomial.operands[0].size
         self.descriptor_out_irreps_str = str(descriptor.outputs[0].irreps)
@@ -211,9 +225,33 @@ class TensorProduct(nnx.Module):
         irreps_o3: Irreps,
         irreps_cue: cue.Irreps,
     ) -> cuex.RepArray:
-        """Convert mul_ir array to cue RepArray with matching metadata."""
-        ir_mul = mul_ir_to_ir_mul(array, irreps_o3)
-        return cuex.RepArray(irreps_cue, jnp.asarray(ir_mul), cue.ir_mul)
+        """Convert array in configured layout to cue RepArray with matching metadata."""
+        if self._api_layout == cue.mul_ir:
+            payload = mul_ir_to_ir_mul(array, irreps_o3)
+        elif self._api_layout == cue.ir_mul:
+            payload = array
+        else:
+            raise ValueError(
+                f'TensorProduct does not support layout {self._api_layout!r}.'
+            )
+        return cuex.RepArray(irreps_cue, jnp.asarray(payload), cue.ir_mul)
+
+    @staticmethod
+    def _resolve_layout(layout_obj: object) -> tuple[cue.IrrepsLayout, str]:
+        if isinstance(layout_obj, str):
+            if layout_obj not in {'mul_ir', 'ir_mul'}:
+                raise ValueError(
+                    f"TensorProduct received unsupported layout string '{layout_obj}'."
+                )
+            return getattr(cue, layout_obj), layout_obj
+        if layout_obj == cue.mul_ir:
+            return layout_obj, 'mul_ir'
+        if layout_obj == cue.ir_mul:
+            return layout_obj, 'ir_mul'
+        raise ValueError(
+            'TensorProduct received an unknown layout object; expected cue.mul_ir '
+            'or cue.ir_mul.'
+        )
 
     def _resolve_weight_tensor(
         self,
@@ -262,10 +300,119 @@ class TensorProduct(nnx.Module):
 
         return tensor
 
+    def _reshape_weights_for_ir_dict(self, weights: jnp.ndarray) -> jnp.ndarray:
+        """Reshape weights into segmented form expected by ir_dict polynomials."""
+        desc = self._ir_dict_poly.inputs[0]
+        seg_shape = tuple(desc.segment_shape)
+        expected = desc.num_segments * (int(_prod(seg_shape)) if seg_shape else 1)
+        if weights.shape[-1] != expected:
+            raise ValueError(
+                'TensorProduct ir_dict weights mismatch: '
+                f'expected {expected}, got {weights.shape[-1]}'
+            )
+        if not seg_shape:
+            return weights.reshape(weights.shape[0], desc.num_segments)
+        return weights.reshape(weights.shape[0], desc.num_segments, *seg_shape)
+
+    def _prepare_ir_dict_inputs(
+        self,
+        x1: jnp.ndarray,
+        x2: dict,
+    ) -> tuple[dict, dict]:
+        """Convert mul_ir arrays to ir_dict inputs with per-irrep segmentation."""
+        irreps_in1 = Irreps(self.irreps_in1_o3)
+        irreps_in2 = Irreps(self.irreps_in2_o3)
+        x1_dict = mul_ir_to_ir_dict(
+            irreps_in1,
+            x1,
+            group=self.group,
+            layout_str=self._layout_str,
+        )
+        if not is_ir_dict(x2):
+            x2 = mul_ir_to_ir_dict(
+                irreps_in2,
+                x2,
+                group=self.group,
+                layout_str=self._layout_str,
+            )
+        input_descs = list(self._ir_dict_poly.inputs)
+        if len(input_descs) != 1 + len(x1_dict) + len(x2):
+            raise ValueError(
+                'TensorProduct ir_dict input descriptors do not match expected inputs.'
+            )
+        x1_descs = input_descs[1 : 1 + len(x1_dict)]
+        x2_descs = input_descs[1 + len(x1_dict) :]
+
+        x1_order = [ir for _, ir in self.irreps_in1_cue]
+        x2_order = [ir for _, ir in self.irreps_in2_cue]
+        if set(x1_dict.keys()) != set(x1_order):
+            raise ValueError('TensorProduct ir_dict inputs missing irreps for x1.')
+        if set(x2.keys()) != set(x2_order):
+            raise ValueError('TensorProduct ir_dict inputs missing irreps for x2.')
+
+        def _reshape_leaf(value: jnp.ndarray, desc) -> jnp.ndarray:
+            if value.ndim < 2:
+                raise ValueError(
+                    'TensorProduct ir_dict inputs must be at least rank-2.'
+                )
+            leading = value.shape[:-2]
+            mul = int(value.shape[-2])
+            ir_dim = int(value.shape[-1])
+            total = mul * ir_dim
+            seg_shape = tuple(desc.segment_shape)
+            expected = desc.num_segments * (int(_prod(seg_shape)) if seg_shape else 1)
+            if expected != total:
+                raise ValueError(
+                    'TensorProduct ir_dict input size mismatch: '
+                    f'expected {expected}, got {total}.'
+                )
+            ir_mul = jnp.swapaxes(value, -1, -2)
+            flat = ir_mul.reshape(*leading, total)
+            if not seg_shape:
+                return flat.reshape(*leading, desc.num_segments)
+            return flat.reshape(*leading, desc.num_segments, *seg_shape)
+
+        x1_dict = OrderedDict(
+            (ir, _reshape_leaf(x1_dict[ir], desc))
+            for ir, desc in zip(x1_order, x1_descs)
+        )
+        x2_dict = OrderedDict(
+            (ir, _reshape_leaf(x2[ir], desc)) for ir, desc in zip(x2_order, x2_descs)
+        )
+        return x1_dict, x2_dict
+
+    def _ir_dict_outputs_to_ir_mul(self, outputs) -> jnp.ndarray:
+        """Convert ir_dict polynomial outputs into descriptor ir_mul layout."""
+        if isinstance(outputs, dict):
+            outputs_list = [outputs[ir] for (_, ir) in self.irreps_out_cue]
+        else:
+            outputs_list = list(outputs)
+
+        if len(outputs_list) != len(self._ir_dict_poly.outputs):
+            raise ValueError(
+                'TensorProduct ir_dict outputs length mismatch: '
+                f'expected {len(self._ir_dict_poly.outputs)}, got {len(outputs_list)}.'
+            )
+
+        flats: list[jnp.ndarray] = []
+        for out, desc in zip(outputs_list, self._ir_dict_poly.outputs):
+            if out.ndim < 1 + desc.ndim:
+                raise ValueError(
+                    'TensorProduct ir_dict output has too few dimensions for descriptor.'
+                )
+            leading = out.shape[: -(1 + desc.ndim)]
+            flat = out.reshape(*leading, desc.size)
+            flats.append(flat)
+
+        if not flats:
+            return jnp.zeros((0, 0), dtype=default_dtype())
+
+        return jnp.concatenate(flats, axis=-1)
+
     def __call__(
         self,
         x1: jnp.ndarray,
-        x2: jnp.ndarray,
+        x2: jnp.ndarray | dict,
         weights: jnp.ndarray | None = None,
         edge_index: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
@@ -294,12 +441,20 @@ class TensorProduct(nnx.Module):
             weight_tensor = self._resolve_weight_tensor(
                 weights, dtype=dtype, batch_size=batch_size
             )
-            out = self._channelwise_apply(
-                x1,
-                x2,
-                weight_tensor,
-                dtype=dtype,
-            )
+            if is_ir_dict(x2):
+                out = self._channelwise_apply_ir_dict(
+                    x1,
+                    x2,
+                    weight_tensor,
+                    dtype=dtype,
+                )
+            else:
+                out = self._channelwise_apply(
+                    x1,
+                    x2,
+                    weight_tensor,
+                    dtype=dtype,
+                )
             object.__setattr__(self, '_conv_method', 'naive')
             return out
 
@@ -322,6 +477,18 @@ class TensorProduct(nnx.Module):
             weights, dtype=dtype, batch_size=edge_batch
         )
 
+        if is_ir_dict(x2):
+            fused_out = self._conv_fused_apply_ir_dict(
+                node_feats=x1,
+                edge_attrs=x2,
+                weights=weight_tensor,
+                sender=sender,
+                receiver=receiver,
+                num_nodes=num_nodes,
+                dtype=dtype,
+            )
+            object.__setattr__(self, '_conv_method', 'uniform_1d')
+            return fused_out
         fused_out: jnp.ndarray | None = None
         if self._conv_polynomial is not None:
             try:
@@ -336,17 +503,24 @@ class TensorProduct(nnx.Module):
                 )
             except (RuntimeError, ValueError, NotImplementedError):
                 fused_out = None
-
         if fused_out is not None:
             object.__setattr__(self, '_conv_method', 'uniform_1d')
             return fused_out
 
-        per_edge = self._channelwise_apply(
-            edge_x1,
-            x2,
-            weight_tensor,
-            dtype=dtype,
-        )
+        if is_ir_dict(x2):
+            per_edge = self._channelwise_apply_ir_dict(
+                edge_x1,
+                x2,
+                weight_tensor,
+                dtype=dtype,
+            )
+        else:
+            per_edge = self._channelwise_apply(
+                edge_x1,
+                x2,
+                weight_tensor,
+                dtype=dtype,
+            )
         aggregated = scatter_sum(per_edge, receiver, dim=0, dim_size=num_nodes)
         object.__setattr__(self, '_conv_method', 'naive')
         return aggregated
@@ -377,6 +551,82 @@ class TensorProduct(nnx.Module):
             Irreps(self.irreps_out_o3),
             self.output_segment_shapes,
         )
+        if self._api_layout == cue.ir_mul:
+            return out_ir_mul
+        return ir_mul_to_mul_ir(out_ir_mul, Irreps(self.irreps_out_o3))
+
+    def _channelwise_apply_ir_dict(
+        self,
+        x1: jnp.ndarray,
+        x2: dict,
+        weight_tensor: jnp.ndarray,
+        *,
+        dtype: jnp.dtype,
+    ) -> jnp.ndarray:
+        """Evaluate tensor product using ir_dict inputs for edge attributes."""
+        x1_dict, x2_dict = self._prepare_ir_dict_inputs(x1, x2)
+        weights = self._reshape_weights_for_ir_dict(weight_tensor)
+        outputs = [
+            jax.ShapeDtypeStruct(
+                (x1.shape[0], desc.num_segments) + tuple(desc.segment_shape),
+                dtype,
+            )
+            for desc in self._ir_dict_poly.outputs
+        ]
+        y = IR_DICT.segmented_polynomial_uniform_1d(
+            self._ir_dict_poly,
+            [weights, x1_dict, x2_dict],
+            outputs,
+            math_dtype=dtype,
+        )
+        out_descriptor = self._ir_dict_outputs_to_ir_mul(y)
+        out_ir_mul = collapse_ir_mul_segments(
+            out_descriptor,
+            Irreps(self.descriptor_out_irreps_str),
+            Irreps(self.irreps_out_o3),
+            self.output_segment_shapes,
+        )
+        if self._api_layout == cue.ir_mul:
+            return out_ir_mul
+        return ir_mul_to_mul_ir(out_ir_mul, Irreps(self.irreps_out_o3))
+
+    def _conv_fused_apply_ir_dict(
+        self,
+        *,
+        node_feats: jnp.ndarray,
+        edge_attrs: dict,
+        weights: jnp.ndarray,
+        sender: jnp.ndarray,
+        receiver: jnp.ndarray,
+        num_nodes: int,
+        dtype: jnp.dtype,
+    ) -> jnp.ndarray | None:
+        x1_dict, x2_dict = self._prepare_ir_dict_inputs(node_feats, edge_attrs)
+        w = self._reshape_weights_for_ir_dict(weights)
+        outputs = [
+            jax.ShapeDtypeStruct(
+                (num_nodes, desc.num_segments) + tuple(desc.segment_shape),
+                dtype,
+            )
+            for desc in self._ir_dict_poly.outputs
+        ]
+        y = IR_DICT.segmented_polynomial_uniform_1d(
+            self._ir_dict_poly,
+            [w, x1_dict, x2_dict],
+            outputs,
+            input_indices=[None, sender, None],
+            output_indices=receiver,
+            math_dtype=dtype,
+        )
+        out_descriptor = self._ir_dict_outputs_to_ir_mul(y)
+        out_ir_mul = collapse_ir_mul_segments(
+            out_descriptor,
+            Irreps(self.descriptor_out_irreps_str),
+            Irreps(self.irreps_out_o3),
+            self.output_segment_shapes,
+        )
+        if self._api_layout == cue.ir_mul:
+            return out_ir_mul
         return ir_mul_to_mul_ir(out_ir_mul, Irreps(self.irreps_out_o3))
 
     def _conv_fused_apply(
@@ -397,8 +647,12 @@ class TensorProduct(nnx.Module):
         irreps_in2 = Irreps(self.irreps_in2_o3)
         irreps_out = Irreps(self.irreps_out_o3)
 
-        node_ir_mul = mul_ir_to_ir_mul(node_feats, irreps_in1)
-        edge_ir_mul = mul_ir_to_ir_mul(edge_attrs, irreps_in2)
+        if self._api_layout == cue.ir_mul:
+            node_ir_mul = node_feats
+            edge_ir_mul = edge_attrs
+        else:
+            node_ir_mul = mul_ir_to_ir_mul(node_feats, irreps_in1)
+            edge_ir_mul = mul_ir_to_ir_mul(edge_attrs, irreps_in2)
 
         outputs_shape_dtype = [
             jax.ShapeDtypeStruct((num_nodes, self.descriptor_out_dim), dtype)
@@ -424,6 +678,8 @@ class TensorProduct(nnx.Module):
             irreps_out,
             self.output_segment_shapes,
         )
+        if self._api_layout == cue.ir_mul:
+            return out_ir_mul
         return ir_mul_to_mul_ir(out_ir_mul, irreps_out)
 
 

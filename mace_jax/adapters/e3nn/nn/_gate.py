@@ -77,7 +77,7 @@ class Gate(nnx.Module):
     """Combine scalar activations with gated higher-order features.
 
     The gate expects its input features to be organised as the concatenation of
-    ``(scalars, gates, gated)`` irreps expressed in cue-style ``ir_mul`` layout.
+    ``(scalars, gates, gated)`` irreps expressed in the configured layout.
     It normalises the scalar and gate channels separately, applies the provided
     non-linearities, and finally modulates each gated irrep by the
     corresponding gate via an element-wise tensor product.  The output packs the
@@ -114,6 +114,7 @@ class Gate(nnx.Module):
         act_gates: Sequence[Callable | None],
         irreps_gated: Irreps,
         normalize_act: bool = True,
+        layout_str: str = 'mul_ir',
     ) -> None:
         self.irreps_scalars = irreps_scalars
         self.act_scalars = tuple(act_scalars)
@@ -121,6 +122,12 @@ class Gate(nnx.Module):
         self.act_gates = tuple(act_gates)
         self.irreps_gated = irreps_gated
         self.normalize_act = normalize_act
+        if layout_str not in {'mul_ir', 'ir_mul'}:
+            raise ValueError(
+                "layout_str must be either 'mul_ir' or 'ir_mul'; "
+                f'got {layout_str!r}.'
+            )
+        self.layout_str = layout_str
 
         irreps_scalars = Irreps(self.irreps_scalars).simplify()
         irreps_gates = Irreps(self.irreps_gates).simplify()
@@ -147,11 +154,13 @@ class Gate(nnx.Module):
             self._irreps_scalars,
             self.act_scalars,
             normalize_act=self.normalize_act,
+            layout_str='mul_ir',
         )
         self._gate_activation = Activation(
             self._irreps_gates,
             self.act_gates,
             normalize_act=self.normalize_act,
+            layout_str='mul_ir',
         )
 
         self._sortcut = _Sortcut(
@@ -193,7 +202,12 @@ class Gate(nnx.Module):
             activated scalars followed by the gated feature blocks.
         """
         if isinstance(features, IrrepsArray):
+            if self.layout_str != 'mul_ir':
+                raise ValueError(
+                    'Gate expects mul_ir layout when passing an IrrepsArray.'
+                )
             array = features.array
+            return_irreps = True
         else:
             array = features
             if array.shape[-1] != _as_irreps(self._irreps_in).dim:
@@ -201,6 +215,13 @@ class Gate(nnx.Module):
                     f'Invalid input shape: expected last dim {_as_irreps(self._irreps_in).dim}, '
                     f'got {array.shape[-1]}'
                 )
+            return_irreps = False
+            if self.layout_str == 'ir_mul':
+                from mace_jax.adapters.cuequivariance.utility import (
+                    ir_mul_to_mul_ir,
+                )
+
+                array = ir_mul_to_mul_ir(array, _as_irreps(self._irreps_in))
 
         scalars, gates, gated = self._sortcut(array)
 
@@ -222,12 +243,22 @@ class Gate(nnx.Module):
 
         if not outputs:
             empty = jnp.zeros(array.shape[:-1] + (0,), dtype=array.dtype)
-            return IrrepsArray(_as_irreps(self._irreps_out), empty)
+            if return_irreps:
+                return IrrepsArray(_as_irreps(self._irreps_out), empty)
+            return empty
 
         concatenated = (
             outputs[0] if len(outputs) == 1 else jnp.concatenate(outputs, axis=-1)
         )
-        return IrrepsArray(_as_irreps(self._irreps_out), concatenated)
+        if return_irreps:
+            return IrrepsArray(_as_irreps(self._irreps_out), concatenated)
+        if self.layout_str == 'ir_mul':
+            from mace_jax.adapters.cuequivariance.utility import mul_ir_to_ir_mul
+
+            concatenated = mul_ir_to_ir_mul(
+                concatenated, _as_irreps(self._irreps_out)
+            )
+        return concatenated
 
     @property
     def irreps_in(self) -> Irreps:
