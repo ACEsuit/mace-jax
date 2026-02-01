@@ -40,6 +40,7 @@ def load_foundation_model(
 ) -> torch.nn.Module:
     """Return a pretrained Torch MACE foundation model on the specified device."""
 
+    source_lower = source.lower()
     loader_kwargs: dict[str, Any] = {'device': device}
     model = load_foundation_torch_model(
         source=source_lower,

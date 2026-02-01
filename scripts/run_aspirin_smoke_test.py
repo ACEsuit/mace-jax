@@ -74,6 +74,28 @@ def _hdf5_cache_path(source: Path, cache_dir: Path | None) -> Path:
     return target_dir / f'{stem}.h5'
 
 
+def _int_env(keys: tuple[str, ...], default: int | None = None) -> int | None:
+    for key in keys:
+        value = os.environ.get(key)
+        if value is None:
+            continue
+        try:
+            return int(value)
+        except ValueError:
+            continue
+    return default
+
+
+def _distributed_info() -> tuple[int, int]:
+    rank = _int_env(
+        ('RANK', 'LOCAL_RANK', 'SLURM_PROCID', 'OMPI_COMM_WORLD_RANK'), default=0
+    )
+    world_size = _int_env(
+        ('WORLD_SIZE', 'SLURM_NTASKS', 'OMPI_COMM_WORLD_SIZE'), default=1
+    )
+    return int(rank or 0), int(world_size or 1)
+
+
 def _convert_xyz_to_hdf5(source: Path, target: Path) -> None:
     import h5py
 
@@ -177,6 +199,22 @@ def main() -> None:
         help='Optional device hint forwarded to the CLI (defaults to cpu).',
     )
     parser.add_argument(
+        '--launcher',
+        choices=['none', 'local', 'auto'],
+        default='none',
+        help='Launcher mode forwarded to the CLI (defaults to none).',
+    )
+    parser.add_argument(
+        '--distributed',
+        action='store_true',
+        help='Ignored compatibility flag for launcher-injected arguments.',
+    )
+    parser.add_argument(
+        '--name',
+        default=None,
+        help='Ignored compatibility flag for launcher-injected arguments.',
+    )
+    parser.add_argument(
         '--print-config',
         action='store_true',
         help='Request the CLI to print the operative gin config.',
@@ -184,6 +222,11 @@ def main() -> None:
     args, unknown = parser.parse_known_args()
     if unknown:
         raise SystemExit(f'Unexpected extra CLI arguments: {unknown}')
+
+    rank, world_size = _distributed_info()
+    if args.distributed or world_size > 1:
+        if rank != 0:
+            return
 
     if args.device in (None, 'cpu'):
         # Force JAX to prefer CPU to avoid GPU plugin init errors on systems
@@ -221,6 +264,7 @@ def main() -> None:
         test_path = _maybe_convert_dataset(test_path, cache_dir=cache_dir, label='test')
 
     cli_args: list[str] = [str(config_path)]
+    cli_args += ['--launcher', args.launcher]
 
     bindings = [
         f'mace_jax.tools.gin_datasets.datasets.train_path={_quote_string(train_path)}',
