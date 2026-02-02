@@ -18,7 +18,6 @@ from mace_jax.modules.wrapper_ops import (
     Linear,
     SymmetricContractionWrapper,
     TensorProduct,
-    TransposeIrrepsLayoutWrapper,
 )
 from mace_jax.tools.dtype import default_dtype
 from mace_jax.tools.scatter import scatter_sum
@@ -153,6 +152,7 @@ class NonLinearReadoutBlock(nnx.Module):
         self.non_linearity = nn.Activation(
             irreps_in=self.hidden_irreps,
             acts=[self.gate],
+            layout_str=getattr(self.cueq_config, 'layout_str', 'mul_ir'),
         )
         self.linear_2 = Linear(
             irreps_in=self.hidden_irreps,
@@ -166,7 +166,8 @@ class NonLinearReadoutBlock(nnx.Module):
         x: IrrepsArray,
         heads: jnp.ndarray | None = None,
     ) -> IrrepsArray:
-        x = self.non_linearity(self.linear_1(x))
+        x = self.linear_1(x)
+        x = self.non_linearity(x)
         if self.num_heads > 1 and heads is not None:
             x = mask_head(x, heads, self.num_heads)
         return self.linear_2(x)
@@ -211,6 +212,7 @@ class NonLinearBiasReadoutBlock(nnx.Module):
         self.non_linearity_1 = nn.Activation(
             irreps_in=self.hidden_irreps,
             acts=[self.gate],
+            layout_str=getattr(self.cueq_config, 'layout_str', 'mul_ir'),
         )
         self.linear_mid = Linear(
             irreps_in=self.hidden_irreps,
@@ -221,6 +223,7 @@ class NonLinearBiasReadoutBlock(nnx.Module):
         self.non_linearity_2 = nn.Activation(
             irreps_in=self.hidden_irreps,
             acts=[self.gate],
+            layout_str=getattr(self.cueq_config, 'layout_str', 'mul_ir'),
         )
         self.linear_2 = Linear(
             irreps_in=self.hidden_irreps,
@@ -234,8 +237,10 @@ class NonLinearBiasReadoutBlock(nnx.Module):
         x: IrrepsArray,
         heads: jnp.ndarray | None = None,
     ) -> IrrepsArray:
-        x = self.non_linearity_1(self.linear_1(x))
-        x = self.non_linearity_2(self.linear_mid(x))
+        x = self.linear_1(x)
+        x = self.non_linearity_1(x)
+        x = self.linear_mid(x)
+        x = self.non_linearity_2(x)
         if self.num_heads > 1 and heads is not None:
             x = mask_head(x, heads, self.num_heads)
         return self.linear_2(x)
@@ -331,6 +336,7 @@ class NonLinearDipoleReadoutBlock(nnx.Module):
             irreps_gates=irreps_gates,
             act_gates=[self.gate] * len(irreps_gates),
             irreps_gated=irreps_gated,
+            layout_str=getattr(self.cueq_config, 'layout_str', 'mul_ir'),
         )
         self.irreps_nonlin = self.equivariant_nonlin.irreps_in.simplify()
 
@@ -348,7 +354,8 @@ class NonLinearDipoleReadoutBlock(nnx.Module):
         )
 
     def __call__(self, x: IrrepsArray) -> IrrepsArray:
-        x = self.equivariant_nonlin(self.linear_1(x))
+        x = self.linear_1(x)
+        x = self.equivariant_nonlin(x)
         return self.linear_2(x)
 
 
@@ -443,6 +450,7 @@ class NonLinearDipolePolarReadoutBlock(nnx.Module):
             irreps_gates=irreps_gates,
             act_gates=[self.gate] * len(irreps_gates),
             irreps_gated=irreps_gated,
+            layout_str=getattr(self.cueq_config, 'layout_str', 'mul_ir'),
         )
         self.irreps_nonlin = self.equivariant_nonlin.irreps_in.simplify()
 
@@ -460,7 +468,8 @@ class NonLinearDipolePolarReadoutBlock(nnx.Module):
         )
 
     def __call__(self, x: IrrepsArray) -> IrrepsArray:
-        x = self.equivariant_nonlin(self.linear_1(x))
+        x = self.linear_1(x)
+        x = self.equivariant_nonlin(x)
         return self.linear_2(x)
 
 
@@ -1430,6 +1439,7 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
             irreps_gates=irreps_gates,
             act_gates=[jax.nn.sigmoid] * len(irreps_gates),
             irreps_gated=irreps_gated,
+            layout_str=getattr(self.cueq_config, 'layout_str', 'mul_ir'),
         )
         self.irreps_nonlin = self.equivariant_nonlin.irreps_in.simplify()
 
@@ -1469,20 +1479,6 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
 
         self.alpha = nnx.Param(jnp.array(20.0, dtype=default_dtype()))
         self.beta = nnx.Param(jnp.zeros((), dtype=default_dtype()))
-
-        # Transpose wrappers
-        self.transpose_mul_ir = TransposeIrrepsLayoutWrapper(
-            irreps=self.irreps_nonlin,
-            source='ir_mul',
-            target='mul_ir',
-            cueq_config=self.cueq_config,
-        )
-        self.transpose_ir_mul = TransposeIrrepsLayoutWrapper(
-            irreps=self.irreps_out,
-            source='mul_ir',
-            target='ir_mul',
-            cueq_config=self.cueq_config,
-        )
 
     def __call__(
         self,
@@ -1553,12 +1549,7 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
         message = message + node_feats_res
 
         # Equivariant non-linearity
-        if self.transpose_mul_ir is not None:
-            message = self.transpose_mul_ir(message)
         message = self.equivariant_nonlin(message)
-        if self.transpose_ir_mul is not None:
-            tensor = message.array if isinstance(message, IrrepsArray) else message
-            message = self.transpose_ir_mul(tensor)
 
         # Linear output
         message = self.linear_2(message)

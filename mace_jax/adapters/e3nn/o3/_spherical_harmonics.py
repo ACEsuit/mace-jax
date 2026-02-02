@@ -28,10 +28,17 @@ class SphericalHarmonics(nnx.Module):
         normalize: bool,
         normalization: str = 'integral',
         irreps_in: Any = None,
+        *,
+        layout_str: str = 'mul_ir',
     ) -> None:
         self.irreps_out = irreps_out
         self.normalize = normalize
         self.normalization = normalization
+        if layout_str not in {'mul_ir', 'ir_mul'}:
+            raise ValueError(
+                f"layout_str must be either 'mul_ir' or 'ir_mul'; got {layout_str!r}."
+            )
+        self.layout_str = layout_str
         self.irreps_in = irreps_in
         irreps_out_input = self.irreps_out
         if isinstance(irreps_out_input, str):
@@ -81,7 +88,7 @@ class SphericalHarmonics(nnx.Module):
                 f'got {self.normalization!r}'
             )
 
-    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+    def __call__(self, x: jnp.ndarray) -> jnp.ndarray | dict:
         """Compute spherical harmonics for input vectors x [*, 3]."""
         if self.normalize:
             x = x / (jnp.linalg.norm(x, axis=-1, keepdims=True) + 1e-9)
@@ -105,4 +112,12 @@ class SphericalHarmonics(nnx.Module):
                 factors.extend([math.sqrt(2 * l_value + 1)] * (2 * l_value + 1))
             sh = sh / jnp.array(factors, dtype=sh.dtype)
 
-        return sh.array
+        array = sh.array
+        if self.layout_str == 'ir_mul':
+            from mace_jax.adapters.cuequivariance.utility import (  # noqa: PLC0415
+                mul_ir_to_ir_mul,
+            )
+
+            array = mul_ir_to_ir_mul(array, self._irreps_out)
+            return array
+        return array

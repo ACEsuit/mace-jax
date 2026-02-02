@@ -36,6 +36,7 @@ from mace.modules.blocks import (
 )
 from mace.modules.wrapper_ops import CuEquivarianceConfig as CuEquivarianceConfigTorch
 
+from mace_jax.adapters.cuequivariance.utility import mul_ir_to_ir_mul
 from mace_jax.adapters.nnx.torch import init_from_torch
 from mace_jax.modules.blocks import (
     EquivariantProductBasisBlock as EquivariantProductBasisBlockJAX,
@@ -78,6 +79,22 @@ def _module_dtype(module: torch.nn.Module) -> torch.dtype:
     for buf in module.buffers():
         return buf.dtype
     return torch.float32
+
+
+def _node_feats_for_layout(node_feats: np.ndarray, layout: str) -> np.ndarray:
+    if layout == 'ir_mul':
+        return np.transpose(node_feats, (0, 2, 1))
+    return node_feats
+
+
+def _flat_for_layout(
+    features: np.ndarray | None, irreps: Irreps, layout: str
+) -> np.ndarray | None:
+    if features is None:
+        return None
+    if layout == 'ir_mul':
+        return np.asarray(mul_ir_to_ir_mul(jnp.asarray(features), irreps))
+    return features
 
 
 def _features_from_xyz(
@@ -281,10 +298,11 @@ class TestEquivariantProductBasisBlock:
     """Compare EquivariantProductBasisBlock in Haiku (JAX) vs PyTorch."""
 
     @pytest.mark.parametrize(
-        'cue_config_kwargs',
+        'enabled,layout',
         [
-            dict(enabled=True, optimize_symmetric=True),
-            dict(enabled=False, optimize_symmetric=False),
+            (True, 'mul_ir'),
+            (False, 'mul_ir'),
+            (True, 'ir_mul'),
         ],
     )
     @pytest.mark.parametrize(
@@ -306,9 +324,18 @@ class TestEquivariantProductBasisBlock:
         correlation,
         use_sc,
         num_elements,
-        cue_config_kwargs,
+        enabled,
+        layout,
     ):
         """Check forward pass matches between JAX and Torch."""
+
+        cue_config_kwargs = dict(
+            enabled=enabled,
+            optimize_symmetric=enabled,
+            layout=layout,
+        )
+        if layout == 'ir_mul':
+            cue_config_kwargs['optimize_linear'] = True
 
         node_feats_irreps = Irreps(node_feats_irreps)
         target_irreps = Irreps(target_irreps)
@@ -326,6 +353,9 @@ class TestEquivariantProductBasisBlock:
             if use_sc
             else None
         )
+        layout = cue_config_kwargs.get('layout', 'mul_ir')
+        x_np = _node_feats_for_layout(x_np, layout)
+        sc_np = _flat_for_layout(sc_np, target_irreps, layout)
         attr_indices = rng.integers(0, num_elements, size=n_nodes)
         attrs_np = np.eye(num_elements, dtype=np.float32)[attr_indices]
 
@@ -471,9 +501,11 @@ class TestRealAgnosticBlocks:
         )
 
         # === Run Torch ===
+        layout = 'mul_ir'
         cue_config_torch = CuEquivarianceConfigTorch(
             enabled=True,
             optimize_symmetric=True,
+            layout=layout,
         )
 
         torch_module = torch_cls(
@@ -502,6 +534,7 @@ class TestRealAgnosticBlocks:
         cue_config_jax = CuEquivarianceConfigJAX(
             enabled=True,
             optimize_symmetric=True,
+            layout=layout,
         )
 
         # === Run JAX ===

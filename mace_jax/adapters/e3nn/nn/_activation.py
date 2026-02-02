@@ -28,8 +28,14 @@ class Activation:
         acts: Sequence[Callable | None],
         *,
         normalize_act: bool = True,
+        layout_str: str = 'mul_ir',
     ) -> None:
         self.irreps_in = Irreps(irreps_in)
+        if layout_str not in {'mul_ir', 'ir_mul'}:
+            raise ValueError(
+                f"layout_str must be either 'mul_ir' or 'ir_mul'; got {layout_str!r}."
+            )
+        self.layout_str = layout_str
 
         # Map common Torch activations to their JAX equivalents so we can apply
         # JAX-side normalisation while still honouring Torch-stored constants.
@@ -146,6 +152,10 @@ class Activation:
     ) -> jnp.ndarray:
         """Apply the configured scalar activations to ``features``."""
         if isinstance(features, IrrepsArray):
+            if self.layout_str != 'mul_ir':
+                raise ValueError(
+                    'Activation expects mul_ir layout when passing an IrrepsArray.'
+                )
             if features.irreps != self.irreps_in:
                 raise ValueError(
                     f'Activation expects irreps {self.irreps_in}, got {features.irreps}'
@@ -166,8 +176,25 @@ class Activation:
                     f'Invalid input shape: expected last dimension {self.irreps_in.dim}, '
                     f'got {array.shape[-1]}'
                 )
-
-            irreps_array = e3nn.IrrepsArray(self.irreps_in, array)
+            segments = []
+            offset = 0
+            for (mul, ir), act in zip(self.irreps_in, self._acts):
+                size = mul * ir.dim
+                segment = array[..., offset : offset + size]
+                offset += size
+                if act is not None:
+                    if ir.l != 0:
+                        raise ValueError(
+                            'Activation can only apply non-linearities to scalar irreps.'
+                        )
+                    segment = act(segment)
+                segments.append(segment)
+            activated = (
+                jnp.concatenate(segments, axis=-1) if segments else array[..., :0]
+            )
+            if moved:
+                activated = jnp.moveaxis(activated, -1, axis)
+            return activated
 
         activated = scalar_activation(
             irreps_array,
@@ -175,9 +202,4 @@ class Activation:
             normalize_act=self._normalize_act,
         ).array
 
-        if isinstance(features, IrrepsArray):
-            return IrrepsArray(self.irreps_out, activated)
-
-        if moved:
-            activated = jnp.moveaxis(activated, -1, axis)
-        return activated
+        return IrrepsArray(self.irreps_out, activated)

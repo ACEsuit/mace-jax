@@ -20,6 +20,9 @@ from tests.conftest import _write_hdf5_from_configs
 def _force_single_device(monkeypatch):
     """Keep unit tests deterministic on multi-device hosts."""
     monkeypatch.setattr(jax, 'local_device_count', lambda: 1)
+    monkeypatch.setattr(jax, 'process_count', lambda: 1)
+    monkeypatch.setattr(jax, 'process_index', lambda: 0)
+    monkeypatch.setattr(jax, 'local_devices', lambda: [jax.devices()[0]])
 
 
 def _make_streaming_loader(tmp_path, targets: list[float]) -> StreamingGraphDataLoader:

@@ -6,7 +6,6 @@ import dataclasses
 from typing import Optional
 
 import cuequivariance as cue
-import jax.numpy as jnp
 from e3nn_jax import Irreps  # type: ignore
 from flax import nnx
 
@@ -65,8 +64,8 @@ class CuEquivarianceConfig:
     """Configuration for cuequivariance acceleration"""
 
     enabled: bool = False
-    layout: str = 'mul_ir'  # One of: mul_ir, ir_mul
-    layout_str: str = 'mul_ir'
+    layout: str = 'ir_mul'  # One of: mul_ir, ir_mul
+    layout_str: str = 'ir_mul'
     group: str = 'O3'
     optimize_all: bool = False  # Set to True to enable all optimizations
     optimize_linear: bool = False
@@ -76,9 +75,17 @@ class CuEquivarianceConfig:
     conv_fusion: bool = False  # Set to True to enable conv fusion
 
     def __post_init__(self):
-        if self.enabled:
+        if isinstance(self.layout, str):
             self.layout_str = self.layout
-            self.layout = getattr(cue, self.layout)
+        else:
+            self.layout_str = getattr(self.layout, 'name', None) or getattr(
+                self.layout, '__name__', None
+            )
+            if self.layout_str is None:
+                self.layout_str = str(self.layout)
+        if self.enabled:
+            if isinstance(self.layout, str):
+                self.layout = getattr(cue, self.layout)
             self.group = (
                 O3_e3nn if self.group == 'O3_e3nn' else getattr(cue, self.group)
             )
@@ -147,6 +154,8 @@ class TensorProduct:
             internal_weights=internal_weights,
             conv_fusion=conv_fusion,
         )
+        if cueq_config is not None and getattr(cueq_config, 'layout', None) is not None:
+            tp_kwargs['layout'] = getattr(cueq_config, 'layout')
         if group is not None:
             tp_kwargs['group'] = group
 
@@ -193,6 +202,8 @@ def FullyConnectedTensorProduct(
         shared_weights=shared_weights,
         internal_weights=internal_weights,
     )
+    if cueq_config is not None and getattr(cueq_config, 'layout', None) is not None:
+        fctp_kwargs['layout'] = getattr(cueq_config, 'layout')
     if group is not None:
         fctp_kwargs['group'] = group
 
@@ -234,12 +245,16 @@ def SymmetricContractionWrapper(
     if use_cue:
         # cuet.SymmetricContraction expects ir_mul inputs regardless of output layout.
         input_layout = 'ir_mul'
+    output_layout = (
+        getattr(cueq_config, 'layout_str', 'mul_ir') if cueq_config else 'mul_ir'
+    )
 
     sc_kwargs = dict(
         correlation=correlation,
         num_elements=num_elements,
         use_reduced_cg=use_reduced_cg,
         input_layout=input_layout,
+        output_layout=output_layout,
     )
     if group is not None:
         sc_kwargs['group'] = group
@@ -250,71 +265,3 @@ def SymmetricContractionWrapper(
         rngs=rngs,
         **sc_kwargs,
     )
-
-
-class TransposeIrrepsLayoutWrapper:
-    """Wrapper around cuex.TransposeIrrepsLayout"""
-
-    def __new__(
-        cls,
-        irreps: Irreps,
-        source: str,
-        target: str,
-        cueq_config: CuEquivarianceConfig | None = None,
-    ):
-        if cueq_config is None or not cueq_config.enabled:
-            return None
-
-        source = source.lower()
-        target = target.lower()
-
-        if source == target:
-            return _IdentityTranspose()
-
-        if {source, target} != {'mul_ir', 'ir_mul'}:
-            raise ValueError(
-                "TransposeIrrepsLayoutWrapper only supports conversions between 'mul_ir' and 'ir_mul' layouts"
-                f' (got source={source!r}, target={target!r}).'
-            )
-
-        return _IrrepsLayoutTranspose(irreps=Irreps(irreps), swap_to=target)
-
-
-class _IdentityTranspose:
-    def __call__(self, tensor: jnp.ndarray) -> jnp.ndarray:
-        return tensor
-
-
-class _IrrepsLayoutTranspose:
-    def __init__(self, *, irreps: Irreps, swap_to: str) -> None:
-        self.irreps = irreps
-        self.swap_to = swap_to
-
-    def __call__(self, tensor: jnp.ndarray) -> jnp.ndarray:
-        leading_shape = tensor.shape[:-1]
-        offset = 0
-        pieces = []
-
-        for mul, ir in self.irreps:
-            dim = ir.dim
-            block_size = mul * dim
-            if block_size == 0:
-                continue
-
-            segment = tensor[..., offset : offset + block_size]
-            offset += block_size
-
-            if self.swap_to == 'ir_mul':
-                segment = segment.reshape(leading_shape + (mul, dim))
-                segment = jnp.swapaxes(segment, -2, -1)
-            else:  # target is 'mul_ir'
-                segment = segment.reshape(leading_shape + (dim, mul))
-                segment = jnp.swapaxes(segment, -2, -1)
-
-            segment = segment.reshape(leading_shape + (block_size,))
-            pieces.append(segment)
-
-        if not pieces:
-            return tensor
-
-        return jnp.concatenate(pieces, axis=-1)

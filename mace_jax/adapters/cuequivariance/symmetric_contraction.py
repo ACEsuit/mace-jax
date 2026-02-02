@@ -20,6 +20,7 @@ weights that is expected during the conversion.
 
 from __future__ import annotations
 
+import logging
 from functools import cache
 
 import cuequivariance_jax as cuex
@@ -38,6 +39,7 @@ from mace_jax.adapters.nnx.torch import (
     nxx_auto_import_from_torch,
     nxx_register_import_mapper,
 )
+from mace_jax.nnx_config import ConfigVar
 from mace_jax.nnx_utils import state_to_pure_dict
 from mace_jax.tools.dtype import default_dtype
 
@@ -85,6 +87,7 @@ class SymmetricContraction(nnx.Module):
     num_elements: int
     use_reduced_cg: bool = True
     input_layout: str = 'mul_ir'
+    output_layout: str = 'mul_ir'
     group: object = cue.O3
 
     def __init__(
@@ -95,6 +98,7 @@ class SymmetricContraction(nnx.Module):
         num_elements: int,
         use_reduced_cg: bool = True,
         input_layout: str = 'mul_ir',
+        output_layout: str = 'mul_ir',
         group: object = cue.O3,
         *,
         rngs: nnx.Rngs | None = None,
@@ -112,6 +116,7 @@ class SymmetricContraction(nnx.Module):
         self.num_elements = num_elements
         self.use_reduced_cg = use_reduced_cg
         self.input_layout = input_layout
+        self.output_layout = output_layout
         self.group = group
 
         if self.correlation <= 0:
@@ -123,6 +128,22 @@ class SymmetricContraction(nnx.Module):
                 "input_layout must be either 'mul_ir' or 'ir_mul'; "
                 f'got {self.input_layout!r}'
             )
+        if self.output_layout not in {'mul_ir', 'ir_mul'}:
+            raise ValueError(
+                "output_layout must be either 'mul_ir' or 'ir_mul'; "
+                f'got {self.output_layout!r}'
+            )
+
+        input_layout_code = 0 if self.input_layout == 'mul_ir' else 1
+        output_layout_code = 0 if self.output_layout == 'mul_ir' else 1
+        self.input_layout_config = ConfigVar(
+            jnp.asarray(input_layout_code, dtype=jnp.int32),
+            is_mutable=False,
+        )
+        self.output_layout_config = ConfigVar(
+            jnp.asarray(output_layout_code, dtype=jnp.int32),
+            is_mutable=False,
+        )
 
         irreps_in_o3 = Irreps(self.irreps_in)
         irreps_out_o3 = Irreps(self.irreps_out)
@@ -201,6 +222,31 @@ class SymmetricContraction(nnx.Module):
         if self.input_layout == 'ir_mul':
             return self._convert_ir_mul_to_mul_ir(x)
         return x
+
+    def _features_to_rep_ir_mul(
+        self, x: jnp.ndarray, dtype: jnp.dtype
+    ) -> cuex.RepArray:
+        """Pack ir_mul features into cue RepArray segments without layout conversion."""
+        segments: list[jnp.ndarray] = []
+        offset = 0
+        for mul_ir in self.irreps_in_cue_base:
+            width = mul_ir.ir.dim
+            seg = x[:, offset : offset + width, :]
+            if seg.shape[1] != width:
+                raise ValueError('Input feature dimension mismatch with irreps.')
+            segments.append(seg)
+            offset += width
+
+        if offset != x.shape[1]:
+            raise ValueError('Input feature dimension mismatch with irreps.')
+
+        return cuex.from_segments(
+            self.irreps_in_cue,
+            segments,
+            (x.shape[0], self.mul),
+            cue.ir_mul,
+            dtype=dtype,
+        )
 
     def _project_basis_weights(
         self, basis_weights: jnp.ndarray, dtype: jnp.dtype
@@ -298,11 +344,14 @@ class SymmetricContraction(nnx.Module):
                 f'got rank {array.ndim}'
             )
 
-        array = self._ensure_mul_ir_layout(array)
-        _validate_features(array, self.mul, self.feature_dim)
-
         weight_rep = self._weight_rep_from_indices(indices, dtype)
-        x_rep = self._features_to_rep(array, dtype)
+        if self.input_layout == 'ir_mul':
+            _validate_features_ir_mul(array, self.mul, self.feature_dim)
+            x_rep = self._features_to_rep_ir_mul(array, dtype)
+        else:
+            array = self._ensure_mul_ir_layout(array)
+            _validate_features(array, self.mul, self.feature_dim)
+            x_rep = self._features_to_rep(array, dtype)
 
         out_rep = cuex.equivariant_polynomial(
             self.descriptor,
@@ -313,11 +362,12 @@ class SymmetricContraction(nnx.Module):
 
         out_ir_mul = out_rep.change_layout(cue.ir_mul).array
 
-        out_mul_ir = ir_mul_to_mul_ir(
+        if self.output_layout == 'ir_mul':
+            return out_ir_mul
+        return ir_mul_to_mul_ir(
             out_ir_mul,
             Irreps(self.irreps_out_o3_str),
         )
-        return out_mul_ir
 
     def _features_to_rep(self, x: jnp.ndarray, dtype: jnp.dtype) -> cuex.RepArray:
         """Pack mul_ir features into cue RepArray segments.
@@ -392,6 +442,15 @@ def _validate_features(x: jnp.ndarray, mul: int, feature_dim: int) -> None:
         )
 
 
+def _validate_features_ir_mul(x: jnp.ndarray, mul: int, feature_dim: int) -> None:
+    """Ensure the feature tensor shape matches the expected ir_mul layout."""
+    if x.ndim != 3 or x.shape[1] != feature_dim or x.shape[2] != mul:
+        raise ValueError(
+            'SymmetricContraction expects input with shape '
+            f'(batch, {feature_dim}, {mul}); got {tuple(x.shape)}'
+        )
+
+
 def _select_weights(
     weight_flat: jnp.ndarray,
     selector: jnp.ndarray,
@@ -441,6 +500,85 @@ def _select_weights(
 
 def _raise_invalid_indices(_: jnp.ndarray) -> None:
     raise ValueError('indices out of range for the available elements')
+
+
+def _symmetric_contraction_import_from_torch_with_layout(cls, torch_module, variables):
+    """Wrapper around the auto-generated import that enforces layout parity."""
+    expected_input = variables.get('input_layout_config', None)
+    expected_output = variables.get('output_layout_config', None)
+
+    def _decode_layout(val):
+        if isinstance(val, jnp.ndarray):
+            try:
+                val_int = int(val)
+            except Exception:
+                return None
+            return 'mul_ir' if val_int == 0 else 'ir_mul'
+        if isinstance(val, (int, np.integer)):
+            return 'mul_ir' if int(val) == 0 else 'ir_mul'
+        return val
+
+    def _layout_str_from_obj(layout_obj) -> str | None:
+        if layout_obj is None:
+            return None
+        if isinstance(layout_obj, str):
+            return layout_obj
+        for attr in ('layout_str', 'name', '__name__'):
+            val = getattr(layout_obj, attr, None)
+            if val is not None:
+                return str(val)
+        return str(layout_obj)
+
+    expected_input = _decode_layout(expected_input)
+    expected_output = _decode_layout(expected_output)
+
+    torch_input = _layout_str_from_obj(getattr(torch_module, 'input_layout', None))
+    torch_output = _layout_str_from_obj(getattr(torch_module, 'output_layout', None))
+    if torch_input is None or torch_output is None:
+        descriptor = getattr(torch_module, 'descriptor', None) or getattr(
+            torch_module, '_descriptor', None
+        )
+        if descriptor is not None:
+            if torch_input is None:
+                try:
+                    torch_input = _layout_str_from_obj(descriptor.inputs[1].layout)
+                except Exception:
+                    torch_input = None
+            if torch_output is None:
+                try:
+                    torch_output = _layout_str_from_obj(descriptor.outputs[0].layout)
+                except Exception:
+                    torch_output = None
+
+    if torch_input is None:
+        torch_input = 'mul_ir'
+    if torch_output is None:
+        torch_output = 'mul_ir'
+
+    if expected_input is not None and str(expected_input) != str(torch_input):
+        logging.warning(
+            'JAX SymmetricContraction input layout %r differs from Torch layout %r; importing weights without conversion.',
+            expected_input,
+            torch_input,
+        )
+    if expected_output is not None and str(expected_output) != str(torch_output):
+        logging.warning(
+            'JAX SymmetricContraction output layout %r differs from Torch layout %r; importing weights without conversion.',
+            expected_output,
+            torch_output,
+        )
+
+    return cls._import_from_torch_impl(
+        torch_module,
+        variables,
+        skip_root=False,
+    )
+
+
+# Override the auto-generated import_from_torch with layout validation.
+SymmetricContraction.import_from_torch = classmethod(
+    _symmetric_contraction_import_from_torch_with_layout
+)
 
 
 ## Import functions

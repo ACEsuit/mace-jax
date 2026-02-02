@@ -77,7 +77,7 @@ class Gate(nnx.Module):
     """Combine scalar activations with gated higher-order features.
 
     The gate expects its input features to be organised as the concatenation of
-    ``(scalars, gates, gated)`` irreps expressed in cue-style ``ir_mul`` layout.
+    ``(scalars, gates, gated)`` irreps expressed in the configured layout.
     It normalises the scalar and gate channels separately, applies the provided
     non-linearities, and finally modulates each gated irrep by the
     corresponding gate via an element-wise tensor product.  The output packs the
@@ -114,6 +114,7 @@ class Gate(nnx.Module):
         act_gates: Sequence[Callable | None],
         irreps_gated: Irreps,
         normalize_act: bool = True,
+        layout_str: str = 'mul_ir',
     ) -> None:
         self.irreps_scalars = irreps_scalars
         self.act_scalars = tuple(act_scalars)
@@ -121,6 +122,11 @@ class Gate(nnx.Module):
         self.act_gates = tuple(act_gates)
         self.irreps_gated = irreps_gated
         self.normalize_act = normalize_act
+        if layout_str not in {'mul_ir', 'ir_mul'}:
+            raise ValueError(
+                f"layout_str must be either 'mul_ir' or 'ir_mul'; got {layout_str!r}."
+            )
+        self.layout_str = layout_str
 
         irreps_scalars = Irreps(self.irreps_scalars).simplify()
         irreps_gates = Irreps(self.irreps_gates).simplify()
@@ -147,11 +153,13 @@ class Gate(nnx.Module):
             self._irreps_scalars,
             self.act_scalars,
             normalize_act=self.normalize_act,
+            layout_str=self.layout_str,
         )
         self._gate_activation = Activation(
             self._irreps_gates,
             self.act_gates,
             normalize_act=self.normalize_act,
+            layout_str=self.layout_str,
         )
 
         self._sortcut = _Sortcut(
@@ -193,7 +201,12 @@ class Gate(nnx.Module):
             activated scalars followed by the gated feature blocks.
         """
         if isinstance(features, IrrepsArray):
+            if self.layout_str != 'mul_ir':
+                raise ValueError(
+                    'Gate expects mul_ir layout when passing an IrrepsArray.'
+                )
             array = features.array
+            return_irreps = True
         else:
             array = features
             if array.shape[-1] != _as_irreps(self._irreps_in).dim:
@@ -201,6 +214,7 @@ class Gate(nnx.Module):
                     f'Invalid input shape: expected last dim {_as_irreps(self._irreps_in).dim}, '
                     f'got {array.shape[-1]}'
                 )
+            return_irreps = False
 
         scalars, gates, gated = self._sortcut(array)
 
@@ -214,20 +228,95 @@ class Gate(nnx.Module):
             outputs.append(scalars_act)
 
         if gates_act.shape[-1] > 0 and gated.shape[-1] > 0:
-            gated_ir = e3nn.IrrepsArray(_as_irreps(self._irreps_gated), gated)
-            gates_ir = e3nn.IrrepsArray(_as_irreps(self._irreps_gates_out), gates_act)
-            gated_prod = e3nn.elementwise_tensor_product(gated_ir, gates_ir).array
+            if self.layout_str == 'ir_mul':
+                gated_prod = self._apply_gates_ir_mul(gated, gates_act)
+            else:
+                gated_prod = self._apply_gates_mul_ir(gated, gates_act)
             if gated_prod.shape[-1] > 0:
                 outputs.append(gated_prod)
 
         if not outputs:
             empty = jnp.zeros(array.shape[:-1] + (0,), dtype=array.dtype)
-            return IrrepsArray(_as_irreps(self._irreps_out), empty)
+            if return_irreps:
+                return IrrepsArray(_as_irreps(self._irreps_out), empty)
+            return empty
 
         concatenated = (
             outputs[0] if len(outputs) == 1 else jnp.concatenate(outputs, axis=-1)
         )
-        return IrrepsArray(_as_irreps(self._irreps_out), concatenated)
+        if return_irreps:
+            return IrrepsArray(_as_irreps(self._irreps_out), concatenated)
+        return concatenated
+
+    def _apply_gates_ir_mul(
+        self, gated: jnp.ndarray, gates_act: jnp.ndarray
+    ) -> jnp.ndarray:
+        """Apply gate scalars to ir_mul-ordered features without layout conversion."""
+        leading_shape = gated.shape[:-1]
+        gated_offset = 0
+        gate_offset = 0
+        pieces: list[jnp.ndarray] = []
+
+        for gated_irrep, gate_irrep in zip(self._irreps_gated, self._irreps_gates_out):
+            mul_gated, ir_gated = gated_irrep
+            mul_gate, ir_gate = gate_irrep
+            if ir_gate.l != 0 or ir_gate.dim != 1:
+                raise ValueError('Gate scalars must be l=0 irreps.')
+            if mul_gate != mul_gated:
+                raise ValueError(
+                    'Gated irreps and gate irreps must share the same multiplicity.'
+                )
+
+            size = mul_gated * ir_gated.dim
+            gated_block = gated[..., gated_offset : gated_offset + size]
+            gated_offset += size
+
+            gate_block = gates_act[..., gate_offset : gate_offset + mul_gate]
+            gate_offset += mul_gate
+
+            gated_block = gated_block.reshape(*leading_shape, ir_gated.dim, mul_gated)
+            gate_block = gate_block.reshape(*leading_shape, 1, mul_gate)
+            gated_block = gated_block * gate_block
+            pieces.append(gated_block.reshape(*leading_shape, size))
+
+        if not pieces:
+            return gated[..., :0]
+        return jnp.concatenate(pieces, axis=-1)
+
+    def _apply_gates_mul_ir(
+        self, gated: jnp.ndarray, gates_act: jnp.ndarray
+    ) -> jnp.ndarray:
+        """Apply gate scalars to mul_ir-ordered features without layout conversion."""
+        leading_shape = gated.shape[:-1]
+        gated_offset = 0
+        gate_offset = 0
+        pieces: list[jnp.ndarray] = []
+
+        for gated_irrep, gate_irrep in zip(self._irreps_gated, self._irreps_gates_out):
+            mul_gated, ir_gated = gated_irrep
+            mul_gate, ir_gate = gate_irrep
+            if ir_gate.l != 0 or ir_gate.dim != 1:
+                raise ValueError('Gate scalars must be l=0 irreps.')
+            if mul_gate != mul_gated:
+                raise ValueError(
+                    'Gated irreps and gate irreps must share the same multiplicity.'
+                )
+
+            size = mul_gated * ir_gated.dim
+            gated_block = gated[..., gated_offset : gated_offset + size]
+            gated_offset += size
+
+            gate_block = gates_act[..., gate_offset : gate_offset + mul_gate]
+            gate_offset += mul_gate
+
+            gated_block = gated_block.reshape(*leading_shape, mul_gated, ir_gated.dim)
+            gate_block = gate_block.reshape(*leading_shape, mul_gate, 1)
+            gated_block = gated_block * gate_block
+            pieces.append(gated_block.reshape(*leading_shape, size))
+
+        if not pieces:
+            return gated[..., :0]
+        return jnp.concatenate(pieces, axis=-1)
 
     @property
     def irreps_in(self) -> Irreps:

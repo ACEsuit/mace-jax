@@ -14,7 +14,11 @@ from e3nn_jax import Irrep, Irreps
 from flax import nnx, serialization
 
 from mace_jax.nnx_config import ConfigVar
-from mace_jax.nnx_utils import state_to_pure_dict, state_to_serializable_dict
+from mace_jax.nnx_utils import (
+    align_layout_config,
+    state_to_pure_dict,
+    state_to_serializable_dict,
+)
 from mace_jax.tools import model_builder
 
 DEFAULT_CONFIG_NAME = 'config.json'
@@ -85,6 +89,7 @@ def _load_checkpoint_bundle(path: Path, dtype: str) -> ModelBundle:
         state_pure = serialization.from_bytes(state_template, state_payload)
     else:
         state_pure = state_payload
+    state_pure = align_layout_config(state_pure, state_template)
     _replace_state_with_specials(state, state_pure)
     state_pure = state_to_pure_dict(state)
     _validate_config_matches_params(model_config, state_pure, context=str(path))
@@ -115,6 +120,7 @@ def load_model_bundle(
     graphdef, state = nnx.split(module)
     state_template = state_to_serializable_dict(state)
     state_pure = serialization.from_bytes(state_template, params_path.read_bytes())
+    state_pure = align_layout_config(state_pure, state_template)
     _replace_state_with_specials(state, state_pure)
     state_pure = state_to_pure_dict(state)
     _validate_config_matches_params(config, state_pure, context=str(params_path))

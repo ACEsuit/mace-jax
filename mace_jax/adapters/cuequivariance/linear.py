@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import cuequivariance_jax as cuex
 import jax
 import jax.numpy as jnp
@@ -290,9 +292,10 @@ def _linear_import_from_torch_with_layout(cls, torch_module, variables):
         torch_layout_str = 'mul_ir'
 
     if expected_layout is not None and str(expected_layout) != str(torch_layout_str):
-        raise ValueError(
-            f'JAX Linear expected layout {expected_layout!r} but Torch module uses '
-            f'layout {torch_layout_str!r}.'
+        logging.warning(
+            'JAX Linear layout %r differs from Torch layout %r; importing weights without conversion.',
+            expected_layout,
+            torch_layout_str,
         )
 
     return cls._import_from_torch_impl(

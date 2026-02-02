@@ -8,6 +8,10 @@ from flax import nnx
 
 from mace_jax.nnx_config import ConfigDict, ConfigVar
 
+_LAYOUT_CONFIG_KEYS = frozenset(
+    {'layout_config', 'input_layout_config', 'output_layout_config'}
+)
+
 
 def state_to_pure_dict(state: nnx.State) -> dict[str, Any]:
     """Convert an NNX State into a pure dict of arrays."""
@@ -44,3 +48,30 @@ def replace_state_from_pure_dict(state: nnx.State, values: dict[str, Any]) -> nn
     """Replace values in an NNX State from a pure dict."""
     nnx.replace_by_pure_dict(state, values)
     return state
+
+
+def align_layout_config(values: Any, template: Any) -> Any:
+    """Override layout ConfigVar leaves using the template layout values.
+
+    This enables loading checkpoints produced with a different layout while
+    keeping the active model layout unchanged.
+    """
+
+    def _align(current: Any, ref: Any) -> Any:
+        if isinstance(current, ConfigDict):
+            return current
+        if isinstance(current, dict) and isinstance(ref, dict):
+            merged: dict[str, Any] = {}
+            for key, val in current.items():
+                ref_val = ref.get(key)
+                if key in _LAYOUT_CONFIG_KEYS and ref_val is not None:
+                    merged[key] = ref_val
+                else:
+                    merged[key] = _align(val, ref_val)
+            for key in _LAYOUT_CONFIG_KEYS:
+                if key in ref and key not in merged:
+                    merged[key] = ref[key]
+            return merged
+        return current
+
+    return _align(values, template)
