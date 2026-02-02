@@ -794,7 +794,10 @@ def optimizer(
         """Build a tree mask selecting parameters to regularize."""
         params = tools.flatten_dict(params)
         mask = {
-            k: any(('linear_down' in ki) or ('symmetric_contraction' in ki) for ki in k)
+            k: any(
+                ('linear_down' in str(ki)) or ('symmetric_contraction' in str(ki))
+                for ki in k
+            )
             for k in params
         }
         if not any(mask.values()):
