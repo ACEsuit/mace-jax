@@ -30,6 +30,7 @@ import optax
 import tqdm
 
 from mace_jax import data
+from jax.experimental import multihost_utils
 
 
 @gin.register
@@ -914,6 +915,39 @@ def train(
     is_primary = process_index == 0
     process_count = getattr(jax, 'process_count', lambda: 1)()
 
+    def _allreduce_array(arr: np.ndarray) -> np.ndarray:
+        if process_count <= 1:
+            return arr
+        gathered = multihost_utils.process_allgather(arr)
+        return np.sum(np.asarray(gathered), axis=0)
+
+    def _allreduce_scalar(value: float) -> float:
+        if process_count <= 1:
+            return float(value)
+        arr = np.asarray(value, dtype=np.float64)
+        return float(_allreduce_array(arr))
+
+    def _allreduce_accumulators(accumulators: dict[str, _MetricAccumulator]) -> None:
+        if process_count <= 1:
+            return
+        for acc in accumulators.values():
+            packed = np.array(
+                [
+                    acc.count,
+                    acc.sum_abs_delta,
+                    acc.sum_abs_target,
+                    acc.sum_sq_delta,
+                    acc.sum_sq_target,
+                ],
+                dtype=np.float64,
+            )
+            reduced = _allreduce_array(packed)
+            acc.count = float(reduced[0])
+            acc.sum_abs_delta = float(reduced[1])
+            acc.sum_abs_target = float(reduced[2])
+            acc.sum_sq_delta = float(reduced[3])
+            acc.sum_sq_target = float(reduced[4])
+
     def _resolve_lr(step: int) -> float | None:
         """Return the current learning rate for a given step if available."""
         schedule = getattr(gradient_transform, 'lr_schedule', None)
@@ -1168,6 +1202,19 @@ def train(
                 )
                 train_metrics = {}
             else:
+                if process_count > 1:
+                    train_total_loss = _allreduce_scalar(train_total_loss)
+                    train_num_graphs = _allreduce_scalar(train_num_graphs)
+                    _allreduce_accumulators(metric_accumulators)
+                    if head_metric_accumulators:
+                        for head_idx, head_acc in head_metric_accumulators.items():
+                            head_loss_totals[head_idx] = _allreduce_scalar(
+                                head_loss_totals.get(head_idx, 0.0)
+                            )
+                            head_graph_counts[head_idx] = _allreduce_scalar(
+                                head_graph_counts.get(head_idx, 0.0)
+                            )
+                            _allreduce_accumulators({head_idx: head_acc})
                 avg_loss = train_total_loss / train_num_graphs
                 train_metrics = _init_metrics_payload(
                     avg_loss, time.time() - train_metrics_start
