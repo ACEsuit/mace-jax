@@ -51,9 +51,10 @@ pip install -e .
 
 MACE-JAX defines a few optional dependency groups:
 
-- `gpu`: JAX CUDA build + cueq CUDA kernels (`jax[cuda12]`, `cuequivariance-ops-cu12`, `cuequivariance-ops-jax-cu12`)
-- `jax-cuda12`: only the JAX CUDA build (`jax[cuda12]`)
-- `torch`: torch + cueq torch ops (needed for torch checkpoint conversion)
+- `jax-cuda13`: JAX CUDA 13 build + cueq CUDA 13 kernels
+- `jax-cuda12`: JAX CUDA 12 build + cueq CUDA 12 kernels
+- `torch-cuda13`: Torch + cueq CUDA 13 torch kernels
+- `torch-cuda12`: Torch + cueq CUDA 12 torch kernels
 - `test`: pytest tooling
 - `plot`: matplotlib + pandas
 - `wandb`: Weights & Biases logging
@@ -63,10 +64,10 @@ MACE-JAX defines a few optional dependency groups:
 Example:
 
 ```sh
-pip install -e .[gpu,torch,test]
+pip install -e .[jax-cuda13,torch-cuda13,test]
 ```
 
-If you only want the JAX CUDA build without cueq extras:
+If you need to stay on CUDA 12:
 
 ```sh
 pip install -e .[jax-cuda12]

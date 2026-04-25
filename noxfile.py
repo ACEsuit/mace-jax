@@ -36,7 +36,7 @@ def tests(session: nox.Session) -> None:
 def fusion_benchmark(session: nox.Session) -> None:
     """Smoke-test the conv-fusion benchmark pipeline."""
 
-    _install_package(session, 'test', 'conv_fusion', 'plot')
+    _install_package(session, 'test', 'jax-cuda13', 'plot')
     session.run(
         'python',
         'playground/benchmark_inference.py',
