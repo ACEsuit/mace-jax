@@ -1,16 +1,24 @@
-"""Regression tests for the two bugs.
+"""Regression tests for the fixed bugs.
 
-(1) ``AgnesiTransform.__call__`` indexes the ``atomic_numbers`` argument
-    (a Python list arriving from the model config) with a traced JAX index.
-    Inside a traced region (``jax.jit`` / ``pmap`` / ``shard_map``) that
-    Python-list ``__getitem__`` calls ``__array__`` on the tracer and raises
-    ``TracerArrayConversionError``.
+(1) The radial transforms (``AgnesiTransform`` / ``SoftTransform`` /
+    ``ZBLBasis``) index the array attributes ``_atomic_numbers`` and
+    ``_covalent_radii`` with traced species indices. Both attributes are plain
+    arrays (not ``nnx.Param``): a freshly built model holds them as *JAX*
+    arrays (which tolerate tracer indexing), but after a model is serialized
+    and reloaded through the bundle loader they come back as *NumPy* arrays.
+    Indexing a NumPy array with a traced index inside a traced region
+    (``jax.jit`` / ``pmap`` / ``shard_map``) raises
+    ``TracerArrayConversionError``. The fix coerces both with ``jnp.asarray``.
+
+    Note: ``mace_jax/modules/models.py`` passes ``self._atomic_numbers`` (a
+    JAX/NumPy array), never a Python list -- so this only reproduces through
+    the full build -> serialize -> reload -> ``jit`` path below.
 
 (2) ``mace_jax.cli.mace_jax_from_torch._serialize_for_json`` references
     ``torch.Tensor`` / ``torch.device`` / ``torch.dtype`` / ``torch.Size``,
-    but the module only imports ``torch`` *inside* ``main()``. Calling the
+    but the module only imported ``torch`` *inside* ``main()``. Calling the
     function from anywhere else (e.g. ``remote_handler.scripts.mace.
-    mace_utils.convert_torch_model_to_jax_bundle``) raises ``NameError``.
+    mace_utils.convert_torch_model_to_jax_bundle``) raised ``NameError``.
 
 
 Reproduce via:
@@ -29,39 +37,6 @@ import jax.numpy as jnp
 import pytest
 
 
-def test_agnesi_transform_traced_atomic_numbers():
-    """The transform must work when its caller passes ``atomic_numbers`` as a
-    Python list (which is what ``mace_jax/modules/models.py`` does) and
-    ``node_attrs_index`` as a traced array (which is what happens under
-    ``jit``/``pmap``).
-    """
-    from mace_jax.modules.radial import AgnesiTransform
-
-    transform = AgnesiTransform(trainable=False)
-
-    # Two atoms in a single edge, two distinct species (Z=50 Sn, Z=8 O).
-    edge_lengths = jnp.array([[2.5]], dtype=jnp.float32)
-    node_attrs = jnp.array([[1.0, 0.0], [0.0, 1.0]], dtype=jnp.float32)
-    edge_index = jnp.array([[0], [1]], dtype=jnp.int32)
-    node_attrs_index = jnp.array([0, 1], dtype=jnp.int32)
-
-    # ``atomic_numbers`` arrives as a Python list / tuple from the config --
-    # NOT a jnp.array. This is the exact shape of the bug.
-    atomic_numbers = [50, 8]
-
-    @jax.jit
-    def f(x, na, ei, idx):
-        return transform(
-            x, na, ei,
-            atomic_numbers=atomic_numbers,
-            node_attrs_index=idx,
-        )
-
-    out = f(edge_lengths, node_attrs, edge_index, node_attrs_index)
-    assert out.shape == (1, 1)
-    assert jnp.isfinite(out).all()
-
-
 def test_serialize_for_json_torch_namespace():
     """The serializer must be callable as a library function (i.e. without
     going through ``main()``, which is the only place ``torch`` is imported).
@@ -76,3 +51,100 @@ def test_serialize_for_json_torch_namespace():
 
     # dtype branch -- separate code path that ALSO needs ``torch``.
     assert _serialize_for_json(torch.float32) == "float32"
+
+
+# ---------------------------------------------------------------------------
+# (1) The covalent-radii transforms (``AgnesiTransform`` / ``SoftTransform`` /
+#     ``ZBLBasis``) index the array attributes ``_atomic_numbers`` and
+#     ``_covalent_radii`` with traced species indices. In a freshly built model
+#     both are *JAX* arrays, so the indexing happens to work; after a model is
+#     serialized and reloaded through the real bundle loader they come back as
+#     *NumPy* arrays, and indexing a NumPy array with a traced index under
+#     ``jit``/``vmap``/``pmap`` raises ``TracerArrayConversionError``
+#     (radial.py: ``atomic_numbers[...]`` and ``covalent_radii[Z_u]``).
+#
+# This only reproduces through the full build -> serialize -> reload -> ``jit``
+# path below; a directly constructed transform never produces the NumPy state.
+# The test fails on the pre-fix commits and passes once both attributes are
+# coerced with ``jnp.asarray``.
+# ---------------------------------------------------------------------------
+
+
+def _small_config(**overrides):
+    config = {
+        'r_max': 4.0,
+        'num_bessel': 2,
+        'num_polynomial_cutoff': 2,
+        'max_ell': 1,
+        'interaction_cls': 'RealAgnosticInteractionBlock',
+        'interaction_cls_first': 'RealAgnosticInteractionBlock',
+        'num_interactions': 1,
+        'num_elements': 2,
+        'hidden_irreps': '2x0e',
+        'edge_irreps': None,
+        'MLP_irreps': '2x0e',
+        'atomic_numbers': [1, 8],
+        'atomic_energies': [0.0, 0.0],
+        'avg_num_neighbors': 1.0,
+        'correlation': 1,
+        'radial_type': 'bessel',
+        'pair_repulsion': False,
+        'distance_transform': None,
+        'use_so3': False,
+        'use_reduced_cg': True,
+        'use_agnostic_product': False,
+        'use_last_readout_only': False,
+        'use_embedding_readout': False,
+        'gate': 'silu',
+        'apply_cutoff': True,
+    }
+    config.update(overrides)
+    return config
+
+
+@pytest.mark.parametrize(
+    'overrides',
+    [
+        pytest.param({'distance_transform': 'Agnesi'}, id='agnesi'),
+        pytest.param({'distance_transform': 'Soft'}, id='soft'),
+        pytest.param({'pair_repulsion': True}, id='zbl-pair-repulsion'),
+    ],
+)
+def test_covalent_radii_transform_survives_reload_and_jit(tmp_path, overrides):
+    """A reloaded model whose radial block uses the covalent-radii transforms
+    must be callable under ``jax.jit``.
+
+    The reload is what makes ``_covalent_radii`` a NumPy array (the state that
+    direct construction never produces), so this is the only way to reach the
+    ``TracerArrayConversionError`` the fix addresses.
+    """
+    import json
+
+    from flax import nnx, serialization
+
+    from mace_jax.nnx_utils import state_to_serializable_dict
+    from mace_jax.tools import bundle as bundle_tools
+    from mace_jax.tools import model_builder
+
+    config = _small_config(**overrides)
+    config, _, _ = model_builder._normalize_atomic_config(config)
+
+    model = model_builder._build_jax_model(config, rngs=nnx.Rngs(0))
+    _, state = nnx.split(model)
+    payload = state_to_serializable_dict(state)
+
+    (tmp_path / 'config.json').write_text(json.dumps(config))
+    (tmp_path / 'params.msgpack').write_bytes(serialization.to_bytes(payload))
+
+    bundle = bundle_tools.load_model_bundle(str(tmp_path), dtype='float64')
+    template = model_builder._prepare_template_data(config)
+
+    @jax.jit
+    def energy(data):
+        out, _ = bundle.graphdef.apply(bundle.params)(
+            data, compute_force=False, compute_stress=False
+        )
+        return out['energy']
+
+    result = energy(template)
+    assert jnp.isfinite(result).all()
