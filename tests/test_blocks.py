@@ -63,7 +63,10 @@ from mace_jax.modules.blocks import (
 from mace_jax.modules.blocks import (
     RealAgnosticResidualNonLinearInteractionBlock as RealAgnosticResidualNonLinearInteractionBlockJAX,
 )
-from mace_jax.modules.wrapper_ops import CuEquivarianceConfig as CuEquivarianceConfigJAX
+from mace_jax.modules.wrapper_ops import (
+    CuEquivarianceConfig as CuEquivarianceConfigJAX,
+)
+from mace_jax.modules.wrapper_ops import EquivarianceConfig
 from mace_jax.tools.device import configure_torch_runtime
 
 
@@ -377,7 +380,9 @@ class TestEquivariantProductBasisBlock:
             use_sc=use_sc,
             num_elements=num_elements,
             use_reduced_cg=True,
-            cueq_config=CuEquivarianceConfigJAX(**cue_config_kwargs),
+            equivariance_config=EquivarianceConfig(
+                cueq_config=CuEquivarianceConfigJAX(**cue_config_kwargs)
+            ),
             rngs=nnx.Rngs(42),
         )
         torch_model = torch_model.to('cpu')
@@ -513,7 +518,7 @@ class TestRealAgnosticBlocks:
             target_irreps=irreps,
             hidden_irreps=irreps,
             avg_num_neighbors=3.0,
-            cueq_config=cue_config_jax,
+            equivariance_config=EquivarianceConfig(cueq_config=cue_config_jax),
             rngs=nnx.Rngs(42),
         )
         module, _ = init_from_torch(module, torch_module)

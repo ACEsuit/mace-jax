@@ -163,6 +163,25 @@ Notes:
  - `--cueq-layout {mul_ir,ir_mul}` and `--cueq-group {O3,O3_e3nn}` mirror the
    Torch defaults (use `ir_mul`/`O3_e3nn` for `--only_cueq`).
 
+##### OpenEquivariance fused convolution
+
+OpenEquivariance is an opt-in CUDA backend for the fused channel-wise tensor
+product convolution. It does not replace cuequivariance for linear or symmetric
+contraction kernels. Install the pinned packages in this order (the second build
+must not use build isolation):
+
+```sh
+pip install 'openequivariance[jax]==0.6.8'
+pip install 'openequivariance_extjax==0.6.8' --no-build-isolation
+```
+
+Enable it with `--enable-openeq`. The explicit equivalents are
+`--openeq-optimize-all`, `--openeq-conv-fusion`,
+`--openeq-layout=mul_ir`, and `--openeq-group=O3_e3nn`. V1 uses CUDA atomic
+aggregation, supports float32/float64 and force-training derivatives, and is not
+deterministic. ROCm is not qualified. Unsupported configurations and missing or
+failed OpenEquivariance kernels raise an error; there is no silent fallback.
+
 For instance, fine-tuning a Torch foundation model against a new dataset can be done with:
 
 ```sh

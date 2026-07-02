@@ -122,53 +122,50 @@ class Gate(nnx.Module):
         self.irreps_gated = irreps_gated
         self.normalize_act = normalize_act
 
-        irreps_scalars = Irreps(self.irreps_scalars).simplify()
-        irreps_gates = Irreps(self.irreps_gates).simplify()
-        irreps_gated = Irreps(self.irreps_gated).simplify()
+        irreps_scalars_in = Irreps(self.irreps_scalars)
+        irreps_gates_in = Irreps(self.irreps_gates)
+        irreps_gated_in = Irreps(self.irreps_gated)
 
-        max_gate_l = max((mul_ir.ir.l for mul_ir in irreps_gates), default=0)
-        max_scalar_l = max((mul_ir.ir.l for mul_ir in irreps_scalars), default=0)
-
-        if len(irreps_gates) > 0 and max_gate_l > 0:
-            raise ValueError(f'Gate scalars must be scalars, got {irreps_gates}')
-        if len(irreps_scalars) > 0 and max_scalar_l > 0:
-            raise ValueError(f'Scalars must be scalars, got {irreps_scalars}')
-        if len(irreps_gates) != len(irreps_gated):
+        if irreps_gates_in.num_irreps != irreps_gated_in.num_irreps:
             raise ValueError(
-                f'Mismatch: {len(irreps_gated)} irreps in gated, '
-                f'{len(irreps_gates)} in gates'
+                f'Mismatch: {irreps_gated_in.num_irreps} irreps in gated, '
+                f'{irreps_gates_in.num_irreps} in gates'
             )
+        if len(irreps_gates_in) > 0 and irreps_gates_in.lmax > 0:
+            raise ValueError(f'Gate scalars must be scalars, got {irreps_gates_in}')
+        if len(irreps_scalars_in) > 0 and irreps_scalars_in.lmax > 0:
+            raise ValueError(f'Scalars must be scalars, got {irreps_scalars_in}')
 
-        self._irreps_scalars = irreps_scalars
-        self._irreps_gates = irreps_gates
-        self._irreps_gated = irreps_gated
+        self._sortcut = _Sortcut(
+            irreps_scalars_in,
+            irreps_gates_in,
+            irreps_gated_in,
+        )
+        self._irreps_scalars, self._irreps_gates, self._irreps_gated = (
+            self._sortcut.irreps_outs
+        )
+        self._irreps_in = self._sortcut.irreps_in
+        self._irreps_gated_input = irreps_gated_in
 
         self._scalar_activation = Activation(
-            self._irreps_scalars,
+            irreps_scalars_in,
             self.act_scalars,
             normalize_act=self.normalize_act,
         )
         self._gate_activation = Activation(
-            self._irreps_gates,
+            irreps_gates_in,
             self.act_gates,
             normalize_act=self.normalize_act,
         )
 
-        self._sortcut = _Sortcut(
-            self._irreps_scalars,
-            self._irreps_gates,
-            self._irreps_gated,
-        )
-
-        self._irreps_in = self._sortcut.irreps_in
         self._irreps_scalars_out = self._scalar_activation.irreps_out
         self._irreps_gates_out = self._gate_activation.irreps_out
 
-        irreps_gated_dim = _as_irreps(self._irreps_gated).dim
+        irreps_gated_dim = _as_irreps(self._irreps_gated_input).dim
         irreps_gates_out_dim = _as_irreps(self._irreps_gates_out).dim
 
         if irreps_gated_dim > 0 and irreps_gates_out_dim > 0:
-            sample_gated = e3nn.zeros(_as_irreps(self._irreps_gated), ())
+            sample_gated = e3nn.zeros(_as_irreps(self._irreps_gated_input), ())
             sample_gates = e3nn.zeros(_as_irreps(self._irreps_gates_out), ())
             self._mul_irreps_out = e3nn.elementwise_tensor_product(
                 sample_gated,
@@ -214,7 +211,7 @@ class Gate(nnx.Module):
             outputs.append(scalars_act)
 
         if gates_act.shape[-1] > 0 and gated.shape[-1] > 0:
-            gated_ir = e3nn.IrrepsArray(_as_irreps(self._irreps_gated), gated)
+            gated_ir = e3nn.IrrepsArray(_as_irreps(self._irreps_gated_input), gated)
             gates_ir = e3nn.IrrepsArray(_as_irreps(self._irreps_gates_out), gates_act)
             gated_prod = e3nn.elementwise_tensor_product(gated_ir, gates_ir).array
             if gated_prod.shape[-1] > 0:

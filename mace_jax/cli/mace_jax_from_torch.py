@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from mace_jax.modules.wrapper_ops import CuEquivarianceConfig
+from mace_jax.modules.wrapper_ops import CuEquivarianceConfig, EquivarianceConfig
 from mace_jax.nnx_utils import state_to_pure_dict
 
 warnings.filterwarnings(
@@ -32,6 +32,8 @@ from mace_jax.tools.model_builder import (
     _build_jax_model,
     _prepare_template_data,
 )
+
+import torch
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import torch
@@ -133,6 +135,7 @@ def convert_model(
     torch_model,
     config: dict[str, Any],
     *,
+    equivariance_config: EquivarianceConfig | dict[str, object] | None = None,
     cueq_config: CuEquivarianceConfig | None = None,
 ):
     try:
@@ -143,20 +146,12 @@ def convert_model(
         ) from exc
     _maybe_update_hidden_irreps_from_torch(torch_model, config)
 
-    try:
-        jax_model = _build_jax_model(
-            config,
-            cueq_config=cueq_config,
-            rngs=nnx.Rngs(0),
-        )
-    except TypeError as exc:
-        if 'cueq_config' in str(exc):
-            jax_model = _build_jax_model(
-                config,
-                rngs=nnx.Rngs(0),
-            )
-        else:
-            raise
+    jax_model = _build_jax_model(
+        config,
+        equivariance_config=equivariance_config,
+        cueq_config=cueq_config,
+        rngs=nnx.Rngs(0),
+    )
     template_data = _prepare_template_data(config)
     graphdef, state = nnx.split(jax_model)
     import_from_torch(jax_model, torch_model, state)
@@ -235,7 +230,7 @@ def main():
     config['torch_model_class'] = torch_model.__class__.__name__
 
     _, state, _ = convert_model(torch_model, config)
-    variables = state_to_pure_dict(state)
+    variables = state_to_serializable_dict(state)
 
     params_bytes = serialization.to_bytes(variables)
     output_path.write_bytes(params_bytes)

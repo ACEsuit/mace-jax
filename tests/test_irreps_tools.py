@@ -5,7 +5,7 @@ from e3nn_jax import Irreps, IrrepsArray
 from mace.modules.irreps_tools import CuEquivarianceConfig as TorchCuEquivarianceConfig
 from mace.modules.irreps_tools import reshape_irreps as TorchReshapeIrreps
 
-from mace_jax.modules.irreps_tools import CuEquivarianceConfig, reshape_irreps
+from mace_jax.modules.irreps_tools import EquivarianceConfig, reshape_irreps
 
 
 def _random_flat(batch: int, irreps: Irreps, rng: np.random.Generator) -> np.ndarray:
@@ -45,8 +45,8 @@ class TestReshapeIrreps:
         torch_out = torch_module(torch.tensor(tensor_np, dtype=torch.float32))
         torch_np = torch_out.detach().cpu().numpy()
 
-        jax_cfg = CuEquivarianceConfig(layout_str='ir_mul')
-        jax_module = reshape_irreps(irreps, cueq_config=jax_cfg)
+        jax_cfg = EquivarianceConfig(layout='ir_mul')
+        jax_module = reshape_irreps(irreps, equivariance_config=jax_cfg)
         jax_np = np.asarray(jax_module(tensor_np))
 
         np.testing.assert_allclose(jax_np, torch_np, rtol=1e-6, atol=1e-7)

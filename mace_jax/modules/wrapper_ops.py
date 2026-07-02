@@ -3,6 +3,7 @@ Wrapper class for o3.Linear that optionally uses cuet.Linear
 """
 
 import dataclasses
+import warnings
 from typing import Optional
 
 import cuequivariance as cue
@@ -61,12 +62,71 @@ def _validate_cue_group(group_value: object | None, *, context: str) -> None:
 
 
 @dataclasses.dataclass
+class OpenEquivarianceConfig:
+    """Configuration for the supported OpenEquivariance JAX operations.
+
+    Fully connected tensor products are intentionally unavailable.  The
+    OpenEquivariance 0.6.8 backward kernel is order-dependent when multiple
+    FCTP problems execute in one process and can silently corrupt force
+    derivatives.  Keep ``optimize_fctp`` in the serialized schema so affected
+    bundles fail explicitly instead of changing their meaning while loading.
+    """
+
+    enabled: bool = False
+    group: str = 'O3_e3nn'
+    optimize_all: bool = False
+    optimize_linear: bool = False
+    optimize_channelwise: bool = False
+    optimize_symmetric: bool = False
+    optimize_fctp: bool = False
+    conv_fusion: bool = False
+
+    def __post_init__(self) -> None:
+        unsupported = []
+        if self.optimize_linear:
+            unsupported.append('optimize_linear')
+        if self.optimize_symmetric:
+            unsupported.append('optimize_symmetric')
+        if self.optimize_fctp:
+            unsupported.append('optimize_fctp (OpenEquivariance 0.6.8 backward '
+                               'is not safe for general FCTP execution)')
+        if unsupported:
+            raise ValueError(
+                'OpenEquivariance does not accelerate these operations: '
+                f"{', '.join(unsupported)}."
+            )
+        if self.group != 'O3_e3nn':
+            raise ValueError(
+                "OpenEquivariance v1 requires group='O3_e3nn'; "
+                f'received {self.group!r}.'
+            )
+
+    @property
+    def channelwise_fusion(self) -> bool:
+        return bool(
+            self.enabled
+            and self.conv_fusion
+            and (self.optimize_all or self.optimize_channelwise)
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            'enabled': bool(self.enabled),
+            'group': 'O3_e3nn',
+            'optimize_all': bool(self.optimize_all),
+            'optimize_linear': bool(self.optimize_linear),
+            'optimize_channelwise': bool(self.optimize_channelwise),
+            'optimize_symmetric': bool(self.optimize_symmetric),
+            'optimize_fctp': bool(self.optimize_fctp),
+            'conv_fusion': bool(self.conv_fusion),
+        }
+
+
+@dataclasses.dataclass
 class CuEquivarianceConfig:
     """Configuration for cuequivariance acceleration"""
 
     enabled: bool = False
-    layout: str = 'mul_ir'  # One of: mul_ir, ir_mul
-    layout_str: str = 'mul_ir'
     group: str = 'O3'
     optimize_all: bool = False  # Set to True to enable all optimizations
     optimize_linear: bool = False
@@ -77,11 +137,111 @@ class CuEquivarianceConfig:
 
     def __post_init__(self):
         if self.enabled:
-            self.layout_str = self.layout
-            self.layout = getattr(cue, self.layout)
             self.group = (
                 O3_e3nn if self.group == 'O3_e3nn' else getattr(cue, self.group)
             )
+
+    def to_dict(self) -> dict[str, object]:
+        """Return a stable bundle representation without backend class objects."""
+        return {
+            'enabled': bool(self.enabled),
+            'group': _group_name(self.group) or 'O3',
+            'optimize_all': bool(self.optimize_all),
+            'optimize_linear': bool(self.optimize_linear),
+            'optimize_channelwise': bool(self.optimize_channelwise),
+            'optimize_symmetric': bool(self.optimize_symmetric),
+            'optimize_fctp': bool(self.optimize_fctp),
+            'conv_fusion': bool(self.conv_fusion),
+        }
+
+
+@dataclasses.dataclass
+class EquivarianceConfig:
+    """Backend-neutral equivariance acceleration configuration."""
+
+    layout: str = 'mul_ir'
+    cueq_config: CuEquivarianceConfig | dict[str, object] | None = None
+    openeq_config: OpenEquivarianceConfig | dict[str, object] | None = None
+
+    def __post_init__(self) -> None:
+        if self.layout not in {'mul_ir', 'ir_mul'}:
+            raise ValueError(
+                "layout must be either 'mul_ir' or 'ir_mul'; "
+                f'received {self.layout!r}.'
+            )
+        if isinstance(self.cueq_config, dict):
+            self.cueq_config = CuEquivarianceConfig(**self.cueq_config)
+        if isinstance(self.openeq_config, dict):
+            self.openeq_config = OpenEquivarianceConfig(**self.openeq_config)
+        if self.openeq_config is not None and self.openeq_config.channelwise_fusion:
+            cueq = self.cueq_config
+            cue_channelwise = cueq is not None and (
+                cueq.conv_fusion
+                or (cueq.enabled and (cueq.optimize_all or cueq.optimize_channelwise))
+            )
+            if cue_channelwise:
+                raise ValueError(
+                    'OpenEquivariance and cuEquivariance cannot both be selected '
+                    'for the channel-wise convolution.'
+                )
+
+    @property
+    def layout_str(self) -> str:
+        """Compatibility spelling used by existing layout-aware modules."""
+        return self.layout
+
+    def to_dict(self) -> dict[str, object]:
+        """Return the canonical, backend-neutral bundle representation."""
+        return {
+            'layout': self.layout,
+            'cueq_config': (
+                self.cueq_config.to_dict() if self.cueq_config is not None else None
+            ),
+            'openeq_config': (
+                self.openeq_config.to_dict() if self.openeq_config is not None else None
+            ),
+        }
+
+
+def resolve_equivariance_config(
+    equivariance_config: EquivarianceConfig | dict[str, object] | None = None,
+    *,
+    cueq_config: CuEquivarianceConfig | dict[str, object] | None = None,
+) -> EquivarianceConfig | None:
+    """Resolve the canonical config and migrate the deprecated model argument."""
+    if equivariance_config is not None and cueq_config is not None:
+        raise ValueError(
+            'Specify only equivariance_config; cueq_config is a deprecated alias.'
+        )
+    if equivariance_config is not None:
+        if isinstance(equivariance_config, EquivarianceConfig):
+            return equivariance_config
+        return EquivarianceConfig(**equivariance_config)
+    if cueq_config is None:
+        return None
+
+    warnings.warn(
+        'cueq_config is deprecated; pass equivariance_config instead.',
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    if isinstance(cueq_config, CuEquivarianceConfig):
+        return EquivarianceConfig(cueq_config=cueq_config)
+
+    legacy = dict(cueq_config)
+    nested_openeq = legacy.pop('openeq_config', None)
+    layout = legacy.pop('layout', None)
+    layout_str = legacy.pop('layout_str', None)
+    if layout is not None and layout_str is not None and layout != layout_str:
+        raise ValueError(
+            'Legacy cueq_config has conflicting layout and layout_str values.'
+        )
+    layout = str(layout if layout is not None else layout_str or 'mul_ir')
+    return EquivarianceConfig(
+        layout=layout,
+        cueq_config=CuEquivarianceConfig(**legacy),
+        openeq_config=nested_openeq,
+    )
 
 
 class Linear:
@@ -93,15 +253,18 @@ class Linear:
         irreps_out: Irreps,
         shared_weights: bool = True,
         internal_weights: bool = True,
-        cueq_config: CuEquivarianceConfig | None = None,
+        equivariance_config: EquivarianceConfig | None = None,
         rngs: nnx.Rngs | None = None,
     ):
+        cueq_config = (
+            equivariance_config.cueq_config if equivariance_config is not None else None
+        )
         group_value = getattr(cueq_config, 'group', None) if cueq_config else None
         _validate_cue_group(group_value, context='Linear')
         group = _resolve_cue_group(cueq_config) if cueq_config else None
         layout = (
-            getattr(cueq_config, 'layout', 'mul_ir')
-            if cueq_config is not None
+            equivariance_config.layout
+            if equivariance_config is not None
             else 'mul_ir'
         )
 
@@ -132,10 +295,41 @@ class TensorProduct:
         instructions=None,
         shared_weights: bool = False,
         internal_weights: bool = False,
-        cueq_config=None,
+        equivariance_config: EquivarianceConfig | None = None,
         rngs: nnx.Rngs | None = None,
     ):
         conv_fusion = False
+        cueq_config = (
+            equivariance_config.cueq_config if equivariance_config is not None else None
+        )
+        openeq_config = (
+            equivariance_config.openeq_config
+            if equivariance_config is not None
+            else None
+        )
+        use_openeq = bool(
+            openeq_config is not None
+            and openeq_config.enabled
+            and (openeq_config.optimize_all or openeq_config.optimize_channelwise)
+        )
+        if use_openeq:
+            # Keep this import lazy: OpenEquivariance is an optional CUDA backend.
+            from mace_jax.adapters.openequivariance import (
+                TensorProduct as OpenEqTensorProduct,
+            )
+
+            return OpenEqTensorProduct(
+                irreps_in1,
+                irreps_in2,
+                irreps_out,
+                instructions=instructions,
+                shared_weights=shared_weights,
+                internal_weights=internal_weights,
+                conv_fusion=openeq_config.conv_fusion,
+                layout=equivariance_config.layout,
+                group=openeq_config.group,
+                rngs=rngs,
+            )
         group_value = getattr(cueq_config, 'group', None) if cueq_config else None
         _validate_cue_group(group_value, context='TensorProduct')
         group = _resolve_cue_group(cueq_config) if cueq_config else None
@@ -165,7 +359,7 @@ def FullyConnectedTensorProduct(
     irreps_out: Irreps,
     shared_weights: bool = True,
     internal_weights: bool = True,
-    cueq_config: CuEquivarianceConfig | None = None,
+    equivariance_config: EquivarianceConfig | None = None,
     rngs: nnx.Rngs | None = None,
 ):
     """
@@ -173,6 +367,9 @@ def FullyConnectedTensorProduct(
     When CuEquivariance acceleration is requested, this raises since a JAX binding
     is not yet available; otherwise defaults to the e3nn_jax implementation.
     """
+    cueq_config = (
+        equivariance_config.cueq_config if equivariance_config is not None else None
+    )
     use_cue = (
         cueq_config is not None
         and getattr(cueq_config, 'enabled', False)
@@ -210,7 +407,7 @@ def SymmetricContractionWrapper(
     irreps_out: Irreps,
     correlation: int,
     num_elements: int | None = None,
-    cueq_config: Optional['CuEquivarianceConfig'] = None,
+    equivariance_config: Optional['EquivarianceConfig'] = None,
     use_reduced_cg: bool = True,
     rngs: nnx.Rngs | None = None,
 ):
@@ -218,22 +415,28 @@ def SymmetricContractionWrapper(
     JAX implementation of SymmetricContraction powered by cuequivariance-jax.
     """
 
+    cueq_config = (
+        equivariance_config.cueq_config if equivariance_config is not None else None
+    )
     use_cue = cueq_config is not None and getattr(cueq_config, 'enabled', False)
 
     group_value = getattr(cueq_config, 'group', None) if cueq_config else None
     if cueq_config is not None:
         _validate_cue_group(group_value, context='SymmetricContraction')
     group = _resolve_cue_group(cueq_config) if cueq_config else None
-    if cueq_config is not None and use_cue:
-        if cueq_config.layout_str not in {'mul_ir', 'ir_mul'}:
-            raise ValueError(
-                f"Unsupported cuequivariance layout '{cueq_config.layout_str}'."
-            )
+    if equivariance_config is not None and equivariance_config.layout not in {
+        'mul_ir',
+        'ir_mul',
+    }:
+        raise ValueError(
+            f"Unsupported equivariance layout '{equivariance_config.layout}'."
+        )
 
-    input_layout = 'mul_ir'
-    if use_cue:
-        # cuet.SymmetricContraction expects ir_mul inputs regardless of output layout.
-        input_layout = 'ir_mul'
+    input_layout = (
+        equivariance_config.layout
+        if equivariance_config is not None
+        else 'mul_ir'
+    )
 
     sc_kwargs = dict(
         correlation=correlation,
@@ -260,9 +463,15 @@ class TransposeIrrepsLayoutWrapper:
         irreps: Irreps,
         source: str,
         target: str,
-        cueq_config: CuEquivarianceConfig | None = None,
+        equivariance_config: EquivarianceConfig | None = None,
     ):
-        if cueq_config is None or not cueq_config.enabled:
+        # These boundary adapters are needed only while the model-wide
+        # representation is ir_mul.  A mul_ir model already matches the
+        # canonical layout consumed and produced by e3nn nonlinearities.
+        if (
+            equivariance_config is None
+            or equivariance_config.layout != 'ir_mul'
+        ):
             return None
 
         source = source.lower()

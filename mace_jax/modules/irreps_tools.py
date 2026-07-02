@@ -7,7 +7,7 @@
 import jax.numpy as jnp
 from e3nn_jax import Irreps
 
-from mace_jax.modules.wrapper_ops import CuEquivarianceConfig
+from mace_jax.modules.wrapper_ops import EquivarianceConfig
 
 
 # Based on mir-group/nequip
@@ -67,10 +67,10 @@ class reshape_irreps:
     def __init__(
         self,
         irreps: Irreps,
-        cueq_config: CuEquivarianceConfig | None = None,
+        equivariance_config: EquivarianceConfig | None = None,
     ):
         self.irreps = Irreps(irreps)
-        self.cueq_config = cueq_config
+        self.equivariance_config = equivariance_config
         self._dims = [ir.dim for _, ir in self.irreps]
         self._muls = [mul for mul, _ in self.irreps]
         self._total_dim = sum(mul * dim for mul, dim in zip(self._muls, self._dims))
@@ -95,14 +95,14 @@ class reshape_irreps:
             field = array[:, ix : ix + mul * dim]
             ix += mul * dim
 
-            if self.cueq_config is not None and self.cueq_config.layout_str == 'ir_mul':
+            if self.equivariance_config is not None and self.equivariance_config.layout_str == 'ir_mul':
                 field = field.reshape(batch, dim, mul)
             else:
                 field = field.reshape(batch, mul, dim)
 
             fields.append(field)
 
-        if self.cueq_config is not None and self.cueq_config.layout_str == 'ir_mul':
+        if self.equivariance_config is not None and self.equivariance_config.layout_str == 'ir_mul':
             return jnp.concatenate(fields, axis=-2)
         return jnp.concatenate(fields, axis=-1)
 
