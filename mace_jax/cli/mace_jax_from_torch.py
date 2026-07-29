@@ -221,7 +221,7 @@ def main():
     config['torch_model_class'] = torch_model.__class__.__name__
 
     _, state, _ = convert_model(torch_model, config)
-    variables = state_to_pure_dict(state)
+    variables = state_to_serializable_dict(state)
 
     params_bytes = serialization.to_bytes(variables)
     output_path.write_bytes(params_bytes)
