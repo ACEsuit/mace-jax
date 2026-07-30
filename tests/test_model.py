@@ -28,7 +28,7 @@ except Exception as exc:  # pragma: no cover
     _TORCH_MODEL_IMPORT_ERROR = exc
 
 from mace_jax import modules
-from mace_jax.modules.wrapper_ops import CuEquivarianceConfig
+from mace_jax.modules.wrapper_ops import EquivarianceConfig
 from mace_jax.tools.import_from_torch import import_from_torch
 
 
@@ -76,18 +76,18 @@ def configure_model_jax(
     if rngs is None:
         rngs = nnx.Rngs(0)
 
-    cueq_config = None
+    equivariance_config = None
     if getattr(args, 'only_cueq', False):
-        cueq_config = CuEquivarianceConfig(
-            enabled=True,
+        equivariance_config = EquivarianceConfig(
+            backend='cueq',
             layout='ir_mul',
             group='O3_e3nn',
             optimize_all=True,
             conv_fusion=(getattr(args, 'device', None) == 'cuda'),
         )
     elif getattr(args, 'enable_cueq', False):
-        cueq_config = CuEquivarianceConfig(
-            enabled=True,
+        equivariance_config = EquivarianceConfig(
+            backend='cueq',
             layout='mul_ir',
             group='O3',
             optimize_all=True,
@@ -110,7 +110,7 @@ def configure_model_jax(
         atomic_numbers=tuple(int(z) for z in z_table.zs),
         use_reduced_cg=args.use_reduced_cg,
         use_so3=args.use_so3,
-        cueq_config=cueq_config,
+        equivariance_config=equivariance_config,
     )
     return modules.ScaleShiftMACE(
         **model_config,
@@ -133,9 +133,25 @@ def configure_model_jax(
     )
 
 
-def _batch_to_jax(batch: Batch) -> dict:
+def _batch_keys(batch) -> list[str]:
+    keys = batch.keys() if callable(batch.keys) else batch.keys
+    return list(keys)
+
+
+def _batch_to_torch_dict(batch: Batch) -> dict:
     converted = {}
-    for key in batch.keys:
+    for key in _batch_keys(batch):
+        value = batch[key]
+        if isinstance(value, torch.Tensor):
+            converted[key] = value.detach().clone()
+        else:
+            converted[key] = value
+    return converted
+
+
+def _batch_to_jax(batch: Batch | dict) -> dict:
+    converted = {}
+    for key in _batch_keys(batch):
         value = batch[key]
         if isinstance(value, torch.Tensor):
             converted[key] = jnp.asarray(value.detach().cpu().numpy())
@@ -207,7 +223,8 @@ class ModelEquivalenceTestBase:
             )
 
         cls.batch = torch_geometric.batch.Batch.from_data_list(atomic_data_list)
-        cls.batch_jax = _batch_to_jax(cls.batch)
+        cls.batch_torch = _batch_to_torch_dict(cls.batch)
+        cls.batch_jax = _batch_to_jax(cls.batch_torch)
 
         cls.args = cls._default_args()
         cls._prepare_args(cls.args)
@@ -221,7 +238,7 @@ class ModelEquivalenceTestBase:
         )
         cls.torch_model.eval()
 
-        torch_output = cls.torch_model(cls.batch, compute_stress=True)
+        torch_output = cls.torch_model(cls.batch_torch, compute_stress=True)
         cls.torch_energy = torch_output['energy'].detach().cpu().numpy()
         cls.torch_forces = torch_output['forces'].detach().cpu().numpy()
         cls.torch_stress = torch_output['stress'].detach().cpu().numpy()
@@ -467,12 +484,11 @@ class ModelEquivalenceTestBase:
             'Agnesi',
             'Soft',
         }
-        if model.cueq_config is not None and getattr(
-            model.cueq_config, 'enabled', False
-        ):
+        cueq_config = getattr(model.equivariance_config, 'cueq_config', None)
+        if cueq_config is not None and getattr(cueq_config, 'enabled', False):
             need_node_attrs_index = need_node_attrs_index or bool(
-                getattr(model.cueq_config, 'optimize_all', False)
-                or getattr(model.cueq_config, 'optimize_symmetric', False)
+                getattr(cueq_config, 'optimize_all', False)
+                or getattr(cueq_config, 'optimize_symmetric', False)
             )
         node_attrs_index = data_jax.get('node_attrs_index')
         if node_attrs_index is None:

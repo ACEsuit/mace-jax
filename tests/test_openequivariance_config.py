@@ -11,24 +11,36 @@ from flax import nnx
 from mace_jax.adapters.openequivariance import TensorProduct as OpenEqTensorProduct
 from mace_jax.cli import mace_jax_train as train_cli
 from mace_jax.modules.wrapper_ops import (
-    CuEquivarianceConfig,
     EquivarianceConfig,
     FullyConnectedTensorProduct,
-    OpenEquivarianceConfig,
     TensorProduct,
 )
 
 
 def _enabled(**kwargs):
-    return OpenEquivarianceConfig(
-        enabled=True, optimize_all=True, conv_fusion=True, **kwargs
-    )
+    config = {
+        "enabled": True,
+        "optimize_all": True,
+        "conv_fusion": True,
+    }
+    config.update(kwargs)
+    return config
+
+
+def _enabled_equivariance(**kwargs):
+    config = {
+        "backend": "openeq",
+        "optimize_all": True,
+        "conv_fusion": True,
+    }
+    config.update(kwargs)
+    return EquivarianceConfig(**config)
 
 
 @pytest.mark.parametrize(
     ('kwargs', 'match'),
     [
-        ({'group': 'O3'}, "group='O3_e3nn'"),
+        ({"group": "O3"}, "group O3_e3nn"),
         ({'optimize_linear': True}, 'optimize_linear'),
         ({'optimize_symmetric': True}, 'optimize_symmetric'),
         ({'optimize_fctp': True}, 'not safe for general FCTP'),
@@ -36,12 +48,12 @@ def _enabled(**kwargs):
 )
 def test_openeq_rejects_unsupported_options(kwargs, match):
     with pytest.raises(ValueError, match=match):
-        _enabled(**kwargs)
+        _enabled_equivariance(**kwargs)
 
 
 def test_openeq_rejects_fctp_from_serialized_config():
-    with pytest.raises(ValueError, match='not safe for general FCTP'):
-        EquivarianceConfig(openeq_config={'enabled': True, 'optimize_fctp': True})
+    with pytest.raises(ValueError, match="not safe for general FCTP"):
+        EquivarianceConfig(backend="openeq", optimize_fctp=True)
 
 
 def test_openeq_adapter_rejects_standalone_tensor_products():
@@ -65,7 +77,7 @@ def test_optimize_all_does_not_select_openeq_fctp():
         Irreps('1x0e'),
         shared_weights=True,
         internal_weights=True,
-        equivariance_config=EquivarianceConfig(openeq_config=_enabled()),
+        equivariance_config=_enabled_equivariance(),
         rngs=nnx.Rngs(0),
     )
     assert not type(module).__module__.startswith(
@@ -74,32 +86,42 @@ def test_optimize_all_does_not_select_openeq_fctp():
 
 
 def test_openeq_selects_only_fused_channelwise_configuration():
-    assert not OpenEquivarianceConfig(enabled=True).channelwise_fusion
-    assert not OpenEquivarianceConfig(
-        enabled=True, optimize_all=True
-    ).channelwise_fusion
-    assert _enabled().channelwise_fusion
+    assert not (
+        _enabled_equivariance(
+            optimize_all=False, conv_fusion=False
+        ).openeq_config.channelwise_fusion
+    )
+    assert not (
+        _enabled_equivariance(conv_fusion=False).openeq_config.channelwise_fusion
+    )
+    assert _enabled_equivariance().openeq_config.channelwise_fusion
 
 
 def test_cueq_rejects_same_kernel_conflict():
-    with pytest.raises(ValueError, match='cannot both be selected'):
-        EquivarianceConfig(
-            cueq_config=CuEquivarianceConfig(
-                enabled=True,
-                optimize_channelwise=True,
-            ),
-            openeq_config=_enabled(),
-        )
+    with pytest.deprecated_call(match="Nested cueq_config"):
+        with pytest.raises(ValueError, match="multiple acceleration backends"):
+            EquivarianceConfig(
+                cueq_config={
+                    "enabled": True,
+                    "optimize_channelwise": True,
+                },
+                openeq_config=_enabled(),
+            )
 
 
 def test_config_round_trip_is_canonical_and_legacy_is_preserved():
-    config = EquivarianceConfig(openeq_config=_enabled())
+    with pytest.deprecated_call(match="Nested cueq_config"):
+        config = EquivarianceConfig(openeq_config=_enabled())
     payload = config.to_dict()
     restored = EquivarianceConfig(**payload)
     assert restored.to_dict() == payload
-    assert payload['layout'] == 'mul_ir'
-    assert payload['cueq_config'] is None
-    assert payload['openeq_config']['group'] == 'O3_e3nn'
+    assert payload["backend"] == "openeq"
+    assert payload["layout"] == "mul_ir"
+    assert payload["group"] == "O3_e3nn"
+    assert payload["optimize_all"] is True
+    assert payload["conv_fusion"] is True
+    assert "cueq_config" not in payload
+    assert "openeq_config" not in payload
 
 
 def test_cli_binds_openeq_config():
@@ -116,11 +138,27 @@ def test_cli_binds_openeq_config():
     gin.clear_config()
 
 
+def test_cli_explicit_openeq_flags_select_backend():
+    gin.clear_config()
+    args, _ = train_cli.parse_args(
+        ["--openeq-optimize-all", "--openeq-conv-fusion"]
+    )
+    train_cli.apply_cli_overrides(args)
+    config = gin.query_parameter(
+        "mace_jax.tools.gin_model.model.equivariance_config"
+    )
+    assert config.backend == "openeq"
+    assert config.optimize_all
+    assert config.conv_fusion
+    assert config.openeq_config.channelwise_fusion
+    gin.clear_config()
+
+
 def test_openeq_import_is_lazy_and_missing_dependency_is_actionable(monkeypatch):
     for name in list(sys.modules):
         if name.startswith('openequivariance'):
             monkeypatch.delitem(sys.modules, name, raising=False)
-    config = EquivarianceConfig(openeq_config=_enabled())
+    config = _enabled_equivariance()
     assert 'openequivariance' not in sys.modules
     import builtins
 
@@ -186,7 +224,7 @@ def test_adapter_uses_receiver_rows_sender_cols_and_permuted_weights(monkeypatch
         instructions=[(0, 0, 0, 'uvu', True)],
         shared_weights=False,
         internal_weights=False,
-        equivariance_config=EquivarianceConfig(openeq_config=_enabled()),
+        equivariance_config=_enabled_equivariance(),
         rngs=nnx.Rngs(0),
     )
     dtype = module.dtype

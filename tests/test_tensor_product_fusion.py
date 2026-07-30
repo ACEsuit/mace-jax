@@ -9,7 +9,10 @@ from e3nn_jax import Irreps  # type: ignore
 from flax import nnx
 
 from mace_jax.modules.blocks import RealAgnosticInteractionBlock
-from mace_jax.modules.wrapper_ops import CuEquivarianceConfig, TensorProduct
+from mace_jax.modules.wrapper_ops import (
+    EquivarianceConfig,
+    TensorProduct,
+)
 from mace_jax.tools.cg import O3_e3nn
 from mace_jax.tools.scatter import scatter_sum
 
@@ -37,11 +40,12 @@ pytestmark = pytest.mark.skipif(
 
 
 def _make_module(conv_fusion: bool) -> TensorProduct:
-    config = CuEquivarianceConfig(
-        enabled=True,
+    config = EquivarianceConfig(
+        backend="cueq",
+        group="O3",
         optimize_channelwise=True,
         conv_fusion=conv_fusion,
-        layout='mul_ir',
+        layout="mul_ir",
     )
     return TensorProduct(
         Irreps('1x0e'),
@@ -49,7 +53,7 @@ def _make_module(conv_fusion: bool) -> TensorProduct:
         Irreps('1x0e'),
         shared_weights=True,
         internal_weights=False,
-        cueq_config=config,
+        equivariance_config=config,
         rngs=nnx.Rngs(0),
     )
 
@@ -168,17 +172,19 @@ class TestWrapperBlockConvFusion:
         edge_attrs = jax.random.normal(edge_attr_key, (num_edges, irreps.dim))
         edge_feats = jax.random.normal(edge_feats_key, (num_edges, irreps.num_irreps))
 
-        fused_config = CuEquivarianceConfig(
-            enabled=True,
+        fused_config = EquivarianceConfig(
+            backend="cueq",
+            group="O3",
             optimize_channelwise=True,
             conv_fusion=True,
-            layout='mul_ir',
+            layout="mul_ir",
         )
-        baseline_config = CuEquivarianceConfig(
-            enabled=True,
+        baseline_config = EquivarianceConfig(
+            backend="cueq",
+            group="O3",
             optimize_channelwise=True,
             conv_fusion=False,
-            layout='mul_ir',
+            layout="mul_ir",
         )
 
         fused_block = RealAgnosticInteractionBlock(
@@ -190,7 +196,7 @@ class TestWrapperBlockConvFusion:
             hidden_irreps=irreps,
             avg_num_neighbors=1.5,
             radial_MLP=[8],
-            cueq_config=fused_config,
+            equivariance_config=fused_config,
             rngs=nnx.Rngs(0),
         )
         baseline_block = RealAgnosticInteractionBlock(
@@ -202,7 +208,7 @@ class TestWrapperBlockConvFusion:
             hidden_irreps=irreps,
             avg_num_neighbors=1.5,
             radial_MLP=[8],
-            cueq_config=baseline_config,
+            equivariance_config=baseline_config,
             rngs=nnx.Rngs(0),
         )
 
@@ -284,11 +290,12 @@ class TestConvFusionTorchParity:
         )
         torch_out = torch_out.detach().cpu().numpy()
 
-        jax_config = CuEquivarianceConfig(
-            enabled=True,
+        jax_config = EquivarianceConfig(
+            backend="cueq",
+            group="O3",
             optimize_channelwise=True,
             conv_fusion=True,
-            layout='mul_ir',
+            layout="mul_ir",
         )
         jax_module = TensorProduct(
             irreps,
@@ -296,7 +303,7 @@ class TestConvFusionTorchParity:
             irreps,
             shared_weights=True,
             internal_weights=False,
-            cueq_config=jax_config,
+            equivariance_config=jax_config,
             rngs=nnx.Rngs(0),
         )
 

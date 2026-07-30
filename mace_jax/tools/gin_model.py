@@ -22,9 +22,7 @@ from flax import nnx
 from mace_jax import data, modules, tools
 from mace_jax.modules.blocks import RealAgnosticResidualInteractionBlock
 from mace_jax.modules.wrapper_ops import (
-    CuEquivarianceConfig,
     EquivarianceConfig,
-    OpenEquivarianceConfig,
     resolve_equivariance_config,
 )
 from mace_jax.nnx_config import ConfigVar
@@ -41,9 +39,7 @@ gin.register('identity')(lambda x: x)
 
 gin.register('std_scaling')(tools.compute_mean_std_atomic_inter_energy)
 gin.register('rms_forces_scaling')(tools.compute_mean_rms_energy_forces)
-gin.external_configurable(CuEquivarianceConfig)
 gin.external_configurable(EquivarianceConfig)
-gin.external_configurable(OpenEquivarianceConfig)
 for _cls in modules.interaction_classes.values():
     gin.external_configurable(_cls, module='mace_jax.modules')
 gin.external_configurable(modules.UniversalLoss, module='mace_jax.modules')
@@ -385,7 +381,7 @@ def model(
         torch_head: Optional head name to select from Torch multi-head models.
         torch_param_dtype: Optional dtype override ('float32' or 'float64') for Torch params.
         equivariance_config: Backend-neutral equivariance acceleration configuration.
-        cueq_config: Deprecated alias for a CuEquivarianceConfig.
+        cueq_config: Deprecated legacy cueq configuration alias.
         **kwargs: Remaining MACE module constructor arguments.
 
     Returns:

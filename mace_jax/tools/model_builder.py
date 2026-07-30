@@ -14,7 +14,6 @@ from mace_jax.data.utils import Configuration, graph_from_configuration
 from mace_jax.modules import interaction_classes, readout_classes
 from mace_jax.modules.models import MACE, ScaleShiftMACE
 from mace_jax.modules.wrapper_ops import (
-    CuEquivarianceConfig,
     EquivarianceConfig,
     resolve_equivariance_config,
 )
@@ -231,7 +230,7 @@ def _build_jax_model(
     config: dict[str, Any],
     *,
     equivariance_config: EquivarianceConfig | dict[str, object] | None = None,
-    cueq_config: CuEquivarianceConfig | None = None,
+    cueq_config: object | None = None,
     rngs: nnx.Rngs | None = None,
 ):
     if rngs is None:
@@ -264,15 +263,12 @@ def _build_jax_model(
         equivariance_config = resolve_equivariance_config(
             cueq_config=config['cueq_config']
         )
-    elif config.get('cue_conv_fusion'):
+    elif config.get("cue_conv_fusion"):
         equivariance_config = EquivarianceConfig(
-            cueq_config=CuEquivarianceConfig(
-                enabled=False,
-                optimize_channelwise=True,
-                conv_fusion=bool(config['cue_conv_fusion']),
-            )
+            backend="cueq",
+            optimize_channelwise=True,
+            conv_fusion=bool(config["cue_conv_fusion"]),
         )
-
     config, atomic_numbers, atomic_energies = _normalize_atomic_config(
         config,
         dtype=np.float32,

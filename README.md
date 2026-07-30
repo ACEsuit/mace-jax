@@ -141,46 +141,49 @@ Additional convenience flags let you adjust common gin settings directly from th
 - `--r-max VALUE`: synchronise the cutoff used in both dataset construction and model definition.
   For streaming datasets, `--batch-max-edges` (or `n_edge` in gin) sets the edge cap.
 
-##### cuequivariance (cueq) / conv_fusion
+##### Equivariance acceleration backend
 
-MACE-JAX exposes cuequivariance with CLI flags that mirror the Torch interface:
+MACE-JAX exposes a single model-wide equivariance acceleration backend. The
+backend is a preferred accelerator: unsupported operations stay on the standard
+JAX implementation instead of requiring a second backend config.
 
 ```sh
-# Enable cueq + conv_fusion (similar to mace --enable_cueq).
+# Enable cueq + conv_fusion when CUDA is detected.
 mace-jax-train configs/aspirin_small.gin --enable_cueq
 
-# cueq-only style (similar to mace --only_cueq): force cueq backend + optimizations.
+# cueq-only style (similar to mace --only_cueq): force cueq layout/group defaults.
 mace-jax-train configs/aspirin_small.gin --only_cueq
+
+# Enable OpenEquivariance for the fused channel-wise convolution path.
+mace-jax-train configs/aspirin_small.gin --enable-openeq
 ```
 
 Notes:
-- `conv_fusion` is enabled automatically when CUDA is detected.
-- You can still override `CuEquivarianceConfig` via `--binding` if you need custom
-  layout/group settings.
- - `--cueq-optimize-all/--no-cueq-optimize-all` and
-   `--cueq-conv-fusion/--no-cueq-conv-fusion` provide direct CLI control over
-   these settings.
- - `--cueq-layout {mul_ir,ir_mul}` and `--cueq-group {O3,O3_e3nn}` mirror the
-   Torch defaults (use `ir_mul`/`O3_e3nn` for `--only_cueq`).
+- `--enable-cueq` binds `EquivarianceConfig(backend="cueq")` with cueq optimization defaults.
+- `--enable-openeq` binds `EquivarianceConfig(backend="openeq")` for the supported fused channel-wise convolution path.
+- `--equivariance-layout {mul_ir,ir_mul}` selects the model-wide representation layout. `--cueq-layout` and `--openeq-layout` are deprecated aliases.
+- `--cueq-group {O3,O3_e3nn}` and `--openeq-group O3_e3nn` provide backend group control.
+- `--cueq-optimize-all/--no-cueq-optimize-all`, `--cueq-conv-fusion/--no-cueq-conv-fusion`, `--openeq-optimize-all/--no-openeq-optimize-all`, and `--openeq-conv-fusion/--no-openeq-conv-fusion` provide direct CLI control over these settings.
+- Legacy serialized `cueq_config`/`openeq_config` dictionaries and Torch `cueq_config` objects are migrated as deprecated compatibility inputs.
 
 ##### OpenEquivariance fused convolution
 
 OpenEquivariance is an opt-in CUDA backend for the fused channel-wise tensor
-product convolution. It does not replace cuequivariance for linear or symmetric
-contraction kernels. Install the pinned packages in this order (the second build
-must not use build isolation):
+product convolution. It does not accelerate linear, symmetric contraction, or
+fully connected tensor-product kernels. Install the pinned packages in this order
+(the second build must not use build isolation):
 
 ```sh
-pip install 'openequivariance[jax]==0.6.8'
-pip install 'openequivariance_extjax==0.6.8' --no-build-isolation
+pip install "openequivariance[jax]==0.6.8"
+pip install "openequivariance_extjax==0.6.8" --no-build-isolation
 ```
 
 Enable it with `--enable-openeq`. The explicit equivalents are
 `--openeq-optimize-all`, `--openeq-conv-fusion`,
-`--openeq-layout=mul_ir`, and `--openeq-group=O3_e3nn`. V1 uses CUDA atomic
+`--equivariance-layout=mul_ir`, and `--openeq-group=O3_e3nn`. V1 uses CUDA atomic
 aggregation, supports float32/float64 and force-training derivatives, and is not
-deterministic. ROCm is not qualified. Unsupported configurations and missing or
-failed OpenEquivariance kernels raise an error; there is no silent fallback.
+deterministic. ROCm is not qualified. Unsupported OpenEquivariance operation
+requests and missing or failed OpenEquivariance kernels raise an error.
 
 For instance, fine-tuning a Torch foundation model against a new dataset can be done with:
 

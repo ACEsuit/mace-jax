@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from mace_jax.modules.wrapper_ops import CuEquivarianceConfig, EquivarianceConfig
+from mace_jax.modules.wrapper_ops import EquivarianceConfig
 from mace_jax.nnx_utils import state_to_pure_dict
 
 warnings.filterwarnings(
@@ -136,7 +136,7 @@ def convert_model(
     config: dict[str, Any],
     *,
     equivariance_config: EquivarianceConfig | dict[str, object] | None = None,
-    cueq_config: CuEquivarianceConfig | None = None,
+    cueq_config: object | None = None,
 ):
     try:
         import torch  # noqa: PLC0415

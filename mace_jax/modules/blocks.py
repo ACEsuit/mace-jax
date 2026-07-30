@@ -19,6 +19,7 @@ from mace_jax.modules.wrapper_ops import (
     SymmetricContractionWrapper,
     TensorProduct,
     TransposeIrrepsLayoutWrapper,
+    resolve_equivariance_config,
 )
 from mace_jax.tools.dtype import default_dtype
 from mace_jax.tools.scatter import scatter_sum
@@ -603,7 +604,8 @@ class EquivariantProductBasisBlock(nnx.Module):
         num_elements: int | None = None,
         use_agnostic_product: bool = False,
         use_reduced_cg: bool | None = None,
-        equivariance_config: EquivarianceConfig | None = None,
+        equivariance_config: EquivarianceConfig | dict[str, object] | None = None,
+        cueq_config: object | None = None,
         *,
         rngs: nnx.Rngs,
     ) -> None:
@@ -614,7 +616,9 @@ class EquivariantProductBasisBlock(nnx.Module):
         self.num_elements = num_elements
         self.use_agnostic_product = use_agnostic_product
         self.use_reduced_cg = use_reduced_cg
-        self.equivariance_config = equivariance_config
+        self.equivariance_config = resolve_equivariance_config(
+            equivariance_config, cueq_config=cueq_config
+        )
 
         num_elements_local = self.num_elements
         if self.use_agnostic_product:
@@ -651,7 +655,6 @@ class EquivariantProductBasisBlock(nnx.Module):
             node_attrs_index = None
 
         use_cueq = False
-        layout_str = getattr(self.equivariance_config, 'layout_str', 'mul_ir')
         cueq_config = getattr(self.equivariance_config, 'cueq_config', None)
         if cueq_config is not None:
             if cueq_config.enabled and (
@@ -669,11 +672,7 @@ class EquivariantProductBasisBlock(nnx.Module):
                 index_attrs = jnp.argmax(node_attrs, axis=1).astype(jnp.int32)
             else:
                 index_attrs = jnp.asarray(node_attrs_index, dtype=jnp.int32).reshape(-1)
-            features = node_feats
-            if layout_str == 'mul_ir':
-                features = jnp.transpose(features, (0, 2, 1))
-            features = features.reshape(features.shape[0], -1)
-            node_feats = self.symmetric_contractions(features, index_attrs)
+            node_feats = self.symmetric_contractions(node_feats, index_attrs)
         else:
             node_feats = self.symmetric_contractions(node_feats, node_attrs)
 
@@ -707,7 +706,8 @@ class InteractionBlock(nnx.Module, metaclass=abc.ABCMeta):
         avg_num_neighbors: float,
         edge_irreps: Irreps | None = None,
         radial_MLP: Sequence[int] | None = None,
-        equivariance_config: EquivarianceConfig | None = None,
+        equivariance_config: EquivarianceConfig | dict[str, object] | None = None,
+        cueq_config: object | None = None,
         *,
         rngs: nnx.Rngs,
     ) -> None:
@@ -718,7 +718,9 @@ class InteractionBlock(nnx.Module, metaclass=abc.ABCMeta):
         self.target_irreps = Irreps(target_irreps)
         self.hidden_irreps = Irreps(hidden_irreps)
         self.avg_num_neighbors = avg_num_neighbors
-        self.equivariance_config = equivariance_config
+        self.equivariance_config = resolve_equivariance_config(
+            equivariance_config, cueq_config=cueq_config
+        )
 
         if radial_MLP is not None:
             self.radial_MLP = list(radial_MLP)
