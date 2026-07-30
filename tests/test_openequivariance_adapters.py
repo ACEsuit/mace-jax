@@ -7,9 +7,9 @@ from e3nn_jax import Irreps
 from flax import nnx
 
 from mace_jax.adapters.e3nn.nn._fc import FullyConnectedNet
-from mace_jax.adapters.openequivariance import (
+from mace_jax.adapters.openequivariance import TensorProduct
+from mace_jax.adapters.openequivariance.fully_connected_tensor_product import (
     FullyConnectedTensorProduct,
-    TensorProduct,
 )
 
 
@@ -59,6 +59,7 @@ def test_standalone_tp_reorders_canonical_shared_weights(monkeypatch):
         shared_weights=True,
         conv_fusion=False,
         rngs=nnx.Rngs(0),
+        _unsafe_allow_standalone_for_diagnostics=True,
     )
     dtype = tp.dtype
     actual = tp(
@@ -85,13 +86,13 @@ def test_fctp_builds_weighted_uvw_paths_and_restores(monkeypatch):
 
 
 def test_projection_reorders_parameter_columns_not_batch_output():
-    network = FullyConnectedNet(
-        [3, 2], output_permutation=(1, 0), rngs=nnx.Rngs(0)
-    )
+    network = FullyConnectedNet([3, 2], output_permutation=(1, 0), rngs=nnx.Rngs(0))
     canonical_weight = np.asarray(network.layers[0].weight)
     x = jnp.arange(12.0).reshape(4, 3)
     actual = network(x)
     scale = np.sqrt(3.0)
     expected = np.asarray(x) @ canonical_weight[:, ::-1] / scale
     np.testing.assert_allclose(actual, expected, rtol=1e-6)
-    np.testing.assert_array_equal(np.asarray(network.layers[0].weight), canonical_weight)
+    np.testing.assert_array_equal(
+        np.asarray(network.layers[0].weight), canonical_weight
+    )
