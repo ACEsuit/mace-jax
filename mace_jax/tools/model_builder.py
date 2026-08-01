@@ -259,9 +259,13 @@ def _build_jax_model(
         equivariance_config = resolve_equivariance_config(equivariance_config)
     elif cueq_config is not None:
         equivariance_config = resolve_equivariance_config(cueq_config=cueq_config)
-    elif config.get('cueq_config') is not None:
+    elif (
+        config.get('cueq_config') is not None
+        or config.get('oeq_config') is not None
+    ):
         equivariance_config = resolve_equivariance_config(
-            cueq_config=config['cueq_config']
+            cueq_config=config.get('cueq_config'),
+            openeq_config=config.get('oeq_config'),
         )
     elif config.get("cue_conv_fusion"):
         equivariance_config = EquivarianceConfig(

@@ -24,6 +24,13 @@ class LegacyCueqConfig:
         self.conv_fusion = kwargs.get("conv_fusion", False)
 
 
+class LatestMaceOEQConfig:
+    def __init__(self, **kwargs):
+        self.enabled = kwargs.get("enabled", False)
+        self.optimize_all = kwargs.get("optimize_all", False)
+        self.optimize_channelwise = kwargs.get("optimize_channelwise", False)
+        self.conv_fusion = kwargs.get("conv_fusion", "atomic")
+
 
 def test_equivariance_config_canonical_round_trip():
     config = EquivarianceConfig(
@@ -61,7 +68,7 @@ def test_legacy_nested_cueq_config_is_migrated():
         "conv_fusion": True,
     }
 
-    with pytest.deprecated_call(match="cueq_config is deprecated"):
+    with pytest.deprecated_call(match="cueq_config.*deprecated"):
         config = resolve_equivariance_config(cueq_config=legacy)
 
     assert config.backend == "cueq"
@@ -86,13 +93,37 @@ def test_legacy_openeq_config_is_migrated():
     assert config.openeq_config.channelwise_fusion
 
 
+def test_latest_mace_disabled_openeq_config_stays_inactive():
+    with pytest.deprecated_call(match="openeq_config.*deprecated"):
+        config = resolve_equivariance_config(
+            openeq_config=LatestMaceOEQConfig()
+        )
+
+    assert config.backend == "jax"
+    assert config.openeq_config is None
+
+
+def test_latest_mace_enabled_openeq_config_is_migrated():
+    with pytest.deprecated_call(match="openeq_config.*deprecated"):
+        config = resolve_equivariance_config(
+            openeq_config=LatestMaceOEQConfig(
+                enabled=True, optimize_all=True, conv_fusion="atomic"
+            )
+        )
+
+    assert config.backend == "openeq"
+    assert config.group == "O3_e3nn"
+    assert config.conv_fusion is True
+    assert config.openeq_config.channelwise_fusion
+
+
 def test_legacy_cueq_config_object_preserves_layout_alias():
     legacy = LegacyCueqConfig(layout="ir_mul", conv_fusion=True)
 
     assert legacy.layout == "ir_mul"
     assert legacy.layout_str is None
 
-    with pytest.deprecated_call(match="cueq_config is deprecated"):
+    with pytest.deprecated_call(match="cueq_config.*deprecated"):
         config = resolve_equivariance_config(cueq_config=legacy)
 
     assert config.backend == "cueq"
@@ -103,7 +134,7 @@ def test_legacy_cueq_config_object_preserves_layout_alias():
 def test_legacy_cueq_config_accepts_layout_str_alias():
     legacy = LegacyCueqConfig(layout="mul_ir", layout_str="ir_mul")
 
-    with pytest.deprecated_call(match="cueq_config is deprecated"):
+    with pytest.deprecated_call(match="cueq_config.*deprecated"):
         config = resolve_equivariance_config(cueq_config=legacy)
 
     assert config.backend == 'jax'

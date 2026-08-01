@@ -147,7 +147,9 @@ class _LegacyOpeneqConfig:
 
     @property
     def active(self) -> bool:
-        return _legacy_config_active(self)
+        # MACE Torch OEQConfig defaults conv_fusion to "atomic" even when
+        # disabled, so conv_fusion alone must not select the openeq backend.
+        return bool(self.enabled or self.optimize_all or self.optimize_channelwise)
 
     @property
     def channelwise_fusion(self) -> bool:
@@ -453,20 +455,24 @@ def resolve_equivariance_config(
     equivariance_config: EquivarianceConfig | dict[str, object] | None = None,
     *,
     cueq_config: object | None = None,
+    openeq_config: object | None = None,
 ) -> EquivarianceConfig | None:
-    if equivariance_config is not None and cueq_config is not None:
+    if equivariance_config is not None and (
+        cueq_config is not None or openeq_config is not None
+    ):
         raise ValueError(
-            "Specify only equivariance_config; cueq_config is a deprecated alias."
+            "Specify only equivariance_config; "
+            "cueq_config/openeq_config are deprecated aliases."
         )
     if equivariance_config is not None:
         if isinstance(equivariance_config, EquivarianceConfig):
             return equivariance_config
         return EquivarianceConfig(**equivariance_config)
-    if cueq_config is None:
+    if cueq_config is None and openeq_config is None:
         return None
 
     warnings.warn(
-        "cueq_config is deprecated; pass equivariance_config instead.",
+        "cueq_config/openeq_config are deprecated; pass equivariance_config instead.",
         DeprecationWarning,
         stacklevel=2,
     )
@@ -479,16 +485,23 @@ def resolve_equivariance_config(
         if isinstance(cueq_config, dict):
             legacy = dict(cueq_config)
             nested_openeq = legacy.pop("openeq_config", None)
-            return EquivarianceConfig(cueq_config=legacy, openeq_config=nested_openeq)
-        return EquivarianceConfig(cueq_config=cueq_config)
+            if openeq_config is None:
+                openeq_config = nested_openeq
+            cueq_config = legacy
+        return EquivarianceConfig(
+            cueq_config=cueq_config, openeq_config=openeq_config
+        )
 
 
 def _resolve_wrapper_equivariance_config(
     equivariance_config: EquivarianceConfig | dict[str, object] | None = None,
     *,
     cueq_config: object | None = None,
+    openeq_config: object | None = None,
 ) -> EquivarianceConfig | None:
-    return resolve_equivariance_config(equivariance_config, cueq_config=cueq_config)
+    return resolve_equivariance_config(
+        equivariance_config, cueq_config=cueq_config, openeq_config=openeq_config
+    )
 
 
 class Linear:
