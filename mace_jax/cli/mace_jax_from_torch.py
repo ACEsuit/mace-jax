@@ -8,12 +8,11 @@ import json
 import warnings
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
 
 from mace_jax.modules.wrapper_ops import EquivarianceConfig
-from mace_jax.nnx_utils import state_to_pure_dict
 
 warnings.filterwarnings(
     'ignore',
@@ -21,6 +20,7 @@ warnings.filterwarnings(
     category=UserWarning,
 )
 
+import torch
 from flax import nnx, serialization
 from mace.tools.scripts_utils import extract_config_mace_model
 
@@ -32,11 +32,6 @@ from mace_jax.tools.model_builder import (
     _build_jax_model,
     _prepare_template_data,
 )
-
-import torch
-
-if TYPE_CHECKING:  # pragma: no cover - typing only
-    import torch
 
 
 def _load_torch_model_from_foundations(
@@ -138,12 +133,6 @@ def convert_model(
     equivariance_config: EquivarianceConfig | dict[str, object] | None = None,
     cueq_config: object | None = None,
 ):
-    try:
-        import torch  # noqa: PLC0415
-    except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency
-        raise ModuleNotFoundError(
-            'Torch is required to convert models from torch checkpoints.'
-        ) from exc
     _maybe_update_hidden_irreps_from_torch(torch_model, config)
 
     jax_model = _build_jax_model(
@@ -194,12 +183,6 @@ def main():
     args = parser.parse_args()
 
     if args.torch_model:
-        try:
-            import torch  # noqa: PLC0415
-        except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency
-            raise ModuleNotFoundError(
-                'Torch is required to load torch checkpoints.'
-            ) from exc
         bundle = torch.load(args.torch_model, map_location='cpu')
         torch_model = (
             bundle['model']

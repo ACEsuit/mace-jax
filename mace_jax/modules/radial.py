@@ -234,7 +234,7 @@ class ZBLBasis(nnx.Module):
 
         if node_attrs_index is None:
             node_attrs_index = jnp.argmax(node_attrs, axis=1)
-        node_atomic_numbers = atomic_numbers[
+        node_atomic_numbers = jnp.asarray(atomic_numbers)[
             jnp.asarray(node_attrs_index, dtype=jnp.int32).reshape(-1)
         ][..., None]
         Z_u = node_atomic_numbers[sender].astype(jnp.int32)
@@ -266,7 +266,9 @@ class ZBLBasis(nnx.Module):
 
         v_edges = (14.3996 * Z_u * Z_v) / x * phi
 
-        r_max = self._covalent_radii[Z_u] + self._covalent_radii[Z_v]
+        # See AgnesiTransform.__call__ for why this coercion is needed.
+        covalent_radii = jnp.asarray(self._covalent_radii, dtype=x.dtype)
+        r_max = covalent_radii[Z_u] + covalent_radii[Z_v]
         envelope = PolynomialCutoff.calculate_envelope(
             x, r_max.astype(x.dtype), jnp.array(float(self.p), dtype=x.dtype)
         )
@@ -328,7 +330,7 @@ class AgnesiTransform(nnx.Module):
 
         if node_attrs_index is None:
             node_attrs_index = jnp.argmax(node_attrs, axis=1)
-        node_atomic_numbers = atomic_numbers[
+        node_atomic_numbers = jnp.asarray(atomic_numbers)[
             jnp.asarray(node_attrs_index, dtype=jnp.int32).reshape(-1)
         ][..., None]
         Z_u = node_atomic_numbers[sender].astype(jnp.int32)
@@ -348,7 +350,8 @@ class AgnesiTransform(nnx.Module):
         q = q.astype(x.dtype)
         p = p.astype(x.dtype)
 
-        r_0 = 0.5 * (self._covalent_radii[Z_u] + self._covalent_radii[Z_v])
+        covalent_radii = jnp.asarray(self._covalent_radii, dtype=x.dtype)
+        r_0 = 0.5 * (covalent_radii[Z_u] + covalent_radii[Z_v])
         r_over_r_0 = x / r_0
 
         numerator = a * jnp.power(r_over_r_0, q)
@@ -396,12 +399,14 @@ class SoftTransform(nnx.Module):
         sender, receiver = edge_index
         if node_attrs_index is None:
             node_attrs_index = jnp.argmax(node_attrs, axis=1)
-        node_atomic_numbers = atomic_numbers[
+        node_atomic_numbers = jnp.asarray(atomic_numbers)[
             jnp.asarray(node_attrs_index, dtype=jnp.int32).reshape(-1)
         ].reshape(-1, 1)
         Z_u = node_atomic_numbers[sender].astype(jnp.int32)
         Z_v = node_atomic_numbers[receiver].astype(jnp.int32)
-        return self._covalent_radii[Z_u] + self._covalent_radii[Z_v]
+        # See AgnesiTransform.__call__ for why this coercion is needed.
+        covalent_radii = jnp.asarray(self._covalent_radii)
+        return covalent_radii[Z_u] + covalent_radii[Z_v]
 
     def __call__(
         self,
