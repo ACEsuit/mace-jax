@@ -21,7 +21,10 @@ from flax import nnx
 
 from mace_jax import data, modules, tools
 from mace_jax.modules.blocks import RealAgnosticResidualInteractionBlock
-from mace_jax.modules.wrapper_ops import CuEquivarianceConfig
+from mace_jax.modules.wrapper_ops import (
+    EquivarianceConfig,
+    resolve_equivariance_config,
+)
 from mace_jax.nnx_config import ConfigVar
 from mace_jax.nnx_utils import state_to_pure_dict
 from mace_jax.tools.dtype import default_dtype
@@ -36,22 +39,22 @@ gin.register('identity')(lambda x: x)
 
 gin.register('std_scaling')(tools.compute_mean_std_atomic_inter_energy)
 gin.register('rms_forces_scaling')(tools.compute_mean_rms_energy_forces)
-gin.external_configurable(CuEquivarianceConfig)
+gin.external_configurable(EquivarianceConfig)
 for _cls in modules.interaction_classes.values():
     gin.external_configurable(_cls, module='mace_jax.modules')
 gin.external_configurable(modules.UniversalLoss, module='mace_jax.modules')
 
 
-def _resolve_cueq_config(cueq_config):
-    if cueq_config is None:
-        return None
-    if isinstance(cueq_config, CuEquivarianceConfig):
-        return cueq_config
-    if isinstance(cueq_config, dict):
-        return CuEquivarianceConfig(**cueq_config)
+def _resolve_equivariance_config(equivariance_config, cueq_config=None):
+    if callable(equivariance_config):
+        equivariance_config = equivariance_config()
     if callable(cueq_config):
-        return cueq_config()
-    return cueq_config
+        cueq_config = cueq_config()
+    if equivariance_config is None and cueq_config is None:
+        return None
+    return resolve_equivariance_config(
+        equivariance_config, cueq_config=cueq_config
+    )
 
 
 def _stringify_callable(value) -> str | None:
@@ -100,7 +103,7 @@ def _merge_state_dicts(base: dict | None, updates: dict | None) -> dict | None:
 
 def _export_model_config(mace_module: modules.MACE) -> dict:
     """Build a config dict compatible with tools.model_builder._build_jax_model."""
-    cueq_config = getattr(mace_module, 'cueq_config', None)
+    equivariance_config = getattr(mace_module, 'equivariance_config', None)
     config = {
         'r_max': float(mace_module.r_max),
         'num_bessel': int(mace_module.num_bessel),
@@ -127,6 +130,9 @@ def _export_model_config(mace_module: modules.MACE) -> dict:
         ),
         'use_so3': bool(getattr(mace_module, 'use_so3', False)),
         'use_reduced_cg': bool(getattr(mace_module, 'use_reduced_cg', True)),
+        'use_edge_irreps_first': bool(
+            getattr(mace_module, 'use_edge_irreps_first', False)
+        ),
         'use_agnostic_product': bool(
             getattr(mace_module, 'use_agnostic_product', False)
         ),
@@ -153,8 +159,11 @@ def _export_model_config(mace_module: modules.MACE) -> dict:
         config['normalize2mom_consts'] = {
             str(k): float(v) for k, v in normalize2mom_consts.items()
         }
+    cueq_config = getattr(equivariance_config, 'cueq_config', None)
     if cueq_config is not None and getattr(cueq_config, 'conv_fusion', False):
         config['cue_conv_fusion'] = True
+    if equivariance_config is not None:
+        config['equivariance_config'] = equivariance_config.to_dict()
     return config
 
 
@@ -340,6 +349,7 @@ def model(
     torch_checkpoint: str | None = None,
     torch_head: str | None = None,
     torch_param_dtype: str | None = None,
+    equivariance_config=None,
     cueq_config=None,
     **kwargs,
 ):
@@ -370,7 +380,8 @@ def model(
         torch_checkpoint: Optional Torch checkpoint path to convert and wrap.
         torch_head: Optional head name to select from Torch multi-head models.
         torch_param_dtype: Optional dtype override ('float32' or 'float64') for Torch params.
-        cueq_config: Optional CuEquivarianceConfig to enable cueq acceleration paths.
+        equivariance_config: Backend-neutral equivariance acceleration configuration.
+        cueq_config: Deprecated legacy cueq configuration alias.
         **kwargs: Remaining MACE module constructor arguments.
 
     Returns:
@@ -660,9 +671,11 @@ def model(
             'learnable_atomic_energies is not supported by the Flax-based gin model.'
         )
 
-    cueq_config = _resolve_cueq_config(cueq_config)
-    if cueq_config is not None:
-        kwargs['cueq_config'] = cueq_config
+    equivariance_config = _resolve_equivariance_config(
+        equivariance_config, cueq_config
+    )
+    if equivariance_config is not None:
+        kwargs['equivariance_config'] = equivariance_config
 
     kwargs.update(
         dict(

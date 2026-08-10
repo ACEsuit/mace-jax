@@ -13,7 +13,10 @@ from mace_jax.adapters.nnx import resolve_gate_callable
 from mace_jax.data.utils import Configuration, graph_from_configuration
 from mace_jax.modules import interaction_classes, readout_classes
 from mace_jax.modules.models import MACE, ScaleShiftMACE
-from mace_jax.modules.wrapper_ops import CuEquivarianceConfig
+from mace_jax.modules.wrapper_ops import (
+    EquivarianceConfig,
+    resolve_equivariance_config,
+)
 from mace_jax.tools.gin_model import _graph_to_data  # type: ignore[attr-defined]
 
 
@@ -226,7 +229,8 @@ def _prepare_template_data(config: dict[str, Any]) -> dict[str, jnp.ndarray]:
 def _build_jax_model(
     config: dict[str, Any],
     *,
-    cueq_config: CuEquivarianceConfig | None = None,
+    equivariance_config: EquivarianceConfig | dict[str, object] | None = None,
+    cueq_config: object | None = None,
     rngs: nnx.Rngs | None = None,
 ):
     if rngs is None:
@@ -244,17 +248,31 @@ def _build_jax_model(
             except Exception:
                 collapse_hidden_irreps = None
 
-    cue_config_obj: CuEquivarianceConfig | None = None
-    if cueq_config is not None:
-        cue_config_obj = cueq_config
-    elif config.get('cue_conv_fusion'):
-        cue_config_obj = CuEquivarianceConfig(
-            enabled=False,
-            optimize_channelwise=True,
-            conv_fusion=bool(config['cue_conv_fusion']),
-            layout='mul_ir',
+    config_equivariance = config.get('equivariance_config')
+    if equivariance_config is not None and config_equivariance is not None:
+        raise ValueError(
+            'equivariance_config was supplied both as an argument and in config.'
         )
-
+    if equivariance_config is None:
+        equivariance_config = config_equivariance
+    if equivariance_config is not None:
+        equivariance_config = resolve_equivariance_config(equivariance_config)
+    elif cueq_config is not None:
+        equivariance_config = resolve_equivariance_config(cueq_config=cueq_config)
+    elif (
+        config.get('cueq_config') is not None
+        or config.get('oeq_config') is not None
+    ):
+        equivariance_config = resolve_equivariance_config(
+            cueq_config=config.get('cueq_config'),
+            openeq_config=config.get('oeq_config'),
+        )
+    elif config.get("cue_conv_fusion"):
+        equivariance_config = EquivarianceConfig(
+            backend="cueq",
+            optimize_channelwise=True,
+            conv_fusion=bool(config["cue_conv_fusion"]),
+        )
     config, atomic_numbers, atomic_energies = _normalize_atomic_config(
         config,
         dtype=np.float32,
@@ -282,6 +300,7 @@ def _build_jax_model(
         embedding_specs=config.get('embedding_specs'),
         use_so3=config.get('use_so3', False),
         use_reduced_cg=config.get('use_reduced_cg', True),
+        use_edge_irreps_first=config.get('use_edge_irreps_first', False),
         use_agnostic_product=config.get('use_agnostic_product', False),
         use_last_readout_only=config.get('use_last_readout_only', False),
         use_embedding_readout=config.get('use_embedding_readout', False),
@@ -290,7 +309,8 @@ def _build_jax_model(
         ),
         readout_cls=_readout(config.get('readout_cls', None)),
         gate=resolve_gate_callable(config.get('gate', None)),
-        cueq_config=cue_config_obj,
+        heads=config.get('heads'),
+        equivariance_config=equivariance_config,
     )
 
     if config.get('normalize2mom_consts') is not None:

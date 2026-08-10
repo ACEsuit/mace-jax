@@ -63,13 +63,39 @@ from mace_jax.modules.blocks import (
 from mace_jax.modules.blocks import (
     RealAgnosticResidualNonLinearInteractionBlock as RealAgnosticResidualNonLinearInteractionBlockJAX,
 )
-from mace_jax.modules.wrapper_ops import CuEquivarianceConfig as CuEquivarianceConfigJAX
+from mace_jax.modules.wrapper_ops import EquivarianceConfig
 from mace_jax.tools.device import configure_torch_runtime
 
 
 def _to_numpy(x):
     array = x.array if hasattr(x, 'array') else x
     return np.asarray(array)
+
+
+def _jax_equivariance_config_from_cue_kwargs(kwargs):
+    if not kwargs.get("enabled", False) and not any(
+        bool(kwargs.get(key, False))
+        for key in (
+            "optimize_all",
+            "optimize_linear",
+            "optimize_channelwise",
+            "optimize_symmetric",
+            "optimize_fctp",
+            "conv_fusion",
+        )
+    ):
+        return EquivarianceConfig()
+    return EquivarianceConfig(
+        backend="cueq",
+        layout=kwargs.get("layout") or kwargs.get("layout_str") or "mul_ir",
+        group=kwargs.get("group") or "O3",
+        optimize_all=kwargs.get("optimize_all", False),
+        optimize_linear=kwargs.get("optimize_linear", False),
+        optimize_channelwise=kwargs.get("optimize_channelwise", False),
+        optimize_symmetric=kwargs.get("optimize_symmetric", False),
+        optimize_fctp=kwargs.get("optimize_fctp", False),
+        conv_fusion=kwargs.get("conv_fusion", False),
+    )
 
 
 def _module_dtype(module: torch.nn.Module) -> torch.dtype:
@@ -377,7 +403,9 @@ class TestEquivariantProductBasisBlock:
             use_sc=use_sc,
             num_elements=num_elements,
             use_reduced_cg=True,
-            cueq_config=CuEquivarianceConfigJAX(**cue_config_kwargs),
+            equivariance_config=_jax_equivariance_config_from_cue_kwargs(
+                cue_config_kwargs
+            ),
             rngs=nnx.Rngs(42),
         )
         torch_model = torch_model.to('cpu')
@@ -499,9 +527,8 @@ class TestRealAgnosticBlocks:
         torch_module = torch_module.to('cpu')
         torch_inputs = tuple(t.cpu() for t in torch_inputs)
 
-        cue_config_jax = CuEquivarianceConfigJAX(
-            enabled=True,
-            optimize_symmetric=True,
+        cue_config_jax = _jax_equivariance_config_from_cue_kwargs(
+            dict(enabled=True, optimize_symmetric=True)
         )
 
         # === Run JAX ===
@@ -513,7 +540,7 @@ class TestRealAgnosticBlocks:
             target_irreps=irreps,
             hidden_irreps=irreps,
             avg_num_neighbors=3.0,
-            cueq_config=cue_config_jax,
+            equivariance_config=cue_config_jax,
             rngs=nnx.Rngs(42),
         )
         module, _ = init_from_torch(module, torch_module)

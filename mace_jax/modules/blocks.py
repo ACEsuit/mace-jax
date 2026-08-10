@@ -13,12 +13,13 @@ from mace_jax.adapters.nnx.torch import (
     nxx_register_module,
 )
 from mace_jax.modules.wrapper_ops import (
-    CuEquivarianceConfig,
+    EquivarianceConfig,
     FullyConnectedTensorProduct,
     Linear,
     SymmetricContractionWrapper,
     TensorProduct,
     TransposeIrrepsLayoutWrapper,
+    resolve_equivariance_config,
 )
 from mace_jax.tools.dtype import default_dtype
 from mace_jax.tools.scatter import scatter_sum
@@ -42,23 +43,23 @@ class LinearNodeEmbeddingBlock(nnx.Module):
 
     irreps_in: Irreps
     irreps_out: Irreps
-    cueq_config: CuEquivarianceConfig | None = None
+    equivariance_config: EquivarianceConfig | None = None
 
     def __init__(
         self,
         irreps_in: Irreps,
         irreps_out: Irreps,
-        cueq_config: CuEquivarianceConfig | None = None,
+        equivariance_config: EquivarianceConfig | None = None,
         *,
         rngs: nnx.Rngs,
     ) -> None:
         self.irreps_in = Irreps(irreps_in)
         self.irreps_out = Irreps(irreps_out)
-        self.cueq_config = cueq_config
+        self.equivariance_config = equivariance_config
         self.linear = Linear(
             irreps_in=self.irreps_in,
             irreps_out=self.irreps_out,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
 
@@ -68,7 +69,7 @@ class LinearNodeEmbeddingBlock(nnx.Module):
     def __repr__(self) -> str:
         return (
             f'{self.__class__.__name__}(irreps_in={self.irreps_in}, '
-            f'irreps_out={self.irreps_out}, cueq_config={self.cueq_config})'
+            f'irreps_out={self.irreps_out}, equivariance_config={self.equivariance_config})'
         )
 
 
@@ -79,23 +80,23 @@ class LinearReadoutBlock(nnx.Module):
 
     irreps_in: Irreps
     irrep_out: Irreps = Irreps('0e')
-    cueq_config: CuEquivarianceConfig | None = None
+    equivariance_config: EquivarianceConfig | None = None
 
     def __init__(
         self,
         irreps_in: Irreps,
         irrep_out: Irreps = Irreps('0e'),
-        cueq_config: CuEquivarianceConfig | None = None,
+        equivariance_config: EquivarianceConfig | None = None,
         *,
         rngs: nnx.Rngs,
     ) -> None:
         self.irreps_in = Irreps(irreps_in)
         self.irrep_out = Irreps(irrep_out)
-        self.cueq_config = cueq_config
+        self.equivariance_config = equivariance_config
         self.linear = Linear(
             irreps_in=self.irreps_in,
             irreps_out=self.irrep_out,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
 
@@ -110,7 +111,7 @@ class LinearReadoutBlock(nnx.Module):
     def __repr__(self) -> str:
         return (
             f'{self.__class__.__name__}(irreps_in={self.irreps_in}, '
-            f'irrep_out={self.irrep_out}, cueq_config={self.cueq_config})'
+            f'irrep_out={self.irrep_out}, equivariance_config={self.equivariance_config})'
         )
 
 
@@ -124,7 +125,7 @@ class NonLinearReadoutBlock(nnx.Module):
     gate: Callable | None
     irrep_out: Irreps = Irreps('0e')
     num_heads: int = 1
-    cueq_config: CuEquivarianceConfig | None = None
+    equivariance_config: EquivarianceConfig | None = None
 
     def __init__(
         self,
@@ -133,7 +134,7 @@ class NonLinearReadoutBlock(nnx.Module):
         gate: Callable | None,
         irrep_out: Irreps = Irreps('0e'),
         num_heads: int = 1,
-        cueq_config: CuEquivarianceConfig | None = None,
+        equivariance_config: EquivarianceConfig | None = None,
         *,
         rngs: nnx.Rngs,
     ) -> None:
@@ -142,12 +143,12 @@ class NonLinearReadoutBlock(nnx.Module):
         self.gate = gate
         self.irrep_out = Irreps(irrep_out)
         self.num_heads = num_heads
-        self.cueq_config = cueq_config
+        self.equivariance_config = equivariance_config
         self.hidden_irreps = self.MLP_irreps
         self.linear_1 = Linear(
             irreps_in=self.irreps_in,
             irreps_out=self.hidden_irreps,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
         self.non_linearity = nn.Activation(
@@ -157,7 +158,7 @@ class NonLinearReadoutBlock(nnx.Module):
         self.linear_2 = Linear(
             irreps_in=self.hidden_irreps,
             irreps_out=self.irrep_out,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
 
@@ -182,7 +183,7 @@ class NonLinearBiasReadoutBlock(nnx.Module):
     gate: Callable | None
     irrep_out: Irreps = Irreps('0e')
     num_heads: int = 1
-    cueq_config: CuEquivarianceConfig | None = None
+    equivariance_config: EquivarianceConfig | None = None
 
     def __init__(
         self,
@@ -191,7 +192,7 @@ class NonLinearBiasReadoutBlock(nnx.Module):
         gate: Callable | None,
         irrep_out: Irreps = Irreps('0e'),
         num_heads: int = 1,
-        cueq_config: CuEquivarianceConfig | None = None,
+        equivariance_config: EquivarianceConfig | None = None,
         *,
         rngs: nnx.Rngs,
     ) -> None:
@@ -200,12 +201,12 @@ class NonLinearBiasReadoutBlock(nnx.Module):
         self.gate = gate
         self.irrep_out = Irreps(irrep_out)
         self.num_heads = num_heads
-        self.cueq_config = cueq_config
+        self.equivariance_config = equivariance_config
         self.hidden_irreps = self.MLP_irreps
         self.linear_1 = Linear(
             irreps_in=self.irreps_in,
             irreps_out=self.hidden_irreps,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
         self.non_linearity_1 = nn.Activation(
@@ -215,7 +216,7 @@ class NonLinearBiasReadoutBlock(nnx.Module):
         self.linear_mid = Linear(
             irreps_in=self.hidden_irreps,
             irreps_out=self.hidden_irreps,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
         self.non_linearity_2 = nn.Activation(
@@ -225,7 +226,7 @@ class NonLinearBiasReadoutBlock(nnx.Module):
         self.linear_2 = Linear(
             irreps_in=self.hidden_irreps,
             irreps_out=self.irrep_out,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
 
@@ -248,19 +249,19 @@ class LinearDipoleReadoutBlock(nnx.Module):
 
     irreps_in: Irreps
     dipole_only: bool = False
-    cueq_config: CuEquivarianceConfig | None = None
+    equivariance_config: EquivarianceConfig | None = None
 
     def __init__(
         self,
         irreps_in: Irreps,
         dipole_only: bool = False,
-        cueq_config: CuEquivarianceConfig | None = None,
+        equivariance_config: EquivarianceConfig | None = None,
         *,
         rngs: nnx.Rngs,
     ) -> None:
         self.irreps_in = Irreps(irreps_in)
         self.dipole_only = dipole_only
-        self.cueq_config = cueq_config
+        self.equivariance_config = equivariance_config
         if self.dipole_only:
             self.irreps_out = Irreps('1x1o')
         else:
@@ -269,7 +270,7 @@ class LinearDipoleReadoutBlock(nnx.Module):
         self.linear = Linear(
             irreps_in=self.irreps_in,
             irreps_out=self.irreps_out,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
 
@@ -286,7 +287,7 @@ class NonLinearDipoleReadoutBlock(nnx.Module):
     MLP_irreps: Irreps
     gate: Callable
     dipole_only: bool = False
-    cueq_config: CuEquivarianceConfig | None = None
+    equivariance_config: EquivarianceConfig | None = None
 
     def __init__(
         self,
@@ -294,7 +295,7 @@ class NonLinearDipoleReadoutBlock(nnx.Module):
         MLP_irreps: Irreps,
         gate: Callable,
         dipole_only: bool = False,
-        cueq_config: CuEquivarianceConfig | None = None,
+        equivariance_config: EquivarianceConfig | None = None,
         *,
         rngs: nnx.Rngs,
     ) -> None:
@@ -302,7 +303,7 @@ class NonLinearDipoleReadoutBlock(nnx.Module):
         self.MLP_irreps = Irreps(MLP_irreps)
         self.gate = gate
         self.dipole_only = dipole_only
-        self.cueq_config = cueq_config
+        self.equivariance_config = equivariance_config
         self.hidden_irreps = self.MLP_irreps
         if self.dipole_only:
             self.irreps_out = Irreps('1x1o')
@@ -337,13 +338,13 @@ class NonLinearDipoleReadoutBlock(nnx.Module):
         self.linear_1 = Linear(
             irreps_in=self.irreps_in,
             irreps_out=self.irreps_nonlin,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
         self.linear_2 = Linear(
             irreps_in=self.hidden_irreps,
             irreps_out=self.irreps_out,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
 
@@ -359,19 +360,19 @@ class LinearDipolePolarReadoutBlock(nnx.Module):
 
     irreps_in: Irreps
     use_polarizability: bool = True
-    cueq_config: CuEquivarianceConfig | None = None
+    equivariance_config: EquivarianceConfig | None = None
 
     def __init__(
         self,
         irreps_in: Irreps,
         use_polarizability: bool = True,
-        cueq_config: CuEquivarianceConfig | None = None,
+        equivariance_config: EquivarianceConfig | None = None,
         *,
         rngs: nnx.Rngs,
     ) -> None:
         self.irreps_in = Irreps(irreps_in)
         self.use_polarizability = use_polarizability
-        self.cueq_config = cueq_config
+        self.equivariance_config = equivariance_config
         if not self.use_polarizability:
             raise ValueError(
                 'LinearDipolePolarReadoutBlock requires use_polarizability=True.'
@@ -380,7 +381,7 @@ class LinearDipolePolarReadoutBlock(nnx.Module):
         self.linear = Linear(
             irreps_in=self.irreps_in,
             irreps_out=self.irreps_out,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
 
@@ -397,7 +398,7 @@ class NonLinearDipolePolarReadoutBlock(nnx.Module):
     MLP_irreps: Irreps
     gate: Callable
     use_polarizability: bool = True
-    cueq_config: CuEquivarianceConfig | None = None
+    equivariance_config: EquivarianceConfig | None = None
 
     def __init__(
         self,
@@ -405,7 +406,7 @@ class NonLinearDipolePolarReadoutBlock(nnx.Module):
         MLP_irreps: Irreps,
         gate: Callable,
         use_polarizability: bool = True,
-        cueq_config: CuEquivarianceConfig | None = None,
+        equivariance_config: EquivarianceConfig | None = None,
         *,
         rngs: nnx.Rngs,
     ) -> None:
@@ -413,7 +414,7 @@ class NonLinearDipolePolarReadoutBlock(nnx.Module):
         self.MLP_irreps = Irreps(MLP_irreps)
         self.gate = gate
         self.use_polarizability = use_polarizability
-        self.cueq_config = cueq_config
+        self.equivariance_config = equivariance_config
         self.hidden_irreps = self.MLP_irreps
         if not self.use_polarizability:
             raise ValueError(
@@ -449,13 +450,13 @@ class NonLinearDipolePolarReadoutBlock(nnx.Module):
         self.linear_1 = Linear(
             irreps_in=self.irreps_in,
             irreps_out=self.irreps_nonlin,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
         self.linear_2 = Linear(
             irreps_in=self.hidden_irreps,
             irreps_out=self.irreps_out,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
 
@@ -592,7 +593,7 @@ class EquivariantProductBasisBlock(nnx.Module):
     num_elements: int | None = None
     use_agnostic_product: bool = False
     use_reduced_cg: bool | None = None
-    cueq_config: CuEquivarianceConfig | None = None
+    equivariance_config: EquivarianceConfig | None = None
 
     def __init__(
         self,
@@ -603,7 +604,8 @@ class EquivariantProductBasisBlock(nnx.Module):
         num_elements: int | None = None,
         use_agnostic_product: bool = False,
         use_reduced_cg: bool | None = None,
-        cueq_config: CuEquivarianceConfig | None = None,
+        equivariance_config: EquivarianceConfig | dict[str, object] | None = None,
+        cueq_config: object | None = None,
         *,
         rngs: nnx.Rngs,
     ) -> None:
@@ -614,7 +616,9 @@ class EquivariantProductBasisBlock(nnx.Module):
         self.num_elements = num_elements
         self.use_agnostic_product = use_agnostic_product
         self.use_reduced_cg = use_reduced_cg
-        self.cueq_config = cueq_config
+        self.equivariance_config = resolve_equivariance_config(
+            equivariance_config, cueq_config=cueq_config
+        )
 
         num_elements_local = self.num_elements
         if self.use_agnostic_product:
@@ -626,7 +630,7 @@ class EquivariantProductBasisBlock(nnx.Module):
             correlation=self.correlation,
             num_elements=num_elements_local,
             use_reduced_cg=self.use_reduced_cg,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
 
@@ -635,7 +639,7 @@ class EquivariantProductBasisBlock(nnx.Module):
             irreps_out=self.target_irreps,
             internal_weights=True,
             shared_weights=True,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
 
@@ -651,10 +655,10 @@ class EquivariantProductBasisBlock(nnx.Module):
             node_attrs_index = None
 
         use_cueq = False
-        layout_str = getattr(self.cueq_config, 'layout_str', 'mul_ir')
-        if self.cueq_config is not None:
-            if self.cueq_config.enabled and (
-                self.cueq_config.optimize_all or self.cueq_config.optimize_symmetric
+        cueq_config = getattr(self.equivariance_config, 'cueq_config', None)
+        if cueq_config is not None:
+            if cueq_config.enabled and (
+                cueq_config.optimize_all or cueq_config.optimize_symmetric
             ):
                 use_cueq = True
 
@@ -668,11 +672,7 @@ class EquivariantProductBasisBlock(nnx.Module):
                 index_attrs = jnp.argmax(node_attrs, axis=1).astype(jnp.int32)
             else:
                 index_attrs = jnp.asarray(node_attrs_index, dtype=jnp.int32).reshape(-1)
-            features = node_feats
-            if layout_str == 'mul_ir':
-                features = jnp.transpose(features, (0, 2, 1))
-            features = features.reshape(features.shape[0], -1)
-            node_feats = self.symmetric_contractions(features, index_attrs)
+            node_feats = self.symmetric_contractions(node_feats, index_attrs)
         else:
             node_feats = self.symmetric_contractions(node_feats, node_attrs)
 
@@ -693,7 +693,7 @@ class InteractionBlock(nnx.Module, metaclass=abc.ABCMeta):
     avg_num_neighbors: float
     edge_irreps: Irreps | None = None
     radial_MLP: Sequence[int] | None = None
-    cueq_config: CuEquivarianceConfig | None = None
+    equivariance_config: EquivarianceConfig | None = None
 
     def __init__(
         self,
@@ -706,7 +706,8 @@ class InteractionBlock(nnx.Module, metaclass=abc.ABCMeta):
         avg_num_neighbors: float,
         edge_irreps: Irreps | None = None,
         radial_MLP: Sequence[int] | None = None,
-        cueq_config: CuEquivarianceConfig | None = None,
+        equivariance_config: EquivarianceConfig | dict[str, object] | None = None,
+        cueq_config: object | None = None,
         *,
         rngs: nnx.Rngs,
     ) -> None:
@@ -717,7 +718,9 @@ class InteractionBlock(nnx.Module, metaclass=abc.ABCMeta):
         self.target_irreps = Irreps(target_irreps)
         self.hidden_irreps = Irreps(hidden_irreps)
         self.avg_num_neighbors = avg_num_neighbors
-        self.cueq_config = cueq_config
+        self.equivariance_config = resolve_equivariance_config(
+            equivariance_config, cueq_config=cueq_config
+        )
 
         if radial_MLP is not None:
             self.radial_MLP = list(radial_MLP)
@@ -729,8 +732,17 @@ class InteractionBlock(nnx.Module, metaclass=abc.ABCMeta):
         else:
             self.edge_irreps = Irreps(self.node_feats_irreps)
 
-        if self.cueq_config and getattr(self.cueq_config, 'conv_fusion', None):
-            self.conv_fusion = self.cueq_config.conv_fusion
+        openeq_config = (
+            getattr(self.equivariance_config, 'openeq_config', None)
+            if self.equivariance_config is not None
+            else None
+        )
+        cueq_config = getattr(self.equivariance_config, 'cueq_config', None)
+        if (cueq_config and getattr(cueq_config, 'conv_fusion', False)) or (
+            openeq_config
+            and getattr(openeq_config, 'channelwise_fusion', False)
+        ):
+            self.conv_fusion = True
 
         self._setup(rngs)
 
@@ -744,6 +756,40 @@ class InteractionBlock(nnx.Module, metaclass=abc.ABCMeta):
         n_real: int | None = None,
     ) -> jnp.ndarray:
         return tensor[:n_real] if n_real is not None else tensor
+
+    def _fused_tensor_product(
+        self,
+        node_feats: jnp.ndarray,
+        edge_attrs: jnp.ndarray,
+        tp_weights: jnp.ndarray,
+        edge_index: jnp.ndarray,
+    ) -> jnp.ndarray:
+        """Run a fused TP with backend-ordered projected weights when required."""
+        if getattr(self.conv_tp, 'expects_projected_weights', False):
+            return self.conv_tp(
+                node_feats,
+                edge_attrs,
+                tp_weights,
+                edge_index,
+                weights_are_openeq_order=True,
+            )
+        return self.conv_tp(node_feats, edge_attrs, tp_weights, edge_index)
+
+    def _standalone_tensor_product(
+        self,
+        node_feats: jnp.ndarray,
+        edge_attrs: jnp.ndarray,
+        tp_weights: jnp.ndarray,
+    ) -> jnp.ndarray:
+        """Run an edge TP whose radial projection may already be backend ordered."""
+        if getattr(self.conv_tp, 'expects_projected_weights', False):
+            return self.conv_tp(
+                node_feats,
+                edge_attrs,
+                tp_weights,
+                weights_are_openeq_order=True,
+            )
+        return self.conv_tp(node_feats, edge_attrs, tp_weights)
 
     @abc.abstractmethod
     def __call__(
@@ -767,7 +813,7 @@ class RealAgnosticInteractionBlock(InteractionBlock):
             self.edge_irreps,
             internal_weights=True,
             shared_weights=True,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
 
@@ -784,7 +830,7 @@ class RealAgnosticInteractionBlock(InteractionBlock):
             instructions=instructions,
             shared_weights=False,
             internal_weights=False,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
 
@@ -794,6 +840,7 @@ class RealAgnosticInteractionBlock(InteractionBlock):
             + list(self.radial_MLP)
             + [self.conv_tp.weight_numel],
             act=jax.nn.silu,
+            output_permutation=getattr(self.conv_tp, 'projection_permutation', None),
             rngs=rngs,
         )
 
@@ -804,7 +851,7 @@ class RealAgnosticInteractionBlock(InteractionBlock):
             self.irreps_out,
             internal_weights=True,
             shared_weights=True,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
 
@@ -813,10 +860,10 @@ class RealAgnosticInteractionBlock(InteractionBlock):
             self.irreps_out,
             self.node_attrs_irreps,
             self.irreps_out,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
-        self.reshape = reshape_irreps(self.irreps_out, cueq_config=self.cueq_config)
+        self.reshape = reshape_irreps(self.irreps_out, equivariance_config=self.equivariance_config)
 
     def __call__(
         self,
@@ -839,9 +886,13 @@ class RealAgnosticInteractionBlock(InteractionBlock):
 
         # Message passing
         if hasattr(self, 'conv_fusion'):
-            message = self.conv_tp(node_feats, edge_attrs, tp_weights, edge_index)
+            message = self._fused_tensor_product(
+                node_feats, edge_attrs, tp_weights, edge_index
+            )
         else:
-            mji = self.conv_tp(node_feats[edge_index[0]], edge_attrs, tp_weights)
+            mji = self._standalone_tensor_product(
+                node_feats[edge_index[0]], edge_attrs, tp_weights
+            )
             message = scatter_sum(
                 src=mji, index=edge_index[1], dim=0, dim_size=node_feats.shape[0]
             )
@@ -868,7 +919,7 @@ class RealAgnosticResidualInteractionBlock(InteractionBlock):
             self.edge_irreps,
             internal_weights=True,
             shared_weights=True,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
 
@@ -885,7 +936,7 @@ class RealAgnosticResidualInteractionBlock(InteractionBlock):
             instructions=instructions,
             shared_weights=False,
             internal_weights=False,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
 
@@ -895,6 +946,7 @@ class RealAgnosticResidualInteractionBlock(InteractionBlock):
             + list(self.radial_MLP)
             + [self.conv_tp.weight_numel],
             act=jax.nn.silu,
+            output_permutation=getattr(self.conv_tp, 'projection_permutation', None),
             rngs=rngs,
         )
 
@@ -905,7 +957,7 @@ class RealAgnosticResidualInteractionBlock(InteractionBlock):
             self.irreps_out,
             internal_weights=True,
             shared_weights=True,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
 
@@ -914,10 +966,10 @@ class RealAgnosticResidualInteractionBlock(InteractionBlock):
             self.node_feats_irreps,
             self.node_attrs_irreps,
             self.hidden_irreps,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
-        self.reshape = reshape_irreps(self.irreps_out, cueq_config=self.cueq_config)
+        self.reshape = reshape_irreps(self.irreps_out, equivariance_config=self.equivariance_config)
 
     def __call__(
         self,
@@ -943,9 +995,13 @@ class RealAgnosticResidualInteractionBlock(InteractionBlock):
 
         # Message passing
         if hasattr(self, 'conv_fusion'):
-            message = self.conv_tp(node_feats, edge_attrs, tp_weights, edge_index)
+            message = self._fused_tensor_product(
+                node_feats, edge_attrs, tp_weights, edge_index
+            )
         else:
-            mji = self.conv_tp(node_feats[edge_index[0]], edge_attrs, tp_weights)
+            mji = self._standalone_tensor_product(
+                node_feats[edge_index[0]], edge_attrs, tp_weights
+            )
             message = scatter_sum(
                 src=mji,
                 index=edge_index[1],
@@ -975,7 +1031,7 @@ class RealAgnosticDensityInteractionBlock(InteractionBlock):
             self.edge_irreps,
             internal_weights=True,
             shared_weights=True,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
 
@@ -992,7 +1048,7 @@ class RealAgnosticDensityInteractionBlock(InteractionBlock):
             instructions=instructions,
             shared_weights=False,
             internal_weights=False,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
 
@@ -1002,6 +1058,7 @@ class RealAgnosticDensityInteractionBlock(InteractionBlock):
             + list(self.radial_MLP)
             + [self.conv_tp.weight_numel],
             act=jax.nn.silu,
+            output_permutation=getattr(self.conv_tp, 'projection_permutation', None),
             rngs=rngs,
         )
 
@@ -1012,7 +1069,7 @@ class RealAgnosticDensityInteractionBlock(InteractionBlock):
             self.irreps_out,
             internal_weights=True,
             shared_weights=True,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
 
@@ -1021,7 +1078,7 @@ class RealAgnosticDensityInteractionBlock(InteractionBlock):
             self.irreps_out,
             self.node_attrs_irreps,
             self.irreps_out,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
 
@@ -1033,7 +1090,7 @@ class RealAgnosticDensityInteractionBlock(InteractionBlock):
         )
 
         # Reshape output
-        self.reshape = reshape_irreps(self.irreps_out, cueq_config=self.cueq_config)
+        self.reshape = reshape_irreps(self.irreps_out, equivariance_config=self.equivariance_config)
 
     def __call__(
         self,
@@ -1069,9 +1126,13 @@ class RealAgnosticDensityInteractionBlock(InteractionBlock):
 
         # Message passing
         if hasattr(self, 'conv_fusion'):
-            message = self.conv_tp(node_feats, edge_attrs, tp_weights, edge_index)
+            message = self._fused_tensor_product(
+                node_feats, edge_attrs, tp_weights, edge_index
+            )
         else:
-            mji = self.conv_tp(node_feats[edge_index[0]], edge_attrs, tp_weights)
+            mji = self._standalone_tensor_product(
+                node_feats[edge_index[0]], edge_attrs, tp_weights
+            )
             message = scatter_sum(
                 src=mji, index=edge_index[1], dim=0, dim_size=node_feats.shape[0]
             )
@@ -1099,7 +1160,7 @@ class RealAgnosticDensityResidualInteractionBlock(InteractionBlock):
             self.edge_irreps,
             internal_weights=True,
             shared_weights=True,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
 
@@ -1116,7 +1177,7 @@ class RealAgnosticDensityResidualInteractionBlock(InteractionBlock):
             instructions=instructions,
             shared_weights=False,
             internal_weights=False,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
 
@@ -1126,6 +1187,7 @@ class RealAgnosticDensityResidualInteractionBlock(InteractionBlock):
             + list(self.radial_MLP)
             + [self.conv_tp.weight_numel],
             act=jax.nn.silu,
+            output_permutation=getattr(self.conv_tp, 'projection_permutation', None),
             rngs=rngs,
         )
 
@@ -1136,7 +1198,7 @@ class RealAgnosticDensityResidualInteractionBlock(InteractionBlock):
             self.irreps_out,
             internal_weights=True,
             shared_weights=True,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
 
@@ -1145,7 +1207,7 @@ class RealAgnosticDensityResidualInteractionBlock(InteractionBlock):
             self.node_feats_irreps,
             self.node_attrs_irreps,
             self.hidden_irreps,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
 
@@ -1157,7 +1219,7 @@ class RealAgnosticDensityResidualInteractionBlock(InteractionBlock):
         )
 
         # Reshape output
-        self.reshape = reshape_irreps(self.irreps_out, cueq_config=self.cueq_config)
+        self.reshape = reshape_irreps(self.irreps_out, equivariance_config=self.equivariance_config)
 
     def __call__(
         self,
@@ -1196,9 +1258,11 @@ class RealAgnosticDensityResidualInteractionBlock(InteractionBlock):
 
         # Message passing
         if hasattr(self, 'conv_fusion'):
-            message = self.conv_tp(node_feats, edge_attrs, tp_weights, edge_index)
+            message = self._fused_tensor_product(
+                node_feats, edge_attrs, tp_weights, edge_index
+            )
         else:
-            mji = self.conv_tp(
+            mji = self._standalone_tensor_product(
                 node_feats[edge_index[0]], edge_attrs, tp_weights
             )  # [n_nodes, irreps]
             message = scatter_sum(
@@ -1229,7 +1293,7 @@ class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
             self.edge_irreps,
             internal_weights=True,
             shared_weights=True,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
 
@@ -1246,7 +1310,7 @@ class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
             instructions=instructions,
             shared_weights=False,
             internal_weights=False,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
 
@@ -1256,7 +1320,7 @@ class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
             self.node_feats_down_irreps,
             internal_weights=True,
             shared_weights=True,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
 
@@ -1268,6 +1332,7 @@ class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
         self.conv_tp_weights = nn.FullyConnectedNet(
             hs=[input_dim] + [256, 256, 256] + [self.conv_tp.weight_numel],
             act=jax.nn.silu,
+            output_permutation=getattr(self.conv_tp, 'projection_permutation', None),
             rngs=rngs,
         )
 
@@ -1278,18 +1343,18 @@ class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
             self.irreps_out,
             internal_weights=True,
             shared_weights=True,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
 
         # Output reshape
-        self.reshape = reshape_irreps(self.irreps_out, cueq_config=self.cueq_config)
+        self.reshape = reshape_irreps(self.irreps_out, equivariance_config=self.equivariance_config)
 
         # Skip connection
         self.skip_linear = Linear(
             self.node_feats_irreps,
             self.hidden_irreps,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
 
@@ -1326,9 +1391,11 @@ class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
 
         # Message passing
         if hasattr(self, 'conv_fusion'):
-            message = self.conv_tp(node_feats_up, edge_attrs, tp_weights, edge_index)
+            message = self._fused_tensor_product(
+                node_feats_up, edge_attrs, tp_weights, edge_index
+            )
         else:
-            mji = self.conv_tp(
+            mji = self._standalone_tensor_product(
                 node_feats_up[edge_index[0]], edge_attrs, tp_weights
             )  # [n_nodes, irreps]
             message = scatter_sum(
@@ -1358,7 +1425,7 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
             node_scalar_irreps,
             internal_weights=True,
             shared_weights=True,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
         self.target_embedding = Linear(
@@ -1366,7 +1433,7 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
             node_scalar_irreps,
             internal_weights=True,
             shared_weights=True,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
 
@@ -1376,7 +1443,7 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
             self.edge_irreps,
             internal_weights=True,
             shared_weights=True,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
 
@@ -1393,7 +1460,7 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
             instructions=instructions,
             shared_weights=False,
             internal_weights=False,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
 
@@ -1403,6 +1470,7 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
             [input_dim + 2 * node_scalar_irreps.dim]
             + self.radial_MLP
             + [self.conv_tp.weight_numel],
+            output_permutation=getattr(self.conv_tp, 'projection_permutation', None),
             rngs=rngs,
         )
 
@@ -1413,12 +1481,12 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
         self.skip_tp = Linear(
             self.node_feats_irreps,
             self.hidden_irreps,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
 
         # Reshape
-        self.reshape = reshape_irreps(self.irreps_out, cueq_config=self.cueq_config)
+        self.reshape = reshape_irreps(self.irreps_out, equivariance_config=self.equivariance_config)
 
         # Equivariant non-linearity
         irreps_scalars = Irreps([(mul, ir) for mul, ir in self.irreps_out if ir.l == 0])
@@ -1439,7 +1507,7 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
             self.irreps_nonlin,
             internal_weights=True,
             shared_weights=True,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
 
@@ -1449,7 +1517,7 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
             self.irreps_nonlin,
             internal_weights=True,
             shared_weights=True,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
         self.linear_2 = Linear(
@@ -1457,7 +1525,7 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
             self.irreps_out,
             internal_weights=True,
             shared_weights=True,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
 
@@ -1475,13 +1543,13 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
             irreps=self.irreps_nonlin,
             source='ir_mul',
             target='mul_ir',
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
         )
         self.transpose_ir_mul = TransposeIrrepsLayoutWrapper(
             irreps=self.irreps_out,
             source='mul_ir',
             target='ir_mul',
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
         )
 
     def __call__(
@@ -1530,9 +1598,11 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
 
         # Message passing
         if hasattr(self, 'conv_fusion'):
-            message = self.conv_tp(node_feats, edge_attrs, tp_weights, edge_index)
+            message = self._fused_tensor_product(
+                node_feats, edge_attrs, tp_weights, edge_index
+            )
         else:
-            mji = self.conv_tp(
+            mji = self._standalone_tensor_product(
                 node_feats[edge_index[0]], edge_attrs, tp_weights
             )  # [n_edges, irreps]
             message = scatter_sum(

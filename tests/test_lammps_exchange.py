@@ -3,7 +3,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from mace_jax.modules import utils as models_utils
+from mace_jax.modules import models, utils as models_utils
 from mace_jax.tools import lammps_exchange
 
 
@@ -16,6 +16,15 @@ class _DummyLAMMPS:
     def forward_exchange(self, src, dst, vec_len):
         self.calls += 1
         np.copyto(dst, src[::-1])
+
+
+class _DummyComm:
+    def __init__(self):
+        self.calls = 0
+
+    def gather(self, features):
+        self.calls += 1
+        return features + 1
 
 
 def test_forward_exchange_requires_lammps_interface():
@@ -40,6 +49,21 @@ def test_apply_lammps_exchange_forwards_to_lammps():
     expected = np.asarray([[3.0, 4.0], [1.0, 2.0]])
     np.testing.assert_allclose(np.asarray(result), expected)
     assert dummy.calls == 1
+
+
+def test_apply_comm_exchange_gathers_features():
+    feats = jnp.array([[1.0, 2.0], [3.0, 4.0]], dtype=jnp.float32)
+    comm = _DummyComm()
+
+    result = models._apply_comm_exchange(feats, comm)
+
+    np.testing.assert_allclose(np.asarray(result), np.asarray(feats + 1))
+    assert comm.calls == 1
+
+
+def test_apply_comm_exchange_requires_gather_interface():
+    with pytest.raises(AttributeError, match='must implement gather'):
+        models._apply_comm_exchange(jnp.ones((2, 2)), object())
 
 
 def test_prepare_graph_carries_lammps_metadata():

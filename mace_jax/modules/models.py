@@ -16,6 +16,10 @@ from mace_jax.adapters.e3nn.o3 import SphericalHarmonics
 from mace_jax.adapters.nnx.torch import nxx_auto_import_from_torch
 from mace_jax.modules.embeddings import GenericJointEmbedding
 from mace_jax.modules.radial import ZBLBasis
+from mace_jax.modules.wrapper_ops import (
+    EquivarianceConfig,
+    resolve_equivariance_config,
+)
 from mace_jax.nnx_config import ConfigVar
 from mace_jax.tools.dtype import default_dtype
 from mace_jax.tools.lammps_exchange import forward_exchange as lammps_forward_exchange
@@ -52,6 +56,19 @@ def _apply_lammps_exchange(
     padded = jnp.concatenate((node_feats, pad), axis=0)
     exchanged = lammps_forward_exchange(padded, lammps_class)
     return exchanged
+
+
+def _apply_comm_exchange(
+    node_feats: jnp.ndarray,
+    comm: Any | None,
+) -> jnp.ndarray:
+    """Gather ghost features through an optional deployment communicator."""
+
+    if comm is None:
+        return node_feats
+    if not hasattr(comm, 'gather'):
+        raise AttributeError('Communication interface must implement gather().')
+    return comm.gather(node_feats)
 
 
 def _as_tuple(value: Sequence[int] | int, repeats: int) -> tuple[int, ...]:
@@ -121,6 +138,8 @@ class MACE(nnx.Module):
         radial_MLP: Sequence[int] | None = None,
         radial_type: str = 'bessel',
         heads: Sequence[str] | None = None,
+        use_edge_irreps_first: bool = False,
+        equivariance_config: EquivarianceConfig | dict[str, Any] | None = None,
         cueq_config: dict[str, Any] | None = None,
         embedding_specs: dict[str, Any] | None = None,
         readout_cls: type[NonLinearReadoutBlock] = NonLinearReadoutBlock,
@@ -155,7 +174,10 @@ class MACE(nnx.Module):
         self.radial_MLP = radial_MLP
         self.radial_type = radial_type
         self.heads = heads
-        self.cueq_config = cueq_config
+        self.use_edge_irreps_first = use_edge_irreps_first
+        self.equivariance_config = resolve_equivariance_config(
+            equivariance_config, cueq_config=cueq_config
+        )
         self.embedding_specs = embedding_specs
         self.readout_cls = readout_cls
 
@@ -204,7 +226,7 @@ class MACE(nnx.Module):
         self.node_embedding = LinearNodeEmbeddingBlock(
             irreps_in=node_attr_irreps,
             irreps_out=node_feats_irreps,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
 
@@ -221,7 +243,7 @@ class MACE(nnx.Module):
                 self.embedding_readout = LinearReadoutBlock(
                     node_feats_irreps,
                     Irreps(f'{len(self._heads)}x0e'),
-                    self.cueq_config,
+                    self.equivariance_config,
                     rngs=rngs,
                 )
 
@@ -269,6 +291,11 @@ class MACE(nnx.Module):
             list(self.radial_MLP) if self.radial_MLP is not None else [64, 64, 64]
         )
         self.atomic_energies_fn = AtomicEnergiesBlock(self._atomic_energies, rngs=rngs)
+        edge_irreps_first = None
+        if self.use_edge_irreps_first and self.edge_irreps is not None:
+            edge_irreps_first = Irreps(
+                f'{self.edge_irreps.count(Irrep(0, 1))}x0e'
+            )
 
         interactions: list[InteractionBlock] = []
         products: list[EquivariantProductBasisBlock] = []
@@ -281,9 +308,10 @@ class MACE(nnx.Module):
             edge_feats_irreps=edge_feats_irreps,
             target_irreps=interaction_irreps_first,
             hidden_irreps=hidden_irreps_out,
+            edge_irreps=edge_irreps_first,
             avg_num_neighbors=self.avg_num_neighbors,
             radial_MLP=radial_mlp,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             rngs=rngs,
         )
         interactions.append(interaction_first)
@@ -295,7 +323,7 @@ class MACE(nnx.Module):
             correlation=self._correlation[0],
             num_elements=self.num_elements,
             use_sc=use_sc_first,
-            cueq_config=self.cueq_config,
+            equivariance_config=self.equivariance_config,
             use_reduced_cg=self.use_reduced_cg,
             use_agnostic_product=self.use_agnostic_product,
             rngs=rngs,
@@ -307,7 +335,7 @@ class MACE(nnx.Module):
                 LinearReadoutBlock(
                     hidden_irreps_out,
                     Irreps(f'{len(self._heads)}x0e'),
-                    self.cueq_config,
+                    self.equivariance_config,
                     rngs=rngs,
                 )
             )
@@ -328,7 +356,7 @@ class MACE(nnx.Module):
                 avg_num_neighbors=self.avg_num_neighbors,
                 edge_irreps=self.edge_irreps,
                 radial_MLP=radial_mlp,
-                cueq_config=self.cueq_config,
+                equivariance_config=self.equivariance_config,
                 rngs=rngs,
             )
             interactions.append(interaction)
@@ -339,7 +367,7 @@ class MACE(nnx.Module):
                 correlation=self._correlation[idx + 1],
                 num_elements=self.num_elements,
                 use_sc=True,
-                cueq_config=self.cueq_config,
+                equivariance_config=self.equivariance_config,
                 use_reduced_cg=self.use_reduced_cg,
                 use_agnostic_product=self.use_agnostic_product,
                 rngs=rngs,
@@ -354,7 +382,7 @@ class MACE(nnx.Module):
                         self.gate,
                         Irreps(f'{len(self._heads)}x0e'),
                         len(self._heads),
-                        self.cueq_config,
+                        self.equivariance_config,
                         rngs=rngs,
                     )
                 )
@@ -363,7 +391,7 @@ class MACE(nnx.Module):
                     LinearReadoutBlock(
                         hidden_irreps,
                         Irreps(f'{len(self._heads)}x0e'),
-                        self.cueq_config,
+                        self.equivariance_config,
                         rngs=rngs,
                     )
                 )
@@ -378,6 +406,7 @@ class MACE(nnx.Module):
         *,
         lammps_mliap: bool = False,
         lammps_class: Any | None = None,
+        comm: Any | None = None,
         compute_node_feats: bool = True,
     ) -> dict[str, jnp.ndarray | None]:
         ctx = prepare_graph(
@@ -398,10 +427,11 @@ class MACE(nnx.Module):
             'Agnesi',
             'Soft',
         }
-        if self.cueq_config is not None and getattr(self.cueq_config, 'enabled', False):
+        cueq_config = getattr(self.equivariance_config, 'cueq_config', None)
+        if cueq_config is not None and getattr(cueq_config, 'enabled', False):
             need_node_attrs_index = need_node_attrs_index or bool(
-                getattr(self.cueq_config, 'optimize_all', False)
-                or getattr(self.cueq_config, 'optimize_symmetric', False)
+                getattr(cueq_config, 'optimize_all', False)
+                or getattr(cueq_config, 'optimize_symmetric', False)
             )
         node_attrs_index = data.get('node_attrs_index')
         if node_attrs_index is None:
@@ -485,6 +515,8 @@ class MACE(nnx.Module):
                 node_feats = _apply_lammps_exchange(
                     node_feats, lammps_class, lammps_natoms
                 )
+            elif comm is not None and idx > 0:
+                node_feats = _apply_comm_exchange(node_feats, comm)
 
             node_attrs_slice = node_attrs_full
             node_attrs_index_slice = node_attrs_index_full
@@ -579,6 +611,7 @@ class ScaleShiftMACE(MACE):
         *,
         lammps_mliap: bool = False,
         lammps_class: Any | None = None,
+        comm: Any | None = None,
         compute_node_feats: bool = True,
     ) -> dict[str, jnp.ndarray | None]:
         ctx = prepare_graph(
@@ -591,7 +624,6 @@ class ScaleShiftMACE(MACE):
         interaction_kwargs = ctx.interaction_kwargs
         lammps_class = interaction_kwargs.lammps_class
         lammps_natoms = interaction_kwargs.lammps_natoms
-        n_real = int(num_atoms_arange.shape[0])
         if lammps_class is not None:
             n_real = int(lammps_natoms[0])
         node_attrs = data['node_attrs']
@@ -599,10 +631,11 @@ class ScaleShiftMACE(MACE):
             'Agnesi',
             'Soft',
         }
-        if self.cueq_config is not None and getattr(self.cueq_config, 'enabled', False):
+        cueq_config = getattr(self.equivariance_config, 'cueq_config', None)
+        if cueq_config is not None and getattr(cueq_config, 'enabled', False):
             need_node_attrs_index = need_node_attrs_index or bool(
-                getattr(self.cueq_config, 'optimize_all', False)
-                or getattr(self.cueq_config, 'optimize_symmetric', False)
+                getattr(cueq_config, 'optimize_all', False)
+                or getattr(cueq_config, 'optimize_symmetric', False)
             )
         node_attrs_index = data.get('node_attrs_index')
         if node_attrs_index is None:
@@ -676,6 +709,8 @@ class ScaleShiftMACE(MACE):
                 node_feats = _apply_lammps_exchange(
                     node_feats, lammps_class, lammps_natoms
                 )
+            elif comm is not None and idx > 0:
+                node_feats = _apply_comm_exchange(node_feats, comm)
 
             node_attrs_slice = node_attrs_full
             node_attrs_index_slice = node_attrs_index_full

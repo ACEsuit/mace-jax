@@ -41,7 +41,7 @@ from mace_jax.adapters.nnx.torch import (
 from mace_jax.nnx_utils import state_to_pure_dict
 from mace_jax.tools.dtype import default_dtype
 
-from .utility import ir_mul_to_mul_ir
+from .utility import ir_mul_to_mul_ir, mul_ir_to_ir_mul
 
 
 @nxx_auto_import_from_torch(allow_missing_mapper=True)
@@ -317,6 +317,8 @@ class SymmetricContraction(nnx.Module):
             out_ir_mul,
             Irreps(self.irreps_out_o3_str),
         )
+        if self.input_layout == 'ir_mul':
+            return mul_ir_to_ir_mul(out_mul_ir, Irreps(self.irreps_out_o3_str))
         return out_mul_ir
 
     def _features_to_rep(self, x: jnp.ndarray, dtype: jnp.dtype) -> cuex.RepArray:

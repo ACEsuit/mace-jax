@@ -40,6 +40,7 @@ class Layer(nnx.Module):
         act: Callable | None,
         var_in: float,
         var_out: float,
+        output_permutation: Sequence[int] | None = None,
         *,
         rngs: nnx.Rngs,
     ) -> None:
@@ -48,6 +49,9 @@ class Layer(nnx.Module):
         self.act = act
         self.var_in = var_in
         self.var_out = var_out
+        self.output_permutation = (
+            tuple(output_permutation) if output_permutation is not None else None
+        )
         self._use_activation = self.act is not None
         if self._use_activation:
             normalized = normalize2mom(self.act)  # compute reference constant
@@ -74,6 +78,9 @@ class Layer(nnx.Module):
 
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
         weight = self.weight
+        if self.output_permutation is not None:
+            # Reorder the small projection matrix, not the batch-sized output.
+            weight = jnp.take(weight, jnp.asarray(self.output_permutation), axis=-1)
 
         if self._use_activation:
             scaled = weight / jnp.sqrt(self.h_in * self.var_in)
@@ -126,6 +133,7 @@ class FullyConnectedNet(nnx.Module):
         variance_in: float = 1.0,
         variance_out: float = 1.0,
         out_act: bool = False,
+        output_permutation: Sequence[int] | None = None,
         *,
         rngs: nnx.Rngs,
     ) -> None:
@@ -134,6 +142,9 @@ class FullyConnectedNet(nnx.Module):
         self.variance_in = variance_in
         self.variance_out = variance_out
         self.out_act = out_act
+        self.output_permutation = (
+            tuple(output_permutation) if output_permutation is not None else None
+        )
         if len(self.hs) < 2:
             raise ValueError('hs must contain at least input and output dimensions.')
 
@@ -154,6 +165,7 @@ class FullyConnectedNet(nnx.Module):
                 act=activation,
                 var_in=var_in,
                 var_out=var_out,
+                output_permutation=self.output_permutation if is_last else None,
                 rngs=rngs,
             )
             layers.append(layer)

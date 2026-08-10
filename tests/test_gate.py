@@ -69,3 +69,60 @@ class TestGate:
             rtol=1e-5,
             atol=1e-6,
         )
+
+    def test_forward_matches_e3nn_with_repeated_even_gate_irreps(self, monkeypatch):
+        """Mirror Torch Gate behavior when repeated 0e gates simplify together."""
+
+        if not hasattr(IrrepsArray, 'from_array'):
+            monkeypatch.setattr(
+                IrrepsArray,
+                'from_array',
+                staticmethod(lambda irreps, array: IrrepsArray(irreps, array)),
+                raising=False,
+            )
+
+        irreps_scalars = '1x0e'
+        irreps_gates = '1x0e + 1x0e + 1x0e'
+        irreps_gated = '1x1o + 1x2e + 1x3o'
+
+        act_scalars = [None] * len(Irreps(irreps_scalars))
+        act_gates = [None] * len(Irreps(irreps_gates))
+
+        gate_torch = GateTorch(
+            o3.Irreps(irreps_scalars),
+            act_scalars,
+            o3.Irreps(irreps_gates),
+            act_gates,
+            o3.Irreps(irreps_gated),
+        )
+
+        rng = np.random.default_rng(1)
+        features_np = rng.standard_normal((3, gate_torch.irreps_in.dim))
+        features_jax = jnp.array(features_np)
+        features_torch = torch.tensor(features_np)
+
+        with torch.no_grad():
+            out_torch = gate_torch(features_torch).cpu().numpy()
+
+        gate_flax = GateJAX(
+            irreps_scalars=Irreps(irreps_scalars),
+            act_scalars=act_scalars,
+            irreps_gates=Irreps(irreps_gates),
+            act_gates=act_gates,
+            irreps_gated=Irreps(irreps_gated),
+        )
+
+        graphdef, state = nnx.split(gate_flax)
+        variables = state_to_pure_dict(state)
+        variables = GateJAX.import_from_torch(gate_torch, variables)
+        out_jax, _ = graphdef.apply(variables)(features_jax)
+        out_jax_array = np.asarray(
+            out_jax.array if hasattr(out_jax, 'array') else out_jax
+        )
+
+        np.testing.assert_allclose(
+            out_jax_array,
+            out_torch,
+            rtol=1e-5,
+            atol=1e-6,
+        )

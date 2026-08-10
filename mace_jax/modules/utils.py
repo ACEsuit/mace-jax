@@ -415,6 +415,30 @@ def add_output_interface(cls=None):
 
             energy_arr = raw_out['energy'] if isinstance(raw_out, dict) else raw_out
 
+            # The energy-only path already has every model output in raw_out.
+            # Calling get_outputs would evaluate _energy_fn a second time only
+            # to recover the same energy. Pure computations normally hide this
+            # duplication through dead-code elimination, while side-effectful
+            # feature communication must execute both evaluations.
+            try:
+                energy_only = not bool(compute_force) and not bool(compute_stress)
+            except TracerBoolConversionError:
+                energy_only = False
+            if energy_only:
+                result = (
+                    dict(raw_out)
+                    if isinstance(raw_out, dict)
+                    else {'energy': energy_arr}
+                )
+                result.update(
+                    {
+                        'energy': jnp.atleast_1d(jnp.asarray(energy_arr)),
+                        'forces': None,
+                        'stress': None,
+                    }
+                )
+                return result
+
             def energy_fn(positions, shifts=None):
                 # Replace the positions in `data` with `pos` before recomputing
                 new_data = dict(data)

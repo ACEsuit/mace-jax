@@ -12,8 +12,7 @@ from typing import Any
 
 import numpy as np
 
-from mace_jax.modules.wrapper_ops import CuEquivarianceConfig
-from mace_jax.nnx_utils import state_to_pure_dict
+from mace_jax.modules.wrapper_ops import EquivarianceConfig
 
 warnings.filterwarnings(
     'ignore',
@@ -131,24 +130,17 @@ def convert_model(
     torch_model,
     config: dict[str, Any],
     *,
-    cueq_config: CuEquivarianceConfig | None = None,
+    equivariance_config: EquivarianceConfig | dict[str, object] | None = None,
+    cueq_config: object | None = None,
 ):
     _maybe_update_hidden_irreps_from_torch(torch_model, config)
 
-    try:
-        jax_model = _build_jax_model(
-            config,
-            cueq_config=cueq_config,
-            rngs=nnx.Rngs(0),
-        )
-    except TypeError as exc:
-        if 'cueq_config' in str(exc):
-            jax_model = _build_jax_model(
-                config,
-                rngs=nnx.Rngs(0),
-            )
-        else:
-            raise
+    jax_model = _build_jax_model(
+        config,
+        equivariance_config=equivariance_config,
+        cueq_config=cueq_config,
+        rngs=nnx.Rngs(0),
+    )
     template_data = _prepare_template_data(config)
     graphdef, state = nnx.split(jax_model)
     import_from_torch(jax_model, torch_model, state)

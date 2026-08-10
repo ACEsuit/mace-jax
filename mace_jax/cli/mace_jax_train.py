@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 import uuid
+import warnings
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -28,7 +29,7 @@ import optax
 
 import mace_jax
 from mace_jax import modules, tools
-from mace_jax.modules.wrapper_ops import CuEquivarianceConfig
+from mace_jax.modules.wrapper_ops import EquivarianceConfig
 from mace_jax.tools import gin_datasets, gin_functions, gin_model
 from mace_jax.tools.arg_parser import build_cli_arg_parser
 from mace_jax.tools.train import SWAConfig
@@ -588,70 +589,118 @@ def _apply_run_options(args: argparse.Namespace) -> None:
     if args.debug is not None:
         gin.bind_parameter('mace_jax.tools.gin_functions.flags.debug', args.debug)
     _bind_if_not_none('mace_jax.tools.gin_functions.flags.device', args.device)
+    layout_aliases = {
+        '--cueq-layout': args.cueq_layout,
+        '--openeq-layout': args.openeq_layout,
+    }
+
+    selected_layouts = {
+        value
+        for value in (args.equivariance_layout, *layout_aliases.values())
+        if value is not None
+    }
+    if len(selected_layouts) > 1:
+        raise ValueError(
+            "Conflicting equivariance layouts were supplied through backend and "
+            "model-wide flags."
+        )
+    for flag, value in layout_aliases.items():
+        if value is not None:
+            warnings.warn(
+                f"{flag} is deprecated; use --equivariance-layout.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+    layout = next(iter(selected_layouts), None)
+
+    openeq_override = any(
+        value is not None
+        for value in (
+            args.openeq_optimize_all,
+            args.openeq_conv_fusion,
+            args.openeq_group,
+        )
+    )
     cueq_override = any(
         value is not None
         for value in (
             args.cueq_optimize_all,
             args.cueq_conv_fusion,
-            args.cueq_layout,
             args.cueq_group,
         )
     )
-    if getattr(args, 'enable_cueq', False) or getattr(args, 'only_cueq', False):
-        enable_cueq = getattr(args, 'enable_cueq', False)
-        only_cueq = getattr(args, 'only_cueq', False)
-        if only_cueq:
-            enable_cueq = True
+    openeq_requested = bool(getattr(args, "enable_openeq", False) or openeq_override)
+    cueq_requested = bool(
+        getattr(args, "enable_cueq", False)
+        or getattr(args, "only_cueq", False)
+        or cueq_override
+    )
+    if openeq_requested and cueq_requested:
+        raise ValueError(
+            "Conflicting equivariance backends were supplied; choose either cueq or openeq."
+        )
+
+    backend = None
+    group = None
+    optimize_all = False
+    optimize_linear = False
+    optimize_channelwise = False
+    optimize_symmetric = False
+    optimize_fctp = False
+    conv_fusion = False
+
+    if openeq_requested:
+        backend = "openeq"
+        optimize_all = (
+            args.openeq_optimize_all
+            if args.openeq_optimize_all is not None
+            else bool(getattr(args, "enable_openeq", False))
+        )
+        conv_fusion = (
+            args.openeq_conv_fusion
+            if args.openeq_conv_fusion is not None
+            else bool(getattr(args, "enable_openeq", False))
+        )
+        group = args.openeq_group or "O3_e3nn"
+    elif cueq_requested:
+        backend = "cueq"
+        only_cueq = bool(getattr(args, "only_cueq", False))
+        enable_cueq = bool(getattr(args, "enable_cueq", False) or only_cueq)
         want_cuda = False
-        if args.device == 'cuda':
+        if args.device == "cuda":
             want_cuda = True
-        elif args.device in (None, 'auto'):
+        elif args.device in (None, "auto"):
             gpu_count = _infer_gpu_count()
             want_cuda = bool(gpu_count and gpu_count > 0)
-        cueq_config = CuEquivarianceConfig(
-            enabled=enable_cueq,
-            layout=(
-                args.cueq_layout
-                if args.cueq_layout is not None
-                else 'ir_mul'
-                if only_cueq
-                else 'mul_ir'
-            ),
-            group=(
-                args.cueq_group
-                if args.cueq_group is not None
-                else 'O3_e3nn'
-                if only_cueq
-                else 'O3'
-            ),
-            optimize_all=only_cueq or enable_cueq,
-            conv_fusion=(
-                args.cueq_conv_fusion
-                if args.cueq_conv_fusion is not None
-                else want_cuda
-            ),
+        optimize_all = (
+            args.cueq_optimize_all
+            if args.cueq_optimize_all is not None
+            else bool(enable_cueq)
         )
-        gin.bind_parameter('mace_jax.tools.gin_model.model.cueq_config', cueq_config)
-    if (
-        cueq_override
-        and not getattr(args, 'enable_cueq', False)
-        and not getattr(args, 'only_cueq', False)
-    ):
+        conv_fusion = (
+            args.cueq_conv_fusion
+            if args.cueq_conv_fusion is not None
+            else want_cuda
+        )
+        group = args.cueq_group or ("O3_e3nn" if only_cueq else "O3")
+        if layout is None and only_cueq:
+            layout = "ir_mul"
+
+    if backend is not None or layout is not None:
         gin.bind_parameter(
-            'mace_jax.tools.gin_model.model.cueq_config', CuEquivarianceConfig
+            "mace_jax.tools.gin_model.model.equivariance_config",
+            EquivarianceConfig(
+                backend=backend or "jax",
+                layout=layout or "mul_ir",
+                group=group,
+                optimize_all=optimize_all,
+                optimize_linear=optimize_linear,
+                optimize_channelwise=optimize_channelwise,
+                optimize_symmetric=optimize_symmetric,
+                optimize_fctp=optimize_fctp,
+                conv_fusion=conv_fusion,
+            ),
         )
-        if args.cueq_optimize_all is not None:
-            gin.bind_parameter(
-                'CuEquivarianceConfig.optimize_all', args.cueq_optimize_all
-            )
-        if args.cueq_conv_fusion is not None:
-            gin.bind_parameter(
-                'CuEquivarianceConfig.conv_fusion', args.cueq_conv_fusion
-            )
-        if args.cueq_layout is not None:
-            gin.bind_parameter('CuEquivarianceConfig.layout', args.cueq_layout)
-        if args.cueq_group is not None:
-            gin.bind_parameter('CuEquivarianceConfig.group', args.cueq_group)
     if getattr(args, 'distributed', False):
         gin.bind_parameter('mace_jax.tools.gin_functions.flags.distributed', True)
     _bind_if_not_none(

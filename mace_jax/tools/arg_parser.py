@@ -97,16 +97,65 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
         help='Disable cueq conv_fusion.',
     )
     parser.add_argument(
+        '--equivariance-layout',
+        choices=['mul_ir', 'ir_mul'],
+        default=None,
+        help='Select the model-wide equivariant representation layout.',
+    )
+    parser.add_argument(
         '--cueq-layout',
         choices=['mul_ir', 'ir_mul'],
         default=None,
-        help='Select cueq layout (mul_ir or ir_mul).',
+        help='Deprecated alias for --equivariance-layout.',
     )
     parser.add_argument(
         '--cueq-group',
         choices=['O3', 'O3_e3nn'],
         default=None,
         help='Select cueq group (O3 or O3_e3nn).',
+    )
+    parser.add_argument(
+        '--enable-openeq',
+        '--enable_openeq',
+        action='store_true',
+        help='Enable OpenEquivariance fused channel-wise convolution.',
+    )
+    parser.add_argument(
+        '--openeq-optimize-all',
+        dest='openeq_optimize_all',
+        action='store_true',
+        default=None,
+        help='Enable all currently supported OpenEquivariance operations.',
+    )
+    parser.add_argument(
+        '--no-openeq-optimize-all',
+        dest='openeq_optimize_all',
+        action='store_false',
+        help='Disable all OpenEquivariance operations.',
+    )
+    parser.add_argument(
+        '--openeq-conv-fusion',
+        dest='openeq_conv_fusion',
+        action='store_true',
+        default=None,
+        help='Enable OpenEquivariance convolution fusion.',
+    )
+    parser.add_argument(
+        '--no-openeq-conv-fusion',
+        dest='openeq_conv_fusion',
+        action='store_false',
+        help='Disable OpenEquivariance convolution fusion.',
+    )
+    parser.add_argument(
+        '--openeq-layout',
+        choices=['mul_ir', 'ir_mul'],
+        default=None,
+        help='Deprecated alias for --equivariance-layout.',
+    )
+    parser.add_argument(
+        '--openeq-group',
+        default=None,
+        help="OpenEquivariance group (v1 requires 'O3_e3nn').",
     )
     parser.add_argument(
         '--distributed',

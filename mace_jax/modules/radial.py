@@ -439,8 +439,17 @@ class SoftTransform(nnx.Module):
 class _RadialSequential(nnx.Module):
     channels: Sequence[int]
 
-    def __init__(self, channels: Sequence[int], *, rngs: nnx.Rngs) -> None:
+    def __init__(
+        self,
+        channels: Sequence[int],
+        output_permutation: Sequence[int] | None = None,
+        *,
+        rngs: nnx.Rngs,
+    ) -> None:
         self.channels = tuple(channels)
+        self.output_permutation = (
+            tuple(output_permutation) if output_permutation is not None else None
+        )
         if len(self.channels) < 2:
             raise ValueError('channels must have length >= 2 for RadialMLP')
 
@@ -476,13 +485,25 @@ class _RadialSequential(nnx.Module):
 
     def __call__(self, inputs: jnp.ndarray) -> jnp.ndarray:
         x = inputs
-        for kind, key in self._layer_order:
+        for order_index, (kind, key) in enumerate(self._layer_order):
             if kind == 'act':
                 x = jax.nn.silu(x)
                 continue
             if key is None:
                 raise ValueError('Missing layer key for radial sequential block')
-            x = self.layers[key](x)
+            layer = self.layers[key]
+            is_last = order_index == len(self._layer_order) - 1
+            if is_last and self.output_permutation is not None:
+                kernel = jnp.take(
+                    layer.kernel, jnp.asarray(self.output_permutation), axis=-1
+                )
+                x = x @ kernel
+                if layer.bias is not None:
+                    x = x + jnp.take(
+                        layer.bias, jnp.asarray(self.output_permutation), axis=-1
+                    )
+            else:
+                x = layer(x)
         return x
 
 
@@ -492,9 +513,20 @@ class RadialMLP(nnx.Module):
 
     channels: Sequence[int]
 
-    def __init__(self, channels: Sequence[int], *, rngs: nnx.Rngs) -> None:
+    def __init__(
+        self,
+        channels: Sequence[int],
+        output_permutation: Sequence[int] | None = None,
+        *,
+        rngs: nnx.Rngs,
+    ) -> None:
         self.channels = tuple(channels)
-        self.net = _RadialSequential(self.channels, rngs=rngs)
+        self.output_permutation = (
+            tuple(output_permutation) if output_permutation is not None else None
+        )
+        self.net = _RadialSequential(
+            self.channels, output_permutation=self.output_permutation, rngs=rngs
+        )
 
     def __call__(self, inputs: jnp.ndarray) -> jnp.ndarray:
         return self.net(inputs)
