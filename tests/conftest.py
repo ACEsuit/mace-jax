@@ -120,3 +120,8 @@ def simple_hdf5_path(tmp_path_factory, simple_xyz_configs):
     path = data_dir / 'simple.h5'
     _write_hdf5_from_configs(path, simple_xyz_configs)
     return path
+
+
+@pytest.fixture(scope='session')
+def simple_2_xyz_path():
+    return Path(__file__).resolve().parent / 'test_data' / 'simple-2.xyz'

@@ -9,6 +9,7 @@ import torch
 from mace_jax import modules, tools
 from mace_jax.cli import mace_jax_train as train_cli
 from mace_jax.cli import mace_jax_train_plot as train_plot
+from mace_jax.cli import mace_jax_preprocess as preprocess_cli
 from mace_jax.tools import gin_functions
 from mace_jax.tools.train import SWAConfig
 
@@ -738,3 +739,26 @@ def test_cli_sets_runtime_and_training_controls(tmp_path, simple_hdf5_path):
         is False
     )
     gin.clear_config()
+
+
+def test_preprocess_cli_run_loads_isolated_atom_energy_from_train_set(
+        tmp_path,
+        monkeypatch,
+        simple_2_xyz_path,
+        ):
+    gin.clear_config()
+    import os
+    monkeypatch.chdir(tmp_path)
+    assert os.getcwd() == str(tmp_path)
+    parser = tools.arg_parser.build_preprocess_arg_parser()
+    args = parser.parse_args(args=[
+        "--train_file", str(simple_2_xyz_path),
+        "--energy_key", "REF_energy",
+        "--forces_key", "REF_forces",
+        "--compute_statistics"
+    ])
+    preprocess_cli.run(args)
+    # Check if the output files are written as expected
+    assert (tmp_path / "train").is_dir()
+    assert (tmp_path / "val").is_dir()
+    assert (tmp_path / "statistics.json").is_file()

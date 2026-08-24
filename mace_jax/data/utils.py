@@ -244,7 +244,7 @@ def load_from_xyz(
         for idx, atoms in enumerate(atoms_list):
             if (
                 len(atoms) == 1
-                and getattr(atoms, 'config_type', None) == 'IsolatedAtom'
+                and atoms.info.get('config_type', None) == 'IsolatedAtom'
             ):
                 if energy_key in atoms.info.keys():
                     atomic_energies_dict[atoms.get_atomic_numbers()[0]] = atoms.info[
