@@ -1,3 +1,5 @@
+import math
+
 import jax
 import jax.numpy as jnp
 from flax import nnx
@@ -11,8 +13,21 @@ def _format_tree_path(path) -> str:
     return '/'.join(str(key) for key in path) if path else '<root>'
 
 
-def _extract_norm_consts() -> dict[str, float]:
-    """Fetch Torch normalize2mom constants for common gates (fail fast).
+def _activation_name(activation) -> str | None:
+    """Return the stable JAX registry key for a Torch activation."""
+    if activation is None:
+        return None
+    name = getattr(activation, '__name__', None)
+    if name is None:
+        name = getattr(getattr(activation, '__class__', None), '__name__', None)
+    if not name:
+        return None
+    name = str(name).lower()
+    return 'silu' if name in {'silu', 'swish'} else name
+
+
+def _extract_norm_consts(torch_model=None) -> dict[str, float]:
+    """Fetch exact Torch normalize2mom constants for all model gates.
 
     Parity relies on reusing the exact normalize2mom constants that Torch
     precomputed for its activation wrappers. If they cannot be obtained we raise
@@ -30,14 +45,51 @@ def _extract_norm_consts() -> dict[str, float]:
         ) from exc
 
     try:
-        const = float(torch_norm(torch.nn.functional.silu).cst)
+        silu = float(torch_norm(torch.nn.functional.silu).cst)
+        sigmoid = float(torch_norm(torch.sigmoid).cst)
     except Exception as exc:
         raise RuntimeError(
-            'Unable to compute normalize2mom constant for torch.nn.functional.silu '
+            'Unable to compute normalize2mom constants for silu/sigmoid '
             'during import; parity cannot be guaranteed.'
         ) from exc
 
-    return {'silu': const, 'swish': const}
+    constants = {'silu': silu, 'swish': silu, 'sigmoid': sigmoid}
+    model_constants: dict[str, float] = {}
+
+    # Newer MACE gated blocks store their normalization data as plain floats
+    # rather than child e3nn normalize2mom modules. Prefer model-resident
+    # values so conversion preserves the exact checkpoint execution semantics.
+    if torch_model is not None:
+        modules = (
+            torch_model.modules()
+            if callable(getattr(torch_model, 'modules', None))
+            else ()
+        )
+        for module in modules:
+            for activation_attr, constant_attr in (
+                ('_act_scalar', '_scalar_cst'),
+                ('_act_gate', '_gate_cst'),
+            ):
+                activation = getattr(module, activation_attr, None)
+                constant = getattr(module, constant_attr, None)
+                key = _activation_name(activation)
+                if key is None or constant is None:
+                    continue
+                value = float(constant)
+                previous = model_constants.get(key)
+                if previous is not None and not math.isclose(
+                    previous, value, rel_tol=1e-12, abs_tol=1e-12
+                ):
+                    raise ValueError(
+                        f'Conflicting normalize2mom constants for {key}: '
+                        f'{previous} and {value}.'
+                    )
+                model_constants[key] = value
+                constants[key] = value
+                if key == 'silu':
+                    constants['swish'] = value
+
+    return constants
 
 
 def import_from_torch(jax_model, torch_model, variables):
@@ -89,7 +141,7 @@ def import_from_torch(jax_model, torch_model, variables):
     variables_pure = jax_model.import_from_torch(torch_model, variables_pure)
 
     # Persist normalize2mom constants in non-trainable collections.
-    norm_consts = _extract_norm_consts()
+    norm_consts = _extract_norm_consts(torch_model)
     if norm_consts:
         for key, value in norm_consts.items():
             register_normalize2mom_const(key, float(value))

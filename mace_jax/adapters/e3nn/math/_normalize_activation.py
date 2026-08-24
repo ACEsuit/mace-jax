@@ -172,11 +172,12 @@ def estimate_normalize2mom_const(
     if key is None:
         raise ValueError('Unable to determine normalize2mom identifier.')
     key = str(key).lower()
-    if key not in {'silu', 'swish'}:
+    if key not in {'silu', 'swish', 'sigmoid'}:
         raise ValueError(f'Unsupported normalize2mom identifier: {key}')
 
     rng = np.random.default_rng(seed)
     values = rng.normal(size=samples).astype(np.float32)
-    silu = values / (1.0 + np.exp(-values))
-    const = float(np.mean(silu * silu) ** -0.5)
+    sigmoid = 1.0 / (1.0 + np.exp(-values))
+    activated = values * sigmoid if key in {'silu', 'swish'} else sigmoid
+    const = float(np.mean(activated * activated) ** -0.5)
     return const
