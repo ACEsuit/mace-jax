@@ -4,11 +4,14 @@ import types
 
 import jax.numpy as jnp
 import pytest
+import torch
 from flax import nnx
 
 from mace_jax.cli import mace_jax_from_torch as jax_from_torch
+from mace_jax.nnx_config import ConfigVar
 from mace_jax.nnx_utils import state_to_pure_dict
 from mace_jax.tools import model_builder
+from mace_jax.tools.import_from_torch import _extract_norm_consts
 
 
 def _patch_common(monkeypatch, jax_model):
@@ -27,6 +30,13 @@ class _DummyJaxModel(nnx.Module):
         self.use_reduced_cg = use_reduced_cg
         self._import_impl = import_impl
         self.w = nnx.Param(jnp.ones((1,), dtype=jnp.float32))
+        self._normalize2mom_consts_var = ConfigVar(
+            {
+                'sigmoid': jnp.asarray(0.0, dtype=jnp.float32),
+                'silu': jnp.asarray(0.0, dtype=jnp.float32),
+                'swish': jnp.asarray(0.0, dtype=jnp.float32),
+            }
+        )
 
     def import_from_torch(self, torch_model, variables):
         return self._import_impl(torch_model, variables)
@@ -71,6 +81,62 @@ def test_convert_model_success(monkeypatch):
     assert template == {'dummy': 1}
     params = state_to_pure_dict(state)
     assert jnp.array_equal(params['w'], jnp.array([42.0], dtype=jnp.float32))
+
+
+def test_extracts_plain_gated_block_activation_constants():
+    gate_constant = 1.8467055342154763
+
+    class _PlainGate(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self._act_scalar = torch.nn.functional.silu
+            self._scalar_cst = float(_extract_norm_consts()['silu'])
+            self._act_gate = torch.sigmoid
+            self._gate_cst = gate_constant
+
+    constants = _extract_norm_consts(_PlainGate())
+
+    assert constants['sigmoid'] == gate_constant
+    assert constants['silu'] == constants['swish']
+
+
+def test_convert_model_exports_checkpoint_gate_constant(monkeypatch):
+    gate_constant = 1.8467055342154763
+
+    class _PlainGate(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.use_reduced_cg = True
+            self._act_gate = torch.sigmoid
+            self._gate_cst = gate_constant
+
+    def _populate_params(_, variables):
+        variables['w'] = jnp.array([42.0], dtype=jnp.float32)
+        return variables
+
+    dummy_jax = _DummyJaxModel(
+        use_reduced_cg=True,
+        import_impl=_populate_params,
+    )
+    _patch_common(monkeypatch, dummy_jax)
+    config = {}
+
+    jax_from_torch.convert_model(_PlainGate(), config)
+
+    assert config['normalize2mom_consts']['sigmoid'] == pytest.approx(gate_constant)
+
+
+def test_rejects_conflicting_model_activation_constants():
+    class _Gate(torch.nn.Module):
+        def __init__(self, constant):
+            super().__init__()
+            self._act_gate = torch.sigmoid
+            self._gate_cst = constant
+
+    model = torch.nn.ModuleList([_Gate(1.0), _Gate(2.0)])
+
+    with pytest.raises(ValueError, match='Conflicting normalize2mom constants'):
+        _extract_norm_consts(model)
 
 
 def test_build_jax_model_forwards_mh1_specific_config(monkeypatch):

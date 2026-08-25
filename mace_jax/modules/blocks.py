@@ -1575,18 +1575,27 @@ class RealAgnosticResidualNonLinearInteractionBlock(InteractionBlock):
         # Source/target embeddings for edges
         source_embedding = self.source_embedding(node_attrs)
         target_embedding = self.target_embedding(node_attrs)
-        edge_feats = jnp.concatenate(
-            [
-                edge_feats,
-                source_embedding[edge_index[0]],
-                target_embedding[edge_index[1]],
-            ],
-            axis=-1,
+
+        # Project endpoint features per node before gathering them to edges.
+        # This is algebraically identical to applying the first affine to the
+        # concatenated edge input, but avoids repeating wide endpoint inputs.
+        tp_weights = self.conv_tp_weights.apply_with_split_first_linear(
+            edge_feats,
+            source_embedding,
+            target_embedding,
+            edge_index[0],
+            edge_index[1],
+        )
+        density_input = self.density_fn.apply_with_split_first_linear(
+            edge_feats,
+            source_embedding,
+            target_embedding,
+            edge_index[0],
+            edge_index[1],
         )
 
         # Convolution weights
-        tp_weights = self.conv_tp_weights(edge_feats)
-        edge_density = jnp.tanh(self.density_fn(edge_feats) ** 2)
+        edge_density = jnp.tanh(density_input**2)
         if cutoff is not None:
             tp_weights = tp_weights * cutoff
             edge_density = edge_density * cutoff

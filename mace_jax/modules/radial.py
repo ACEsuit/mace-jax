@@ -506,6 +506,98 @@ class _RadialSequential(nnx.Module):
                 x = layer(x)
         return x
 
+    def _split_first_input_projection(
+        self,
+        edge_features: jnp.ndarray,
+        source_features: jnp.ndarray,
+        target_features: jnp.ndarray,
+        senders: jnp.ndarray,
+        receivers: jnp.ndarray,
+    ) -> jnp.ndarray:
+        """Evaluate the first affine without gathering endpoint inputs."""
+        if not self._layer_order or self._layer_order[0][0] != 'linear':
+            raise ValueError('RadialMLP must start with a linear layer.')
+        first_key = self._layer_order[0][1]
+        if first_key is None:
+            raise ValueError('Missing first RadialMLP linear layer key.')
+        if (
+            edge_features.shape[0] != senders.shape[0]
+            or senders.shape != receivers.shape
+        ):
+            raise ValueError(
+                'edge_features, senders, and receivers must have equal edge counts.'
+            )
+
+        first = self.layers[first_key]
+        edge_dim = edge_features.shape[-1]
+        source_dim = source_features.shape[-1]
+        target_dim = target_features.shape[-1]
+        expected_dim = edge_dim + source_dim + target_dim
+        kernel = jnp.asarray(first.kernel, dtype=edge_features.dtype)
+        if kernel.shape[0] != expected_dim:
+            raise ValueError(
+                'RadialMLP first-layer input dimension mismatch: '
+                f'expected {expected_dim}, got {kernel.shape[0]}.'
+            )
+
+        edge_kernel, source_kernel, target_kernel = jnp.split(
+            kernel,
+            (edge_dim, edge_dim + source_dim),
+            axis=0,
+        )
+        projected = jnp.matmul(
+            edge_features,
+            edge_kernel,
+            precision=first.precision,
+        )
+        projected = projected + jnp.matmul(
+            source_features,
+            source_kernel,
+            precision=first.precision,
+        )[senders]
+        projected = projected + jnp.matmul(
+            target_features,
+            target_kernel,
+            precision=first.precision,
+        )[receivers]
+        if first.bias is not None:
+            projected = projected + jnp.asarray(first.bias, dtype=projected.dtype)
+        return projected
+
+    def apply_with_split_first_linear(
+        self,
+        edge_features: jnp.ndarray,
+        source_features: jnp.ndarray,
+        target_features: jnp.ndarray,
+        senders: jnp.ndarray,
+        receivers: jnp.ndarray,
+    ) -> jnp.ndarray:
+        """Apply the MLP without materializing concatenated endpoint features."""
+        x = self._split_first_input_projection(
+            edge_features,
+            source_features,
+            target_features,
+            senders,
+            receivers,
+        )
+        for order_index, (kind, key) in enumerate(self._layer_order[1:], start=1):
+            if kind == 'act':
+                x = jax.nn.silu(x)
+                continue
+            if key is None:
+                raise ValueError('Missing RadialMLP layer key.')
+            layer = self.layers[key]
+            is_last = order_index == len(self._layer_order) - 1
+            if is_last and self.output_permutation is not None:
+                permutation = jnp.asarray(self.output_permutation)
+                kernel = jnp.take(layer.kernel, permutation, axis=-1)
+                x = jnp.matmul(x, kernel, precision=layer.precision)
+                if layer.bias is not None:
+                    x = x + jnp.take(layer.bias, permutation, axis=-1)
+            else:
+                x = layer(x)
+        return x
+
 
 @nxx_auto_import_from_torch(allow_missing_mapper=True)
 class RadialMLP(nnx.Module):
@@ -530,3 +622,19 @@ class RadialMLP(nnx.Module):
 
     def __call__(self, inputs: jnp.ndarray) -> jnp.ndarray:
         return self.net(inputs)
+
+    def apply_with_split_first_linear(
+        self,
+        edge_features: jnp.ndarray,
+        source_features: jnp.ndarray,
+        target_features: jnp.ndarray,
+        senders: jnp.ndarray,
+        receivers: jnp.ndarray,
+    ) -> jnp.ndarray:
+        return self.net.apply_with_split_first_linear(
+            edge_features,
+            source_features,
+            target_features,
+            senders,
+            receivers,
+        )
