@@ -14,6 +14,7 @@ from mace_jax.nnx_config import ConfigVar
 from mace_jax.nnx_utils import state_to_pure_dict
 
 _IMPORT_MAPPERS: dict[str, Callable] = {}
+_IMPORT_MAPPERS_WITH_TARGET: set[str] = set()
 
 _FIRST_CAP_RE = re.compile('(.)([A-Z][a-z]+)')
 _ALL_CAP_RE = re.compile('([a-z0-9])([A-Z])')
@@ -26,11 +27,17 @@ def camel_to_snake(value: str) -> str:
     return step2.lower()
 
 
-def nxx_register_import_mapper(torch_type: str) -> Callable[[Callable], Callable]:
-    """Register a function that copies parameters from a Torch module."""
+def nxx_register_import_mapper(
+    torch_type: str, *, with_target: bool = False
+) -> Callable[[Callable], Callable]:
+    """Register a parameter mapper, optionally receiving the target NNX module."""
 
     def decorator(fn: Callable) -> Callable:
         _IMPORT_MAPPERS[torch_type] = fn
+        if with_target:
+            _IMPORT_MAPPERS_WITH_TARGET.add(torch_type)
+        else:
+            _IMPORT_MAPPERS_WITH_TARGET.discard(torch_type)
         return fn
 
     return decorator
@@ -95,6 +102,7 @@ def _apply_module_import(
     scope: tuple[str, ...],
     *,
     fallback: Callable | None,
+    target_module: nnx.Module | None = None,
 ) -> None:
     module_name = _torch_module_name(module)
     mapper = _IMPORT_MAPPERS.get(module_name)
@@ -103,7 +111,17 @@ def _apply_module_import(
     has_state = has_parameters or has_buffers
 
     if mapper is not None:
-        mapper(module, variables, list(scope))
+        if module_name in _IMPORT_MAPPERS_WITH_TARGET:
+            target = target_module
+            for key in scope:
+                if target is None:
+                    break
+                target = (
+                    target[int(key)] if key.isdigit() else getattr(target, key, None)
+                )
+            mapper(module, variables, list(scope), target_module=target)
+        else:
+            mapper(module, variables, list(scope))
         return
 
     if not has_state:
@@ -154,6 +172,7 @@ def nxx_auto_import_from_torch(
             variables,
             *,
             skip_root: bool = False,
+            target_module: nnx.Module | None = None,
         ):
             variables_mut = variables
 
@@ -169,6 +188,7 @@ def nxx_auto_import_from_torch(
                         variables_mut,
                         scope,
                         fallback=fallback_fn,
+                        target_module=target_module,
                     )
                 except (KeyError, ValueError):
                     if fallback_fn is not None:
@@ -179,13 +199,15 @@ def nxx_auto_import_from_torch(
             return variables_mut
 
         @classmethod
-        def import_from_torch(cls, torch_module, variables):
+        def import_from_torch(cls, torch_module, variables, *, target_module=None):
             return cls._import_from_torch_impl(
                 torch_module,
                 variables,
                 skip_root=False,
+                target_module=target_module,
             )
 
+        import_from_torch.__func__._supports_target_module = True
         cls.import_from_torch = import_from_torch
         cls._import_from_torch_impl = _import_from_torch_impl
         cls._torch_import_fallback = fallback_fn
@@ -198,13 +220,14 @@ def nxx_register_module(torch_type: str):
     """Register an NNX module class to handle Torch weight imports."""
 
     def decorator(cls):
-        def mapper(module, variables, scope: Sequence[str]):
+        def mapper(module, variables, scope: Sequence[str], *, target_module=None):
             target = _resolve_scope(variables, scope)
             if hasattr(cls, '_import_from_torch_impl'):
                 updated = cls._import_from_torch_impl(
                     module,
                     target,
                     skip_root=True,
+                    target_module=target_module,
                 )
             else:
                 updated = cls.import_from_torch(module, target)
@@ -213,6 +236,7 @@ def nxx_register_module(torch_type: str):
                 target.update(updated)
 
         _IMPORT_MAPPERS[torch_type] = mapper
+        _IMPORT_MAPPERS_WITH_TARGET.add(torch_type)
         return cls
 
     return decorator
@@ -222,7 +246,12 @@ def init_from_torch(module: nnx.Module, torch_module):
     """Populate an NNX module's parameters from a Torch module in-place."""
     graphdef, state = nnx.split(module)
     pure = state_to_pure_dict(state)
-    updated = module.__class__.import_from_torch(torch_module, pure)
+    if getattr(module.import_from_torch, '_supports_target_module', False):
+        updated = module.__class__.import_from_torch(
+            torch_module, pure, target_module=module
+        )
+    else:
+        updated = module.__class__.import_from_torch(torch_module, pure)
     if updated is not None:
         nnx.replace_by_pure_dict(state, updated)
         module = nnx.merge(graphdef, state)

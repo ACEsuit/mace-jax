@@ -9,6 +9,7 @@ from mace_jax.nnx_utils import state_to_pure_dict
 try:  # pragma: no cover - optional torch dependency for parity tests
     from mace.modules.radial import BesselBasis as BesselBasisTorch
     from mace.modules.radial import ChebychevBasis as ChebychevBasisTorch
+    from mace.modules.radial import GaussianBasis as GaussianBasisTorch
     from mace.modules.radial import RadialMLP as RadialMLPTorch
     from mace.modules.radial import ZBLBasis as ZBLBasisTorch
 except Exception as exc:  # pragma: no cover
@@ -17,8 +18,10 @@ except Exception as exc:  # pragma: no cover
         allow_module_level=True,
     )
 
+from mace_jax.modules.blocks import RadialEmbeddingBlock
 from mace_jax.modules.radial import BesselBasis as BesselBasisJAX
 from mace_jax.modules.radial import ChebychevBasis as ChebychevBasisJAX
+from mace_jax.modules.radial import GaussianBasis
 from mace_jax.modules.radial import RadialMLP as RadialMLPJax
 from mace_jax.modules.radial import ZBLBasis as ZBLBasisJAX
 
@@ -26,6 +29,23 @@ from mace_jax.modules.radial import ZBLBasis as ZBLBasisJAX
 def _split_module(module):
     graphdef, state = nnx.split(module)
     return graphdef, state_to_pure_dict(state)
+
+
+@pytest.mark.parametrize('trainable', [False, True])
+def test_gaussian_radial_embedding_matches_torch(trainable):
+    lengths = np.array([[0.1], [1.5], [3.0], [5.1]])
+    basis = GaussianBasis(5.0, num_basis=6, trainable=trainable, rngs=nnx.Rngs(0))
+    reference = GaussianBasisTorch(5.0, num_basis=6, trainable=trainable)
+    expected = reference(torch.tensor(lengths)).detach().numpy()
+    np.testing.assert_allclose(basis(jnp.asarray(lengths)), expected, rtol=1e-6)
+    embedding = RadialEmbeddingBlock(
+        r_max=5.0, num_bessel=6, num_polynomial_cutoff=5, radial_type='gaussian'
+    )
+    radial, _ = embedding(jnp.asarray(lengths), None, None, None)
+    assert radial.shape == (4, 6)
+    np.testing.assert_allclose(
+        radial, expected * embedding.cutoff_fn(lengths), rtol=1e-6
+    )
 
 
 class TestBesselBasisParity:

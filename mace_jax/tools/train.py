@@ -28,9 +28,9 @@ import jraph
 import numpy as np
 import optax
 import tqdm
+from jax.experimental import multihost_utils
 
 from mace_jax import data
-from jax.experimental import multihost_utils
 
 
 @gin.register
@@ -422,6 +422,35 @@ def _apply_property_weight_mask(
     return graph_mask * (weights_arr > 0).astype(graph_mask.dtype)
 
 
+def _checked_loss(loss_fn, graph, predictions):
+    missing = [
+        key
+        for key in ('energy', 'forces', 'stress', 'virials', 'dipole', 'polarizability')
+        if getattr(loss_fn, f'{key}_weight', 0.0) != 0.0
+        and predictions.get(key) is None
+    ]
+    if missing:
+        raise ValueError(
+            f'The configured loss requires missing model predictions: {missing}'
+        )
+    return loss_fn(graph, predictions)
+
+
+def _prepare_pred_graph(graph, output):
+    """Build a prediction graph without using reference labels as predictions."""
+    globals_updates = {
+        key: output.get(key)
+        for key in ('energy', 'stress', 'virials', 'dipole', 'polarizability')
+        if hasattr(graph.globals, key)
+    }
+    pred_graph = graph._replace(
+        nodes=graph.nodes._replace(forces=output.get('forces')),
+        globals=graph.globals._replace(**globals_updates),
+    )
+    predictions = {key: value for key, value in output.items() if value is not None}
+    return pred_graph, predictions
+
+
 def _compute_eval_batch_metrics(
     loss_fn,
     graph,
@@ -464,7 +493,7 @@ def _compute_eval_batch_metrics(
     polar_mask = _apply_property_weight_mask(graph_mask, graph, 'polarizability_weight')
     atom_counts = jnp.maximum(jnp.asarray(graph.n_node), 1.0)
 
-    per_graph_loss = loss_fn(graph, pred_outputs)
+    per_graph_loss = _checked_loss(loss_fn, graph, pred_outputs)
     loss = jnp.sum(per_graph_loss * graph_mask)
 
     result = {
@@ -740,36 +769,6 @@ def train(
             metrics_loss_fn, metric_targets=metrics_required_targets
         )
 
-        def _prepare_pred_graph(graph, output):
-            nodes = graph.nodes
-            if output.get('forces') is not None:
-                nodes = nodes._replace(forces=output.get('forces'))
-            globals_updates = {}
-            for key in ('energy', 'stress', 'virials', 'dipole', 'polarizability'):
-                if key in output and output[key] is not None:
-                    globals_updates[key] = output[key]
-            globals_attr = (
-                graph.globals._replace(**globals_updates)
-                if globals_updates
-                else graph.globals
-            )
-            pred_graph = graph._replace(nodes=nodes, globals=globals_attr)
-            pred_outputs = {
-                'energy': pred_graph.globals.energy,
-                'forces': pred_graph.nodes.forces,
-                'stress': pred_graph.globals.stress,
-            }
-            virials_value = getattr(pred_graph.globals, 'virials', None)
-            if virials_value is not None:
-                pred_outputs['virials'] = virials_value
-            dipole_value = getattr(pred_graph.globals, 'dipole', None)
-            if dipole_value is not None:
-                pred_outputs['dipole'] = dipole_value
-            polar_value = getattr(pred_graph.globals, 'polarizability', None)
-            if polar_value is not None:
-                pred_outputs['polarizability'] = polar_value
-            return pred_graph, pred_outputs
-
         def _psum_metrics(tree):
             return jax.tree_util.tree_map(
                 lambda x: jax.lax.psum(x, 'devices') if x is not None else None,
@@ -821,7 +820,7 @@ def train(
             def _loss_fn(trainable):
                 """Compute masked total loss and per-batch metrics."""
                 output = metrics_predictor(trainable, graph)
-                per_graph_loss = metrics_loss_fn(graph, output)
+                per_graph_loss = _checked_loss(metrics_loss_fn, graph, output)
                 loss = jnp.sum(jnp.where(mask, per_graph_loss, 0.0))
                 pred_graph, pred_outputs = _prepare_pred_graph(graph, output)
                 batch_metrics = batch_metrics_fn(graph, pred_graph, pred_outputs, None)
@@ -1344,34 +1343,7 @@ def evaluate(
     def _eval_step(params_, graph):
         """Run the predictor and compute per-batch metric stats on devices."""
         output = predictor(params_, graph)
-        nodes = graph.nodes
-        if output.get('forces') is not None:
-            nodes = nodes._replace(forces=output.get('forces'))
-        globals_updates = {}
-        for key in ('energy', 'stress', 'virials', 'dipole', 'polarizability'):
-            if key in output and output[key] is not None:
-                globals_updates[key] = output[key]
-        globals_attr = (
-            graph.globals._replace(**globals_updates)
-            if globals_updates
-            else graph.globals
-        )
-        pred_graph = graph._replace(nodes=nodes, globals=globals_attr)
-
-        pred_outputs = {
-            'energy': pred_graph.globals.energy,
-            'forces': pred_graph.nodes.forces,
-            'stress': pred_graph.globals.stress,
-        }
-        virials_value = getattr(pred_graph.globals, 'virials', None)
-        if virials_value is not None:
-            pred_outputs['virials'] = virials_value
-        dipole_value = getattr(pred_graph.globals, 'dipole', None)
-        if dipole_value is not None:
-            pred_outputs['dipole'] = dipole_value
-        polar_value = getattr(pred_graph.globals, 'polarizability', None)
-        if polar_value is not None:
-            pred_outputs['polarizability'] = polar_value
+        pred_graph, pred_outputs = _prepare_pred_graph(graph, output)
 
         batch_metrics = batch_metrics_fn(graph, pred_graph, pred_outputs, None)
         return _psum_metrics(batch_metrics)

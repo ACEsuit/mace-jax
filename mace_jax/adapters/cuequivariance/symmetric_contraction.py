@@ -22,17 +22,17 @@ from __future__ import annotations
 
 from functools import cache
 
+import cuequivariance as cue
 import cuequivariance_jax as cuex
 import jax
 import jax.numpy as jnp
 import numpy as np
-from e3nn_jax import Irreps
-from flax import nnx
-
-import cuequivariance as cue
 from cuequivariance.group_theory.experimental.mace.symmetric_contractions import (
     symmetric_contraction as cue_mace_symmetric_contraction,
 )
+from e3nn_jax import Irreps
+from flax import nnx
+
 from mace_jax.adapters.nnx.torch import (
     _resolve_scope,
     nxx_auto_import_from_torch,
@@ -467,8 +467,12 @@ def _import_cue_symmetric_contraction(module, variables, scope) -> None:
     target['weight'] = jnp.asarray(weight, dtype=dtype)
 
 
-@nxx_register_import_mapper('mace.modules.symmetric_contraction.SymmetricContraction')
-def _import_native_symmetric_contraction(module, variables, scope) -> None:
+@nxx_register_import_mapper(
+    'mace.modules.symmetric_contraction.SymmetricContraction', with_target=True
+)
+def _import_native_symmetric_contraction(
+    module, variables, scope, *, target_module=None
+) -> None:
     """Import mapper that mirrors the native Torch module weight layout.
 
     Native MACE stores weights per-degree and per-correlation.  This mapper
@@ -480,6 +484,9 @@ def _import_native_symmetric_contraction(module, variables, scope) -> None:
     converted = _convert_native_weights(
         module,
         target_template=jnp.asarray(weight, dtype=default_dtype()),
+        target_use_reduced_cg=(
+            target_module.use_reduced_cg if target_module is not None else None
+        ),
     )
     target['weight'] = jnp.asarray(converted, dtype=weight.dtype)
 
@@ -492,6 +499,7 @@ def _convert_native_weights(
     torch_module,
     *,
     target_template: jnp.ndarray,
+    target_use_reduced_cg: bool | None = None,
 ) -> jnp.ndarray:
     """Convert native MACE weights into the layout expected by the JAX module.
 
@@ -503,6 +511,9 @@ def _convert_native_weights(
     target_template:
         Array matching the desired output shape and dtype.  Only its metadata is
         used; the values are ignored.
+    target_use_reduced_cg:
+        Target basis setting. When provided, resolves equal-dimensional full and
+        reduced bases that cannot be distinguished by the parameter shape.
 
     Returns
     -------
@@ -564,7 +575,14 @@ def _convert_native_weights(
     full_dim = descriptor_projection.shape[0]
     native_dim = native_weight.shape[1]
 
-    if basis_dim == reduced_dim:
+    # Full and reduced bases can have equal dimensions but different layouts.
+    # Prefer the actual target setting over inferring the basis from its shape.
+    use_reduced = (
+        basis_dim == reduced_dim
+        if target_use_reduced_cg is None
+        else target_use_reduced_cg
+    )
+    if use_reduced and basis_dim == reduced_dim:
         if native_dim == reduced_dim:
             converted = np.einsum(
                 'zau,ab->zbu', native_weight, reduced_projection, optimize=True
@@ -590,10 +608,13 @@ def _convert_native_weights(
                 'ab,zbu->zau', transform, native_weight, optimize=True
             )
         elif native_dim == reduced_dim:
+            reduced = np.einsum(
+                'zau,ab->zbu', native_weight, reduced_projection, optimize=True
+            )
             lift = np.linalg.pinv(descriptor_projection, rcond=1e-12).astype(
                 native_weight.dtype, copy=False
             )
-            converted = np.einsum('zau,ab->zbu', native_weight, lift, optimize=True)
+            converted = np.einsum('zau,ab->zbu', reduced, lift, optimize=True)
         else:
             raise ValueError(
                 'Native SymmetricContraction weight shape mismatch during import.'

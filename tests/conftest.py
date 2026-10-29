@@ -4,6 +4,7 @@ from pathlib import Path
 
 import ase.io
 import h5py
+import jax
 import numpy as np
 import pytest
 import torch
@@ -49,6 +50,31 @@ def _preserve_global_precisions_per_test():
     finally:
         jax_config.update('jax_enable_x64', prev_jax_x64)
         torch.set_default_dtype(prev_torch_dtype)
+
+
+def _available_runtime_modes():
+    """Discover both backends even when JAX defaults to GPU."""
+    modes = []
+    for mode in ('cpu', 'gpu'):
+        if mode == 'gpu' and not torch.cuda.is_available():
+            continue
+        try:
+            devices = jax.devices(mode)
+        except RuntimeError:
+            continue
+        if devices:
+            modes.append(mode)
+    return modes
+
+
+@pytest.fixture(params=_available_runtime_modes())
+def runtime_devices(request):
+    """Run parity checks on matching Torch/JAX CPU and GPU devices."""
+    mode = request.param
+    jax_device = jax.devices(mode)[0]
+    torch_device = torch.device('cuda' if mode == 'gpu' else 'cpu')
+    with jax.default_device(jax_device):
+        yield {'mode': mode, 'torch_device': torch_device, 'jax_device': jax_device}
 
 
 @pytest.fixture(scope='session')

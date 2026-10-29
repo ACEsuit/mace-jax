@@ -1,10 +1,19 @@
+import jax
 import jax.numpy as jnp
 import jraph
 import numpy as np
+import pytest
+import torch
+from mace.modules.loss import conditional_huber_forces as torch_conditional_huber
 
 from mace_jax.data import GraphEdges, GraphGlobals, GraphNodes
 from mace_jax.modules import loss as loss_mod
 from mace_jax.tools import sum_nodes_of_the_same_graph
+from mace_jax.tools.train import (
+    _checked_loss,
+    _make_eval_batch_metrics,
+    _prepare_pred_graph,
+)
 
 
 def build_test_graph():
@@ -77,6 +86,26 @@ def build_predictions():
             dtype=jnp.float32,
         ),
     }
+
+
+def test_missing_predictions_do_not_create_perfect_metrics():
+    graph = build_test_graph()
+    output = {'energy': build_predictions()['energy']}
+    pred_graph, predictions = _prepare_pred_graph(graph, output)
+    loss_fn = loss_mod.WeightedEnergyForcesLoss(forces_weight=0.0)
+    metrics = _make_eval_batch_metrics(loss_fn)(graph, pred_graph, predictions, None)
+    assert metrics['energy'] is not None
+    assert metrics['forces'] is None
+    assert metrics['stress'] is None
+
+
+@pytest.mark.parametrize('missing', ['energy', 'forces', 'virials'])
+def test_training_rejects_missing_required_predictions(missing):
+    graph = build_test_graph()
+    output = build_predictions() | {'virials': jnp.zeros((3, 3, 3))}
+    output.pop(missing)
+    with pytest.raises(ValueError, match=f'missing model predictions.*{missing}'):
+        _checked_loss(loss_mod.WeightedEnergyForcesVirialsLoss(), graph, output)
 
 
 def test_weighted_energy_and_forces_losses():
@@ -161,12 +190,13 @@ def test_conditional_losses_match_baseline_for_small_forces():
 
     node_mask = jraph.get_node_padding_mask(graph).astype(jnp.float32)
     diff = (graph.nodes.forces - preds['forces']) * node_mask[:, None]
-    delta_per_node = jnp.full(diff.shape[0], 0.5, dtype=diff.dtype)
-    delta_expanded = delta_per_node[:, None]
-    loss_components = jnp.where(
-        jnp.abs(diff) <= delta_expanded,
-        0.5 * diff**2 / delta_expanded,
-        delta_expanded * (jnp.abs(diff) - 0.5 * delta_expanded),
+    loss_components = jnp.asarray(
+        torch.nn.functional.huber_loss(
+            torch.tensor(np.asarray(diff)),
+            torch.zeros(diff.shape),
+            reduction='none',
+            delta=0.5,
+        ).numpy()
     )
     loss_components *= node_mask[:, None]
 
@@ -184,4 +214,117 @@ def test_conditional_losses_match_baseline_for_small_forces():
     )
     np.testing.assert_allclose(
         np.asarray(conditional_huber), np.asarray(expected_huber), rtol=1e-6, atol=1e-6
+    )
+
+
+def test_force_weights_disable_missing_labels_and_scale_labeled_graphs():
+    graph = build_test_graph()
+    preds = build_predictions()
+    baseline = loss_mod.mean_squared_error_forces(graph, preds['forces'])
+    graph = graph._replace(
+        globals=graph.globals._replace(forces_weight=jnp.array([0.0, 0.25, 0.0]))
+    )
+    actual = loss_mod.mean_squared_error_forces(graph, preds['forces'])
+    np.testing.assert_allclose(actual, baseline * jnp.array([0.0, 0.25, 0.0]))
+    grad = jax.grad(
+        lambda forces: loss_mod.WeightedForcesLoss()(graph, {'forces': forces}).sum()
+    )(preds['forces'])
+    np.testing.assert_array_equal(grad[:2], 0.0)
+
+
+@pytest.mark.parametrize(
+    'loss_cls',
+    [
+        loss_mod.WeightedHuberEnergyForcesStressLoss,
+        loss_mod.UniversalLoss,
+    ],
+)
+@pytest.mark.parametrize('property_name', ['energy', 'forces', 'stress'])
+def test_huber_matches_torch_values_and_gradients(loss_cls, property_name):
+    graph = build_test_graph()
+    graph = graph._replace(globals=graph.globals._replace(weight=jnp.ones(3)))
+    # Include errors on both sides of delta=0.5 in each property.
+    reference = (
+        graph.nodes.forces
+        if property_name == 'forces'
+        else getattr(graph.globals, property_name)
+    )
+    reference = reference.astype(jnp.float64)
+    pred = reference + jnp.linspace(0.1, 0.9, reference.size).reshape(reference.shape)
+    weights = {
+        f'{name}_weight': float(name == property_name)
+        for name in ('energy', 'forces', 'stress')
+    }
+    loss_fn = loss_cls(**weights, huber_delta=0.5)
+    actual, actual_grad = jax.value_and_grad(
+        lambda value: loss_fn(graph, {property_name: value}).sum()
+    )(pred)
+    pred_torch = torch.tensor(np.asarray(pred), requires_grad=True)
+    ref_torch = torch.tensor(np.asarray(reference))
+    if property_name == 'energy':
+        expected = torch.nn.functional.huber_loss(
+            pred_torch[:2] / torch.tensor([2.0, 1.0]),
+            ref_torch[:2] / torch.tensor([2.0, 1.0]),
+            delta=0.5,
+            reduction='sum',
+        )
+    elif property_name == 'forces':
+        expected = sum(
+            torch.nn.functional.huber_loss(
+                pred_torch[start:end], ref_torch[start:end], delta=0.5
+            )
+            for start, end in [(0, 2), (2, 3)]
+        )
+    else:
+        expected = sum(
+            torch.nn.functional.huber_loss(pred_torch[i], ref_torch[i], delta=0.5)
+            for i in range(2)
+        )
+    expected.backward()
+    np.testing.assert_allclose(actual, expected.detach().numpy(), rtol=1e-6)
+    np.testing.assert_allclose(actual_grad, pred_torch.grad.numpy(), atol=1e-7)
+
+
+def test_universal_loss_is_zero_for_exact_forces_with_nonunit_weights():
+    graph = build_test_graph()
+    graph = graph._replace(
+        globals=graph.globals._replace(forces_weight=jnp.array([0.5, 3.0, 0.0]))
+    )
+    loss_fn = loss_mod.UniversalLoss(energy_weight=0.0, stress_weight=0.0)
+    value, grad = jax.value_and_grad(
+        lambda forces: loss_fn(graph, {'forces': forces}).sum()
+    )(graph.nodes.forces)
+    assert value == 0.0
+    np.testing.assert_array_equal(grad, 0.0)
+
+
+@pytest.mark.parametrize('force_norm', [50.0, 150.0, 250.0, 350.0])
+def test_conditional_huber_matches_torch(force_norm):
+    graph = build_test_graph()
+    reference = jnp.zeros_like(graph.nodes.forces).at[:, 0].set(force_norm)
+    graph = graph._replace(nodes=graph.nodes._replace(forces=reference))
+    pred = reference + jnp.array([0.01, 0.1, 0.6], dtype=reference.dtype)
+    actual = loss_mod.conditional_huber_forces(graph, pred, huber_delta=0.5)
+    expected = torch_conditional_huber(
+        torch.tensor(np.asarray(reference[:2])), torch.tensor(np.asarray(pred[:2])), 0.5
+    )
+    np.testing.assert_allclose(
+        actual[:2], [expected.item(), 2 * expected.item()], rtol=1e-5
+    )
+    assert actual[2] == 0.0
+
+
+def test_weighted_huber_uses_fixed_threshold_for_large_forces():
+    graph = build_test_graph()
+    reference = jnp.full_like(graph.nodes.forces, 350.0)
+    graph = graph._replace(nodes=graph.nodes._replace(forces=reference))
+    pred = reference + 0.2
+    loss_fn = loss_mod.WeightedHuberEnergyForcesStressLoss(
+        energy_weight=0.0, stress_weight=0.0, huber_delta=0.5
+    )
+    expected = torch.nn.functional.huber_loss(
+        torch.tensor(np.asarray(reference)), torch.tensor(np.asarray(pred)), delta=0.5
+    ).item()
+    np.testing.assert_allclose(
+        loss_fn(graph, {'forces': pred})[:2], [expected, 2 * expected], rtol=1e-6
     )

@@ -125,7 +125,8 @@ def mean_squared_error_forces(
     diff_sq = jnp.mean(jnp.square(diff), axis=-1)
 
     per_graph_weight = _graph_attribute(graph, 'weight', 1.0, dtype=diff_sq.dtype)
-    per_node_weight = _broadcast_to_nodes(graph, per_graph_weight)
+    forces_weight = _graph_attribute(graph, 'forces_weight', 1.0, dtype=diff_sq.dtype)
+    per_node_weight = _broadcast_to_nodes(graph, per_graph_weight * forces_weight)
     per_node_loss = per_node_weight * diff_sq
     per_graph = _safe_divide(
         sum_nodes_of_the_same_graph(graph, per_node_loss), _num_atoms(graph)
@@ -278,6 +279,16 @@ def conditional_huber_forces(
     forces_pred: jnp.ndarray,
     huber_delta: float,
 ) -> jnp.ndarray:
+    return _huber_error_forces(graph, forces_pred, huber_delta, conditional=True)
+
+
+def _huber_error_forces(
+    graph: jraph.GraphsTuple,
+    forces_pred: jnp.ndarray,
+    huber_delta: float,
+    *,
+    conditional: bool = False,
+) -> jnp.ndarray:
     if not hasattr(graph.nodes, 'forces') or graph.nodes.forces is None:
         return jnp.zeros(graph.n_node.shape, dtype=jnp.asarray(forces_pred).dtype)
     forces_ref = jnp.asarray(graph.nodes.forces)
@@ -297,11 +308,13 @@ def conditional_huber_forces(
         factors[:3],
         default=factors[3],
     )
+    if not conditional:
+        delta_per_node = jnp.full_like(delta_per_node, huber_delta)
     delta_per_node = jnp.maximum(delta_per_node, 1e-12)
     delta_expanded = delta_per_node[:, None]
     loss_components = jnp.where(
         jnp.abs(diff) <= delta_expanded,
-        0.5 * diff**2 / delta_expanded,
+        0.5 * diff**2,
         delta_expanded * (jnp.abs(diff) - 0.5 * delta_expanded),
     )
     loss_components *= node_mask
@@ -420,7 +433,7 @@ class WeightedHuberEnergyForcesStressLoss:
             diff = _safe_divide(energy_ref - energy_pred, num_atoms)
             huber = jnp.where(
                 jnp.abs(diff) <= self.huber_delta,
-                0.5 * diff**2 / self.huber_delta,
+                0.5 * diff**2,
                 self.huber_delta * (jnp.abs(diff) - 0.5 * self.huber_delta),
             )
             weight = _graph_attribute(graph, 'weight', 1.0, dtype=huber.dtype)
@@ -432,7 +445,7 @@ class WeightedHuberEnergyForcesStressLoss:
             )
 
         if self.forces_weight != 0.0 and 'forces' in predictions:
-            loss += self.forces_weight * conditional_huber_forces(
+            loss += self.forces_weight * _huber_error_forces(
                 graph, predictions['forces'], self.huber_delta
             )
 
@@ -445,7 +458,7 @@ class WeightedHuberEnergyForcesStressLoss:
             delta = jnp.asarray(self.huber_delta, dtype=diff.dtype)
             loss_stress = jnp.where(
                 jnp.abs(diff) <= delta,
-                0.5 * diff**2 / delta,
+                0.5 * diff**2,
                 delta * (jnp.abs(diff) - 0.5 * delta),
             )
             loss_stress = jnp.mean(loss_stress, axis=(1, 2))
@@ -494,7 +507,7 @@ class UniversalLoss:
             diff = energy_weight * _safe_divide(energy_ref - energy_pred, num_atoms)
             huber = jnp.where(
                 jnp.abs(diff) <= self.huber_delta,
-                0.5 * diff**2 / self.huber_delta,
+                0.5 * diff**2,
                 self.huber_delta * (jnp.abs(diff) - 0.5 * self.huber_delta),
             )
             loss += (
@@ -504,18 +517,28 @@ class UniversalLoss:
                 * _graph_mask(graph)
             )
 
-        if self.forces_weight != 0.0 and 'forces' in predictions:
+        if (
+            self.forces_weight != 0.0
+            and 'forces' in predictions
+            and graph.nodes.forces is not None
+        ):
             forces_weight = _graph_attribute(
                 graph, 'forces_weight', 1.0, dtype=jnp.float32
             )
-            per_node_weight = _broadcast_to_nodes(
-                graph,
-                _graph_attribute(graph, 'weight', 1.0, dtype=jnp.float32)
-                * forces_weight,
+            per_node_weight = _broadcast_to_nodes(graph, forces_weight)
+            # UniversalLoss weights both sides of the residual before applying
+            # Huber, including the reference norm used to choose its threshold.
+            scaled_graph = graph._replace(
+                nodes=graph.nodes._replace(
+                    forces=graph.nodes.forces * per_node_weight[:, None]
+                ),
+                globals=graph.globals._replace(
+                    forces_weight=jnp.ones_like(forces_weight)
+                ),
             )
             scaled_pred = predictions['forces'] * per_node_weight[:, None]
             loss += self.forces_weight * conditional_huber_forces(
-                graph, scaled_pred, self.huber_delta
+                scaled_graph, scaled_pred, self.huber_delta
             )
 
         if self.stress_weight != 0.0 and 'stress' in predictions:
@@ -529,7 +552,7 @@ class UniversalLoss:
             diff = stress_weight[:, None, None] * (stress_ref - stress_pred)
             huber = jnp.where(
                 jnp.abs(diff) <= self.huber_delta,
-                0.5 * diff**2 / self.huber_delta,
+                0.5 * diff**2,
                 self.huber_delta * (jnp.abs(diff) - 0.5 * self.huber_delta),
             )
             huber = jnp.mean(huber, axis=(1, 2))

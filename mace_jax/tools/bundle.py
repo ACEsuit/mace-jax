@@ -13,6 +13,7 @@ import numpy as np
 from e3nn_jax import Irrep, Irreps
 from flax import nnx, serialization
 
+from mace_jax.adapters.e3nn.math import moment
 from mace_jax.nnx_config import ConfigVar
 from mace_jax.nnx_utils import state_to_pure_dict, state_to_serializable_dict
 from mace_jax.tools import model_builder
@@ -57,6 +58,50 @@ def _maybe_set_dtype(dtype: str | None) -> None:
         jax.config.update('jax_enable_x64', False)
 
 
+@jax.jit
+def _legacy_sigmoid_const():
+    # Older bundles omitted sigmoid from their state. Match the deterministic
+    # JAX estimate used when loading those bundles, rather than changing their
+    # predictions to the new NumPy estimate or a process-global Torch override.
+    return moment(jax.nn.sigmoid, 2, jax.random.PRNGKey(0)) ** -0.5
+
+
+def _restore_bundle(config: dict, payload, dtype: str, *, context: str) -> ModelBundle:
+    config, _, _ = model_builder._normalize_atomic_config(config)
+    _maybe_set_dtype(dtype)
+    serialized = isinstance(payload, (bytes, bytearray))
+    state_pure = serialization.msgpack_restore(payload) if serialized else dict(payload)
+
+    stored_consts = state_pure.get('_normalize2mom_consts_var')
+    if stored_consts is not None:
+        consts = dict(stored_consts.items())
+        if 'sigmoid' not in consts:
+            configured = config.get('normalize2mom_consts') or {}
+            consts['sigmoid'] = (
+                configured['sigmoid']
+                if 'sigmoid' in configured
+                else np.asarray(_legacy_sigmoid_const())
+            )
+        state_pure['_normalize2mom_consts_var'] = consts
+        # Activations are constructed before NNX state is restored. Build them
+        # with the saved constants, including for checkpoints lacking JSON data.
+        config['normalize2mom_consts'] = {
+            key: float(np.asarray(value)) for key, value in consts.items()
+        }
+
+    module = model_builder._build_jax_model(config, rngs=nnx.Rngs(0))
+    graphdef, state = nnx.split(module)
+    if serialized:
+        # Keep strict validation of all other keys after the schema migration.
+        state_pure = serialization.from_state_dict(
+            state_to_serializable_dict(state), state_pure
+        )
+    _replace_state_with_specials(state, state_pure)
+    state_pure = state_to_pure_dict(state)
+    _validate_config_matches_params(config, state_pure, context=context)
+    return ModelBundle(config=config, params=state_pure, graphdef=graphdef)
+
+
 def _load_checkpoint_bundle(path: Path, dtype: str) -> ModelBundle:
     with path.open('rb') as handle:
         payload = pickle.load(handle)
@@ -76,19 +121,7 @@ def _load_checkpoint_bundle(path: Path, dtype: str) -> ModelBundle:
     )
     if state_payload is None:
         raise ValueError(f'Checkpoint {path} is missing state/params payload.')
-    model_config, _, _ = model_builder._normalize_atomic_config(model_config)
-    _maybe_set_dtype(dtype)
-    module = model_builder._build_jax_model(model_config, rngs=nnx.Rngs(0))
-    graphdef, state = nnx.split(module)
-    state_template = state_to_serializable_dict(state)
-    if isinstance(state_payload, (bytes, bytearray)):
-        state_pure = serialization.from_bytes(state_template, state_payload)
-    else:
-        state_pure = state_payload
-    _replace_state_with_specials(state, state_pure)
-    state_pure = state_to_pure_dict(state)
-    _validate_config_matches_params(model_config, state_pure, context=str(path))
-    return ModelBundle(config=model_config, params=state_pure, graphdef=graphdef)
+    return _restore_bundle(model_config, state_payload, dtype, context=str(path))
 
 
 def load_model_bundle(
@@ -105,20 +138,12 @@ def load_model_bundle(
     config_path, params_path = resolve_model_paths(model_arg)
     config = json.loads(config_path.read_text())
 
-    _maybe_set_dtype(dtype)
-
     if wrapper not in (None, '', 'mace'):
         raise ValueError('mace-jax only supports the built-in MACE wrapper.')
 
-    config, _, _ = model_builder._normalize_atomic_config(config)
-    module = model_builder._build_jax_model(config, rngs=nnx.Rngs(0))
-    graphdef, state = nnx.split(module)
-    state_template = state_to_serializable_dict(state)
-    state_pure = serialization.from_bytes(state_template, params_path.read_bytes())
-    _replace_state_with_specials(state, state_pure)
-    state_pure = state_to_pure_dict(state)
-    _validate_config_matches_params(config, state_pure, context=str(params_path))
-    return ModelBundle(config=config, params=state_pure, graphdef=graphdef)
+    return _restore_bundle(
+        config, params_path.read_bytes(), dtype, context=str(params_path)
+    )
 
 
 def _find_param_leaf(tree, keys: Sequence[str]):

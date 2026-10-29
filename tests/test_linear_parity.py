@@ -41,16 +41,32 @@ except Exception as exc:  # pragma: no cover - optional backend
     _CUE_TORCH_IMPORT_ERROR = exc
 
 
-def _torch_cuda_available() -> bool:
-    return torch.cuda.is_available() and torch.cuda.device_count() > 0
-
-
 def _require_cue_torch():
     if not _CUE_TORCH_AVAILABLE:
         pytest.skip(
             f'cuequivariance torch backend unavailable: {_CUE_TORCH_IMPORT_ERROR}'
         )
     return CuEquivarianceConfigTorch, TorchLinearWrapper, CueLinearTorch
+
+
+def _cue_linear(irreps_in, irreps_out, device):
+    config_cls, wrapper, cue_linear = _require_cue_torch()
+    if device.type == 'cpu':
+        # CUDA availability alone must not select a CUDA transpose for CPU input.
+        return cue_linear(
+            cue.Irreps(cue.O3, str(irreps_in)),
+            cue.Irreps(cue.O3, str(irreps_out)),
+            layout=cue.mul_ir,
+            use_fallback=True,
+            method='naive',
+            device=device,
+        )
+    return wrapper(
+        irreps_in,
+        irreps_out,
+        shared_weights=True,
+        cueq_config=config_cls(enabled=True, optimize_linear=True),
+    ).to(device)
 
 
 def _as_irreps_array(irreps: Irreps, array: jnp.ndarray) -> IrrepsArray:
@@ -78,6 +94,10 @@ def _features_from_xyz(
 
 
 class TestLinearParity:
+    @pytest.fixture(autouse=True)
+    def _runtime(self, runtime_devices):
+        self.torch_device = runtime_devices['torch_device']
+
     def test_high_dim_linear_parity(self):
         """Cue-backed Linear vs e3nn o3.Linear on high-dimensional irreps."""
 
@@ -87,10 +107,14 @@ class TestLinearParity:
         irreps_out = o3.Irreps('16x0e')
 
         torch_linear = o3.Linear(irreps_in, irreps_out, shared_weights=True)
-        torch_linear = torch_linear.float().eval()
+        torch_linear = torch_linear.to(
+            device=self.torch_device, dtype=torch.float32
+        ).eval()
 
         features_np = rng.standard_normal((4, irreps_in.dim), dtype=np.float32)
-        features_torch = torch.tensor(features_np, dtype=torch.float32)
+        features_torch = torch.tensor(
+            features_np, dtype=torch.float32, device=self.torch_device
+        )
 
         with torch.no_grad():
             out_torch = torch_linear(features_torch).cpu().numpy()
@@ -117,10 +141,14 @@ class TestLinearParity:
         irreps_out = o3.Irreps('1x0e')
 
         features_np = simple_xyz_features
-        features_torch = torch.tensor(features_np, dtype=torch.float32)
+        features_torch = torch.tensor(
+            features_np, dtype=torch.float32, device=self.torch_device
+        )
 
         torch_linear = o3.Linear(irreps_in, irreps_out, shared_weights=True)
-        torch_linear = torch_linear.float().eval()
+        torch_linear = torch_linear.to(
+            device=self.torch_device, dtype=torch.float32
+        ).eval()
         with torch.no_grad():
             out_torch = torch_linear(features_torch).cpu().numpy()
 
@@ -146,7 +174,9 @@ class TestLinearParity:
         irreps_in = o3.Irreps('1x0e + 1x1o')
         irreps_out = o3.Irreps('1x0e')
         features_np = simple_xyz_features.astype(np.float32)
-        features_torch = torch.tensor(features_np, dtype=torch.float32)
+        features_torch = torch.tensor(
+            features_np, dtype=torch.float32, device=self.torch_device
+        )
         features_jax = _as_irreps_array(Irreps(irreps_in), jnp.asarray(features_np))
 
         # --- e3nn backend via wrapper (cue disabled) ---
@@ -157,7 +187,7 @@ class TestLinearParity:
                 shared_weights=True,
                 cueq_config=CuEquivarianceConfigTorch(enabled=False),
             )
-            .float()
+            .to(device=self.torch_device, dtype=torch.float32)
             .eval()
         )
         with torch.no_grad():
@@ -178,17 +208,11 @@ class TestLinearParity:
         np.testing.assert_allclose(out_jax_arr, out_torch_e3nn, rtol=1e-6, atol=1e-6)
 
         # --- cue-backed torch backend (enable optimize_linear to trigger cue) ---
-        if not _torch_cuda_available():
-            return
-        cue_cfg = CuEquivarianceConfigTorch(enabled=True, optimize_linear=True)
         try:
-            torch_linear_cue = TorchLinearWrapper(
-                irreps_in,
-                irreps_out,
-                shared_weights=True,
-                cueq_config=cue_cfg,
-            )
-            torch_linear_cue = torch_linear_cue.float().eval()
+            torch_linear_cue = _cue_linear(irreps_in, irreps_out, self.torch_device)
+            torch_linear_cue = torch_linear_cue.to(
+                device=self.torch_device, dtype=torch.float32
+            ).eval()
         except Exception as exc:
             pytest.skip(f'cuequivariance torch backend unavailable: {exc}')
 
@@ -215,7 +239,9 @@ class TestLinearParity:
         irreps_out = o3.Irreps('8x0e + 4x1o')
 
         features_np = rng.standard_normal((5, irreps_in.dim), dtype=np.float32)
-        features_torch = torch.tensor(features_np, dtype=torch.float32)
+        features_torch = torch.tensor(
+            features_np, dtype=torch.float32, device=self.torch_device
+        )
         features_jax = _as_irreps_array(Irreps(irreps_in), jnp.asarray(features_np))
 
         # --- e3nn backend via wrapper (cue disabled) ---
@@ -226,7 +252,7 @@ class TestLinearParity:
                 shared_weights=True,
                 cueq_config=CuEquivarianceConfigTorch(enabled=False),
             )
-            .float()
+            .to(device=self.torch_device, dtype=torch.float32)
             .eval()
         )
         with torch.no_grad():
@@ -247,17 +273,11 @@ class TestLinearParity:
         np.testing.assert_allclose(out_jax_arr, out_torch_e3nn, rtol=1e-6, atol=1e-6)
 
         # --- cue-backed torch backend (enable optimize_linear to trigger cue) ---
-        if not _torch_cuda_available():
-            return
-        cue_cfg = CuEquivarianceConfigTorch(enabled=True, optimize_linear=True)
         try:
-            torch_linear_cue = TorchLinearWrapper(
-                irreps_in,
-                irreps_out,
-                shared_weights=True,
-                cueq_config=cue_cfg,
-            )
-            torch_linear_cue = torch_linear_cue.float().eval()
+            torch_linear_cue = _cue_linear(irreps_in, irreps_out, self.torch_device)
+            torch_linear_cue = torch_linear_cue.to(
+                device=self.torch_device, dtype=torch.float32
+            ).eval()
         except Exception as exc:
             pytest.skip(f'cuequivariance torch backend unavailable: {exc}')
 
@@ -279,8 +299,6 @@ class TestLinearParity:
     def test_cue_linear_matches_torch_mul_ir(self, simple_xyz_features):
         """Cue Linear adapter should mirror torch cuet.Linear in mul_ir layout."""
         _, _, CueLinearTorch = _require_cue_torch()
-        if not _torch_cuda_available():
-            pytest.skip('cuequivariance torch backend requires CUDA')
         irreps_in = '1x0e + 1x1o'
         irreps_out = '2x0e'
 
@@ -288,11 +306,15 @@ class TestLinearParity:
             cue.Irreps(cue.O3, irreps_in),
             cue.Irreps(cue.O3, irreps_out),
             layout=cue.mul_ir,
-        ).float()
+            use_fallback=True if self.torch_device.type == 'cpu' else None,
+            device=self.torch_device,
+        ).to(device=self.torch_device, dtype=torch.float32)
 
         features_np = _features_from_xyz(simple_xyz_features, Irreps(irreps_in))
         features_jax = jnp.asarray(features_np)
-        features_torch = torch.tensor(features_np, dtype=torch.float32)
+        features_torch = torch.tensor(
+            features_np, dtype=torch.float32, device=self.torch_device
+        )
 
         with torch.no_grad():
             out_torch = torch_layer(features_torch).cpu().numpy()
@@ -316,8 +338,6 @@ class TestLinearParity:
     def test_cue_linear_matches_torch_ir_mul(self, simple_xyz_features):
         """Cue Linear adapter should mirror torch cuet.Linear in ir_mul layout."""
         _, _, CueLinearTorch = _require_cue_torch()
-        if not _torch_cuda_available():
-            pytest.skip('cuequivariance torch backend requires CUDA')
         irreps_in = '2x0e + 1x1o'
         irreps_out = '1x0e + 1x1o'
         irreps_in_obj = Irreps(irreps_in)
@@ -326,14 +346,18 @@ class TestLinearParity:
             cue.Irreps(cue.O3, irreps_in),
             cue.Irreps(cue.O3, irreps_out),
             layout=cue.ir_mul,
-        ).float()
+            use_fallback=True if self.torch_device.type == 'cpu' else None,
+            device=self.torch_device,
+        ).to(device=self.torch_device, dtype=torch.float32)
 
         # Build mul_ir features from the XYZ sample, then convert to ir_mul for torch.
         features_mul_ir = _features_from_xyz(simple_xyz_features, irreps_in_obj)
         features_ir_mul = cue_mul_ir_to_ir_mul(
             jnp.asarray(features_mul_ir), irreps_in_obj
         )
-        features_torch = torch.tensor(np.asarray(features_ir_mul), dtype=torch.float32)
+        features_torch = torch.tensor(
+            np.asarray(features_ir_mul), dtype=torch.float32, device=self.torch_device
+        )
 
         with torch.no_grad():
             out_torch_ir_mul = torch_layer(features_torch).cpu().numpy()
@@ -358,8 +382,6 @@ class TestLinearParity:
     def test_import_rejects_layout_mismatch(self):
         """Import should fail when Torch and JAX layouts disagree."""
         _, _, CueLinearTorch = _require_cue_torch()
-        if not _torch_cuda_available():
-            pytest.skip('cuequivariance torch backend requires CUDA')
         irreps_in = '1x0e + 1x1o'
         irreps_out = '1x0e'
 
@@ -367,7 +389,9 @@ class TestLinearParity:
             cue.Irreps(cue.O3, irreps_in),
             cue.Irreps(cue.O3, irreps_out),
             layout=cue.mul_ir,  # Torch uses mul_ir
-        ).float()
+            use_fallback=True if self.torch_device.type == 'cpu' else None,
+            device=self.torch_device,
+        ).to(device=self.torch_device, dtype=torch.float32)
 
         features_np = np.zeros((2, o3.Irreps(irreps_in).dim), dtype=np.float32)
         features_jax = jnp.asarray(features_np)

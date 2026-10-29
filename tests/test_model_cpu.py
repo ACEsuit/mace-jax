@@ -1,4 +1,4 @@
-"""Small end-to-end Torch conversion checks that do not require CUDA."""
+"""Small end-to-end Torch conversion checks on CPU and available GPUs."""
 
 import jax
 import jax.numpy as jnp
@@ -13,7 +13,10 @@ from mace_jax.tools.import_from_torch import extract_config_mace_model
 
 
 @pytest.mark.parametrize('radial_type', ['bessel', 'gaussian'])
-def test_converted_multihead_model_matches_torch_on_cpu(radial_type):
+@pytest.mark.parametrize('nonlinear', [False, True])
+def test_converted_multihead_model_matches_torch(
+    radial_type, nonlinear, runtime_devices
+):
     torch.manual_seed(10)
     config = dict(
         r_max=3.0,
@@ -37,6 +40,15 @@ def test_converted_multihead_model_matches_torch_on_cpu(radial_type):
         heads=['first', 'second'],
         radial_type=radial_type,
     )
+    if nonlinear:
+        config.update(
+            interaction_cls=blocks.RealAgnosticResidualNonLinearInteractionBlock,
+            interaction_cls_first=blocks.RealAgnosticResidualNonLinearInteractionBlock,
+            radial_MLP=[8, 8],
+            # Isolate gated interaction parity from higher-order CG projection
+            # roundoff; the regular interaction cases cover correlation=2.
+            correlation=1,
+        )
     model = models.ScaleShiftMACE(**config)
     config = extract_config_mace_model(model)
     assert config['num_bessel'] == 3
@@ -58,8 +70,10 @@ def test_converted_multihead_model_matches_torch_on_cpu(radial_type):
         'ptr': np.array([0, 3, 6]),
         'head': np.array([0, 1]),
     }
-    expected = model(
-        {key: torch.tensor(value) for key, value in data.items()}, compute_stress=True
+    torch_device = runtime_devices['torch_device']
+    expected = model.to(torch_device)(
+        {key: torch.tensor(value, device=torch_device) for key, value in data.items()},
+        compute_stress=True,
     )
 
     @jax.jit
@@ -70,7 +84,7 @@ def test_converted_multihead_model_matches_torch_on_cpu(radial_type):
     for key in ('energy', 'forces', 'stress', 'node_energy'):
         np.testing.assert_allclose(
             actual[key],
-            expected[key].detach().numpy(),
+            expected[key].detach().cpu().numpy(),
             rtol=1e-5,
             atol=1e-7,
             err_msg=key,

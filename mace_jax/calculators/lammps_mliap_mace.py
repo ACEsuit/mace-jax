@@ -175,6 +175,7 @@ class LAMMPS_MLIAP_MACE(MLIAPUnified):
         self.dtype = jnp.asarray(self.model.r_max).dtype
 
         self.device = self._select_device()
+        self.model.params = jax.device_put(self.model.params, self.device)
         self.initialized = False
         self.step = 0
 
@@ -201,16 +202,22 @@ class LAMMPS_MLIAP_MACE(MLIAPUnified):
         )
 
     def _select_device(self, *, using_kokkos: bool = False) -> Device:
-        devices = jax.devices()
-        cpu_devices = [d for d in devices if d.platform == 'cpu']
-        gpu_devices = [d for d in devices if d.platform in {'gpu', 'cuda', 'rocm'}]
-
         if self.config.force_cpu:
+            try:
+                cpu_devices = jax.devices('cpu')
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    'MACE_FORCE_CPU is set but no CPU devices are available to JAX.'
+                ) from exc
             if not cpu_devices:
                 raise RuntimeError(
                     'MACE_FORCE_CPU is set but no CPU devices are available to JAX.'
                 )
             return cpu_devices[0]
+
+        devices = jax.devices()
+        cpu_devices = [d for d in devices if d.platform == 'cpu']
+        gpu_devices = [d for d in devices if d.platform in {'gpu', 'cuda', 'rocm'}]
 
         if gpu_devices:
             return gpu_devices[0]

@@ -72,7 +72,9 @@ class MACEJAXCalculator(Calculator):
         Calculator.calculate(self, atoms)
 
         # prepare data
-        config = data.config_from_atoms(atoms)
+        # ASE's copy has no calculator attached. Reading labels from the input
+        # atoms would otherwise call back into this calculator recursively.
+        config = data.config_from_atoms(self.atoms.copy())
         if self.z_table is not None:
             config.atomic_numbers = self.z_table(config.atomic_numbers)
 

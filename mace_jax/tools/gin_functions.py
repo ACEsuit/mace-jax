@@ -39,6 +39,7 @@ from unique_names_generator.data import ADJECTIVES, NAMES
 
 from mace_jax import modules, tools
 from mace_jax.tools import device as device_utils
+from mace_jax.tools.train import _checked_loss
 
 _PROFILE_HELPER = None
 _PROFILE_HELPER_MISSING_WARNED = False
@@ -1318,8 +1319,8 @@ def train(
 
     for train_item in tools.train(
         params=trainable_params,
-        total_loss_fn=lambda params, graph: loss_fn(
-            graph, predictor_with_config(params, graph)
+        total_loss_fn=lambda params, graph: _checked_loss(
+            loss_fn, graph, predictor_with_config(params, graph)
         ),
         train_loader=train_loader,
         gradient_transform=gradient_transform,

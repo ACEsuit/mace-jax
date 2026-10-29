@@ -82,7 +82,11 @@ def _prepare_normalize2mom_consts(
 ) -> dict[str, float]:
     if consts is None:
         silu_value = estimate_normalize2mom_const('silu')
-        consts = {'silu': silu_value, 'swish': silu_value}
+        consts = {
+            'silu': silu_value,
+            'swish': silu_value,
+            'sigmoid': estimate_normalize2mom_const('sigmoid'),
+        }
     else:
         consts = dict(consts)
         if 'silu' not in consts:
@@ -91,6 +95,8 @@ def _prepare_normalize2mom_consts(
             consts.setdefault('swish', silu_value)
         if 'swish' not in consts:
             consts['swish'] = consts['silu']
+        if 'sigmoid' not in consts:
+            consts['sigmoid'] = estimate_normalize2mom_const('sigmoid')
     cleaned: dict[str, float] = {}
     for key, val in consts.items():
         try:

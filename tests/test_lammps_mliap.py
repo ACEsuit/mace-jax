@@ -1,9 +1,5 @@
 import os
-from contextlib import ExitStack
-
-from mace_jax.nnx_utils import state_to_pure_dict
-
-os.environ.setdefault('JAX_PLATFORM_NAME', 'cpu')
+from types import SimpleNamespace
 
 import jax
 import jax.numpy as jnp
@@ -17,27 +13,7 @@ from mace_jax.calculators.lammps_mliap_mace import (
     LAMMPS_MLIAP_MACE,
     create_lammps_mliap_calculator,
 )
-from mace_jax.tools.device import configure_torch_runtime
-
-try:
-    import torch
-except ImportError:  # pragma: no cover - torch optional dependency
-    torch = None  # type: ignore
-
-
-def _available_runtime_modes() -> list[str]:
-    devices = list(jax.devices())
-    has_cpu = any(dev.platform == 'cpu' for dev in devices)
-    has_gpu = any(dev.platform in {'gpu', 'cuda', 'rocm'} for dev in devices)
-
-    modes: list[str] = []
-    if has_cpu:
-        modes.append('cpu')
-    if has_gpu and torch is not None and torch.cuda.is_available():
-        modes.append('gpu')
-    if not modes:
-        pytest.skip('No supported JAX devices found for LAMMPS tests.')
-    return modes
+from mace_jax.nnx_utils import state_to_pure_dict
 
 
 def _restore_env(name: str, value: str | None) -> None:
@@ -47,49 +23,23 @@ def _restore_env(name: str, value: str | None) -> None:
         os.environ[name] = value
 
 
-@pytest.fixture(params=_available_runtime_modes())
-def lammps_runtime(request):
-    """
-    Ensure the calculator is exercised both on CPU and (when available) GPU.
-
-    The fixture temporarily tweaks the environment to steer the device choice
-    inside `LAMMPS_MLIAP_MACE` and installs a `jax.default_device` context so any
-    arrays created during the test live on the intended backend.
-    """
-
-    mode: str = request.param
-    stack = ExitStack()
+@pytest.fixture
+def lammps_runtime(runtime_devices):
+    """Select the calculator backend to match the shared CPU/GPU fixture."""
+    mode = runtime_devices['mode']
     orig_force_cpu = os.environ.get('MACE_FORCE_CPU')
     orig_allow_cpu = os.environ.get('MACE_ALLOW_CPU')
 
     try:
         if mode == 'gpu':
-            if not (torch and torch.cuda.is_available()):
-                pytest.skip('CUDA runtime for PyTorch not available.')
-            torch_device = configure_torch_runtime('cuda')
-
-            gpu_devices = [
-                dev for dev in jax.devices() if dev.platform in {'gpu', 'cuda', 'rocm'}
-            ]
-            if not gpu_devices:
-                pytest.skip('No GPU devices available to JAX.')
-            jax_device = gpu_devices[0]
-
             os.environ.pop('MACE_FORCE_CPU', None)
             os.environ.pop('MACE_ALLOW_CPU', None)
         else:
-            torch_device = configure_torch_runtime('cpu')
-            cpu_devices = [dev for dev in jax.devices() if dev.platform == 'cpu']
-            if not cpu_devices:
-                pytest.skip('No CPU devices available to JAX.')
-            jax_device = cpu_devices[0]
             os.environ['MACE_FORCE_CPU'] = 'true'
             os.environ['MACE_ALLOW_CPU'] = 'true'
 
-        stack.enter_context(jax.default_device(jax_device))
-        yield {'mode': mode, 'torch_device': torch_device, 'jax_device': jax_device}
+        yield runtime_devices
     finally:
-        stack.close()
         _restore_env('MACE_FORCE_CPU', orig_force_cpu)
         _restore_env('MACE_ALLOW_CPU', orig_allow_cpu)
 
@@ -564,26 +514,45 @@ def test_lammps_mliap_wrapper_periodic_image_example(lammps_runtime):
     assert dummy_data.energy == pytest.approx(total_energy)
 
 
-def test_lammps_calculator_respects_force_cpu(monkeypatch):
-    if not any(dev.platform == 'cpu' for dev in jax.devices()):
-        pytest.skip('No CPU devices available to JAX.')
+@pytest.mark.parametrize('default_platform', ['cpu', 'gpu'])
+def test_lammps_calculator_respects_force_cpu(monkeypatch, default_platform):
+    cpu_devices = jax.devices('cpu')
     monkeypatch.setenv('MACE_FORCE_CPU', 'true')
     model = _build_test_model()
-
-    pair_i = jnp.asarray([0], dtype=jnp.int32)
-    pair_j = jnp.asarray([0], dtype=jnp.int32)
-    vectors = jnp.asarray([[0.5, 0.0, 0.0]], dtype=jnp.float64)
-
-    lammps_batch = _build_lammps_batch(vectors, pair_i, pair_j, natoms=1)
-
     graphdef, params_state = nnx.split(model)
     params = state_to_pure_dict(params_state)
 
+    real_devices = jax.devices
+    default_devices = (
+        cpu_devices if default_platform == 'cpu' else [SimpleNamespace(platform='gpu')]
+    )
+    monkeypatch.setattr(
+        jax,
+        'devices',
+        lambda backend=None: (
+            default_devices if backend is None else real_devices(backend)
+        ),
+    )
     calculator = LAMMPS_MLIAP_MACE(graphdef, params)
     assert calculator.device.platform == 'cpu'
+    assert all(
+        leaf.device.platform == 'cpu'
+        for leaf in jax.tree.leaves(calculator.model.params)
+        if isinstance(leaf, jax.Array)
+    )
+    dummy_data = DummyLAMMPSData(
+        elems=[0, 0],
+        rij=[[0.5, 0.0, 0.0], [-0.5, 0.0, 0.0]],
+        pair_i=[0, 1],
+        pair_j=[1, 0],
+    )
+    calculator.compute_forces(dummy_data)
+    assert calculator.device.platform == 'cpu'
+    assert np.isfinite(dummy_data.energy)
+    assert np.isfinite(dummy_data.updated_pair_forces).all()
 
 
-def test_compute_forces_registers_jax_ffi_handles(monkeypatch):
+def test_compute_forces_registers_jax_ffi_handles(monkeypatch, lammps_runtime):
     model = _build_test_model()
     pair_i = jnp.asarray([0, 1], dtype=jnp.int32)
     pair_j = jnp.asarray([1, 0], dtype=jnp.int32)

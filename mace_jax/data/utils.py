@@ -106,7 +106,6 @@ def config_from_atoms(
         config_type_weights = DEFAULT_CONFIG_TYPE_WEIGHTS
 
     energy = atoms.info.get(energy_key, None)  # eV
-    energy_present = energy is not None
     if energy is None:
         try:
             energy = atoms.get_potential_energy()
@@ -156,7 +155,11 @@ def config_from_atoms(
         polarizability = np.asarray(polarizability)
 
     def _get_weight(key: str, present: bool) -> float:
-        value = atoms.info.get(f'{key}_weight', None)
+        if not present:
+            return 0.0
+        value = atoms.info.get(
+            f'config_{key}_weight', atoms.info.get(f'{key}_weight', None)
+        )
         if value is None:
             return 1.0 if present else 0.0
         return float(np.asarray(value).reshape(()))
@@ -174,7 +177,9 @@ def config_from_atoms(
     cell = np.array(atoms.get_cell())
     assert np.linalg.det(cell) >= 0.0
     config_type = atoms.info.get('config_type', 'Default')
-    weight = config_type_weights.get(config_type, 1.0)
+    weight = float(atoms.info.get('config_weight', 1.0)) * config_type_weights.get(
+        config_type, 1.0
+    )
     head = head_name if head_name is not None else atoms.info.get('head', 'Default')
     return Configuration(
         atomic_numbers=atomic_numbers,
@@ -242,14 +247,13 @@ def load_from_xyz(
         atoms_without_iso_atoms = []
 
         for idx, atoms in enumerate(atoms_list):
-            if (
-                len(atoms) == 1
-                and getattr(atoms, 'config_type', None) == 'IsolatedAtom'
-            ):
-                if energy_key in atoms.info.keys():
-                    atomic_energies_dict[atoms.get_atomic_numbers()[0]] = atoms.info[
-                        energy_key
-                    ]
+            if len(atoms) == 1 and atoms.info.get('config_type') == 'IsolatedAtom':
+                energy = atoms.info.get(energy_key)
+                # ASE stores standard extxyz energies on a SinglePointCalculator.
+                if energy is None and energy_key == 'energy' and atoms.calc is not None:
+                    energy = atoms.calc.results.get('energy')
+                if energy is not None:
+                    atomic_energies_dict[int(atoms.numbers[0])] = float(energy)
                 else:
                     logging.warning(
                         f"Configuration '{idx}' is marked as 'IsolatedAtom' "
@@ -517,7 +521,7 @@ def graph_from_configuration(
         ),
         edges=GraphEdges(shifts=shifts, unit_shifts=unit_shifts),
         globals=jax.tree_util.tree_map(
-            lambda x: x[None, ...] if x is not None else None,
+            lambda x: np.asarray(x)[None, ...] if x is not None else None,
             GraphGlobals(
                 cell=cell,
                 energy=config.energy,

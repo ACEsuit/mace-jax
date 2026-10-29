@@ -228,6 +228,41 @@ def test_gin_training_smoke(tmp_path):
     _run_gin_training(tmp_path)
 
 
+@pytest.mark.parametrize('n_graph', [3, 4])
+def test_multihead_stress_scaling_applies_per_graph(monkeypatch, n_graph):
+    train_loader, _, _, atomic_energies_dict, r_max = gin_datasets.datasets()
+    original_apply = gin_model.modules.MACE.apply
+
+    def predict(self, params, data, **kwargs):
+        output = original_apply(self, params, data, **kwargs)
+        output['stress'] = jnp.ones((data['ptr'].shape[0] - 1, 3, 3))
+        return output
+
+    monkeypatch.setattr(gin_model.modules.MACE, 'apply', predict)
+    model_fn, params, _ = gin_model.model(
+        r_max=r_max,
+        train_graphs=train_loader.graphs,
+        atomic_energies_dict=atomic_energies_dict,
+        heads=['first', 'second'],
+        scaling=lambda graphs, e0: (np.zeros(2), np.array([2.0, 3.0])),
+    )
+    first = train_loader.graphs[0]
+    first = first._replace(globals=first.globals._replace(head=np.array([0])))
+    second = first._replace(globals=first.globals._replace(head=np.array([1])))
+    batch = jraph.batch([first, second])
+    padded = jraph.pad_with_graphs(
+        batch,
+        n_node=int(batch.n_node.sum()) + 1,
+        n_edge=int(batch.n_edge.sum()),
+        n_graph=n_graph,
+    )
+    output = model_fn(params, padded, compute_stress=True)
+    expected = np.zeros((n_graph, 3, 3))
+    expected[0] = 2.0
+    expected[1] = 3.0
+    np.testing.assert_allclose(output['stress'], expected)
+
+
 def _run_gin_training(tmp_path, **train_kwargs):
     train_loader, valid_loader, test_loader, atomic_energies_dict, r_max = (
         gin_datasets.datasets()

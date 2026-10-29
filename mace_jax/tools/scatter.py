@@ -83,7 +83,7 @@ def scatter_sum(
         out = jnp.zeros(size, dtype=src.dtype)
 
     # Build indices for scatter
-    idx_grids = jnp.meshgrid(*[jnp.arange(s) for s in src.shape], indexing='ij')
+    idx_grids = list(jnp.meshgrid(*[jnp.arange(s) for s in src.shape], indexing='ij'))
     idx_grids[dim] = index  # replace the dimension with scatter indices
     scatter_indices = tuple(idx_grids)
 

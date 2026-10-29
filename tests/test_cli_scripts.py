@@ -19,7 +19,6 @@ class _DummyTorchModel(torch.nn.Module):
         self.r_max = torch.tensor(r_max)
 
 
-@pytest.mark.slow
 def test_run_train_cli_writes_operative_config(tmp_path, monkeypatch, simple_hdf5_path):
     gin.clear_config()
     results_dir = tmp_path / 'results'
@@ -54,21 +53,37 @@ def test_run_train_cli_writes_operative_config(tmp_path, monkeypatch, simple_hdf
     parsed, remaining = train_cli.parse_args(args)
     train_cli.configure_gin(parsed, remaining)
     train_cli.apply_cli_overrides(parsed)
-    operative = gin.operative_config_str()
-    train_cli._write_operative_config(
-        directory=str(results_dir),
-        tag='test',
-        operative_config=operative,
-        is_primary=True,
+    monkeypatch.setattr(gin_functions, 'flags', lambda: 0)
+    monkeypatch.setattr(gin_functions, 'logs', lambda: (str(results_dir), 'test', None))
+
+    class StopAfterConfig(RuntimeError):
+        pass
+
+    def stop_before_loading_datasets():
+        raise StopAfterConfig
+
+    monkeypatch.setattr(
+        train_cli.gin_datasets, 'datasets', stop_before_loading_datasets
     )
+    with pytest.raises(StopAfterConfig):
+        train_cli.run_training()
 
     gin_files = list(Path(results_dir).glob('*.gin'))
     assert gin_files, 'Expected operative gin config to be written.'
-    operative = gin_files[0].read_text(encoding='utf-8')
-    assert 'mace_jax.tools.gin_model.model.torch_checkpoint' in operative
-    assert 'dummy.pt' in operative
-    assert 'mace_jax.tools.gin_datasets.datasets.train_path' in operative
     gin.clear_config()
+    try:
+        gin.parse_config_file(str(gin_files[0]))
+        assert (
+            gin.query_parameter('mace_jax.tools.gin_model.model.torch_checkpoint')
+            == str(torch_ckpt)
+        )
+        assert gin.query_parameter('mace_jax.tools.gin_model.model.torch_head') == 'Surface'
+        assert (
+            gin.query_parameter('mace_jax.tools.gin_datasets.datasets.train_path')
+            == str(train_hdf5)
+        )
+    finally:
+        gin.clear_config()
 
 
 def test_plot_train_cli_generates_output(tmp_path):

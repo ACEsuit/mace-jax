@@ -253,6 +253,7 @@ class TestLinearReadoutBlock:
 class TestNonLinearReadoutBlock:
     """Compare NonLinearReadoutBlock in Haiku vs PyTorch."""
 
+    @pytest.mark.parametrize('dtype', [torch.float32, torch.float64])
     @pytest.mark.parametrize(
         'irreps_in, MLP_irreps, irrep_out, num_heads',
         [
@@ -262,25 +263,28 @@ class TestNonLinearReadoutBlock:
         ],
     )
     def test_forward_match_real_xyz(
-        self, irreps_in, MLP_irreps, irrep_out, num_heads, simple_xyz_features
+        self, irreps_in, MLP_irreps, irrep_out, num_heads, simple_xyz_features, dtype
     ):
         """Parity check on real XYZ-derived inputs to catch ordering issues."""
         irreps_in_obj = o3.Irreps(irreps_in)
         MLP_irreps_obj = o3.Irreps(MLP_irreps)
         irrep_out_obj = o3.Irreps(irrep_out)
 
-        x_np = _features_from_xyz(simple_xyz_features, irreps_in_obj)
+        np_dtype = np.float32 if dtype == torch.float32 else np.float64
+        x_np = _features_from_xyz(simple_xyz_features, irreps_in_obj).astype(np_dtype)
         x_jax = jnp.asarray(x_np)
         x_ir = IrrepsArray(irreps_in_obj, x_jax)
-        x_torch = torch.tensor(x_np, dtype=torch.float32)
+        x_torch = torch.tensor(x_np, dtype=dtype)
 
-        torch_model = NonLinearReadoutBlockTorch(
-            irreps_in=irreps_in_obj,
-            MLP_irreps=MLP_irreps_obj,
-            gate=torch.nn.SiLU(),
-            irrep_out=irrep_out_obj,
-            num_heads=num_heads,
-        ).float()
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(0)
+            torch_model = NonLinearReadoutBlockTorch(
+                irreps_in=irreps_in_obj,
+                MLP_irreps=MLP_irreps_obj,
+                gate=torch.nn.SiLU(),
+                irrep_out=irrep_out_obj,
+                num_heads=num_heads,
+            ).to(dtype=dtype)
         out_torch = torch_model(x_torch)
 
         module = NonLinearReadoutBlockJAX(
@@ -295,11 +299,13 @@ class TestNonLinearReadoutBlock:
         graphdef, state = nnx.split(module)
         out_jax, _ = graphdef.apply(state)(x_ir)
 
+        # The two frameworks accumulate float32 products in different orders.
+        rtol, atol = (1e-5, 1e-6) if dtype == torch.float32 else (1e-10, 1e-10)
         np.testing.assert_allclose(
             _to_numpy(out_jax),
             out_torch.detach().cpu().numpy(),
-            rtol=5e-7,
-            atol=5e-7,
+            rtol=rtol,
+            atol=atol,
         )
 
 

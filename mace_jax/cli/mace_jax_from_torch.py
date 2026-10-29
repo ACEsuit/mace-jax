@@ -22,11 +22,13 @@ warnings.filterwarnings(
 
 import torch
 from flax import nnx, serialization
-from mace.tools.scripts_utils import extract_config_mace_model
 
 from mace_jax.nnx_utils import state_to_serializable_dict
 from mace_jax.tools.foundation_models import load_foundation_torch_model
-from mace_jax.tools.import_from_torch import import_from_torch
+from mace_jax.tools.import_from_torch import (
+    extract_config_mace_model,
+    import_from_torch,
+)
 from mace_jax.tools.model_builder import (
     _as_irreps,
     _build_jax_model,

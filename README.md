@@ -33,6 +33,18 @@ pip install nox
 nox
 ```
 
+To run the full suite in an existing environment, including slow tests:
+
+```sh
+python -m pytest -o addopts='' -rs
+```
+
+The LAMMPS, linear parity, symmetric contraction, and small model conversion
+tests run explicit `[cpu]` and `[gpu]` variants when both JAX and Torch support
+the GPU. CPU variants also run on GPU hosts; cuEquivariance uses its CPU fallback
+for those variants. Use `-v` to see each variant. To test only the CPU backend,
+set `JAX_PLATFORMS=cpu`.
+
 ## Installation
 
 From github:
@@ -47,6 +59,9 @@ Or locally:
 pip install -e .
 ```
 
+The cuEquivariance 0.10 backend requires JAX below 0.12. The package metadata
+enforces this upper bound for both CPU and CUDA installations.
+
 ### Optional extras
 
 MACE-JAX defines a few optional dependency groups:
@@ -55,6 +70,7 @@ MACE-JAX defines a few optional dependency groups:
 - `jax-cuda12`: JAX CUDA 12 build + cueq CUDA 12 kernels
 - `torch-cuda13`: Torch + cueq CUDA 13 torch kernels
 - `torch-cuda12`: Torch + cueq CUDA 12 torch kernels
+- `openeq-jax`: OpenEquivariance CUDA kernels (requires the two-stage installation below)
 - `test`: pytest tooling
 - `plot`: matplotlib + pandas
 - `wandb`: Weights & Biases logging
@@ -177,6 +193,19 @@ fully connected tensor-product kernels. Install the pinned packages in this orde
 pip install "openequivariance[jax]==0.6.8"
 pip install "openequivariance_extjax==0.6.8" --no-build-isolation
 ```
+
+For an editable checkout with `uv`, use:
+
+```sh
+uv pip install "openequivariance[jax]==0.6.8"
+uv pip install -e ".[openeq-jax]" --no-build-isolation-package openequivariance-extjax
+```
+
+JAX must already be installed in the active environment. The first command
+installs OpenEquivariance and its build tools; the second builds the JAX extension
+against that environment's XLA headers. Installing `.[openeq-jax]` with default
+build isolation can fail with `No module named 'jax'` and a missing
+`xla/ffi/api/ffi.h`, because the extension's build requirements omit JAX.
 
 Enable it with `--enable-openeq`. The explicit equivalents are
 `--openeq-optimize-all`, `--openeq-conv-fusion`,
@@ -369,6 +398,12 @@ download and import pre-trained foundation models when `--torch-model` is not
 provided.
 
 If `--output` is omitted the converted parameters are written to `<checkpoint>-jax.npz`.
+
+Conversion preserves the SiLU and sigmoid normalization constants stored in Torch
+gated blocks. Reconvert the original Torch checkpoint to correct bundles exported
+before this fix from models using MACE's `GatedEquivariantBlock`. Existing JAX
+bundles remain loadable and retain their previous normalization when a saved
+sigmoid constant is absent.
 
 You can try this with one of the released foundation models (downloaded automatically):
 

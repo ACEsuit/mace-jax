@@ -1354,7 +1354,9 @@ def run_training() -> None:
     is_primary = process_index == 0
 
     Path(directory).mkdir(parents=True, exist_ok=True)
-    operative_config = gin.operative_config_str()
+    # Model and dataset configurables have not run yet, so the operative config
+    # omits their settings. Save all configured bindings, including CLI overrides.
+    operative_config = gin.config_str()
     _write_operative_config(
         directory=directory,
         tag=tag,

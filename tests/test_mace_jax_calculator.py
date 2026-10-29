@@ -3,6 +3,7 @@ import numpy as np
 import pytest
 from ase import Atoms
 
+from mace_jax import data
 from mace_jax.calculators import MACEJAXCalculator
 
 
@@ -45,3 +46,24 @@ def test_mace_jax_calculator_runs():
     assert np.asarray(calc.results['forces']).shape == (2, 3)
     assert np.asarray(calc.results['stress']).shape == (6,)
     assert pytest.approx(calc.results['energy']) == calc.results['free_energy']
+
+
+def test_attached_calculator_does_not_recursively_request_its_own_labels(monkeypatch):
+    original = data.config_from_atoms
+
+    def check_detached(atoms, **kwargs):
+        assert atoms.calc is None
+        return original(atoms, **kwargs)
+
+    monkeypatch.setattr(data, 'config_from_atoms', check_detached)
+    atoms = Atoms('H2', positions=[[0, 0, 0], [0, 0, 1]])
+    atoms.calc = MACEJAXCalculator(
+        model=_toy_model,
+        params={'scale': jnp.asarray(1.0), 'force': jnp.asarray(0.0)},
+        r_max=2.0,
+        atomic_numbers=[1],
+    )
+    assert atoms.get_potential_energy() == pytest.approx(1.0)
+    np.testing.assert_array_equal(atoms.get_forces(), np.zeros((2, 3)))
+    atoms.positions[1, 2] = 1.2
+    assert atoms.get_potential_energy() == pytest.approx(1.2)

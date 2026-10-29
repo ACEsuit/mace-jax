@@ -19,6 +19,15 @@ class Outputs(NamedTuple):
     stress_mask: bool | jnp.ndarray
 
 
+def _stress_from_virials(virials: jnp.ndarray, cell: jnp.ndarray) -> jnp.ndarray:
+    volume = jnp.abs(jnp.linalg.det(cell.reshape(-1, 3, 3))).reshape(-1, 1, 1)
+    valid_volume = volume > 0.0
+    # Mask the denominator before dividing: masking an infinity afterwards still
+    # leaves NaNs in reverse-mode derivatives for zero-volume cells.
+    stress = -virials / jnp.where(valid_volume, volume, 1.0)
+    return jnp.where(valid_volume & (jnp.abs(stress) < 1e10), stress, 0.0)
+
+
 def compute_forces(
     energy_fn: Callable[[jnp.ndarray], jnp.ndarray],
     positions: jnp.ndarray,
@@ -101,9 +110,7 @@ def compute_forces_and_stress(
     virials = -grad_disp
 
     # Stress computation
-    volume = jnp.abs(jnp.linalg.det(cell.reshape(-1, 3, 3))).reshape(-1, 1, 1)
-    stress = -virials / volume
-    stress = jnp.where(jnp.abs(stress) < 1e10, stress, jnp.zeros_like(stress))
+    stress = _stress_from_virials(virials, cell)
 
     return forces, stress
 
@@ -190,13 +197,7 @@ def get_outputs(
 
         forces = -grad_pos
         virials = -grad_disp
-        volume = jnp.abs(jnp.linalg.det(cell.reshape(-1, 3, 3))).reshape(-1, 1, 1)
-        stress = -virials / volume
-        stress = jnp.where(
-            jnp.abs(stress) < 1e10,
-            stress,
-            jnp.zeros_like(stress),
-        )
+        stress = _stress_from_virials(virials, cell)
         total_energy = _ensure_energy(per_graph_energy)
         return total_energy, forces, stress
 

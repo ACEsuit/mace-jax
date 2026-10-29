@@ -52,9 +52,7 @@ def _resolve_equivariance_config(equivariance_config, cueq_config=None):
         cueq_config = cueq_config()
     if equivariance_config is None and cueq_config is None:
         return None
-    return resolve_equivariance_config(
-        equivariance_config, cueq_config=cueq_config
-    )
+    return resolve_equivariance_config(equivariance_config, cueq_config=cueq_config)
 
 
 def _stringify_callable(value) -> str | None:
@@ -416,9 +414,11 @@ def model(
 
     if torch_checkpoint is not None:
         import torch  # noqa: PLC0415
-        from mace.tools.scripts_utils import extract_config_mace_model  # noqa: PLC0415
 
         from mace_jax.cli import mace_jax_from_torch  # noqa: PLC0415
+        from mace_jax.tools.import_from_torch import (  # noqa: PLC0415
+            extract_config_mace_model,
+        )
 
         checkpoint_path = Path(torch_checkpoint)
         if not checkpoint_path.exists():
@@ -671,9 +671,7 @@ def model(
             'learnable_atomic_energies is not supported by the Flax-based gin model.'
         )
 
-    equivariance_config = _resolve_equivariance_config(
-        equivariance_config, cueq_config
-    )
+    equivariance_config = _resolve_equivariance_config(equivariance_config, cueq_config)
     if equivariance_config is not None:
         kwargs['equivariance_config'] = equivariance_config
 
@@ -883,7 +881,10 @@ def model(
 
             stress = outputs.get('stress')
             if stress is not None:
-                stress = std_graph * jnp.nan_to_num(stress)
+                stress_scale = (
+                    std_graph if std_arr.ndim == 0 else std_graph[:, None, None]
+                )
+                stress = stress_scale * jnp.nan_to_num(stress)
                 stress = stress * graph_mask[:, None, None]
 
             return {

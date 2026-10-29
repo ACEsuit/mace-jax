@@ -9,9 +9,12 @@ from flax import nnx
 
 from mace_jax.adapters.cuequivariance.symmetric_contraction import SymmetricContraction
 from mace_jax.adapters.nnx.torch import init_from_torch
-from mace_jax.tools.device import configure_torch_runtime
 
 try:  # pragma: no cover - optional cue torch backend
+    import cuequivariance as cue
+    from cuequivariance_torch import (
+        SymmetricContraction as CueSymmetricContractionTorch,
+    )
     from mace.modules.wrapper_ops import (
         CuEquivarianceConfig,
         SymmetricContractionWrapper,
@@ -35,6 +38,47 @@ def _jax_float_dtype() -> jnp.dtype:
     return jnp.asarray(0.0).dtype
 
 
+@pytest.mark.parametrize('source_reduced', [False, True])
+@pytest.mark.parametrize('target_reduced', [False, True])
+@pytest.mark.parametrize('correlation', [2, 3])
+def test_scalar_output_import_respects_target_basis(
+    source_reduced, target_reduced, correlation, runtime_devices
+):
+    # At correlation=2 the full and reduced bases have identical weight shapes.
+    irreps_in = '2x0e + 2x1o'
+    irreps_out = '2x0e'
+    torch_module = SymmetricContractionWrapper(
+        irreps_in=o3.Irreps(irreps_in),
+        irreps_out=o3.Irreps(irreps_out),
+        correlation=correlation,
+        num_elements=2,
+        use_reduced_cg=source_reduced,
+    ).to(runtime_devices['torch_device'])
+    module = SymmetricContraction(
+        irreps_in=Irreps(irreps_in),
+        irreps_out=Irreps(irreps_out),
+        correlation=correlation,
+        num_elements=2,
+        use_reduced_cg=target_reduced,
+        rngs=nnx.Rngs(0),
+    )
+    module, _ = init_from_torch(module, torch_module)
+    inputs = np.random.default_rng(5).normal(size=(4, 2, 4))
+    attrs = np.eye(2)[[0, 1, 1, 0]]
+    expected = (
+        torch_module(
+            torch.tensor(inputs, device=runtime_devices['torch_device']),
+            torch.tensor(attrs, device=runtime_devices['torch_device']),
+        )
+        .detach()
+        .cpu()
+        .numpy()
+    )
+    np.testing.assert_allclose(
+        module(jnp.asarray(inputs), jnp.asarray(attrs)), expected, rtol=2e-6, atol=2e-6
+    )
+
+
 def _module_dtype(module: torch.nn.Module) -> torch.dtype:
     for param in module.parameters():
         return param.dtype
@@ -43,11 +87,35 @@ def _module_dtype(module: torch.nn.Module) -> torch.dtype:
     return torch.get_default_dtype()
 
 
-def _available_torch_devices() -> list[str]:
-    devices = ['cpu']
-    if torch.cuda.is_available():
-        devices.append('cuda')
-    return devices
+def _cue_contraction(irreps_in, irreps_out, correlation, num_elements, device):
+    if device.type == 'cpu':
+        # Force CPU transpose/contraction methods even when CUDA is installed.
+        return CueSymmetricContractionTorch(
+            cue.Irreps(cue.O3, str(irreps_in)),
+            cue.Irreps(cue.O3, str(irreps_out)),
+            contraction_degree=correlation,
+            num_elements=num_elements,
+            layout_in=cue.ir_mul,
+            layout_out=cue.mul_ir,
+            original_mace=False,
+            method='naive',
+            use_fallback=True,
+            dtype=torch.get_default_dtype(),
+            device=device,
+        ).eval()
+    return (
+        SymmetricContractionWrapper(
+            irreps_in=o3.Irreps(str(irreps_in)),
+            irreps_out=o3.Irreps(str(irreps_out)),
+            correlation=correlation,
+            num_elements=num_elements,
+            cueq_config=CuEquivarianceConfig(
+                enabled=True, layout='mul_ir', optimize_symmetric=True
+            ),
+        )
+        .to(device)
+        .eval()
+    )
 
 
 def _validate_cue_on_device(device: torch.device) -> None:
@@ -71,13 +139,9 @@ def _validate_cue_on_device(device: torch.device) -> None:
         module(x, indices)
 
 
-@pytest.fixture(params=_available_torch_devices())
-def torch_device(request):
-    device_str: str = request.param
-    try:
-        torch_device = configure_torch_runtime(device_str)
-    except RuntimeError:
-        pytest.skip('Requested Torch device is not available.')
+@pytest.fixture
+def torch_device(runtime_devices):
+    torch_device = runtime_devices['torch_device']
 
     if torch_device.type == 'cuda':
         try:
@@ -88,7 +152,7 @@ def torch_device(request):
 
 
 @pytest.fixture
-def module_and_state():
+def module_and_state(runtime_devices):
     module = SymmetricContraction(
         irreps_in=Irreps('1x0e'),
         irreps_out=Irreps('1x0e'),
@@ -102,25 +166,9 @@ def module_and_state():
 
 class TestSymmetricContractionImport:
     def test_forward_matches_cue_torch(self, module_and_state, torch_device):
-        if torch_device.type != 'cuda':
-            pytest.skip('cue-equivariance requires CUDA backend.')
         module, _, _ = module_and_state
 
-        torch_module = (
-            SymmetricContractionWrapper(
-                irreps_in=o3.Irreps('1x0e'),
-                irreps_out=o3.Irreps('1x0e'),
-                correlation=1,
-                num_elements=2,
-                cueq_config=CuEquivarianceConfig(
-                    enabled=True,
-                    layout='mul_ir',
-                    optimize_symmetric=True,
-                ),
-            )
-            .to(torch_device)
-            .eval()
-        )
+        torch_module = _cue_contraction('1x0e', '1x0e', 1, 2, torch_device)
         dtype = _module_dtype(torch_module)
 
         module, _ = init_from_torch(module, torch_module)
@@ -231,8 +279,6 @@ class TestSymmetricContractionImport:
         )
 
     def test_forward_matches_cue_torch_large_irreps(self, torch_device):
-        if torch_device.type != 'cuda':
-            pytest.skip('cue-equivariance large irreps test requires CUDA backend.')
         irreps_in = Irreps('128x0e + 128x1o + 128x2e + 128x3o')
         irreps_out = Irreps('128x0e + 128x1o + 128x2e')
         correlation = 3
@@ -249,20 +295,8 @@ class TestSymmetricContractionImport:
         mul = irreps_in[0].mul
         feature_dim = sum(term.ir.dim for term in irreps_in)
 
-        torch_module = (
-            SymmetricContractionWrapper(
-                irreps_in=o3.Irreps(str(irreps_in)),
-                irreps_out=o3.Irreps(str(irreps_out)),
-                correlation=correlation,
-                num_elements=num_elements,
-                cueq_config=CuEquivarianceConfig(
-                    enabled=True,
-                    layout='mul_ir',
-                    optimize_symmetric=True,
-                ),
-            )
-            .to(torch_device)
-            .eval()
+        torch_module = _cue_contraction(
+            irreps_in, irreps_out, correlation, num_elements, torch_device
         )
         dtype = _module_dtype(torch_module)
 
