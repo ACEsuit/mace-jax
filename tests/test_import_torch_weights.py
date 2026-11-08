@@ -7,12 +7,16 @@ import pytest
 import torch
 from e3nn.math._normalize_activation import normalize2mom
 from flax import nnx
+from mace.tools import scripts_utils
 
 from mace_jax.cli import mace_jax_from_torch as jax_from_torch
 from mace_jax.nnx_config import ConfigVar
 from mace_jax.nnx_utils import state_to_pure_dict
 from mace_jax.tools import model_builder
-from mace_jax.tools.import_from_torch import _extract_norm_consts
+from mace_jax.tools.import_from_torch import (
+    _extract_norm_consts,
+    extract_config_mace_model,
+)
 
 
 def _patch_common(monkeypatch, jax_model):
@@ -204,3 +208,107 @@ def test_build_jax_model_forwards_mh1_specific_config(monkeypatch):
         captured['heads'] == tuple(config['heads'])
         or captured['heads'] == config['heads']
     )
+
+
+@pytest.fixture
+def legacy_edge_model(monkeypatch):
+    class RealAgnosticResidualNonLinearInteractionBlock(types.SimpleNamespace):
+        pass
+
+    first = RealAgnosticResidualNonLinearInteractionBlock(
+        node_feats_irreps='4x0e',
+        edge_irreps='2x0e',
+        linear_up=types.SimpleNamespace(irreps_in='4x0e', irreps_out='2x0e'),
+        linear_res=types.SimpleNamespace(irreps_in='2x0e'),
+    )
+    model = types.SimpleNamespace(edge_irreps='2x0e + 2x1o', interactions=[first])
+    monkeypatch.setattr(
+        scripts_utils,
+        'extract_config_mace_model',
+        lambda source: {
+            'use_edge_irreps_first': getattr(source, 'use_edge_irreps_first', False)
+        },
+    )
+    return model
+
+
+def test_recovers_legacy_first_edge_metadata_without_mutation(legacy_edge_model):
+    model = legacy_edge_model
+    before = dict(vars(model))
+    first_before = dict(vars(model.interactions[0]))
+
+    assert extract_config_mace_model(model)['use_edge_irreps_first'] is True
+
+    assert vars(model) == before
+    assert vars(model.interactions[0]) == first_before
+    assert not hasattr(model, 'use_edge_irreps_first')
+
+
+@pytest.mark.parametrize('flag', [False, True])
+def test_preserves_explicit_first_edge_metadata(legacy_edge_model, flag):
+    model = legacy_edge_model
+    model.use_edge_irreps_first = flag
+    # Explicit metadata must bypass inference, even for unfamiliar layouts.
+    model.interactions = [object()]
+    assert extract_config_mace_model(model)['use_edge_irreps_first'] is flag
+
+
+@pytest.mark.parametrize('edge_irreps', [None, '4x0e + 4x1o', '2x1o'])
+def test_preserves_legacy_default_for_unchanged_layout(legacy_edge_model, edge_irreps):
+    model = legacy_edge_model
+    model.edge_irreps = edge_irreps
+    first = model.interactions[0]
+    first.edge_irreps = '4x0e'
+    first.linear_up.irreps_out = '4x0e'
+    first.linear_res.irreps_in = '4x0e'
+    assert extract_config_mace_model(model)['use_edge_irreps_first'] is False
+
+
+def test_recovers_legacy_false_first_edge_metadata(legacy_edge_model):
+    model = legacy_edge_model
+    first = model.interactions[0]
+    first.edge_irreps = '4x0e'
+    first.linear_up.irreps_out = '4x0e'
+    first.linear_res.irreps_in = '4x0e'
+    assert extract_config_mace_model(model)['use_edge_irreps_first'] is False
+
+
+def test_preserves_legacy_default_without_nonlinear_residual(legacy_edge_model):
+    model = legacy_edge_model
+    model.interactions = [
+        types.SimpleNamespace(
+            node_feats_irreps='4x0e',
+            edge_irreps='4x0e',
+            linear_up=types.SimpleNamespace(irreps_in='4x0e', irreps_out='4x0e'),
+        )
+    ]
+    assert extract_config_mace_model(model)['use_edge_irreps_first'] is False
+
+
+def test_rejects_unsupported_nondefault_legacy_projection(legacy_edge_model):
+    first = legacy_edge_model.interactions[0]
+    legacy_edge_model.interactions = [types.SimpleNamespace(**vars(first))]
+    with pytest.raises(ValueError, match='Cannot infer missing use_edge_irreps_first'):
+        extract_config_mace_model(legacy_edge_model)
+
+
+@pytest.mark.parametrize('field', ['projection', 'residual', 'edge', 'input'])
+def test_rejects_inconsistent_legacy_first_edge_layout(legacy_edge_model, field):
+    model = legacy_edge_model
+    first = model.interactions[0]
+    if field == 'projection':
+        first.linear_up.irreps_out = '3x0e'
+    elif field == 'residual':
+        first.linear_res.irreps_in = '4x0e'
+    elif field == 'edge':
+        first.edge_irreps = '4x0e'
+    else:
+        first.linear_up.irreps_in = '3x0e'
+    with pytest.raises(ValueError, match='Cannot infer missing use_edge_irreps_first'):
+        extract_config_mace_model(model)
+
+
+def test_rejects_unsupported_legacy_first_edge_layout(legacy_edge_model):
+    legacy_edge_model.interactions = [types.SimpleNamespace()]
+    with pytest.raises(ValueError, match='Re-export the Torch checkpoint'):
+        extract_config_mace_model(legacy_edge_model)

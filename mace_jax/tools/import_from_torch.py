@@ -11,7 +11,7 @@ from mace_jax.tools.dtype import default_dtype
 
 
 def extract_config_mace_model(torch_model):
-    """Extract Torch config, including non-Bessel radial basis sizes.
+    """Extract Torch config, recovering supported legacy architecture metadata.
 
     Some Torch MACE versions access ``bessel_weights`` even for Gaussian and
     Chebyshev bases. Supply that size on shallow module copies so extraction
@@ -23,19 +23,74 @@ def extract_config_mace_model(torch_model):
 
     radial = getattr(torch_model, 'radial_embedding', None)
     basis = getattr(radial, 'bessel_fn', None)
-    if basis is None or hasattr(basis, 'bessel_weights'):
-        return torch_extract_config(torch_model)
+    extraction_model = torch_model
+    if basis is not None and not hasattr(basis, 'bessel_weights'):
+        extraction_model = copy.copy(torch_model)
+        extraction_model._modules = dict(torch_model._modules)
+        radial_copy = copy.copy(radial)
+        radial_copy._modules = dict(radial._modules)
+        basis_copy = copy.copy(basis)
+        # Only len() is used by the extractor; no additional Torch state is needed.
+        basis_copy.bessel_weights = range(radial.out_dim)
+        radial_copy.bessel_fn = basis_copy
+        extraction_model.radial_embedding = radial_copy
 
-    model_copy = copy.copy(torch_model)
-    model_copy._modules = dict(torch_model._modules)
-    radial_copy = copy.copy(radial)
-    radial_copy._modules = dict(radial._modules)
-    basis_copy = copy.copy(basis)
-    # Only len() is used by the extractor; no additional Torch state is needed.
-    basis_copy.bessel_weights = range(radial.out_dim)
-    radial_copy.bessel_fn = basis_copy
-    model_copy.radial_embedding = radial_copy
-    return torch_extract_config(model_copy)
+    config = torch_extract_config(extraction_model)
+    if (
+        'error' not in config
+        and not hasattr(torch_model, 'use_edge_irreps_first')
+        and getattr(torch_model, 'edge_irreps', None) is not None
+    ):
+        config['use_edge_irreps_first'] = _infer_use_edge_irreps_first(torch_model)
+    return config
+
+
+def _infer_use_edge_irreps_first(torch_model) -> bool:
+    """Recover a missing flag from a supported first block, without mutation.
+
+    Older MH1 checkpoints omit the model flag although their first interaction
+    stores the projected edge representation. Default-compatible projections
+    retain False; only the known nonlinear block can infer True. Explicit flags
+    and models without edge irreps never enter this fallback.
+    """
+    from e3nn import o3  # noqa: PLC0415
+
+    message = (
+        'Cannot infer missing use_edge_irreps_first from the checkpoint: '
+        'the first interaction layout is unsupported or inconsistent. '
+        'Re-export the Torch checkpoint with explicit use_edge_irreps_first metadata.'
+    )
+    try:
+        first = torch_model.interactions[0]
+        nonlinear = (
+            type(first).__name__ == 'RealAgnosticResidualNonLinearInteractionBlock'
+        )
+        node_irreps = o3.Irreps(str(first.node_feats_irreps)).simplify()
+        edge_channels = o3.Irreps(str(torch_model.edge_irreps)).count(o3.Irrep('0e'))
+        edge_irreps = o3.Irreps(f'{edge_channels}x0e')
+        projected_irreps = o3.Irreps(str(first.linear_up.irreps_out)).simplify()
+        if (
+            not node_irreps
+            or node_irreps != o3.Irreps(f'{node_irreps.count(o3.Irrep("0e"))}x0e')
+            or o3.Irreps(str(first.linear_up.irreps_in)).simplify() != node_irreps
+            or o3.Irreps(str(first.edge_irreps)).simplify() != projected_irreps
+            or (
+                nonlinear
+                and o3.Irreps(str(first.linear_res.irreps_in)).simplify()
+                != projected_irreps
+            )
+        ):
+            raise ValueError(message)
+    except (AttributeError, IndexError, TypeError, ValueError) as exc:
+        raise ValueError(message) from exc
+
+    if projected_irreps == node_irreps:
+        # Equal node/edge widths yield the same architecture for either flag.
+        # Preserve the legacy default in that case as well.
+        return False
+    if nonlinear and edge_channels and projected_irreps == edge_irreps:
+        return True
+    raise ValueError(message)
 
 
 def _format_tree_path(path) -> str:

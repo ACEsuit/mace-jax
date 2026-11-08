@@ -14,8 +14,9 @@ from mace_jax.tools.import_from_torch import extract_config_mace_model
 
 @pytest.mark.parametrize('radial_type', ['bessel', 'gaussian'])
 @pytest.mark.parametrize('nonlinear', [False, True])
+@pytest.mark.parametrize('missing_edge_metadata', [False, True])
 def test_converted_multihead_model_matches_torch(
-    radial_type, nonlinear, runtime_devices
+    radial_type, nonlinear, missing_edge_metadata, runtime_devices
 ):
     torch.manual_seed(10)
     config = dict(
@@ -49,8 +50,17 @@ def test_converted_multihead_model_matches_torch(
             # roundoff; the regular interaction cases cover correlation=2.
             correlation=1,
         )
+    if missing_edge_metadata:
+        config.update(
+            edge_irreps=o3.Irreps('1x0e+1x1o'),
+            use_edge_irreps_first=nonlinear,
+        )
     model = models.ScaleShiftMACE(**config)
+    if missing_edge_metadata:
+        del model.use_edge_irreps_first
     config = extract_config_mace_model(model)
+    assert not missing_edge_metadata or not hasattr(model, 'use_edge_irreps_first')
+    assert config['use_edge_irreps_first'] == (nonlinear and missing_edge_metadata)
     assert config['num_bessel'] == 3
     assert config['radial_type'] == radial_type
     if radial_type == 'gaussian':
