@@ -673,6 +673,15 @@ def _padding_amounts(graph) -> tuple[int, int, int, int, int, int]:
     return node_cap, edge_cap, graph_cap, pad_nodes, pad_edges, pad_graphs
 
 
+def _psum_metrics(tree):
+    """Sum metric trees across devices for pmap evaluation."""
+    return jax.tree_util.tree_map(
+        lambda x: jax.lax.psum(x, 'devices') if x is not None else None,
+        tree,
+        is_leaf=lambda x: x is None,
+    )
+
+
 def train(
     params: Any,
     total_loss_fn: Callable,  # loss_fn(params, graph) -> [num_graphs]
@@ -768,13 +777,6 @@ def train(
         batch_metrics_fn = _make_eval_batch_metrics(
             metrics_loss_fn, metric_targets=metrics_required_targets
         )
-
-        def _psum_metrics(tree):
-            return jax.tree_util.tree_map(
-                lambda x: jax.lax.psum(x, 'devices') if x is not None else None,
-                tree,
-                is_leaf=lambda x: x is None,
-            )
 
     def _prepare_graph_for_devices(graph: jraph.GraphsTuple):
         """Ensure `graph` has a leading axis matching local device count.
@@ -1324,14 +1326,6 @@ def evaluate(
                 f'devices ({local_device_count}), got axis size {graph.n_node.shape[0]}.'
             )
         return graph
-
-    def _psum_metrics(tree):
-        """Sum metric trees across devices for pmap evaluation."""
-        return jax.tree_util.tree_map(
-            lambda x: jax.lax.psum(x, 'devices') if x is not None else None,
-            tree,
-            is_leaf=lambda x: x is None,
-        )
 
     @partial(
         jax.pmap,
