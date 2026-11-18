@@ -1241,6 +1241,14 @@ def train(
             yield epoch + 1, params, optimizer_state, eval_params
 
 
+def _eval_step(predictor, metrics_fn, params_, graph):
+    """Run the predictor and compute per-batch metric stats on devices."""
+    output = predictor(params_, graph)
+    pred_graph, pred_outputs = _prepare_pred_graph(graph, output)
+    batch_metrics = metrics_fn(graph, pred_graph, pred_outputs, None)
+    return _psum_metrics(batch_metrics)
+
+
 def evaluate(
     predictor: Callable,
     params: Any,
@@ -1250,6 +1258,7 @@ def evaluate(
     progress_bar: bool = True,
     device_prefetch_batches: int | None = None,
     log_padding: bool = False,
+    eval_step: Callable = None,
 ) -> tuple[float, dict[str, Any]]:
     r"""Evaluate the predictor on the given data loader.
 
@@ -1274,7 +1283,12 @@ def evaluate(
     num_graphs = 0.0
 
     metric_accumulators = _init_metric_accumulators()
-    batch_metrics_fn = _make_eval_batch_metrics(loss_fn)
+    if eval_step is None:
+        eval_step = partial(
+            _eval_step,
+            predictor,
+            _make_eval_batch_metrics(loss_fn),
+        )
 
     padding_stats = {
         'pad_nodes': 0,
@@ -1327,21 +1341,6 @@ def evaluate(
             )
         return graph
 
-    @partial(
-        jax.pmap,
-        in_axes=(None, 0),
-        out_axes=0,
-        axis_name='devices',
-        devices=local_devices,
-    )
-    def _eval_step(params_, graph):
-        """Run the predictor and compute per-batch metric stats on devices."""
-        output = predictor(params_, graph)
-        pred_graph, pred_outputs = _prepare_pred_graph(graph, output)
-
-        batch_metrics = batch_metrics_fn(graph, pred_graph, pred_outputs, None)
-        return _psum_metrics(batch_metrics)
-
     def _process_batch(
         ref_graph: jraph.GraphsTuple,
         *,
@@ -1362,7 +1361,7 @@ def evaluate(
         padding_stats['pad_graphs'] += pad_graphs
 
         device_graph = ref_graph if prepared else _prepare_graph_for_devices(ref_graph)
-        batch_metrics = _eval_step(params, device_graph)
+        batch_metrics = eval_step(params, device_graph)
         batch_metrics = data.unreplicate_from_local_devices(batch_metrics)
 
         def _squeeze(value):
