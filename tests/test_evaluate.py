@@ -12,7 +12,10 @@ import pytest
 
 from mace_jax import tools
 from mace_jax.data import GraphEdges, GraphGlobals, GraphNodes
-from mace_jax.modules.loss import WeightedEnergyForcesLoss
+from mace_jax.modules.loss import (
+    WeightedEnergyForcesLoss,
+    WeightedEnergyForcesStressLoss,
+)
 from mace_jax.tools import gin_functions
 from mace_jax.tools.train import SWAConfig, _make_eval_step
 
@@ -126,8 +129,10 @@ def test_cached_evaluation_reduces_distinct_graphs(prefetch_batches):
     assert len(traces) == 1
 
 
-def _run_training(tmp_path, monkeypatch, predictor, *, params=None, swa_config=None):
-    loader = _Loader()
+def _run_training(
+    tmp_path, monkeypatch, predictor, *, params=None, swa_config=None, loader=None
+):
+    loader = _Loader() if loader is None else loader
     logger = _Logger()
 
     def epochs(*, params, optimizer_state, **kwargs):
@@ -287,3 +292,161 @@ def test_evaluation_with_real_training_and_ema(
     assert epoch == start_epoch + 3
     assert float(final_bundle['params']['w']) == pytest.approx(expected_ema)
     assert final_bundle['config'] == expected_config
+
+
+@pytest.mark.parametrize('eval_train', [False, True])
+@pytest.mark.parametrize('averaging', ['none', 'ema', 'swa'])
+@pytest.mark.parametrize('stage_start', [0, 2])
+def test_swa_loss_switch_updates_gradients_and_metrics(
+    tmp_path, monkeypatch, eval_train, averaging, stage_start
+):
+    loader = _Loader(energies=(2.0,) * jax.local_device_count())
+    traces = []
+    trace_counts = []
+
+    class TraceLogger(_Logger):
+        def log(self, metrics):
+            super().log(metrics)
+            if metrics['mode'] == 'valid':
+                trace_counts.append(len(traces))
+
+    def predictor(params, graph):
+        traces.append(None)
+        return _predict(params, graph)
+
+    logger = TraceLogger()
+    params = {'w': jnp.array(0.0, dtype=jnp.float64)}
+    optimizer = optax.sgd(0.2, momentum=0.6)
+    monkeypatch.setattr(
+        gin_functions,
+        'loss',
+        lambda: WeightedEnergyForcesLoss(energy_weight=1.0, forces_weight=0.0),
+    )
+    _, final = gin_functions.train(
+        predictor=predictor,
+        params=params,
+        optimizer_state=optimizer.init(params),
+        train_loader=loader,
+        valid_loader=loader,
+        test_loader=None,
+        gradient_transform=optimizer,
+        max_epochs=5,
+        logger=logger,
+        directory=str(tmp_path),
+        tag='stage_switch',
+        eval_train=eval_train,
+        progress_bar=False,
+        ema_decay=0.5 if averaging == 'ema' else None,
+        swa_config=SWAConfig(
+            start_interval=stage_start,
+            prefer_swa_params=averaging == 'swa',
+            stage_loss_factory=WeightedEnergyForcesLoss,
+            stage_loss_kwargs={'energy_weight': 5.0, 'forces_weight': 0.0},
+        ),
+    )
+    weight, velocity, ema = 0.0, 0.0, 0.0
+    snapshots = []
+    expected_train = []
+    expected_valid = [1.0]
+    for step in range(1, 6):
+        loss_weight = 1.0 if step <= stage_start else 5.0
+        expected_train.append(loss_weight * ((weight - 2.0) / 2.0) ** 2)
+        velocity = 0.6 * velocity + loss_weight * (weight - 2.0) / 2.0
+        weight -= 0.2 * velocity
+        decay = min(0.5, (1 + step) / (10 + step))
+        ema = decay * ema + (1 - decay) * weight
+        if step > stage_start:
+            snapshots.append(weight)
+        eval_weight = weight
+        if averaging == 'ema':
+            eval_weight = ema
+        elif averaging == 'swa' and snapshots:
+            eval_weight = np.mean(snapshots)
+        expected_valid.append(loss_weight * ((eval_weight - 2.0) / 2.0) ** 2)
+    valid = [r['loss'] for r in logger.rows if r['mode'] == 'valid']
+    np.testing.assert_allclose(valid, expected_valid, rtol=1e-6, atol=1e-12)
+    assert float(final['w']) == pytest.approx(eval_weight)
+    if eval_train:
+        train = [r['loss'] for r in logger.rows if r['mode'] == 'train']
+        np.testing.assert_allclose(train, expected_train, rtol=1e-6, atol=1e-12)
+    # Once Stage Two is compiled, both training and evaluation reuse it.
+    assert trace_counts[3:] == [trace_counts[3]] * 3
+    if stage_start:
+        assert trace_counts[3] > trace_counts[2]
+
+
+@pytest.mark.parametrize('eval_train', [False, True])
+@pytest.mark.parametrize('checkpoint_epoch', [2, 3])
+def test_resumed_swa_uses_stage_two_loss_immediately(
+    tmp_path, monkeypatch, eval_train, checkpoint_epoch
+):
+    loader = _Loader(energies=(2.0,) * jax.local_device_count())
+    logger = _Logger()
+    params = {'w': jnp.array(0.4, dtype=jnp.float64)}
+    optimizer = optax.sgd(0.2)
+    checkpoint = tmp_path / 'stage_two.ckpt'
+    with checkpoint.open('wb') as handle:
+        pickle.dump(
+            {
+                'epoch': checkpoint_epoch,
+                'params': params,
+                'optimizer_state': optimizer.init(params),
+            },
+            handle,
+        )
+    monkeypatch.setattr(
+        gin_functions,
+        'loss',
+        lambda: WeightedEnergyForcesLoss(energy_weight=1.0, forces_weight=0.0),
+    )
+    _, final = gin_functions.train(
+        predictor=_predict,
+        params=params,
+        optimizer_state=optimizer.init(params),
+        train_loader=loader,
+        valid_loader=loader,
+        test_loader=None,
+        gradient_transform=optimizer,
+        max_epochs=checkpoint_epoch + 1,
+        logger=logger,
+        directory=str(tmp_path),
+        tag='resumed_stage',
+        eval_train=eval_train,
+        progress_bar=False,
+        resume_from=str(checkpoint),
+        swa_config=SWAConfig(
+            start_interval=2,
+            prefer_swa_params=False,
+            stage_loss_factory=WeightedEnergyForcesLoss,
+            stage_loss_kwargs={'energy_weight': 5.0, 'forces_weight': 0.0},
+        ),
+    )
+    valid = [r['loss'] for r in logger.rows if r['mode'] == 'valid']
+    np.testing.assert_allclose(valid, [3.2, 0.8])
+    assert float(final['w']) == pytest.approx(1.2)
+    if eval_train:
+        train = [r['loss'] for r in logger.rows if r['mode'] == 'train']
+        np.testing.assert_allclose(train, [3.2])
+
+
+def test_swa_validates_stage_two_targets_before_training(tmp_path, monkeypatch):
+    loader = _Loader()
+    loader.graphs = [
+        g._replace(globals=g.globals._replace(stress=None)) for g in loader.graphs
+    ]
+    with pytest.raises(ValueError, match='Training loss requires targets.*stress'):
+        _run_training(
+            tmp_path,
+            monkeypatch,
+            _predict,
+            loader=loader,
+            swa_config=SWAConfig(
+                start_interval=2,
+                stage_loss_factory=WeightedEnergyForcesStressLoss,
+                stage_loss_kwargs={
+                    'energy_weight': 1.0,
+                    'forces_weight': 0.0,
+                    'stress_weight': 1.0,
+                },
+            ),
+        )

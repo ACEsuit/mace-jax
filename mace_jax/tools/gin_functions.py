@@ -1227,6 +1227,10 @@ def train(
         swa_loss_fn = _instantiate_loss(
             swa_config.stage_loss_factory, swa_config.stage_loss_kwargs or {}
         )
+        required_by_loss |= _required_targets_from_loss(swa_loss_fn)
+        if resume_path is not None and start_interval >= swa_config.start_interval:
+            loss_fn = swa_loss_fn
+            stage_two_active = True
     train_head_loaders = _split_loader_by_heads(train_loader)
     valid_head_loaders = _split_loader_by_heads(valid_loader)
     test_head_loaders = _split_loader_by_heads(test_loader)
@@ -1328,6 +1332,7 @@ def train(
         gradient_transform=gradient_transform,
         optimizer_state=optimizer_state,
         ema_decay=ema_decay,
+        swa_config=swa_config,
         max_grad_norm=max_grad_norm,
         start_interval=start_interval,
         schedule_free_eval_fn=schedule_free_eval_fn,
@@ -1338,6 +1343,7 @@ def train(
         metrics_loss_fn=loss_fn,
         metrics_required_targets=required_by_loss if eval_train else None,
         initial_eval_params=resume_eval_params,
+        loss_fn_getter=lambda: loss_fn,
         **kwargs,
     ):
         if len(train_item) == 5:
