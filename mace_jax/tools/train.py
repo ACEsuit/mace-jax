@@ -1249,6 +1249,18 @@ def _eval_step(predictor, metrics_fn, params_, graph):
     return _psum_metrics(batch_metrics)
 
 
+def _make_eval_step(predictor: Callable, loss_fn: Any) -> Callable:
+    """Build a reusable mapped evaluation step for one predictor and loss."""
+    metrics_fn = _make_eval_batch_metrics(loss_fn)
+    return jax.pmap(
+        partial(_eval_step, predictor, metrics_fn),
+        in_axes=(None, 0),
+        out_axes=0,
+        axis_name='devices',
+        devices=jax.local_devices(),
+    )
+
+
 def evaluate(
     predictor: Callable,
     params: Any,
@@ -1258,7 +1270,7 @@ def evaluate(
     progress_bar: bool = True,
     device_prefetch_batches: int | None = None,
     log_padding: bool = False,
-    eval_step: Callable = None,
+    eval_step: Callable | None = None,
 ) -> tuple[float, dict[str, Any]]:
     r"""Evaluate the predictor on the given data loader.
 
@@ -1272,6 +1284,8 @@ def evaluate(
         device_prefetch_batches: Optional number of batches to prefetch to devices.
             Defaults to max(loader prefetch, 2) when None.
         log_padding: Whether to log padding statistics for streaming loaders.
+        eval_step: Optional mapped step from `_make_eval_step` to reuse across
+            evaluations. Rebuild it when the predictor or loss changes.
 
     Returns:
         Tuple of (average_loss, metrics_dict) aggregated over the dataset.
@@ -1284,11 +1298,7 @@ def evaluate(
 
     metric_accumulators = _init_metric_accumulators()
     if eval_step is None:
-        eval_step = partial(
-            _eval_step,
-            predictor,
-            _make_eval_batch_metrics(loss_fn),
-        )
+        eval_step = _make_eval_step(predictor, loss_fn)
 
     padding_stats = {
         'pad_nodes': 0,

@@ -17,7 +17,6 @@ from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
-from functools import partial
 
 import gin
 import jax
@@ -40,11 +39,7 @@ from unique_names_generator.data import ADJECTIVES, NAMES
 
 from mace_jax import modules, tools
 from mace_jax.tools import device as device_utils
-from mace_jax.tools.train import (
-    _checked_loss,
-    _make_eval_batch_metrics,
-    _eval_step,
-)
+from mace_jax.tools.train import _checked_loss, _make_eval_step
 
 _PROFILE_HELPER = None
 _PROFILE_HELPER_MISSING_WARNED = False
@@ -1322,14 +1317,7 @@ def train(
     if not isinstance(eval_train, bool):
         raise ValueError('eval_train must be a boolean.')
 
-    batch_eval_metrics_fn = _make_eval_batch_metrics(loss_fn)
-    eval_step = partial(
-        jax.pmap,
-        in_axes=(None, 0),
-        out_axes=0,
-        axis_name='devices',
-        devices=jax.local_devices(),
-    )(partial(_eval_step, predictor, batch_eval_metrics_fn))
+    eval_step = _make_eval_step(predictor_with_config, loss_fn)
 
     for train_item in tools.train(
         params=trainable_params,
@@ -1467,6 +1455,7 @@ def train(
                 epoch,
             )
             loss_fn = swa_loss_fn
+            eval_step = _make_eval_step(predictor_with_config, loss_fn)
             lowest_loss = np.inf
             patience_counter = 0
             stage_two_active = True
