@@ -673,6 +673,15 @@ def _padding_amounts(graph) -> tuple[int, int, int, int, int, int]:
     return node_cap, edge_cap, graph_cap, pad_nodes, pad_edges, pad_graphs
 
 
+def _psum_metrics(tree):
+    """Sum metric trees across devices for pmap evaluation."""
+    return jax.tree_util.tree_map(
+        lambda x: jax.lax.psum(x, 'devices') if x is not None else None,
+        tree,
+        is_leaf=lambda x: x is None,
+    )
+
+
 def train(
     params: Any,
     total_loss_fn: Callable,  # loss_fn(params, graph) -> [num_graphs]
@@ -694,6 +703,7 @@ def train(
     metrics_loss_fn: Any | None = None,
     metrics_required_targets: set[str] | None = None,
     initial_eval_params: Any | None = None,
+    loss_fn_getter: Callable[[], Any] | None = None,
 ):
     """Yield training state for each epoch while updating parameters.
 
@@ -724,6 +734,11 @@ def train(
         metrics_loss_fn: Loss function used to compute training metrics.
         metrics_required_targets: Optional set of target names to include in metrics.
         initial_eval_params: Optional initial EMA/eval params (used when resuming).
+        loss_fn_getter: Optional callback returning the current loss object before
+            each epoch. When provided, apply it to `metrics_predictor` outputs
+            instead of using `total_loss_fn`. Returning a different loss object
+            rebuilds the compiled update and metrics without resetting state;
+            loss objects must not be mutated in place.
 
     Yields:
         Tuple of (epoch, trainable_params, optimizer_state, eval_params).
@@ -746,6 +761,8 @@ def train(
         raise ValueError(
             'collect_metrics requires metrics_predictor and metrics_loss_fn.'
         )
+    if loss_fn_getter is not None and metrics_predictor is None:
+        raise ValueError('loss_fn_getter requires metrics_predictor.')
 
     head_indices: list[int] = []
     head_names: list[str] = []
@@ -763,18 +780,6 @@ def train(
 
     local_devices = jax.local_devices()
     local_device_count = max(1, len(local_devices))
-
-    if metrics_enabled:
-        batch_metrics_fn = _make_eval_batch_metrics(
-            metrics_loss_fn, metric_targets=metrics_required_targets
-        )
-
-        def _psum_metrics(tree):
-            return jax.tree_util.tree_map(
-                lambda x: jax.lax.psum(x, 'devices') if x is not None else None,
-                tree,
-                is_leaf=lambda x: x is None,
-            )
 
     def _prepare_graph_for_devices(graph: jraph.GraphsTuple):
         """Ensure `graph` has a leading axis matching local device count.
@@ -804,111 +809,131 @@ def train(
             )
         return graph
 
-    @partial(
-        jax.pmap,
-        in_axes=(None, 0),
-        out_axes=None,
-        axis_name='devices',
-        devices=local_devices,
-    )
-    def grad_fn(params, graph: jraph.GraphsTuple):
-        """Compute per-device loss and gradients for a sharded batch."""
-        # graph is assumed to be padded by jraph.pad_with_graphs
-        mask = _graph_mask(graph)
+    def _make_update_fn(current_loss_fn):
+        """Compile one loss stage while keeping optimizer/EMA state as inputs."""
         if metrics_enabled:
-
-            def _loss_fn(trainable):
-                """Compute masked total loss and per-batch metrics."""
-                output = metrics_predictor(trainable, graph)
-                per_graph_loss = _checked_loss(metrics_loss_fn, graph, output)
-                loss = jnp.sum(jnp.where(mask, per_graph_loss, 0.0))
-                pred_graph, pred_outputs = _prepare_pred_graph(graph, output)
-                batch_metrics = batch_metrics_fn(graph, pred_graph, pred_outputs, None)
-                head_metrics: tuple = ()
-                if head_indices:
-                    head_values = getattr(graph.globals, 'head', None)
-                    if head_values is not None:
-                        head_values = jnp.asarray(head_values).reshape(-1)
-                        per_head = []
-                        for head_idx in head_indices:
-                            head_mask = jnp.asarray(
-                                head_values == head_idx, dtype=jnp.float32
-                            )
-                            per_head.append(
-                                batch_metrics_fn(
-                                    graph, pred_graph, pred_outputs, head_mask
-                                )
-                            )
-                        head_metrics = tuple(per_head)
-                return loss, (batch_metrics, head_metrics)
-
-        else:
-
-            def _loss_fn(trainable):
-                """Compute masked total loss for gradient evaluation."""
-                per_graph_loss = total_loss_fn(trainable, graph)
-                loss = jnp.sum(jnp.where(mask, per_graph_loss, 0.0))
-                return loss, (None, ())
-
-        (loss, (batch_metrics, head_metrics)), grad = jax.value_and_grad(
-            _loss_fn, has_aux=True
-        )(params)
-        if metrics_enabled:
-            batch_metrics = _psum_metrics(batch_metrics)
-            if head_metrics:
-                head_metrics = tuple(_psum_metrics(metrics) for metrics in head_metrics)
-        else:
-            batch_metrics = None
-            head_metrics = ()
-        loss = jax.lax.psum(loss, 'devices')
-        grad = jax.tree_util.tree_map(lambda g: jax.lax.psum(g, 'devices'), grad)
-        num_graphs = jax.lax.psum(jnp.sum(mask), 'devices')
-        return num_graphs, loss, grad, batch_metrics, head_metrics
-
-    # jit-of-pmap is not recommended but so far it seems faster
-    @jax.jit
-    def update_fn(
-        params,
-        optimizer_state,
-        ema_params,
-        num_updates: int,
-        graph: jraph.GraphsTuple,
-    ) -> tuple[float, Any, Any, Any, jnp.ndarray, dict | None, tuple]:
-        """Apply one optimizer step and update EMA parameters."""
-        n, loss, grad, batch_metrics, head_metrics = grad_fn(params, graph)
-        loss = loss / n
-        grad = jax.tree_util.tree_map(lambda x: x / n, grad)
-        if lr_scale_by_graphs:
-            grad = jax.tree_util.tree_map(lambda g: g * n, grad)
-        grad = _sanitize_grads(grad)
-
-        if max_grad_norm is not None:
-            grad_norm = jnp.sqrt(
-                sum(jnp.sum(jnp.square(x)) for x in jax.tree_util.tree_leaves(grad))
+            batch_metrics_fn = _make_eval_batch_metrics(
+                current_loss_fn, metric_targets=metrics_required_targets
             )
-            clip_coef = jnp.minimum(1.0, max_grad_norm / (grad_norm + 1e-12))
-            grad = jax.tree_util.tree_map(lambda g: g * clip_coef, grad)
 
-        updates, optimizer_state = gradient_transform.update(
-            grad, optimizer_state, params
+        @partial(
+            jax.pmap,
+            in_axes=(None, 0),
+            out_axes=None,
+            axis_name='devices',
+            devices=local_devices,
         )
-        params = optax.apply_updates(params, updates)
-        if ema_decay is not None:
-            decay = jnp.minimum(ema_decay, (1 + num_updates) / (10 + num_updates))
-            ema_params = jax.tree_util.tree_map(
-                lambda x, y: x * decay + y * (1 - decay), ema_params, params
-            )
-        else:
-            ema_params = params
-        return (
-            loss,
+        def grad_fn(params, graph: jraph.GraphsTuple):
+            """Compute per-device loss and gradients for a sharded batch."""
+            # graph is assumed to be padded by jraph.pad_with_graphs
+            mask = _graph_mask(graph)
+            if metrics_enabled:
+
+                def _loss_fn(trainable):
+                    """Compute masked total loss and per-batch metrics."""
+                    output = metrics_predictor(trainable, graph)
+                    per_graph_loss = _checked_loss(current_loss_fn, graph, output)
+                    loss = jnp.sum(jnp.where(mask, per_graph_loss, 0.0))
+                    pred_graph, pred_outputs = _prepare_pred_graph(graph, output)
+                    batch_metrics = batch_metrics_fn(
+                        graph, pred_graph, pred_outputs, None
+                    )
+                    head_metrics: tuple = ()
+                    if head_indices:
+                        head_values = getattr(graph.globals, 'head', None)
+                        if head_values is not None:
+                            head_values = jnp.asarray(head_values).reshape(-1)
+                            per_head = []
+                            for head_idx in head_indices:
+                                head_mask = jnp.asarray(
+                                    head_values == head_idx, dtype=jnp.float32
+                                )
+                                per_head.append(
+                                    batch_metrics_fn(
+                                        graph, pred_graph, pred_outputs, head_mask
+                                    )
+                                )
+                            head_metrics = tuple(per_head)
+                    return loss, (batch_metrics, head_metrics)
+
+            else:
+
+                def _loss_fn(trainable):
+                    """Compute masked total loss for gradient evaluation."""
+                    if loss_fn_getter is None:
+                        per_graph_loss = total_loss_fn(trainable, graph)
+                    else:
+                        output = metrics_predictor(trainable, graph)
+                        per_graph_loss = _checked_loss(current_loss_fn, graph, output)
+                    loss = jnp.sum(jnp.where(mask, per_graph_loss, 0.0))
+                    return loss, (None, ())
+
+            (loss, (batch_metrics, head_metrics)), grad = jax.value_and_grad(
+                _loss_fn, has_aux=True
+            )(params)
+            if metrics_enabled:
+                batch_metrics = _psum_metrics(batch_metrics)
+                if head_metrics:
+                    head_metrics = tuple(
+                        _psum_metrics(metrics) for metrics in head_metrics
+                    )
+            else:
+                batch_metrics = None
+                head_metrics = ()
+            loss = jax.lax.psum(loss, 'devices')
+            grad = jax.tree_util.tree_map(lambda g: jax.lax.psum(g, 'devices'), grad)
+            num_graphs = jax.lax.psum(jnp.sum(mask), 'devices')
+            return num_graphs, loss, grad, batch_metrics, head_metrics
+
+        # jit-of-pmap is not recommended but so far it seems faster
+        @jax.jit
+        def update_fn(
             params,
             optimizer_state,
             ema_params,
-            n,
-            batch_metrics,
-            head_metrics,
-        )
+            num_updates: int,
+            graph: jraph.GraphsTuple,
+        ) -> tuple[float, Any, Any, Any, jnp.ndarray, dict | None, tuple]:
+            """Apply one optimizer step and update EMA parameters."""
+            n, loss, grad, batch_metrics, head_metrics = grad_fn(params, graph)
+            loss = loss / n
+            grad = jax.tree_util.tree_map(lambda x: x / n, grad)
+            if lr_scale_by_graphs:
+                grad = jax.tree_util.tree_map(lambda g: g * n, grad)
+            grad = _sanitize_grads(grad)
+
+            if max_grad_norm is not None:
+                grad_norm = jnp.sqrt(
+                    sum(jnp.sum(jnp.square(x)) for x in jax.tree_util.tree_leaves(grad))
+                )
+                clip_coef = jnp.minimum(1.0, max_grad_norm / (grad_norm + 1e-12))
+                grad = jax.tree_util.tree_map(lambda g: g * clip_coef, grad)
+
+            updates, optimizer_state = gradient_transform.update(
+                grad, optimizer_state, params
+            )
+            params = optax.apply_updates(params, updates)
+            if ema_decay is not None:
+                decay = jnp.minimum(ema_decay, (1 + num_updates) / (10 + num_updates))
+                ema_params = jax.tree_util.tree_map(
+                    lambda x, y: x * decay + y * (1 - decay), ema_params, params
+                )
+            else:
+                ema_params = params
+            return (
+                loss,
+                params,
+                optimizer_state,
+                ema_params,
+                n,
+                batch_metrics,
+                head_metrics,
+            )
+
+        return update_fn
+
+    current_loss_fn = metrics_loss_fn if loss_fn_getter is None else loss_fn_getter()
+    update_fn = _make_update_fn(current_loss_fn)
 
     process_index = getattr(jax, 'process_index', lambda: 0)()
     is_primary = process_index == 0
@@ -1006,6 +1031,11 @@ def train(
 
     padding_logged = False
     for epoch in itertools.count(start_interval):
+        if loss_fn_getter is not None:
+            next_loss_fn = loss_fn_getter()
+            if next_loss_fn is not current_loss_fn:
+                current_loss_fn = next_loss_fn
+                update_fn = _make_update_fn(current_loss_fn)
         epoch_batches_iter, effective_steps = _epoch_batches(epoch)
         if effective_steps <= 0:
             raise ValueError(
@@ -1239,6 +1269,26 @@ def train(
             yield epoch + 1, params, optimizer_state, eval_params
 
 
+def _eval_step(predictor, metrics_fn, params_, graph):
+    """Run the predictor and compute per-batch metric stats on devices."""
+    output = predictor(params_, graph)
+    pred_graph, pred_outputs = _prepare_pred_graph(graph, output)
+    batch_metrics = metrics_fn(graph, pred_graph, pred_outputs, None)
+    return _psum_metrics(batch_metrics)
+
+
+def _make_eval_step(predictor: Callable, loss_fn: Any) -> Callable:
+    """Build a reusable mapped evaluation step for one predictor and loss."""
+    metrics_fn = _make_eval_batch_metrics(loss_fn)
+    return jax.pmap(
+        partial(_eval_step, predictor, metrics_fn),
+        in_axes=(None, 0),
+        out_axes=0,
+        axis_name='devices',
+        devices=jax.local_devices(),
+    )
+
+
 def evaluate(
     predictor: Callable,
     params: Any,
@@ -1248,6 +1298,7 @@ def evaluate(
     progress_bar: bool = True,
     device_prefetch_batches: int | None = None,
     log_padding: bool = False,
+    eval_step: Callable | None = None,
 ) -> tuple[float, dict[str, Any]]:
     r"""Evaluate the predictor on the given data loader.
 
@@ -1261,6 +1312,8 @@ def evaluate(
         device_prefetch_batches: Optional number of batches to prefetch to devices.
             Defaults to max(loader prefetch, 2) when None.
         log_padding: Whether to log padding statistics for streaming loaders.
+        eval_step: Optional mapped step from `_make_eval_step` to reuse across
+            evaluations. Rebuild it when the predictor or loss changes.
 
     Returns:
         Tuple of (average_loss, metrics_dict) aggregated over the dataset.
@@ -1272,7 +1325,8 @@ def evaluate(
     num_graphs = 0.0
 
     metric_accumulators = _init_metric_accumulators()
-    batch_metrics_fn = _make_eval_batch_metrics(loss_fn)
+    if eval_step is None:
+        eval_step = _make_eval_step(predictor, loss_fn)
 
     padding_stats = {
         'pad_nodes': 0,
@@ -1325,29 +1379,6 @@ def evaluate(
             )
         return graph
 
-    def _psum_metrics(tree):
-        """Sum metric trees across devices for pmap evaluation."""
-        return jax.tree_util.tree_map(
-            lambda x: jax.lax.psum(x, 'devices') if x is not None else None,
-            tree,
-            is_leaf=lambda x: x is None,
-        )
-
-    @partial(
-        jax.pmap,
-        in_axes=(None, 0),
-        out_axes=0,
-        axis_name='devices',
-        devices=local_devices,
-    )
-    def _eval_step(params_, graph):
-        """Run the predictor and compute per-batch metric stats on devices."""
-        output = predictor(params_, graph)
-        pred_graph, pred_outputs = _prepare_pred_graph(graph, output)
-
-        batch_metrics = batch_metrics_fn(graph, pred_graph, pred_outputs, None)
-        return _psum_metrics(batch_metrics)
-
     def _process_batch(
         ref_graph: jraph.GraphsTuple,
         *,
@@ -1368,7 +1399,7 @@ def evaluate(
         padding_stats['pad_graphs'] += pad_graphs
 
         device_graph = ref_graph if prepared else _prepare_graph_for_devices(ref_graph)
-        batch_metrics = _eval_step(params, device_graph)
+        batch_metrics = eval_step(params, device_graph)
         batch_metrics = data.unreplicate_from_local_devices(batch_metrics)
 
         def _squeeze(value):
