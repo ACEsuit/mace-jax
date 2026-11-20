@@ -42,6 +42,28 @@ def _small_config():
     }
 
 
+def test_legacy_bias_readout_bundle(tmp_path):
+    config = dict(
+        _small_config(), readout_cls='NonLinearBiasReadoutBlock', num_interactions=2
+    )
+    model = model_builder._build_jax_model(config, rngs=nnx.Rngs(0))
+    payload = state_to_serializable_dict(nnx.state(model))
+
+    def strip_biases(tree):
+        if isinstance(tree, dict):
+            tree.pop('bias', None)
+            for value in tree.values():
+                strip_biases(value)
+
+    strip_biases(payload['readouts'])
+    (tmp_path / 'config.json').write_text(json.dumps(config))
+    (tmp_path / 'params.msgpack').write_bytes(serialization.to_bytes(payload))
+    restored = bundle_tools.load_model_bundle(str(tmp_path), dtype='float64')
+    data = model_builder._prepare_template_data(config)
+    output, _ = restored.graphdef.apply(restored.params)(data)
+    np.testing.assert_allclose(output['energy'], model(data)['energy'], atol=1e-10)
+
+
 @pytest.mark.parametrize('scaled', [False, True])
 def test_bundle_roundtrip(tmp_path, scaled):
     config = _small_config()

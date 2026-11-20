@@ -516,6 +516,8 @@ class Linear:
         equivariance_config: EquivarianceConfig | dict[str, object] | None = None,
         cueq_config: object | None = None,
         rngs: nnx.Rngs | None = None,
+        *,
+        biases: bool = False,
     ):
         equivariance_config = _resolve_wrapper_equivariance_config(
             equivariance_config, cueq_config=cueq_config
@@ -534,6 +536,7 @@ class Linear:
             shared_weights=shared_weights,
             internal_weights=internal_weights,
             layout=layout,
+            biases=biases,
         )
         if group is not None:
             linear_kwargs['group'] = group

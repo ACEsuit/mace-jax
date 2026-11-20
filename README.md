@@ -188,6 +188,7 @@ mace-jax-train configs/aspirin_small.gin --enable-openeq
 ```
 
 Notes:
+
 - `--enable-cueq` binds `EquivarianceConfig(backend="cueq")` with cueq optimization defaults.
 - `--enable-openeq` binds `EquivarianceConfig(backend="openeq")` for the supported fused channel-wise convolution path.
 - `--equivariance-layout {mul_ir,ir_mul}` selects the model-wide representation layout. `--cueq-layout` and `--openeq-layout` are deprecated aliases.
@@ -311,15 +312,15 @@ pre-trained checkpoint used in this example.
 
 A typical 2-host launch (one process per host) looks like:
 
-  ```sh
-  JAX_PROCESS_COUNT=2 \
-  JAX_PROCESS_INDEX=${SLURM_PROCID} \
-  mace-jax-train configs/aspirin_small.gin \
-    --device cuda \
-    --distributed \
-    --coordinator-address host0 \
-    --coordinator-port 12345
-  ```
+```sh
+JAX_PROCESS_COUNT=2 \
+JAX_PROCESS_INDEX=${SLURM_PROCID} \
+mace-jax-train configs/aspirin_small.gin \
+  --device cuda \
+  --distributed \
+  --coordinator-address host0 \
+  --coordinator-port 12345
+```
 
 #### `mace-jax-predict`
 
@@ -338,6 +339,7 @@ mace-jax-predict checkpoints/model.ckpt data/hdf5/train_0.h5 \
 ```
 
 Notes:
+
 - `--batch-max-edges` is required for streaming HDF5 predictions unless cached
   streaming stats are present next to the file.
 - `--batch-max-nodes` is optional for predictions if you want to override the
@@ -365,6 +367,7 @@ Pass the resulting `statistics.json` to training via `mace-jax-train --statistic
 to reuse the computed scaling and average neighbor counts.
 
 Key preprocessing arguments (most commonly used):
+
 - `--train_file/--valid_file/--test_file`: input XYZ files. If `--valid_file` is omitted,
   `--valid_fraction` is used to split the training file.
 - `--h5_prefix`: output root for HDF5 shards (`<prefix>/train`, `<prefix>/val`, `<prefix>/test`).
@@ -425,9 +428,9 @@ download and import pre-trained foundation models when `--torch-model` is not
 provided.
 
 The model builder and automatic Torch conversion support `MACE`,
-`ScaleShiftMACE`, `AtomicDipolesMACE`, `EnergyDipolesMACE`, and
-`AtomicDielectricMACE`. LES, PolarMACE, magnetic models, and unsupported readouts
-raise an error rather than being converted to a different architecture.
+`ScaleShiftMACE`, `AtomicDipolesMACE`, `EnergyDipolesMACE`,
+`AtomicDielectricMACE`, `MACELES`, `PolarMACE`, `MagneticScaleShiftMACE`, and
+`MagneticSCFMACE`. Unsupported architectures and readouts raise an error.
 
 If `--output` is omitted the converted parameters are written to `<checkpoint>-jax.npz`.
 
@@ -481,10 +484,57 @@ use **e Angstrom**. The ASE calculator converts legacy dipoles to e Angstrom.
 Polarizabilities use Angstrom cubed. `polarizability_sh` contains the six
 irreducible components; `polarizability` is a symmetric 3-by-3 tensor.
 
+##### Long-range and magnetic models
+
+Select these families with `model.model_class` in gin (or `--model`). Existing
+Torch checkpoints use the ordinary conversion and `--torch-checkpoint` paths.
+The electrostatic and magnetic calculations run in JAX, including forces,
+total stress, and parameter gradients for energy/force training. Torch's LES,
+graph-longrange, and sphericart packages are needed to load reference Torch
+models and run parity tests, but not to use saved JAX bundles.
+
+- `MACELES` adds latent charges, optional dipoles/quadrupoles, and induced
+  charge/dipole response. Configure these with `model.les_arguments`, for example
+  `{'use_dipole': True, 'use_induced_dipole': True}`. Request Born effective charges
+  with `compute_bec=True` or the prediction CLI's `--compute-bec`.
+- `PolarMACE` adds constrained charge/spin densities and iterative field response.
+  `compute_polarizability=True` (CLI: `--compute-polarizability`) differentiates the
+  dipole with respect to the external field. `polarizability_method='energy'`
+  (CLI: `--polarizability-method energy`) differentiates the energy twice and
+  also returns `dipole_from_energy`. These response definitions need not agree
+  for an arbitrary model. PolarMACE currently requires `mul_ir` layout, ordinary
+  layer readouts, and no feature embeddings or pair repulsion. Its Gaussian
+  backend supports angular orders 0 and 1, matching graph-longrange 0.4.4.
+- `MagneticScaleShiftMACE` uses vector magnetic moments and returns
+  `magforces = -dE/dmagmom`. Set `model.m_max` to one positive maximum moment per
+  element, `model.num_mag_radial_basis`, and `model.max_m_ell`. The gin factory
+  selects the magnetic interaction classes automatically. Magnetic interactions
+  currently require unfused tensor products; disable convolution fusion when
+  selecting an acceleration backend.
+- `MagneticSCFMACE` relaxes the input moments with JAX L-BFGS before evaluation.
+  Configure `n_scf_step`, `scf_tol`, `scf_step_size`, and `use_collinear` through
+  `model`. The solver is stateless: reuse `equilibrated_magmom` explicitly as the
+  next initial guess. Derivatives hold relaxed moments fixed. Its optimizer
+  trajectory and iteration counts can differ from Torch L-BFGS; JAX returns a
+  fixed-length energy history, repeating the final energy after convergence.
+
+XYZ/ASE and HDF5 preserve `total_spin` and `external_field` from `Atoms.info`,
+and `magmom` from `Atoms.arrays` (falling back to `Atoms.info` or ASE initial
+magnetic moments). Scalar moments are expanded along z. `total_spin` follows
+MACE's multiplicity convention: the constrained net spin is `total_spin - 1`;
+the default is 1. External fields default to zero. Direct model input dictionaries
+use shapes `[G]`, `[G,3]`, and `[N,3]`, respectively. PolarMACE's field convention
+adds `external_field · dipole` to the energy, so this input is minus the physical
+electric field. Dipoles use e Angstrom and field-response polarizability uses
+e² Angstrom²/eV. The ASE calculator exposes polarizability and magnetic forces
+through `calc.get_property('polarizability', atoms)` and
+`calc.get_property('magforces', atoms)`.
+
 ##### Hessians and local stresses
 
-Energy models accept `compute_hessian=True`, `compute_edge_forces=True`, and
-`compute_atomic_stresses=True`. Hessians have shape `[3*N, N, 3]`; the corresponding
+Energy models accept `compute_hessian=True` and `compute_edge_forces=True`;
+local energy models also accept `compute_atomic_stresses=True`.
+Hessians have shape `[3*N, N, 3]`; the corresponding
 matrix is `hessian.reshape(3*N, 3*N)`. Electric models accept
 `compute_dielectric_derivatives=True`, returning `dmu_dr` with shape `[3,N,3]`
 and, for dielectric models, `dalpha_dr` with shape `[9,N,3]`. Use these flags as
@@ -651,6 +701,7 @@ glob pattern. The loader expands all matching files and derives padding caps acr
 the combined dataset.
 
 Streaming loader knobs (CLI or gin):
+
 - `--batch-max-edges` / `n_edge`: edge cap for fixed-shape batches.
 - `--suffle`: enable/disable per-epoch shuffling for training (default: true).
   Validation/test loaders never shuffle.
@@ -667,7 +718,7 @@ Links to the files containing the functions configured by the gin config file.
 - [`datasets`](https://github.com/ACEsuit/mace-jax/blob/main/mace_jax/tools/gin_datasets.py)
 - [`model`](https://github.com/ACEsuit/mace-jax/blob/main/mace_jax/tools/gin_model.py) and [here](https://github.com/ACEsuit/mace-jax/blob/main/mace_jax/modules/models.py)
 - [`loss`](https://github.com/ACEsuit/mace-jax/blob/main/mace_jax/modules/loss.py)
-    if `loss.energy_weight`, `loss.forces_weight` or `loss.stress_weight` is nonzero the loss will be applied
+  if `loss.energy_weight`, `loss.forces_weight` or `loss.stress_weight` is nonzero the loss will be applied
 - [`optimizer`](https://github.com/ACEsuit/mace-jax/blob/main/mace_jax/tools/gin_functions.py)
 - [`train`](https://github.com/ACEsuit/mace-jax/blob/main/mace_jax/tools/gin_functions.py)
 
@@ -678,6 +729,7 @@ We are happy to accept pull requests under an [MIT license](https://choosealicen
 ## References
 
 If you use this code, please cite our papers:
+
 ```text
 @misc{Batatia2022MACE,
   title = {MACE: Higher Order Equivariant Message Passing Neural Networks for Fast and Accurate Force Fields},

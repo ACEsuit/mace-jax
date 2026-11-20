@@ -214,6 +214,7 @@ class NonLinearBiasReadoutBlock(nnx.Module):
             acts=[self.gate],
         )
         self.linear_mid = Linear(
+            biases=True,
             irreps_in=self.hidden_irreps,
             irreps_out=self.hidden_irreps,
             equivariance_config=self.equivariance_config,
@@ -224,6 +225,7 @@ class NonLinearBiasReadoutBlock(nnx.Module):
             acts=[self.gate],
         )
         self.linear_2 = Linear(
+            biases=True,
             irreps_in=self.hidden_irreps,
             irreps_out=self.irrep_out,
             equivariance_config=self.equivariance_config,
@@ -236,6 +238,8 @@ class NonLinearBiasReadoutBlock(nnx.Module):
         heads: jnp.ndarray | None = None,
     ) -> IrrepsArray:
         x = self.non_linearity_1(self.linear_1(x))
+        if self.num_heads > 1 and heads is not None:
+            x = mask_head(x, heads, self.num_heads)
         x = self.non_linearity_2(self.linear_mid(x))
         if self.num_heads > 1 and heads is not None:
             x = mask_head(x, heads, self.num_heads)
@@ -650,6 +654,12 @@ class EquivariantProductBasisBlock(nnx.Module):
         node_attrs: jnp.ndarray,
         node_attrs_index: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
+        node_feats = self._contract(node_feats, node_attrs, node_attrs_index)
+        if self.use_sc and sc is not None:
+            return self.linear(node_feats) + sc
+        return self.linear(node_feats)
+
+    def _contract(self, node_feats, node_attrs, node_attrs_index=None):
         if self.use_agnostic_product:
             node_attrs = jnp.ones((node_feats.shape[0], 1), dtype=node_feats.dtype)
             node_attrs_index = None
@@ -676,9 +686,7 @@ class EquivariantProductBasisBlock(nnx.Module):
         else:
             node_feats = self.symmetric_contractions(node_feats, node_attrs)
 
-        if self.use_sc and sc is not None:
-            return self.linear(node_feats) + sc
-        return self.linear(node_feats)
+        return node_feats
 
 
 class InteractionBlock(nnx.Module, metaclass=abc.ABCMeta):

@@ -23,6 +23,7 @@ from .blocks import (
     RealAgnosticResidualNonLinearInteractionBlock,
     ScaleShiftBlock,
 )
+from .les import MACELES
 from .loss import (
     DipolePolarLoss,
     DipoleSingleLoss,
@@ -36,6 +37,11 @@ from .loss import (
     WeightedHuberEnergyForcesStressLoss,
     uber_loss,
 )
+from .magnetic import MagneticScaleShiftMACE, MagneticSCFMACE
+from .magnetic_blocks import (
+    MagneticRealAgnosticResidueSpinOrbitCoupledDensityInteractionBlock,
+    MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock,
+)
 from .models import (
     MACE,
     AtomicDielectricMACE,
@@ -43,6 +49,7 @@ from .models import (
     EnergyDipolesMACE,
     ScaleShiftMACE,
 )
+from .polar import PolarMACE
 
 __all__ = [
     'AtomicEnergiesBlock',
@@ -69,6 +76,12 @@ __all__ = [
     'DipoleSingleLoss',
     'DipolePolarLoss',
     'uber_loss',
+    'MACELES',
+    'PolarMACE',
+    'MagneticScaleShiftMACE',
+    'MagneticSCFMACE',
+    'MagneticRealAgnosticResidueSpinOrbitCoupledDensityInteractionBlock',
+    'MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock',
     'MACE',
     'ScaleShiftMACE',
     'AtomicDipolesMACE',
@@ -86,6 +99,8 @@ except Exception:
     pass
 
 interaction_classes: dict[str, type[InteractionBlock]] = {
+    'MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock': MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock,
+    'MagneticRealAgnosticResidueSpinOrbitCoupledDensityInteractionBlock': MagneticRealAgnosticResidueSpinOrbitCoupledDensityInteractionBlock,
     'RealAgnosticResidualInteractionBlock': RealAgnosticResidualInteractionBlock,
     'RealAgnosticAttResidualInteractionBlock': RealAgnosticAttResidualInteractionBlock,
     'RealAgnosticInteractionBlock': RealAgnosticInteractionBlock,

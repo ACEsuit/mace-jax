@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import cuequivariance as cue
 import cuequivariance_jax as cuex
 import jax
 import jax.numpy as jnp
@@ -9,7 +10,6 @@ import numpy as np
 from e3nn_jax import Irreps, IrrepsArray  # type: ignore
 from flax import nnx
 
-import cuequivariance as cue
 from mace_jax.adapters.nnx.torch import nxx_auto_import_from_torch
 from mace_jax.nnx_config import ConfigVar
 from mace_jax.tools.dtype import default_dtype
@@ -44,6 +44,7 @@ class Linear(nnx.Module):
         layout: object = 'mul_ir',
         group: object = cue.O3,
         *,
+        biases: bool = False,
         rngs: nnx.Rngs | None = None,
     ) -> None:
         self.irreps_in = irreps_in
@@ -85,6 +86,16 @@ class Linear(nnx.Module):
             jnp.asarray(layout_code, dtype=jnp.int32),
             is_mutable=False,
         )
+        self._bias_indices = tuple(
+            i
+            for (mul, ir), sl in zip(self.irreps_out_o3, self.irreps_out_o3.slices())
+            if ir.l == 0 and ir.p == 1
+            for i in range(sl.start, sl.stop)
+        )
+        if biases:
+            self.bias = nnx.Param(
+                jnp.zeros(len(self._bias_indices), dtype=default_dtype())
+            )
         if self._internal_weights:
             if rngs is None:
                 raise ValueError('rngs is required when internal_weights=True')
@@ -243,6 +254,10 @@ class Linear(nnx.Module):
                 f'{self._descriptor_output_layout!r} to {self._api_layout!r}.'
             )
 
+        if hasattr(self, 'bias'):
+            out_mul_ir = out_mul_ir.at[
+                ..., jnp.asarray(self._bias_indices, dtype=jnp.int32)
+            ].add(self.bias[...])
         if had_irreps:
             return IrrepsArray(irreps_out, out_mul_ir)
         return out_mul_ir

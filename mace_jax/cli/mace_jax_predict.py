@@ -118,6 +118,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.set_defaults(compute_forces=None)
     parser.add_argument('--compute-hessian', action='store_true')
+    parser.add_argument('--compute-polarizability', action='store_true')
+    parser.add_argument(
+        '--polarizability-method', choices=['dipole', 'energy'], default='dipole'
+    )
+    parser.add_argument('--compute-bec', action='store_true')
     parser.add_argument('--compute-atomic-stresses', action='store_true')
     parser.add_argument('--compute-edge-forces', action='store_true')
     parser.add_argument('--compute-dielectric-derivatives', action='store_true')
@@ -273,6 +278,9 @@ def _build_predictor(
     compute_atomic_stresses: bool = False,
     compute_edge_forces: bool = False,
     compute_dielectric_derivatives: bool = False,
+    compute_polarizability: bool = False,
+    polarizability_method: str = 'dipole',
+    compute_bec: bool = False,
 ):
     atomic_numbers = model_config.get('atomic_numbers')
     num_species = len(atomic_numbers) if atomic_numbers is not None else 0
@@ -287,6 +295,8 @@ def _build_predictor(
         name: True
         for name, enabled in dict(
             compute_hessian=compute_hessian,
+            compute_polarizability=compute_polarizability,
+            compute_bec=compute_bec,
             compute_atomic_stresses=compute_atomic_stresses,
             compute_edge_forces=compute_edge_forces,
             compute_dielectric_derivatives=compute_dielectric_derivatives,
@@ -294,6 +304,8 @@ def _build_predictor(
         if enabled
     }
 
+    if compute_polarizability:
+        extra_flags['polarizability_method'] = polarizability_method
     keep_keys: set[str] | None = None
     if not full_outputs:
         keep_keys = {
@@ -304,7 +316,22 @@ def _build_predictor(
             'polarizability',
             'polarizability_sh',
             'polar',
+            'magforces',
+            'spins',
+            'latent_charges',
+            'latent_dipoles',
+            'latent_quads',
+            'latent_alphas',
+            'latent_kappas',
+            'les_energy',
+            'electrostatic_energy',
+            'electron_energy',
+            'equilibrated_magmom',
         }
+        if compute_bec:
+            keep_keys.add('BEC')
+        if compute_polarizability:
+            keep_keys.add('dipole_from_energy')
         if compute_hessian:
             keep_keys.add('hessian')
         if compute_atomic_stresses:
@@ -579,6 +606,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         compute_stress=args.compute_stress,
         full_outputs=bool(args.full_outputs),
         compute_hessian=args.compute_hessian,
+        compute_polarizability=args.compute_polarizability,
+        polarizability_method=args.polarizability_method,
+        compute_bec=args.compute_bec,
         compute_atomic_stresses=args.compute_atomic_stresses,
         compute_edge_forces=args.compute_edge_forces,
         compute_dielectric_derivatives=args.compute_dielectric_derivatives,

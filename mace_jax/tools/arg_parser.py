@@ -24,6 +24,10 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
         choices=[
             'MACE',
             'ScaleShiftMACE',
+            'MACELES',
+            'PolarMACE',
+            'MagneticScaleShiftMACE',
+            'MagneticSCFMACE',
             'AtomicDipolesMACE',
             'EnergyDipolesMACE',
             'AtomicDielectricMACE',

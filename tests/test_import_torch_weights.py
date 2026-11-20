@@ -26,7 +26,7 @@ class MACE(types.SimpleNamespace):
 
 @pytest.mark.parametrize(
     'model_class',
-    ['MACELES', 'PolarMACE', 'MagneticMACE', 'MagneticScaleShiftMACE'],
+    ['MagneticMACE', 'UnknownExtension'],
 )
 def test_builder_rejects_unsupported_model_before_initialization(model_class):
     with pytest.raises(ValueError, match=f'Unsupported model class {model_class!r}'):
@@ -37,9 +37,9 @@ def test_builder_rejects_unsupported_model_before_initialization(model_class):
 
 @pytest.mark.parametrize('configured_class', [None, 'MACE', 'ScaleShiftMACE'])
 def test_conversion_checks_actual_source_architecture(configured_class):
-    source = type('MACELES', (), {})()
+    source = type('UnknownExtension', (), {})()
     config = {} if configured_class is None else {'torch_model_class': configured_class}
-    with pytest.raises(ValueError, match="Unsupported model class 'MACELES'"):
+    with pytest.raises(ValueError, match="Unsupported model class 'UnknownExtension'"):
         jax_from_torch.convert_model(source, config)
 
 

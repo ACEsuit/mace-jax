@@ -131,6 +131,7 @@ def get_outputs(
     compute_force: bool = True,
     compute_stress: bool = False,
     compute_virials: bool = False,
+    cell_dependent: bool = False,
 ) -> Outputs:
     """
     Evaluate per-graph energies with optional forces, stress, and virial tensors.
@@ -193,7 +194,8 @@ def get_outputs(
             unit_shifts,
             cell_reshaped[batch[edge_index[0]]],
         )
-        per_graph_energy = energy_fn(deformed_positions, shifts=shifts)
+        cell_kwargs = {'cell': cell_reshaped} if cell_dependent else {}
+        per_graph_energy = energy_fn(deformed_positions, shifts=shifts, **cell_kwargs)
         return jnp.sum(per_graph_energy), per_graph_energy
 
     def energy_sum_fn(pos):
@@ -495,6 +497,9 @@ def add_output_interface(cls=None):
             compute_edge_forces: bool = False,
             compute_atomic_stresses: bool = False,
             compute_dielectric_derivatives: bool = False,
+            compute_magforces: bool | None = None,
+            compute_polarizability: bool = False,
+            polarizability_method: str = 'dipole',
             **model_kwargs,
         ) -> dict[str, jnp.ndarray | None]:
             raw_out = self._energy_fn(
@@ -518,12 +523,52 @@ def add_output_interface(cls=None):
                 )
             energy_arr = raw_out.get('energy') if isinstance(raw_out, dict) else raw_out
 
-            def energy_fn(positions, shifts=None):
+            def energy_fn(positions, shifts=None, cell=None):
                 new_data = dict(data, positions=positions)
                 if shifts is not None:
                     new_data['shifts'] = shifts
+                if cell is not None:
+                    new_data['cell'] = cell
                 out = self._energy_fn(new_data, **model_kwargs)
                 return out['energy'] if isinstance(out, dict) else out
+
+            def field_properties(input_data):
+                if not getattr(self, 'field_dependent', False):
+                    raise ValueError(
+                        'Field-response polarizability requires a field-dependent model.'
+                    )
+                field = jnp.asarray(
+                    input_data.get(
+                        'external_field', jnp.zeros((len(input_data['ptr']) - 1, 3))
+                    )
+                )
+
+                def field_output(value):
+                    return self._energy_fn(
+                        dict(input_data, external_field=value), **model_kwargs
+                    )
+
+                derived_dipole = None
+                if polarizability_method == 'dipole':
+                    derivative = jax.jacrev(
+                        lambda value: field_output(value)['dipole'].sum(axis=0)
+                    )(field)
+                elif polarizability_method == 'energy':
+                    dipole_fn = jax.grad(
+                        lambda value: field_output(value)['energy'].sum()
+                    )
+                    derived_dipole = dipole_fn(field)
+                    derivative = jax.jacrev(lambda value: dipole_fn(value).sum(axis=0))(
+                        field
+                    )
+                else:
+                    raise ValueError(
+                        "polarizability_method must be 'dipole' or 'energy'."
+                    )
+                return dict(
+                    polarizability=-derivative.transpose(1, 0, 2),
+                    dipole_from_energy=derived_dipole,
+                )
 
             def extra_outputs(result):
                 # These potentially large outputs are opt-in static flags, so
@@ -534,6 +579,19 @@ def add_output_interface(cls=None):
                     atomic_virials=None,
                     atomic_stresses=None,
                 )
+                magnetic = getattr(self, 'magnetic', False)
+                if compute_magforces or (compute_magforces is None and magnetic):
+                    if not magnetic:
+                        raise ValueError('Magnetic forces require a magnetic model.')
+                    result['magforces'] = -jax.grad(
+                        lambda moments: jnp.sum(
+                            self._energy_fn(dict(data, magmom=moments), **model_kwargs)[
+                                'energy'
+                            ]
+                        )
+                    )(data['magmom'])
+                elif magnetic:
+                    result['magforces'] = None
                 if compute_hessian:
                     hessian = jax.jacfwd(jax.grad(lambda pos: jnp.sum(energy_fn(pos))))(
                         data['positions']
@@ -541,6 +599,12 @@ def add_output_interface(cls=None):
                     n = data['positions'].shape[0]
                     result['hessian'] = hessian.reshape(3 * n, n, 3)
                 if compute_edge_forces or compute_atomic_stresses:
+                    if compute_atomic_stresses and getattr(
+                        self, 'cell_dependent', False
+                    ):
+                        raise ValueError(
+                            'Atomic stresses are not defined for long-range models; request total stress instead.'
+                        )
                     edge_forces = jax.grad(
                         lambda shifts: jnp.sum(
                             energy_fn(data['positions'], shifts=shifts)
@@ -562,6 +626,8 @@ def add_output_interface(cls=None):
                                 data.get('pbc'),
                             )
                         )
+                if compute_polarizability:
+                    result.update(field_properties(data))
                 if compute_dielectric_derivatives:
                     if result.get('dipole') is None:
                         raise ValueError(
@@ -575,8 +641,12 @@ def add_output_interface(cls=None):
                         if result.get(key) is not None:
 
                             def property_sum(pos):
-                                out = self._energy_fn(
-                                    dict(data, positions=pos), **model_kwargs
+                                input_data = dict(data, positions=pos)
+                                out = (
+                                    field_properties(input_data)
+                                    if key == 'polarizability'
+                                    and compute_polarizability
+                                    else self._energy_fn(input_data, **model_kwargs)
                                 )
                                 return (
                                     out[key].reshape(out[key].shape[0], -1).sum(axis=0)
@@ -624,6 +694,7 @@ def add_output_interface(cls=None):
                 compute_force=compute_force,
                 compute_stress=compute_stress,
                 compute_virials=compute_virials,
+                cell_dependent=getattr(self, 'cell_dependent', False),
             )
             total_energy, forces, stress = (
                 outputs.energy,

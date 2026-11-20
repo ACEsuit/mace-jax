@@ -54,6 +54,9 @@ class Configuration:
     graph_features: dict[str, np.ndarray] | None = None
     charges: np.ndarray | None = None
     total_charge: float = 0.0
+    total_spin: float = 1.0
+    external_field: np.ndarray | None = None
+    magmom: np.ndarray | None = None
 
 
 Configurations = list[Configuration]
@@ -198,7 +201,8 @@ def config_from_atoms(
         atoms.arrays.get(
             charges_key,
             atoms.info.get(
-                charges_key, cached_results.get(charges_key, atoms.get_initial_charges())
+                charges_key,
+                cached_results.get(charges_key, atoms.get_initial_charges()),
             ),
         ),
         dtype=float,
@@ -208,6 +212,26 @@ def config_from_atoms(
     total_charge = float(atoms.info.get('total_charge', charges.sum()))
     if not np.isfinite(total_charge):
         raise ValueError('total_charge must be finite.')
+    total_spin = float(atoms.info.get('total_spin', 1.0))
+    external_field = np.asarray(
+        atoms.info.get('external_field', np.zeros(3)), dtype=float
+    ).reshape(-1)
+    magmom = np.asarray(
+        atoms.arrays.get(
+            'magmom', atoms.info.get('magmom', atoms.get_initial_magnetic_moments())
+        ),
+        dtype=float,
+    )
+    if magmom.shape == (len(atoms),):
+        magmom = np.stack(
+            (np.zeros_like(magmom), np.zeros_like(magmom), magmom), axis=-1
+        )
+    if not np.isfinite(total_spin):
+        raise ValueError('total_spin must be finite.')
+    if external_field.shape != (3,) or not np.isfinite(external_field).all():
+        raise ValueError('external_field must contain three finite components.')
+    if magmom.shape != (len(atoms), 3) or not np.isfinite(magmom).all():
+        raise ValueError('magmom must contain three finite components per atom.')
     return Configuration(
         atomic_numbers=atomic_numbers,
         positions=atoms.get_positions(),
@@ -232,6 +256,9 @@ def config_from_atoms(
         graph_features=graph_features,
         charges=charges,
         total_charge=total_charge,
+        total_spin=total_spin,
+        external_field=external_field,
+        magmom=magmom,
     )
 
 
@@ -459,6 +486,11 @@ def save_configurations_as_HDF5(configurations: Configurations, _, h5_file) -> N
                     features_group[name] = value
         properties_subgrp = subgroup.create_group('properties')
         properties_subgrp['total_charge'] = config.total_charge
+        properties_subgrp['total_spin'] = config.total_spin
+        for key in ('external_field', 'magmom'):
+            value = getattr(config, key)
+            if value is not None:
+                properties_subgrp[key] = value
         if config.charges is not None:
             properties_subgrp['charges'] = config.charges
         if config.energy is not None:
@@ -494,8 +526,8 @@ def write_value(value):
 
 GraphNodes = namedtuple(
     'Nodes',
-    ['positions', 'forces', 'species', 'features', 'charges'],
-    defaults=[None, None],
+    ['positions', 'forces', 'species', 'features', 'charges', 'magmom'],
+    defaults=[None, None, None],
 )
 # Multiprocessing pickle support expects the class to be exported under its __name__.
 Nodes = GraphNodes
@@ -525,6 +557,8 @@ class GraphGlobals(NamedTuple):
     pbc: np.ndarray | None = None
     features: dict[str, np.ndarray] | None = None
     total_charge: np.ndarray | None = None
+    total_spin: np.ndarray | None = None
+    external_field: np.ndarray | None = None
 
 
 def graph_from_configuration(
@@ -567,6 +601,9 @@ def graph_from_configuration(
     return jraph.GraphsTuple(
         nodes=GraphNodes(
             positions=config.positions,
+            magmom=np.zeros_like(config.positions)
+            if config.magmom is None
+            else config.magmom,
             forces=config.forces,
             species=species,
             features=config.node_features,
@@ -583,6 +620,10 @@ def graph_from_configuration(
                 cell=cell,
                 features=config.graph_features,
                 total_charge=np.asarray(config.total_charge),
+                total_spin=np.asarray(config.total_spin),
+                external_field=np.zeros(3)
+                if config.external_field is None
+                else config.external_field,
                 pbc=np.asarray(
                     config.pbc if config.pbc is not None else (False, False, False),
                     dtype=bool,

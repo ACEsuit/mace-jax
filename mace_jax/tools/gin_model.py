@@ -102,6 +102,23 @@ def _merge_state_dicts(base: dict | None, updates: dict | None) -> dict | None:
 
 def _export_model_config(mace_module: modules.MACE) -> dict:
     """Build a config dict compatible with tools.model_builder._build_jax_model."""
+    if isinstance(mace_module, modules.MagneticSCFMACE):
+        config = _export_model_config(mace_module.magmom_mace)
+        config['torch_model_class'] = 'MagneticSCFMACE'
+        config.update(
+            {
+                key: getattr(mace_module, key)
+                for key in (
+                    'n_scf_step',
+                    'scf_tol',
+                    'scf_logging',
+                    'scf_step_size',
+                    'use_scf',
+                    'use_collinear',
+                )
+            }
+        )
+        return config
     equivariance_config = getattr(mace_module, 'equivariance_config', None)
     config = {
         'torch_model_class': type(mace_module).__name__,
@@ -163,6 +180,32 @@ def _export_model_config(mace_module: modules.MACE) -> dict:
         'heads': _serialize_config_value(getattr(mace_module, 'heads', None)),
     }
     normalize2mom_consts = getattr(mace_module, '_normalize2mom_consts', None)
+    if isinstance(mace_module, modules.MACELES):
+        config['les_arguments'] = _serialize_config_value(mace_module.les_arguments)
+    if isinstance(mace_module, modules.MagneticScaleShiftMACE):
+        config['m_max'] = np.asarray(mace_module.m_max[...]).tolist()
+        for key in (
+            'max_m_ell',
+            'num_mag_radial_basis',
+            'use_magmom_one_body',
+            'num_mag_radial_basis_one_body',
+        ):
+            config[key] = getattr(mace_module, key)
+    if isinstance(mace_module, modules.PolarMACE):
+        from mace_jax.modules.polar import POLAR_CONFIG_KEYS  # noqa: PLC0415
+
+        for key in POLAR_CONFIG_KEYS:
+            name = (
+                '_' + key
+                if key
+                in (
+                    'field_feature_norms',
+                    'fixedpoint_update_config',
+                    'field_readout_config',
+                )
+                else key
+            )
+            config[key] = _serialize_config_value(getattr(mace_module, name))
     if isinstance(mace_module, modules.AtomicDielectricMACE):
         config['use_polarizability'] = mace_module.use_polarizability
         config['means_stds'] = {
@@ -368,6 +411,26 @@ def _graph_to_data(
         if total_charge is None
         else jnp.asarray(total_charge, dtype=positions.dtype).reshape(-1)
     )
+
+    for key, container, default in (
+        ('magmom', graph.nodes, jnp.zeros_like(positions)),
+        (
+            'external_field',
+            graph.globals,
+            jnp.zeros((len(graph.n_node), 3), dtype=positions.dtype),
+        ),
+        (
+            'total_spin',
+            graph.globals,
+            jnp.ones(len(graph.n_node), dtype=positions.dtype),
+        ),
+    ):
+        if key in (getattr(container, 'features', None) or {}):
+            continue
+        value = getattr(container, key, None)
+        data_dict[key] = (
+            default if value is None else jnp.asarray(value, dtype=positions.dtype)
+        )
 
     for container, mask in (
         (graph.nodes, jraph.get_node_padding_mask(graph)),
@@ -695,6 +758,10 @@ def model(
     else:
         logging.info(f'Use the average min neighbor distance: {avg_r_min:.3f}')
 
+    if model_class in ('MACELES', 'PolarMACE') and scaling is not None:
+        raise ValueError(
+            'Long-range models require local atomic_inter_scale/shift instead of global energy scaling.'
+        )
     tensor_only = model_class in ('AtomicDipolesMACE', 'AtomicDielectricMACE')
     if tensor_only:
         atomic_energies = 'zero'
@@ -831,6 +898,15 @@ def model(
         if irreps_key in kwargs:
             kwargs[irreps_key] = _ensure_irreps(kwargs[irreps_key])
 
+    if model_class in ('MagneticScaleShiftMACE', 'MagneticSCFMACE'):
+        kwargs.setdefault(
+            'interaction_cls',
+            modules.MagneticRealAgnosticResidueSpinOrbitCoupledDensityInteractionBlock,
+        )
+        kwargs.setdefault(
+            'interaction_cls_first',
+            modules.MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock,
+        )
     kwargs.setdefault('interaction_cls', RealAgnosticResidualInteractionBlock)
     kwargs.setdefault('interaction_cls_first', RealAgnosticResidualInteractionBlock)
 
@@ -1029,6 +1105,27 @@ def model(
                 'edge_forces',
                 'atomic_virials',
                 'atomic_stresses',
+                'equilibrated_magmom',
+                'magforces',
+                'latent_charges',
+                'latent_dipoles',
+                'latent_quads',
+                'latent_kappas',
+                'latent_alphas',
+                'BEC',
+                'les_energy',
+                'density_coefficients',
+                'spin_density',
+                'spins',
+                'spin_charge_density',
+                'charges_history',
+                'fukui_functions',
+                'electrostatic_energy',
+                'electron_energy',
+                'dipole_from_energy',
+                'total_charge',
+                'fermi_level',
+                'external_field',
             ):
                 value = outputs.get(key)
                 if value is None:
@@ -1056,6 +1153,20 @@ def model(
                         'atomic_dipoles',
                         'atomic_virials',
                         'atomic_stresses',
+                        'equilibrated_magmom',
+                        'magforces',
+                        'latent_charges',
+                        'latent_dipoles',
+                        'latent_quads',
+                        'latent_kappas',
+                        'latent_alphas',
+                        'BEC',
+                        'density_coefficients',
+                        'spin_density',
+                        'spins',
+                        'spin_charge_density',
+                        'charges_history',
+                        'fukui_functions',
                     ):
                         mask = node_mask
                         scale = jnp.broadcast_to(std_graph, graph.n_node.shape)[
@@ -1064,7 +1175,12 @@ def model(
                     else:
                         mask = graph_mask
                         scale = 1.0
-                    if key in ('edge_forces', 'atomic_virials', 'atomic_stresses'):
+                    if key in (
+                        'edge_forces',
+                        'atomic_virials',
+                        'atomic_stresses',
+                        'magforces',
+                    ):
                         value = value * jnp.asarray(scale).reshape(
                             (-1,) + (1,) * (value.ndim - 1)
                         )
@@ -1078,6 +1194,10 @@ def model(
     if model_class not in (
         'MACE',
         'ScaleShiftMACE',
+        'MACELES',
+        'PolarMACE',
+        'MagneticScaleShiftMACE',
+        'MagneticSCFMACE',
         'AtomicDipolesMACE',
         'EnergyDipolesMACE',
         'AtomicDielectricMACE',

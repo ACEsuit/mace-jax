@@ -17,6 +17,23 @@ def extract_config_mace_model(torch_model):
     Chebyshev bases. Supply that size on shallow module copies so extraction
     works without changing the source model or copying its parameter tensors.
     """
+    if type(torch_model).__name__ == 'MagneticSCFMACE':
+        config = extract_config_mace_model(torch_model.magmom_mace)
+        config['torch_model_class'] = 'MagneticSCFMACE'
+        config.update(
+            {
+                key: getattr(torch_model, key)
+                for key in (
+                    'n_scf_step',
+                    'scf_tol',
+                    'scf_logging',
+                    'scf_step_size',
+                    'use_scf',
+                    'use_collinear',
+                )
+            }
+        )
+        return config
     if type(torch_model).__name__ in (
         'MACE',
         'AtomicDipolesMACE',
@@ -52,7 +69,59 @@ def extract_config_mace_model(torch_model):
         and getattr(torch_model, 'edge_irreps', None) is not None
     ):
         config['use_edge_irreps_first'] = _infer_use_edge_irreps_first(torch_model)
+    if type(torch_model).__name__ == 'MACELES' and 'error' not in config:
+        _copy_les_config(torch_model, config)
     return config
+
+
+def _copy_les_config(model, config):
+    args = {}
+    for key in (
+        'sigma',
+        'dl',
+        'remove_self_interaction',
+        'remove_mean',
+        'epsilon_factor',
+        'use_atomwise',
+        'use_fixed_atomic_charges',
+        'use_atomic_alpha',
+        'use_epsilon_r_scaling',
+    ):
+        args[key] = getattr(model.les, key)
+    mapping = dict(
+        use_dipole='use_dipoles',
+        use_quad='use_quads',
+        use_induced_charge='use_induced_charges',
+        use_induced_dipole='use_induced_dipoles',
+        output_scale='les_output_scale',
+        kappa_scale='les_kappa_scale',
+        alpha_scale='les_alpha_scale',
+    )
+    for key in (
+        'compute_bec',
+        'bec_output_index',
+        'use_anisotropic_polarizability',
+        'alpha_irreps',
+        'alpha_1o_nonlinear_readout',
+        'alpha_1o_linear_w_pos',
+        'make_alpha_positive',
+        'make_kappa_positive',
+    ):
+        if hasattr(model, key):
+            args[key] = getattr(model, key)
+    for key, name in mapping.items():
+        args[key] = getattr(model, name, 1.0 if key.endswith('_scale') else False)
+    for flag, module, key in (
+        ('use_fixed_atomic_charges', 'fixed_charges', 'fixed_charge_values'),
+        ('use_atomic_alpha', 'atomic_alpha', 'atomic_alpha_values'),
+    ):
+        if args[flag]:
+            args[key] = (
+                getattr(model.les, module)(model.atomic_numbers).detach().cpu().tolist()
+            )
+    config.update(
+        les_arguments=args, torch_model_class='MACELES', keep_last_layer_irreps=True
+    )
 
 
 def _extract_unscaled_config(model):

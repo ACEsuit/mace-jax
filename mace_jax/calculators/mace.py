@@ -61,7 +61,29 @@ class MACEJAXCalculator(Calculator):
             list(type(self).implemented_properties) if self.has_energy else []
         )
         if self.has_energy:
-            self.implemented_properties += ['stresses', 'hessian', 'atomic_virials']
+            self.implemented_properties += ['hessian']
+            if self.model_class not in ('MACELES', 'PolarMACE'):
+                self.implemented_properties += ['stresses', 'atomic_virials']
+        if self.model_class in ('MagneticScaleShiftMACE', 'MagneticSCFMACE'):
+            self.implemented_properties += ['magforces']
+        if self.model_class == 'MagneticSCFMACE':
+            self.implemented_properties += ['equilibrated_magmom']
+        if self.model_class == 'PolarMACE':
+            self.implemented_properties += [
+                'charges',
+                'spins',
+                'dipole',
+                'polarizability',
+                'dmu_dr',
+            ]
+        if self.model_class == 'MACELES':
+            self.implemented_properties += [
+                'latent_charges',
+                'latent_dipoles',
+                'latent_alphas',
+                'latent_quads',
+                'BEC',
+            ]
         if self.model_class in (
             'AtomicDipolesMACE',
             'EnergyDipolesMACE',
@@ -77,12 +99,18 @@ class MACEJAXCalculator(Calculator):
             ]
         self.params = stop_grad(params)
 
-        def predict(w, g, atomic=False, hessian=False, dielectric=False):
+        def predict(
+            w, g, atomic=False, hessian=False, dielectric=False, polar=False, bec=False
+        ):
             flags = {}
             if atomic:
                 flags['compute_atomic_stresses'] = True
             if hessian:
                 flags['compute_hessian'] = True
+            if polar:
+                flags['compute_polarizability'] = True
+            if bec:
+                flags['compute_bec'] = True
             if dielectric:
                 flags['compute_dielectric_derivatives'] = True
             return self.model(
@@ -94,7 +122,7 @@ class MACEJAXCalculator(Calculator):
             )
 
         self.predictor = jax.jit(
-            predict, static_argnames=('atomic', 'hessian', 'dielectric')
+            predict, static_argnames=('atomic', 'hessian', 'dielectric', 'polar', 'bec')
         )
 
         self.r_max = r_max
@@ -138,8 +166,18 @@ class MACEJAXCalculator(Calculator):
             ),
             copy=True,
         )
-        return charges, np.array(
-            atoms.info.get('total_charge', charges.sum()), copy=True
+        return (
+            charges,
+            np.array(atoms.info.get('total_charge', charges.sum()), copy=True),
+            np.array(atoms.info.get('total_spin', 1.0), copy=True),
+            np.array(atoms.info.get('external_field', np.zeros(3)), copy=True),
+            np.array(
+                atoms.arrays.get(
+                    'magmom',
+                    atoms.info.get('magmom', atoms.get_initial_magnetic_moments()),
+                ),
+                copy=True,
+            ),
         )
 
     def get_hessian(self, atoms=None):
@@ -198,6 +236,8 @@ class MACEJAXCalculator(Calculator):
             atomic=any(key in properties for key in ('stresses', 'atomic_virials')),
             hessian='hessian' in properties,
             dielectric=any(key in properties for key in ('dmu_dr', 'dalpha_dr')),
+            polar=self.model_class == 'PolarMACE' and 'polarizability' in properties,
+            bec=self.model_class == 'MACELES' and 'BEC' in properties,
         )
         out = jax.device_get(out)
         n_atoms = len(self.atoms)
@@ -242,6 +282,8 @@ class MACEJAXCalculator(Calculator):
         for key in ('dipole', 'polarizability', 'polarizability_sh'):
             if out.get(key) is not None:
                 factor = dipole_factor if key == 'dipole' else self.length_units_to_A**3
+                if key == 'polarizability' and self.model_class == 'PolarMACE':
+                    factor = self.length_units_to_A**2 / self.energy_units_to_eV
                 self.results[key] = np.asarray(out[key])[0] * factor
         for key in ('charges', 'atomic_dipoles'):
             if out.get(key) is not None:
@@ -256,3 +298,17 @@ class MACEJAXCalculator(Calculator):
                     else self.length_units_to_A**2
                 )
                 self.results[key] = np.asarray(out[key])[:, :n_atoms] * factor
+
+        for key in (
+            'magforces',
+            'equilibrated_magmom',
+            'spins',
+            'latent_charges',
+            'latent_dipoles',
+            'latent_alphas',
+            'latent_quads',
+            'BEC',
+        ):
+            if out.get(key) is not None:
+                factor = self.energy_units_to_eV if key == 'magforces' else 1.0
+                self.results[key] = np.asarray(out[key])[:n_atoms] * factor

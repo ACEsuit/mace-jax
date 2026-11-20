@@ -14,7 +14,7 @@ from e3nn_jax import Irrep, Irreps
 from flax import nnx, serialization
 
 from mace_jax.adapters.e3nn.math import moment
-from mace_jax.nnx_config import ConfigVar
+from mace_jax.nnx_config import ConfigDict, ConfigVar
 from mace_jax.nnx_utils import state_to_pure_dict, state_to_serializable_dict
 from mace_jax.tools import model_builder
 
@@ -72,7 +72,12 @@ def _restore_bundle(config: dict, payload, dtype: str, *, context: str) -> Model
     serialized = isinstance(payload, (bytes, bytearray))
     state_pure = serialization.msgpack_restore(payload) if serialized else dict(payload)
 
-    stored_consts = state_pure.get('_normalize2mom_consts_var')
+    model_state = (
+        state_pure.get('magmom_mace', {})
+        if config.get('torch_model_class') == 'MagneticSCFMACE'
+        else state_pure
+    )
+    stored_consts = model_state.get('_normalize2mom_consts_var')
     if stored_consts is not None:
         consts = dict(stored_consts.items())
         if 'sigmoid' not in consts:
@@ -82,7 +87,7 @@ def _restore_bundle(config: dict, payload, dtype: str, *, context: str) -> Model
                 if 'sigmoid' in configured
                 else np.asarray(_legacy_sigmoid_const())
             )
-        state_pure['_normalize2mom_consts_var'] = consts
+        model_state['_normalize2mom_consts_var'] = consts
         # Activations are constructed before NNX state is restored. Build them
         # with the saved constants, including for checkpoints lacking JSON data.
         config['normalize2mom_consts'] = {
@@ -91,11 +96,24 @@ def _restore_bundle(config: dict, payload, dtype: str, *, context: str) -> Model
 
     module = model_builder._build_jax_model(config, rngs=nnx.Rngs(0))
     graphdef, state = nnx.split(module)
+    template = state_to_serializable_dict(state)
+    if config.get('readout_cls') == 'NonLinearBiasReadoutBlock':
+        # Older JAX readouts omitted these biases entirely. Restore their
+        # equivalent zero values while retaining strict checks for other leaves.
+        def restore_biases(saved, expected):
+            if not isinstance(saved, dict) or not isinstance(expected, dict):
+                return
+            for key, value in expected.items():
+                saved_key = key if key in saved else str(key)
+                if key == 'bias' and key not in saved:
+                    saved[key] = np.zeros_like(value)
+                elif saved_key in saved:
+                    restore_biases(saved[saved_key], value)
+
+        restore_biases(state_pure.get('readouts'), template.get('readouts'))
     if serialized:
         # Keep strict validation of all other keys after the schema migration.
-        state_pure = serialization.from_state_dict(
-            state_to_serializable_dict(state), state_pure
-        )
+        state_pure = serialization.from_state_dict(template, state_pure)
     _replace_state_with_specials(state, state_pure)
     state_pure = state_to_pure_dict(state)
     _validate_config_matches_params(config, state_pure, context=context)
@@ -157,6 +175,8 @@ def _find_param_leaf(tree, keys: Sequence[str]):
 
 
 def _infer_num_elements_from_params(config: dict, params) -> int | None:
+    if config.get('torch_model_class') == 'MagneticSCFMACE':
+        params = params.get('magmom_mace', params)
     weight = _find_param_leaf(params, ('params', 'node_embedding', 'linear', 'weight'))
     if weight is None:
         weight = _find_param_leaf(params, ('node_embedding', 'linear', 'weight'))
@@ -198,13 +218,18 @@ __all__ = ['ModelBundle', 'load_model_bundle', 'resolve_model_paths']
 
 def _replace_state_with_specials(state: nnx.State, state_pure: dict) -> None:
     """Replace state while handling ConfigVar leaves that store dicts."""
-    normalize2mom = None
-    if isinstance(state_pure, dict) and '_normalize2mom_consts_var' in state_pure:
-        normalize2mom = state_pure.pop('_normalize2mom_consts_var')
 
-    nnx.replace_by_pure_dict(state, state_pure)
+    def wrap_config_dicts(value, template):
+        if isinstance(template, ConfigVar) and isinstance(value, dict):
+            return ConfigDict(value)
+        if isinstance(value, dict) and isinstance(template, (dict, nnx.State)):
+            result = {}
+            for key, child in value.items():
+                target_key = key
+                if key not in template and isinstance(key, str) and key.isdigit():
+                    target_key = int(key)
+                result[key] = wrap_config_dicts(child, template.get(target_key))
+            return result
+        return value
 
-    if normalize2mom is not None:
-        cfg = state.get('_normalize2mom_consts_var', None)
-        if isinstance(cfg, ConfigVar):
-            cfg.set_value(normalize2mom)
+    nnx.replace_by_pure_dict(state, wrap_config_dicts(state_pure, state))

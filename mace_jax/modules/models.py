@@ -331,7 +331,8 @@ class MACE(nnx.Module):
         products: list[EquivariantProductBasisBlock] = []
         readouts: list[nnx.Module] = []
 
-        interaction_first = self.interaction_cls_first(
+        interaction_first = self._make_interaction(
+            self.interaction_cls_first,
             node_attrs_irreps=node_attr_irreps,
             node_feats_irreps=node_feats_irreps,
             edge_attrs_irreps=sh_irreps,
@@ -347,7 +348,7 @@ class MACE(nnx.Module):
         interactions.append(interaction_first)
 
         use_sc_first = 'Residual' in self.interaction_cls_first.__name__
-        product_first = EquivariantProductBasisBlock(
+        product_first = self._make_product(
             node_feats_irreps=interaction_first.target_irreps,
             target_irreps=hidden_irreps_out,
             correlation=self._correlation[0],
@@ -366,7 +367,8 @@ class MACE(nnx.Module):
         for idx in range(self.num_interactions - 1):
             hidden_irreps_out = self._layer_irreps(idx + 1)
 
-            interaction = self.interaction_cls(
+            interaction = self._make_interaction(
+                self.interaction_cls,
                 node_attrs_irreps=node_attr_irreps,
                 node_feats_irreps=hidden_irreps,
                 edge_attrs_irreps=sh_irreps,
@@ -381,7 +383,7 @@ class MACE(nnx.Module):
             )
             interactions.append(interaction)
 
-            product = EquivariantProductBasisBlock(
+            product = self._make_product(
                 node_feats_irreps=interaction_irreps,
                 target_irreps=hidden_irreps_out,
                 correlation=self._correlation[idx + 1],
@@ -400,6 +402,21 @@ class MACE(nnx.Module):
         self.interactions = nnx.List(interactions)
         self.products = nnx.List(products)
         self.readouts = nnx.List(readouts)
+
+    def _make_interaction(self, cls, **kwargs):
+        return cls(**kwargs)
+
+    def _make_product(self, **kwargs):
+        return EquivariantProductBasisBlock(**kwargs)
+
+    def _edge_vectors_for_harmonics(self, vectors):
+        return vectors
+
+    def _interaction_inputs(self, data):
+        return {}
+
+    def _node_energy_correction(self, data):
+        return 0.0
 
     def _layer_irreps(self, layer):
         collapse = (
@@ -482,7 +499,9 @@ class MACE(nnx.Module):
         ).astype(ctx.vectors.dtype)
 
         node_feats = self.node_embedding(node_attrs)
-        edge_attrs = self.spherical_harmonics(ctx.vectors)
+        edge_attrs = self.spherical_harmonics(
+            self._edge_vectors_for_harmonics(ctx.vectors)
+        )
         edge_feats, cutoff = self.radial_embedding(
             ctx.lengths,
             node_attrs,
@@ -686,7 +705,9 @@ class ScaleShiftMACE(MACE):
         ).astype(ctx.vectors.dtype)
 
         node_feats = self.node_embedding(node_attrs)
-        edge_attrs = self.spherical_harmonics(ctx.vectors)
+        edge_attrs = self.spherical_harmonics(
+            self._edge_vectors_for_harmonics(ctx.vectors)
+        )
         edge_feats, cutoff = self.radial_embedding(
             ctx.lengths,
             node_attrs,
@@ -726,6 +747,7 @@ class ScaleShiftMACE(MACE):
         node_energies_list = [pair_node_energy]
         node_feats_list: list[jnp.ndarray] = []
 
+        extra_inputs = self._interaction_inputs(data)
         node_attrs_full = node_attrs
         node_attrs_index_full = node_attrs_index
 
@@ -755,6 +777,7 @@ class ScaleShiftMACE(MACE):
                 cutoff=cutoff,
                 n_real=n_real if lammps_class is not None else None,
                 first_layer=(idx == 0),
+                **extra_inputs,
             )
             if lammps_class is not None and idx == 0:
                 node_attrs_slice = node_attrs_slice[:n_real]
@@ -765,6 +788,7 @@ class ScaleShiftMACE(MACE):
                 sc=sc,
                 node_attrs=node_attrs_slice,
                 node_attrs_index=node_attrs_index_slice,
+                **extra_inputs,
             )
             if lammps_class is not None:
                 node_feats = node_feats[:n_real]
@@ -787,6 +811,7 @@ class ScaleShiftMACE(MACE):
                 else node_feats
             )
         node_inter_es = jnp.sum(jnp.stack(node_energies_list, axis=0), axis=0)
+        node_inter_es += self._node_energy_correction(data)
         node_inter_es = self.scale_shift(node_inter_es, node_heads)
         inter_e = scatter_sum(
             node_inter_es,
@@ -874,7 +899,9 @@ class _TensorMACE(MACE):
             feats += self.joint_embedding(
                 data['batch'], {name: data[name] for name in self._embedding_names}
             )
-        edge_attrs = self.spherical_harmonics(ctx.vectors)
+        edge_attrs = self.spherical_harmonics(
+            self._edge_vectors_for_harmonics(ctx.vectors)
+        )
         edge_feats, cutoff = self.radial_embedding(
             ctx.lengths,
             attrs,

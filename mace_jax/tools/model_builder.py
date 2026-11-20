@@ -12,6 +12,8 @@ from flax import nnx
 from mace_jax.adapters.nnx import resolve_gate_callable
 from mace_jax.data.utils import Configuration, graph_from_configuration
 from mace_jax.modules import interaction_classes, readout_classes
+from mace_jax.modules.les import MACELES
+from mace_jax.modules.magnetic import MagneticScaleShiftMACE, MagneticSCFMACE
 from mace_jax.modules.models import (
     MACE,
     AtomicDielectricMACE,
@@ -19,6 +21,7 @@ from mace_jax.modules.models import (
     EnergyDipolesMACE,
     ScaleShiftMACE,
 )
+from mace_jax.modules.polar import POLAR_CONFIG_KEYS, PolarMACE
 from mace_jax.modules.wrapper_ops import (
     EquivarianceConfig,
     resolve_equivariance_config,
@@ -218,6 +221,10 @@ def _validate_model_class(name: str) -> None:
     if name not in (
         'MACE',
         'ScaleShiftMACE',
+        'MACELES',
+        'PolarMACE',
+        'MagneticScaleShiftMACE',
+        'MagneticSCFMACE',
         'AtomicDipolesMACE',
         'EnergyDipolesMACE',
         'AtomicDielectricMACE',
@@ -369,6 +376,25 @@ def _build_jax_model(
         common_kwargs['apply_cutoff'] = bool(config['apply_cutoff'])
 
     torch_class = config.get('torch_model_class', 'MACE')
+    if torch_class == 'MagneticSCFMACE':
+        options = {
+            key: config[key]
+            for key in (
+                'n_scf_step',
+                'scf_tol',
+                'scf_logging',
+                'scf_step_size',
+                'use_scf',
+                'use_collinear',
+            )
+            if key in config
+        }
+        inner_config = dict(config, torch_model_class='MagneticScaleShiftMACE')
+        inner_config.pop('equivariance_config', None)
+        inner = _build_jax_model(
+            inner_config, equivariance_config=equivariance_config, rngs=rngs
+        )
+        return MagneticSCFMACE(inner, **options)
     tensor_classes = dict(
         AtomicDipolesMACE=AtomicDipolesMACE,
         EnergyDipolesMACE=EnergyDipolesMACE,
@@ -381,6 +407,42 @@ def _build_jax_model(
                 means_stds=config.get('means_stds'),
             )
         return tensor_classes[torch_class](rngs=rngs, **common_kwargs)
+    if torch_class == 'PolarMACE':
+        options = {key: config[key] for key in POLAR_CONFIG_KEYS if key in config}
+        return PolarMACE(
+            **options,
+            atomic_inter_scale=np.asarray(config.get('atomic_inter_scale', 1.0)),
+            atomic_inter_shift=np.asarray(config.get('atomic_inter_shift', 0.0)),
+            rngs=rngs,
+            **common_kwargs,
+        )
+    if torch_class == 'MagneticScaleShiftMACE':
+        options = {
+            key: config[key]
+            for key in (
+                'm_max',
+                'max_m_ell',
+                'num_mag_radial_basis',
+                'use_magmom_one_body',
+                'num_mag_radial_basis_one_body',
+            )
+            if key in config
+        }
+        return MagneticScaleShiftMACE(
+            **options,
+            atomic_inter_scale=np.asarray(config.get('atomic_inter_scale', 1.0)),
+            atomic_inter_shift=np.asarray(config.get('atomic_inter_shift', 0.0)),
+            rngs=rngs,
+            **common_kwargs,
+        )
+    if torch_class == 'MACELES':
+        return MACELES(
+            les_arguments=config.get('les_arguments'),
+            atomic_inter_scale=np.asarray(config.get('atomic_inter_scale', 1.0)),
+            atomic_inter_shift=np.asarray(config.get('atomic_inter_shift', 0.0)),
+            rngs=rngs,
+            **common_kwargs,
+        )
     if torch_class == 'ScaleShiftMACE' or 'atomic_inter_scale' in config:
         return ScaleShiftMACE(
             atomic_inter_scale=np.asarray(config.get('atomic_inter_scale', 1.0)),

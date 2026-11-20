@@ -1334,6 +1334,13 @@ _GRAPH_OUTPUT_KEYS = {
     'contributions',
     'displacement',
     'interaction_energy',
+    'les_energy',
+    'electrostatic_energy',
+    'electron_energy',
+    'dipole_from_energy',
+    'total_charge',
+    'fermi_level',
+    'external_field',
 }
 _NODE_OUTPUT_KEYS = {
     'forces',
@@ -1343,10 +1350,25 @@ _NODE_OUTPUT_KEYS = {
     'atomic_stresses',
     'node_energy',
     'node_feats',
+    'magforces',
+    'equilibrated_magmom',
+    'latent_charges',
+    'latent_dipoles',
+    'latent_quads',
+    'latent_kappas',
+    'latent_alphas',
+    'BEC',
+    'density_coefficients',
+    'spin_density',
+    'spins',
+    'spin_charge_density',
+    'charges_history',
+    'fukui_functions',
 }
 _EDGE_OUTPUT_KEYS: set[str] = {'edge_forces'}
 _SKIP_OUTPUT_KEYS = {
     'lammps_natoms',
+    'scf_energy_history',
 }
 
 

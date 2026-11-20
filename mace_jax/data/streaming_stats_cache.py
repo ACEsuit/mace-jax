@@ -20,8 +20,8 @@ import pickle
 from collections.abc import Sequence
 from pathlib import Path
 
-# Version 3 adds charges and electric-property keys to cached graphs and metadata.
-STREAMING_STATS_CACHE_VERSION = 3
+# Version 4 adds magnetic moments, total spin, and external fields to cached graphs.
+STREAMING_STATS_CACHE_VERSION = 4
 
 
 def stats_cache_path(dataset_path: Path) -> Path:
