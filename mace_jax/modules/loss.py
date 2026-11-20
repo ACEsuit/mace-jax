@@ -595,7 +595,11 @@ class WeightedEnergyForcesVirialsLoss:
                 graph, predictions['forces']
             )
 
-        if self.virials_weight != 0.0 and 'virials' in predictions:
+        if self.virials_weight != 0.0:
+            if predictions.get('virials') is None:
+                raise ValueError(
+                    'Virial loss requires virial predictions; enable compute_virials.'
+                )
             loss += self.virials_weight * weighted_mean_squared_virials(
                 graph, predictions['virials']
             )

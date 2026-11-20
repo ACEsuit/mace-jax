@@ -125,6 +125,15 @@ class HDF5Dataset:
             pbc=pbc,
         )
         info = atoms.info
+        for scope in ('node_features', 'graph_features'):
+            features = group.get(scope)
+            if features is not None:
+                for name in features:
+                    value = np.asarray(features[name])
+                    if scope == 'node_features':
+                        atoms.set_array(name, value)
+                    else:
+                        info[name] = value
 
         config_type = group.get('config_type')
         if config_type is not None:

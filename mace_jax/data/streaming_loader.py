@@ -77,6 +77,7 @@ class StreamingDatasetSpec:
     prefactor_stress: float = 1.0
     remap_stress: np.ndarray | None = None
     weight: float = 1.0
+    embedding_specs: dict | None = None
 
 
 def _niggli_reduce_inplace(atoms):
@@ -114,6 +115,7 @@ def _atoms_to_graph(
         prefactor_stress=spec.prefactor_stress,
         remap_stress=spec.remap_stress,
         head_name=spec.head_name,
+        embedding_specs=spec.embedding_specs,
     )
     if spec.weight != 1.0:
         conf.weight *= float(spec.weight)
@@ -1055,6 +1057,7 @@ def get_hdf5_dataloader(
     head_to_index: dict[str, int] | None = None,
     shuffle: bool = False,
     keep_workers_alive: bool = True,
+    embedding_specs: dict | None = None,
 ) -> StreamingGraphDataLoader:
     """Create a StreamingGraphDataLoader from one or more HDF5 files.
 
@@ -1073,6 +1076,7 @@ def get_hdf5_dataloader(
         head_to_index: Optional head-name to index mapping.
         shuffle: Deterministic per-epoch shuffle toggle.
         keep_workers_alive: Keep worker processes alive across epochs.
+        embedding_specs: Explicit model inputs to extract from each configuration.
 
     Returns:
         StreamingGraphDataLoader configured for the provided shards.
@@ -1085,7 +1089,14 @@ def get_hdf5_dataloader(
         files = _expand_hdf5_paths([data_file])
     datasets = [HDF5Dataset(path, mode='r') for path in files]
     if dataset_specs is None:
-        dataset_specs = [StreamingDatasetSpec(path=path) for path in files]
+        dataset_specs = [
+            StreamingDatasetSpec(path=path, embedding_specs=embedding_specs)
+            for path in files
+        ]
+    elif embedding_specs is not None:
+        dataset_specs = [
+            replace(spec, embedding_specs=embedding_specs) for spec in dataset_specs
+        ]
     return StreamingGraphDataLoader(
         datasets=datasets,
         dataset_specs=dataset_specs,

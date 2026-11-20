@@ -9,7 +9,7 @@ from flax import nnx, serialization
 from mace_jax.adapters.e3nn.math import _normalize_activation as normalization
 from mace_jax.nnx_utils import state_to_serializable_dict
 from mace_jax.tools import bundle as bundle_tools
-from mace_jax.tools import model_builder
+from mace_jax.tools import gin_model, model_builder
 
 
 def _small_config():
@@ -47,10 +47,18 @@ def test_bundle_roundtrip(tmp_path, scaled):
     config = _small_config()
     if scaled:
         config.update(atomic_inter_scale=1.2, atomic_inter_shift=0.3)
+        config.update(num_interactions=2, interaction_avg_num_neighbors=[2.0, 5.0])
+        config['embedding_specs'] = {
+            'charge': dict(type='continuous', per='graph', emb_dim=2)
+        }
     config, _, _ = model_builder._normalize_atomic_config(config)
     model = model_builder._build_jax_model(config, rngs=nnx.Rngs(0))
     # Older native bundles infer the architecture without torch_model_class.
     assert type(model).__name__ == ('ScaleShiftMACE' if scaled else 'MACE')
+    exported = gin_model._export_model_config(model)
+    assert exported['interaction_avg_num_neighbors'] == (
+        [2.0, 5.0] if scaled else [1.0]
+    )
     graphdef, state = nnx.split(model)
     params_payload = state_to_serializable_dict(state)
 
@@ -60,6 +68,10 @@ def test_bundle_roundtrip(tmp_path, scaled):
     params_path.write_bytes(serialization.to_bytes(params_payload))
 
     bundle = bundle_tools.load_model_bundle(str(tmp_path), dtype='float64')
+    restored = nnx.merge(bundle.graphdef, bundle.params)
+    assert [block.avg_num_neighbors for block in restored.interactions] == (
+        [2.0, 5.0] if scaled else [config['avg_num_neighbors']]
+    )
 
     assert '_normalize2mom_consts_var' in bundle.params
     template = model_builder._prepare_template_data(config)

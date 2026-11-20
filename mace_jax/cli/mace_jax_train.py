@@ -110,6 +110,14 @@ def apply_cli_overrides(args: argparse.Namespace) -> None:
     unlock_cm = getattr(gin, 'unlock_config', None)
     context = unlock_cm() if callable(unlock_cm) else contextlib.nullcontext()
     with context:
+        embedding_specs = getattr(args, 'embedding_specs', None)
+        if embedding_specs is not None:
+            gin.bind_parameter(
+                'mace_jax.tools.gin_model.model.embedding_specs', embedding_specs
+            )
+            gin.bind_parameter(
+                'mace_jax.tools.gin_datasets.datasets.embedding_specs', embedding_specs
+            )
         _apply_run_options(args)
         _prepare_foundation_checkpoint(args)
         _apply_dataset_options(args)
@@ -1254,14 +1262,19 @@ def _build_predictor(model_fn, loss_fn):
     stress_weight = getattr(loss_fn, 'stress_weight', 0.0)
     compute_force = bool(float(forces_weight) != 0.0)
     compute_stress = bool(float(stress_weight) != 0.0)
-    return jax.jit(
+    virials_weight = getattr(loss_fn, 'virials_weight', 0.0)
+    extra_flags = {'compute_virials': True} if float(virials_weight) != 0.0 else {}
+    predictor = jax.jit(
         lambda w, g: model_fn(
             w,
             g,
             compute_force=compute_force,
             compute_stress=compute_stress,
+            **extra_flags,
         )
     )
+    predictor.for_loss = lambda selected_loss: _build_predictor(model_fn, selected_loss)
+    return predictor
 
 
 def _estimate_interval_length(train_loader) -> int:

@@ -16,6 +16,7 @@ from mace_jax.tools import model_builder
 from mace_jax.tools.import_from_torch import (
     _extract_norm_consts,
     extract_config_mace_model,
+    import_from_torch,
 )
 
 
@@ -253,6 +254,7 @@ def legacy_edge_model(monkeypatch):
         pass
 
     first = RealAgnosticResidualNonLinearInteractionBlock(
+        avg_num_neighbors=2.0,
         node_feats_irreps='4x0e',
         edge_irreps='2x0e',
         linear_up=types.SimpleNamespace(irreps_in='4x0e', irreps_out='2x0e'),
@@ -281,12 +283,38 @@ def test_recovers_legacy_first_edge_metadata_without_mutation(legacy_edge_model)
     assert not hasattr(model, 'use_edge_irreps_first')
 
 
+def test_extracts_neighbor_normalizations_from_legacy_scalars(legacy_edge_model):
+    legacy_edge_model.interactions.append(types.SimpleNamespace(avg_num_neighbors=5.0))
+    assert extract_config_mace_model(legacy_edge_model)[
+        'interaction_avg_num_neighbors'
+    ] == [2.0, 5.0]
+
+
+def test_import_rejects_mismatched_static_neighbor_normalizations(legacy_edge_model):
+    target = types.SimpleNamespace(
+        interactions=[types.SimpleNamespace(avg_num_neighbors=5.0)]
+    )
+    with pytest.raises(ValueError, match='neighbor normalizations differ'):
+        import_from_torch(target, legacy_edge_model, {})
+
+
+def test_import_accepts_float32_neighbor_roundoff(legacy_edge_model):
+    legacy_edge_model.interactions[0].avg_num_neighbors = torch.tensor(
+        2.1, dtype=torch.float32
+    )
+    target = types.SimpleNamespace(
+        interactions=[types.SimpleNamespace(avg_num_neighbors=2.1)],
+        import_from_torch=lambda source, variables: variables,
+    )
+    assert import_from_torch(target, legacy_edge_model, {}) == {}
+
+
 @pytest.mark.parametrize('flag', [False, True])
 def test_preserves_explicit_first_edge_metadata(legacy_edge_model, flag):
     model = legacy_edge_model
     model.use_edge_irreps_first = flag
     # Explicit metadata must bypass inference, even for unfamiliar layouts.
-    model.interactions = [object()]
+    model.interactions = [types.SimpleNamespace(avg_num_neighbors=2.0)]
     assert extract_config_mace_model(model)['use_edge_irreps_first'] is flag
 
 
@@ -314,6 +342,7 @@ def test_preserves_legacy_default_without_nonlinear_residual(legacy_edge_model):
     model = legacy_edge_model
     model.interactions = [
         types.SimpleNamespace(
+            avg_num_neighbors=2.0,
             node_feats_irreps='4x0e',
             edge_irreps='4x0e',
             linear_up=types.SimpleNamespace(irreps_in='4x0e', irreps_out='4x0e'),
@@ -346,6 +375,6 @@ def test_rejects_inconsistent_legacy_first_edge_layout(legacy_edge_model, field)
 
 
 def test_rejects_unsupported_legacy_first_edge_layout(legacy_edge_model):
-    legacy_edge_model.interactions = [types.SimpleNamespace()]
+    legacy_edge_model.interactions = [types.SimpleNamespace(avg_num_neighbors=2.0)]
     with pytest.raises(ValueError, match='Re-export the Torch checkpoint'):
         extract_config_mace_model(legacy_edge_model)

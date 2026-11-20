@@ -20,6 +20,7 @@ import numpy as np
 from flax import nnx
 
 from mace_jax import data, modules, tools
+from mace_jax.data.features import RESERVED_INPUTS
 from mace_jax.modules.blocks import RealAgnosticResidualInteractionBlock
 from mace_jax.modules.wrapper_ops import (
     EquivarianceConfig,
@@ -117,6 +118,11 @@ def _export_model_config(mace_module: modules.MACE) -> dict:
             mace_module.atomic_energies, dtype=float
         ).tolist(),
         'avg_num_neighbors': float(mace_module.avg_num_neighbors),
+        'interaction_avg_num_neighbors': [
+            float(block.avg_num_neighbors) for block in mace_module.interactions
+        ]
+        if hasattr(mace_module, 'interactions')
+        else None,
         'correlation': _serialize_config_value(mace_module.correlation),
         'radial_type': getattr(mace_module, 'radial_type', 'bessel'),
         'pair_repulsion': bool(getattr(mace_module, 'pair_repulsion', False)),
@@ -327,6 +333,27 @@ def _graph_to_data(
     if head_attr is not None:
         data_dict['head'] = jnp.asarray(head_attr, dtype=jnp.int32).reshape(-1)
 
+    for container, mask in (
+        (graph.nodes, jraph.get_node_padding_mask(graph)),
+        (graph.globals, jraph.get_graph_padding_mask(graph)),
+    ):
+        for name, value in (getattr(container, 'features', None) or {}).items():
+            if name in RESERVED_INPUTS or name in data_dict:
+                raise ValueError(
+                    f'Embedding feature {name!r} conflicts with another model input.'
+                )
+            value = jnp.asarray(value)
+            if jnp.issubdtype(value.dtype, jnp.floating):
+                value = value.astype(default_dtype())
+            # Keep padded categories valid even when an embedding uses an offset.
+            if value.shape[0]:
+                value = jnp.where(
+                    mask.reshape(mask.shape + (1,) * (value.ndim - 1)),
+                    value,
+                    jnp.broadcast_to(value[:1], value.shape),
+                )
+            data_dict[name] = value
+
     return data_dict
 
 
@@ -459,6 +486,21 @@ def model(
                 f'Failed to extract Torch configuration: {config["error"]}'
             )
         config['torch_model_class'] = torch_model.__class__.__name__
+        requested_specs = kwargs.get('embedding_specs')
+        if requested_specs is not None:
+            source_specs = config.get('embedding_specs') or {}
+            if set(requested_specs) != set(source_specs) or any(
+                {k: v for k, v in requested_specs[name].items() if k != 'key'}
+                != {k: v for k, v in spec.items() if k != 'key'}
+                for name, spec in source_specs.items()
+            ):
+                raise ValueError(
+                    'embedding_specs must match the Torch checkpoint; only metadata key aliases may differ.'
+                )
+            # Preserve the source feature order: the projection weights depend on it.
+            config['embedding_specs'] = {
+                name: dict(requested_specs[name]) for name in source_specs
+            }
 
         logging.info('Converting Torch model to JAX representation')
         graphdef, state, _ = mace_jax_from_torch.convert_model(torch_model, config)
@@ -513,9 +555,15 @@ def model(
             *,
             compute_force: bool = True,
             compute_stress: bool = False,
+            compute_virials: bool = False,
         ) -> dict[str, jnp.ndarray]:
             """Apply the converted Torch model to a `GraphsTuple` input."""
             data_dict = _graph_to_data(graph, num_species=num_species_local)
+            extra_flags = (
+                {'compute_virials': compute_virials}
+                if compute_virials is not False
+                else {}
+            )
             if torch_head is not None:
                 head_names = config.get('heads') or []
                 if torch_head not in head_names:
@@ -537,6 +585,7 @@ def model(
                     data_dict,
                     compute_force=compute_force,
                     compute_stress=compute_stress,
+                    **extra_flags,
                 )
                 return outputs
 
@@ -545,6 +594,7 @@ def model(
                 data_dict,
                 compute_force=compute_force,
                 compute_stress=compute_stress,
+                **extra_flags,
             )
 
         params_bundle = (
@@ -740,6 +790,7 @@ def model(
             *,
             compute_force: bool = True,
             compute_stress: bool = False,
+            compute_virials: bool = False,
         ) -> dict[str, jnp.ndarray]:
             """Apply the MACE module to a (possibly padded) graph."""
             e3nn.config('path_normalization', path_normalization)
@@ -772,7 +823,7 @@ def model(
                     broadcast_mask = mask
                 return jnp.where(broadcast_mask, array, fill)
 
-            sanitized_nodes = graph.nodes.__class__(
+            sanitized_nodes = graph.nodes._replace(
                 positions=_sanitize(
                     graph.nodes.positions, node_mask_bool, expand_dims=1
                 ),
@@ -791,7 +842,7 @@ def model(
                     else None
                 ),
             )
-            sanitized_globals = graph.globals.__class__(
+            sanitized_globals = graph.globals._replace(
                 cell=(
                     _sanitize(graph.globals.cell, graph_mask_bool, expand_dims=2)
                     if getattr(graph.globals, 'cell', None) is not None
@@ -841,16 +892,16 @@ def model(
             )
 
             data_dict = _graph_to_data(sanitized_graph, num_species=num_species_local)
-            # Geometry padding may copy a real cell into a dummy graph, but
-            # periodicity belongs to the original graphs and is false in padding.
-            pbc = getattr(graph.globals, 'pbc', None)
-            if pbc is not None:
-                data_dict['pbc'] = jnp.asarray(pbc, dtype=bool).reshape(-1, 3)
             outputs = predict_fn(
                 state_local,
                 data_dict,
                 compute_force=compute_force,
                 compute_stress=compute_stress,
+                **(
+                    {'compute_virials': compute_virials}
+                    if compute_virials is not False
+                    else {}
+                ),
             )
 
             # Apply optional rescaling consistent with the historical Haiku version.
@@ -896,10 +947,18 @@ def model(
                 stress = stress_scale * jnp.nan_to_num(stress)
                 stress = stress * graph_mask[:, None, None]
 
+            virials = outputs.get('virials')
+            if virials is not None:
+                virial_scale = (
+                    std_graph if std_arr.ndim == 0 else std_graph[:, None, None]
+                )
+                virials = virial_scale * virials * graph_mask[:, None, None]
+
             return {
                 'energy': energy,
                 'forces': forces,
                 'stress': stress,
+                'virials': virials,
             }
 
         return apply_fn
@@ -920,11 +979,14 @@ def model(
         )
         model_config = _export_model_config(mace_module)
 
-        def _predict(state_local, data_dict, *, compute_force, compute_stress):
+        def _predict(
+            state_local, data_dict, *, compute_force, compute_stress, **extra_flags
+        ):
             outputs, _ = graphdef.apply(state_local)(
                 data_dict,
                 compute_force=compute_force,
                 compute_stress=compute_stress,
+                **extra_flags,
             )
             return outputs
 
@@ -943,12 +1005,15 @@ def model(
     params_bundle = params
     model_config = _export_model_config(mace_module)
 
-    def _predict(state_local, data_dict, *, compute_force, compute_stress):
+    def _predict(
+        state_local, data_dict, *, compute_force, compute_stress, **extra_flags
+    ):
         return mace_module.apply(
             state_local,
             data_dict,
             compute_force=compute_force,
             compute_stress=compute_stress,
+            **extra_flags,
         )
 
     apply_fn = _make_apply_fn(

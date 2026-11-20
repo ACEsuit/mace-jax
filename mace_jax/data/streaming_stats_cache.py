@@ -70,6 +70,7 @@ def spec_fingerprint(
         head_index = int(head_to_index[spec.head_name])
     payload = {
         'head_name': spec.head_name,
+        'embedding_specs': getattr(spec, 'embedding_specs', None),
         'head_index': head_index,
         'energy_key': spec.energy_key,
         'forces_key': spec.forces_key,

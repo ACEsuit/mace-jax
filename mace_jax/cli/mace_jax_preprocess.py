@@ -168,6 +168,7 @@ def _collect_configs(
     dipole_key: str,
     polarizability_key: str,
     extract_atomic_energies: bool,
+    embedding_specs: dict | None = None,
 ) -> tuple[dict[int, float], data.Configurations]:
     atomic_energies_values: dict[int, list[float]] = {}
     configs: data.Configurations = []
@@ -182,6 +183,7 @@ def _collect_configs(
             dipole_key=dipole_key,
             polarizability_key=polarizability_key,
             extract_atomic_energies=extract_atomic_energies,
+            embedding_specs=embedding_specs,
         )
         configs.extend(new_configs)
         for z, value in ae_dict.items():
@@ -245,6 +247,7 @@ def run(args: argparse.Namespace) -> None:
         dipole_key=args.dipole_key,
         polarizability_key=args.polarizability_key,
         extract_atomic_energies=True,
+        embedding_specs=getattr(args, 'embedding_specs', None),
     )
 
     valid_configs: data.Configurations = []
@@ -259,6 +262,7 @@ def run(args: argparse.Namespace) -> None:
             dipole_key=args.dipole_key,
             polarizability_key=args.polarizability_key,
             extract_atomic_energies=False,
+            embedding_specs=getattr(args, 'embedding_specs', None),
         )
     else:
         size = len(train_configs)
@@ -282,6 +286,7 @@ def run(args: argparse.Namespace) -> None:
             dipole_key=args.dipole_key,
             polarizability_key=args.polarizability_key,
             extract_atomic_energies=False,
+            embedding_specs=getattr(args, 'embedding_specs', None),
         )
         test_configs_by_type = data.test_config_types(test_configs)
 

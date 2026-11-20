@@ -9,6 +9,7 @@ from flax import traverse_util
 from jax import config as jax_config
 
 from mace_jax import data
+from mace_jax.data.features import extract_features
 from mace_jax.data.utils import (
     AtomicNumberTable,
     atomic_numbers_to_indices,
@@ -36,11 +37,18 @@ class MACEJAXCalculator(Calculator):
         length_units_to_A: float = 1.0,
         default_dtype='float64',
         atomic_numbers: list[int] | None = None,
+        embedding_specs: dict | None = None,
         **kwargs,
     ):
         Calculator.__init__(self, **kwargs)
         self.results = {}
         self.model = model
+        self.embedding_specs = (
+            embedding_specs
+            if embedding_specs is not None
+            else getattr(model, 'model_config', {}).get('embedding_specs')
+        )
+        self._embedding_feature_values = None
         self.params = stop_grad(params)
         self.predictor = jax.jit(
             lambda w, g: self.model(w, g, compute_force=True, compute_stress=True)
@@ -59,6 +67,19 @@ class MACEJAXCalculator(Calculator):
         if default_dtype == 'float64':
             jax_config.update('jax_enable_x64', True)
 
+    def check_state(self, atoms, tol=1e-15):
+        changes = super().check_state(atoms, tol=tol)
+        if self.atoms is not None and self._embedding_feature_values is not None:
+            previous = self._embedding_feature_values
+            current = extract_features(atoms, self.embedding_specs)
+            if any(
+                not np.array_equal(old[name], new[name])
+                for old, new in zip(previous, current)
+                for name in (old or {})
+            ):
+                changes.append('embedding_features')
+        return changes
+
     # pylint: disable=dangerous-default-value
     def calculate(self, atoms=None, properties=None, system_changes=all_changes):
         """
@@ -74,7 +95,18 @@ class MACEJAXCalculator(Calculator):
         # prepare data
         # ASE's copy has no calculator attached. Reading labels from the input
         # atoms would otherwise call back into this calculator recursively.
-        config = data.config_from_atoms(self.atoms.copy())
+        config = data.config_from_atoms(
+            self.atoms.copy(), embedding_specs=self.embedding_specs
+        )
+        # ASE copies info dictionaries shallowly; cache independent feature arrays
+        # so in-place edits to graph inputs also invalidate the calculated results.
+        self._embedding_feature_values = tuple(
+            {
+                name: np.array(value, copy=True)
+                for name, value in (features or {}).items()
+            }
+            for features in (config.node_features, config.graph_features)
+        )
         if self.z_table is not None:
             config.atomic_numbers = self.z_table(config.atomic_numbers)
 

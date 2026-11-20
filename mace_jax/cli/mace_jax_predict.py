@@ -307,7 +307,12 @@ def _predict_xyz(
     prefetch_batches: int | None,
     progress_bar: bool,
 ) -> tuple[list[int], dict[str, list[Any]]]:
-    _, configs = data.load_from_xyz(input_path, head_name=head_name, no_data_ok=True)
+    _, configs = data.load_from_xyz(
+        input_path,
+        head_name=head_name,
+        no_data_ok=True,
+        embedding_specs=model_config.get('embedding_specs'),
+    )
     if not configs:
         raise ValueError(f'No configurations found in {input_path}.')
     z_table = data.AtomicNumberTable(model_config['atomic_numbers'])
@@ -486,7 +491,11 @@ def _predict_hdf5(
             cached_graphs,
         )
     dataset_specs = [
-        data.StreamingDatasetSpec(path=path, head_name=head_name)
+        data.StreamingDatasetSpec(
+            path=path,
+            head_name=head_name,
+            embedding_specs=model_config.get('embedding_specs'),
+        )
         for path in expanded_paths
     ]
     loader = data.get_hdf5_dataloader(

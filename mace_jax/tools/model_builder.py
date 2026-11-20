@@ -233,6 +233,17 @@ def _build_configuration(
 def _prepare_template_data(config: dict[str, Any]) -> dict[str, jnp.ndarray]:
     atomic_numbers = tuple(int(z) for z in config['atomic_numbers'])
     configuration = _build_configuration(atomic_numbers, config['r_max'])
+    node_features, graph_features = {}, {}
+    for name, spec in (config.get('embedding_specs') or {}).items():
+        per_node = spec.get('per', 'node') == 'node'
+        shape = (len(atomic_numbers),) if per_node else ()
+        if spec['type'] == 'categorical':
+            value = np.full(shape, -spec.get('offset', 0), dtype=np.int32)
+        else:
+            value = np.zeros(shape + (int(spec.get('in_dim', 1)),))
+        (node_features if per_node else graph_features)[name] = value
+    configuration.node_features = node_features or None
+    configuration.graph_features = graph_features or None
     graph = graph_from_configuration(configuration, cutoff=config['r_max'])
     return _graph_to_data(graph, num_species=len(atomic_numbers))
 
@@ -305,6 +316,7 @@ def _build_jax_model(
         atomic_numbers=atomic_numbers,
         atomic_energies=atomic_energies,
         avg_num_neighbors=float(config['avg_num_neighbors']),
+        interaction_avg_num_neighbors=config.get('interaction_avg_num_neighbors'),
         correlation=config['correlation'],
         radial_type=config.get('radial_type', 'bessel'),
         pair_repulsion=config.get('pair_repulsion', False),

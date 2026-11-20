@@ -10,7 +10,7 @@ the same shape, and the caps can be cached per split to avoid rescans.
 import logging
 import multiprocessing as mp
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from glob import glob
 from pathlib import Path
 from queue import Empty
@@ -148,6 +148,7 @@ def _graph_from_dataset_entry(
         prefactor_stress=spec.prefactor_stress,
         remap_stress=spec.remap_stress,
         head_name=spec.head_name,
+        embedding_specs=spec.embedding_specs,
     )
     if spec.weight != 1.0:
         conf.weight *= float(spec.weight)
@@ -1486,6 +1487,7 @@ def _build_eval_streaming_loader(
 @gin.configurable
 def datasets(
     *,
+    embedding_specs: dict | None = None,
     r_max: float | None = None,
     train_path: str,
     config_type_weights: dict = None,
@@ -1594,6 +1596,38 @@ def datasets(
         prefactor_stress=prefactor_stress,
         remap_stress=remap_stress,
     )
+
+    if embedding_specs is None:
+        try:
+            embedding_specs = gin.query_parameter(
+                'mace_jax.tools.gin_model.model.embedding_specs'
+            )
+        except ValueError:
+            pass
+    if embedding_specs is None:
+        try:
+            checkpoint = gin.query_parameter(
+                'mace_jax.tools.gin_model.model.torch_checkpoint'
+            )
+        except ValueError:
+            checkpoint = None
+        if checkpoint:
+            import torch  # noqa: PLC0415
+
+            source = torch.load(checkpoint, map_location='cpu', weights_only=False)
+            source = source.get('model', source) if isinstance(source, dict) else source
+            embedding_specs = getattr(source, 'embedding_specs', None)
+            del source
+    if embedding_specs:
+        dataset_specs = [
+            replace(spec, embedding_specs=embedding_specs) for spec in dataset_specs
+        ]
+        valid_specs = [
+            replace(spec, embedding_specs=embedding_specs) for spec in valid_specs
+        ]
+        test_specs = [
+            replace(spec, embedding_specs=embedding_specs) for spec in test_specs
+        ]
 
     train_loader, atomic_energies_dict, r_max = _build_streaming_train_loader(
         dataset_specs=dataset_specs,

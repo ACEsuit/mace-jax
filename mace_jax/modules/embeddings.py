@@ -94,15 +94,17 @@ class GenericJointEmbedding(nnx.Module):
 
             per = spec.get('per', 'node')
             if per == 'graph':
-                feat = feat[batch][..., None]
+                feat = feat[batch]
             elif per != 'node':
                 raise ValueError(f"Unknown 'per' value {per!r} for feature {name!r}.")
 
             if spec['type'] == 'categorical':
                 offset = spec.get('offset', 0)
-                feat = (feat + offset).astype(jnp.int32).squeeze(-1)
+                feat = (feat + offset).astype(jnp.int32).reshape((batch.shape[0],))
                 emb = self.embedders[name](feat)
             elif spec['type'] == 'continuous':
+                if feat.ndim == 1:
+                    feat = feat[:, None]
                 emb = self.embedders[name](feat)
             else:
                 raise ValueError(f'Unknown feature type {spec["type"]!r}')

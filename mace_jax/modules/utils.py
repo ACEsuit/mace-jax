@@ -11,13 +11,15 @@ from mace_jax.tools.utils import safe_norm
 
 
 class Outputs(NamedTuple):
-    """Container describing energy, forces, stress, and their availability masks."""
+    """Energy, forces, stress, virials, and their availability masks."""
 
     energy: jnp.ndarray
     forces: jnp.ndarray | None
     stress: jnp.ndarray | None
     force_mask: bool | jnp.ndarray
     stress_mask: bool | jnp.ndarray
+    virials: jnp.ndarray | None = None
+    virials_mask: bool | jnp.ndarray = False
 
 
 def _stress_from_virials(
@@ -127,12 +129,13 @@ def get_outputs(
     data: dict[str, jnp.ndarray],
     compute_force: bool = True,
     compute_stress: bool = False,
+    compute_virials: bool = False,
 ) -> Outputs:
     """
-    Evaluate per-graph energies together with optional forces and stress tensors.
+    Evaluate per-graph energies with optional forces, stress, and virial tensors.
 
     The function works with both plain Python booleans and traced JAX booleans.
-    When `compute_force` / `compute_stress` are Python `bool`s we only execute
+    When the output flags are Python `bool`s we only execute
     the strictly necessary derivative computation and return `None` for any
     disabled quantity. When the flags are traced (for example, inside a JIT
     compiled control flow) the same logic is reproduced with `lax.cond`; in that
@@ -150,13 +153,17 @@ def get_outputs(
             boolean scalar.
         compute_stress: Whether to return stresses. As above, can be Python or
             traced.
+        compute_virials: Return strain virials, without volume or periodicity
+            masking. Stress requests also return virials.
 
     Returns:
         An `Outputs` tuple where:
             * `energy` is a `[n_graphs]` array of per-graph energies.
             * `forces` is `[n_nodes, 3]` or `None` depending on the flags.
             * `stress` is `[n_graphs, 3, 3]` or `None` depending on the flags.
-            * `force_mask` / `stress_mask` indicate availability; when the input
+            * `virials` is `[n_graphs, 3, 3]` or `None`; unlike stress, it remains
+              available for nonperiodic and zero-volume configurations.
+            * `force_mask` / `stress_mask` / `virials_mask` indicate availability; when the input
               flags were traced these masks are JAX booleans aligned with the
               returned arrays.
     """
@@ -196,8 +203,8 @@ def get_outputs(
     def _ensure_energy(value: jnp.ndarray) -> jnp.ndarray:
         return jnp.atleast_1d(jnp.asarray(value))
 
-    def _compute_stress_raw() -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-        """Gradient-based computation of (energy, forces, stress) for stress path."""
+    def _compute_stress_raw():
+        """Compute energy, forces, stress, and virials from symmetric strain."""
         (_, per_graph_energy), (grad_pos, grad_disp) = jax.value_and_grad(
             energy_displacement_fn,
             argnums=(0, 1),
@@ -208,7 +215,7 @@ def get_outputs(
         virials = -grad_disp
         stress = _stress_from_virials(virials, cell, data.get('pbc'))
         total_energy = _ensure_energy(per_graph_energy)
-        return total_energy, forces, stress
+        return total_energy, forces, stress, virials
 
     def _compute_force_raw() -> tuple[jnp.ndarray, jnp.ndarray]:
         """Gradient-based computation of (energy, forces) for the force-only path."""
@@ -233,11 +240,20 @@ def get_outputs(
 
     force_flag, force_traced = _coerce_flag(compute_force)
     stress_flag, stress_traced = _coerce_flag(compute_stress)
+    virials_flag, virials_traced = _coerce_flag(compute_virials)
 
-    if not (force_traced or stress_traced):
-        if stress_flag:
-            total_energy, forces, stress = _compute_stress_raw()
-            return Outputs(total_energy, forces, stress, True, True)
+    if not (force_traced or stress_traced or virials_traced):
+        if stress_flag or virials_flag:
+            total_energy, forces, stress, virials = _compute_stress_raw()
+            return Outputs(
+                total_energy,
+                forces,
+                stress if stress_flag else None,
+                True,
+                stress_flag,
+                virials,
+                True,
+            )
         if force_flag:
             total_energy, forces = _compute_force_raw()
             return Outputs(total_energy, forces, None, True, False)
@@ -246,6 +262,9 @@ def get_outputs(
 
     compute_force_mask = jnp.asarray(compute_force, dtype=bool)
     compute_stress_mask = jnp.asarray(compute_stress, dtype=bool)
+    compute_virials_mask = (
+        jnp.asarray(compute_virials, dtype=bool) | compute_stress_mask
+    )
 
     zero_forces = jnp.zeros_like(positions)
     zero_stress = jnp.zeros((num_graphs, 3, 3), dtype=positions.dtype)
@@ -253,23 +272,46 @@ def get_outputs(
     false_scalar = jnp.asarray(False, dtype=bool)
 
     def _stress_branch(_):
-        total_energy, forces, stress = _compute_stress_raw()
-        return Outputs(total_energy, forces, stress, true_scalar, true_scalar)
+        total_energy, forces, stress, virials = _compute_stress_raw()
+        stress = jnp.where(compute_stress_mask, stress, zero_stress)
+        return Outputs(
+            total_energy,
+            forces,
+            stress,
+            true_scalar,
+            compute_stress_mask,
+            virials,
+            true_scalar,
+        )
 
     def _force_branch(_):
         total_energy, forces = _compute_force_raw()
-        return Outputs(total_energy, forces, zero_stress, true_scalar, false_scalar)
+        return Outputs(
+            total_energy,
+            forces,
+            zero_stress,
+            true_scalar,
+            false_scalar,
+            zero_stress,
+            false_scalar,
+        )
 
     def _energy_only_branch(_):
         total_energy = _compute_energy_raw()
         return Outputs(
-            total_energy, zero_forces, zero_stress, false_scalar, false_scalar
+            total_energy,
+            zero_forces,
+            zero_stress,
+            false_scalar,
+            false_scalar,
+            zero_stress,
+            false_scalar,
         )
 
     # lazily route traced flags through the right derivative path so only the
     # requested branch is evaluated when inside a JIT-compiled context
     return lax.cond(
-        compute_stress_mask,
+        compute_virials_mask,
         _stress_branch,
         lambda _: lax.cond(
             compute_force_mask,
@@ -417,6 +459,7 @@ def add_output_interface(cls=None):
             data: dict[str, jnp.ndarray],
             compute_force: bool = True,
             compute_stress: bool = False,
+            compute_virials: bool = False,
             **model_kwargs,
         ) -> dict[str, jnp.ndarray | None]:
             raw_out = self._energy_fn(
@@ -432,7 +475,9 @@ def add_output_interface(cls=None):
             # duplication through dead-code elimination, while side-effectful
             # feature communication must execute both evaluations.
             try:
-                energy_only = not bool(compute_force) and not bool(compute_stress)
+                energy_only = not (
+                    bool(compute_force) or bool(compute_stress) or bool(compute_virials)
+                )
             except TracerBoolConversionError:
                 energy_only = False
             if energy_only:
@@ -446,6 +491,7 @@ def add_output_interface(cls=None):
                         'energy': jnp.atleast_1d(jnp.asarray(energy_arr)),
                         'forces': None,
                         'stress': None,
+                        'virials': None,
                     }
                 )
                 return result
@@ -464,12 +510,19 @@ def add_output_interface(cls=None):
                 )
                 return out['energy'] if isinstance(out, dict) else out
 
-            total_energy, forces, stress, has_force, has_stress = get_outputs(
+            outputs = get_outputs(
                 energy_fn=energy_fn,
                 data=data,
                 compute_force=compute_force,
                 compute_stress=compute_stress,
+                compute_virials=compute_virials,
             )
+            total_energy, forces, stress = (
+                outputs.energy,
+                outputs.forces,
+                outputs.stress,
+            )
+            has_force, has_stress = outputs.force_mask, outputs.stress_mask
 
             result = (
                 dict(raw_out) if isinstance(raw_out, dict) else {'energy': energy_arr}
@@ -477,6 +530,7 @@ def add_output_interface(cls=None):
             try:
                 force_flag = bool(has_force)
                 stress_flag = bool(has_stress)
+                virials_flag = bool(outputs.virials_mask)
             except TracerBoolConversionError:
                 result.update(
                     {
@@ -485,6 +539,8 @@ def add_output_interface(cls=None):
                         'stress': stress,
                         'forces_mask': has_force,
                         'stress_mask': has_stress,
+                        'virials': outputs.virials,
+                        'virials_mask': outputs.virials_mask,
                     }
                 )
             else:
@@ -493,6 +549,7 @@ def add_output_interface(cls=None):
                         'energy': total_energy,
                         'forces': forces if force_flag else None,
                         'stress': stress if stress_flag else None,
+                        'virials': outputs.virials if virials_flag else None,
                     }
                 )
             return result

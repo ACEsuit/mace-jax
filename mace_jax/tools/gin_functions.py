@@ -1234,6 +1234,8 @@ def train(
         if resume_path is not None and start_interval >= swa_config.start_interval:
             loss_fn = swa_loss_fn
             stage_two_active = True
+    if hasattr(predictor, 'for_loss'):
+        predictor = predictor.for_loss(loss_fn)
     train_head_loaders = _split_loader_by_heads(train_loader)
     valid_head_loaders = _split_loader_by_heads(valid_loader)
     test_head_loaders = _split_loader_by_heads(test_loader)
@@ -1456,6 +1458,8 @@ def train(
                 epoch,
             )
             loss_fn = swa_loss_fn
+            if hasattr(predictor, 'for_loss'):
+                predictor = predictor.for_loss(loss_fn)
             eval_step = _make_eval_step(predictor_with_config, loss_fn)
             lowest_loss = np.inf
             patience_counter = 0

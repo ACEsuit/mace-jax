@@ -14,6 +14,7 @@ import jraph
 import numpy as np
 from roundmantissa import ceil_mantissa
 
+from mace_jax.data.features import extract_features
 from mace_jax.data.neighborhood import get_neighborhood
 
 Vector = np.ndarray  # [3,]
@@ -49,6 +50,8 @@ class Configuration:
     weight: float = 1.0  # weight of config in loss
     config_type: str | None = DEFAULT_CONFIG_TYPE  # config_type of config
     head: str = 'Default'
+    node_features: dict[str, np.ndarray] | None = None
+    graph_features: dict[str, np.ndarray] | None = None
 
 
 Configurations = list[Configuration]
@@ -100,6 +103,7 @@ def config_from_atoms(
     virials_key: str = 'virials',
     dipole_key: str = 'dipole',
     polarizability_key: str = 'polarizability',
+    embedding_specs: dict | None = None,
 ) -> Configuration:
     """Convert ase.Atoms to Configuration"""
     if config_type_weights is None:
@@ -181,6 +185,7 @@ def config_from_atoms(
         config_type, 1.0
     )
     head = head_name if head_name is not None else atoms.info.get('head', 'Default')
+    node_features, graph_features = extract_features(atoms, embedding_specs)
     return Configuration(
         atomic_numbers=atomic_numbers,
         positions=atoms.get_positions(),
@@ -201,6 +206,8 @@ def config_from_atoms(
         pbc=pbc,
         cell=cell,
         head=head,
+        node_features=node_features,
+        graph_features=graph_features,
     )
 
 
@@ -229,6 +236,7 @@ def load_from_xyz(
     remap_stress: np.ndarray = None,
     head_name: str | None = None,
     no_data_ok: bool = False,
+    embedding_specs: dict | None = None,
 ) -> tuple[dict[int, float], Configurations]:
     if num_configs is None:
         atoms_list = ase.io.read(file_or_path, format='extxyz', index=':')
@@ -270,6 +278,7 @@ def load_from_xyz(
     configs = [
         config_from_atoms(
             atoms,
+            embedding_specs=embedding_specs,
             energy_key=energy_key,
             forces_key=forces_key,
             stress_key=stress_key,
@@ -416,6 +425,12 @@ def save_configurations_as_HDF5(configurations: Configurations, _, h5_file) -> N
         subgroup['config_type'] = write_value(config.config_type)
         if config.head is not None:
             subgroup['head'] = write_value(config.head)
+        for scope in ('node_features', 'graph_features'):
+            values = getattr(config, scope)
+            if values:
+                features_group = subgroup.create_group(scope)
+                for name, value in values.items():
+                    features_group[name] = value
         properties_subgrp = subgroup.create_group('properties')
         if config.energy is not None:
             properties_subgrp['energy'] = write_value(config.energy)
@@ -448,7 +463,9 @@ def write_value(value):
     return value if value is not None else 'None'
 
 
-GraphNodes = namedtuple('Nodes', ['positions', 'forces', 'species'])
+GraphNodes = namedtuple(
+    'Nodes', ['positions', 'forces', 'species', 'features'], defaults=[None]
+)
 # Multiprocessing pickle support expects the class to be exported under its __name__.
 Nodes = GraphNodes
 
@@ -475,6 +492,7 @@ class GraphGlobals(NamedTuple):
     dipole_weight: np.ndarray | None = None
     polarizability_weight: np.ndarray | None = None
     pbc: np.ndarray | None = None
+    features: dict[str, np.ndarray] | None = None
 
 
 def graph_from_configuration(
@@ -519,12 +537,14 @@ def graph_from_configuration(
             positions=config.positions,
             forces=config.forces,
             species=species,
+            features=config.node_features,
         ),
         edges=GraphEdges(shifts=shifts, unit_shifts=unit_shifts),
         globals=jax.tree_util.tree_map(
             lambda x: np.asarray(x)[None, ...] if x is not None else None,
             GraphGlobals(
                 cell=cell,
+                features=config.graph_features,
                 pbc=np.asarray(
                     config.pbc if config.pbc is not None else (False, False, False),
                     dtype=bool,
@@ -656,21 +676,7 @@ def split_graphs_for_devices(graph, num_devices: int) -> list[jraph.GraphsTuple]
             [np.asarray(graph.n_edge), np.zeros(pad_graphs, dtype=np.int32)]
         )
 
-        globals_attr = graph.globals
-        if globals_attr is None:
-            globals_dict = None
-        elif hasattr(globals_attr, 'items'):
-            globals_dict = globals_attr.__class__()
-            for key, value in globals_attr.items():
-                globals_dict[key] = _pad_global_value(value)
-        elif hasattr(globals_attr, '_fields'):
-            padded = {
-                key: _pad_global_value(value)
-                for key, value in globals_attr._asdict().items()
-            }
-            globals_dict = globals_attr.__class__(**padded)
-        else:
-            globals_dict = _pad_global_value(globals_attr)
+        globals_dict = jax.tree_util.tree_map(_pad_global_value, graph.globals)
 
         return graph._replace(
             globals=globals_dict,

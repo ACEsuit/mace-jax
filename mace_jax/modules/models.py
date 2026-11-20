@@ -129,6 +129,7 @@ class MACE(nnx.Module):
         hidden_irreps: Irreps = Irreps('1x0e'),
         MLP_irreps: Irreps = Irreps('1x0e'),
         avg_num_neighbors: float = 1.0,
+        interaction_avg_num_neighbors: Sequence[float] | None = None,
         correlation: int | Sequence[int] = 1,
         gate: Callable | None = None,
         pair_repulsion: bool = False,
@@ -165,6 +166,22 @@ class MACE(nnx.Module):
         self.hidden_irreps = hidden_irreps
         self.MLP_irreps = MLP_irreps
         self.avg_num_neighbors = avg_num_neighbors
+        normalizations = (
+            [avg_num_neighbors] * num_interactions
+            if interaction_avg_num_neighbors is None
+            else interaction_avg_num_neighbors
+        )
+        if len(normalizations) != num_interactions:
+            raise ValueError(
+                'interaction_avg_num_neighbors must have one value per interaction.'
+            )
+        self.interaction_avg_num_neighbors = tuple(float(x) for x in normalizations)
+        if any(
+            not np.isfinite(x) or x <= 0 for x in self.interaction_avg_num_neighbors
+        ):
+            raise ValueError(
+                'Interaction neighbor normalizations must be finite and positive.'
+            )
         self.correlation = correlation
         self.gate = gate
         self.pair_repulsion = pair_repulsion
@@ -315,7 +332,7 @@ class MACE(nnx.Module):
             target_irreps=interaction_irreps_first,
             hidden_irreps=hidden_irreps_out,
             edge_irreps=edge_irreps_first,
-            avg_num_neighbors=self.avg_num_neighbors,
+            avg_num_neighbors=self.interaction_avg_num_neighbors[0],
             radial_MLP=radial_mlp,
             equivariance_config=self.equivariance_config,
             rngs=rngs,
@@ -359,7 +376,7 @@ class MACE(nnx.Module):
                 edge_feats_irreps=edge_feats_irreps,
                 target_irreps=interaction_irreps,
                 hidden_irreps=hidden_irreps_out,
-                avg_num_neighbors=self.avg_num_neighbors,
+                avg_num_neighbors=self.interaction_avg_num_neighbors[idx + 1],
                 edge_irreps=self.edge_irreps,
                 radial_MLP=radial_mlp,
                 equivariance_config=self.equivariance_config,

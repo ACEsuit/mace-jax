@@ -163,3 +163,53 @@ def test_native_mace_propagates_periodicity_through_padding():
         output['energy'][:3], np.repeat(output['energy'][0], 3), atol=1e-12
     )
     assert np.all(np.isfinite(output['forces']))
+    assert np.linalg.norm(output['virials'][0]) > 0
+    np.testing.assert_allclose(output['virials'][0], output['virials'][1], atol=1e-12)
+    np.testing.assert_allclose(
+        output['virials'][1], -(8**3) * output['stress'][1], atol=1e-12
+    )
+
+
+@pytest.mark.parametrize('compute_stress', [False, True])
+@pytest.mark.parametrize('compute_virials', [False, True])
+@pytest.mark.parametrize('traced', [False, True])
+def test_virial_output_flags_and_molecular_gradients(
+    compute_stress, compute_virials, traced
+):
+    positions = jnp.array([[1.0, 2.0, 3.0]])
+    data = dict(
+        positions=positions,
+        cell=jnp.zeros((1, 3, 3)),
+        pbc=jnp.zeros((1, 3), bool),
+        batch=jnp.zeros(1, jnp.int32),
+        ptr=jnp.array([0, 1]),
+        edge_index=jnp.zeros((2, 0), jnp.int32),
+        unit_shifts=jnp.zeros((0, 3)),
+    )
+
+    def loss(weight):
+        flags = dict(
+            compute_force=False,
+            compute_stress=compute_stress,
+            compute_virials=compute_virials,
+        )
+        if traced:
+            flags = jax.tree.map(jnp.asarray, flags)
+        result = get_outputs(
+            lambda pos, shifts=None: jnp.array([weight * jnp.sum(pos**2)]),
+            data,
+            **flags,
+        )
+        if not traced and not (compute_stress or compute_virials):
+            assert result.virials is None
+            return jnp.asarray(0.0)
+        return jnp.sum(result.virials**2)
+
+    value, grad = jax.jit(jax.value_and_grad(loss))(1.0)
+    expected = (
+        np.sum((2 * np.outer(positions[0], positions[0])) ** 2)
+        if (compute_stress or compute_virials)
+        else 0.0
+    )
+    np.testing.assert_allclose(value, expected)
+    np.testing.assert_allclose(grad, 2 * expected)

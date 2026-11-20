@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 
 
@@ -16,6 +17,13 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
         help='gin-config files to load (evaluated in order).',
     )
     parser.add_argument('--name', help='Run name used in log files.', default=None)
+    parser.add_argument(
+        '--embedding-specs',
+        '--embedding_specs',
+        type=json.loads,
+        default=None,
+        help='JSON mapping of model embedding inputs.',
+    )
 
     parser.add_argument(
         '--log-dir',
@@ -940,6 +948,13 @@ def build_preprocess_arg_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         required=False,
+    )
+    parser.add_argument(
+        '--embedding-specs',
+        '--embedding_specs',
+        type=json.loads,
+        default=None,
+        help='JSON mapping of embedding inputs to preserve in HDF5.',
     )
     cpu_count = os.cpu_count() or 1
     parser.add_argument(

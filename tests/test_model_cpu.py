@@ -56,9 +56,11 @@ def test_converted_multihead_model_matches_torch(
             use_edge_irreps_first=nonlinear,
         )
     model = models.ScaleShiftMACE(**config)
+    model.interactions[1].set_avg_num_neighbors(5.0)
     if missing_edge_metadata:
         del model.use_edge_irreps_first
     config = extract_config_mace_model(model)
+    assert config['interaction_avg_num_neighbors'] == [2.0, 5.0]
     assert not missing_edge_metadata or not hasattr(model, 'use_edge_irreps_first')
     assert config['use_edge_irreps_first'] == (nonlinear and missing_edge_metadata)
     assert config['num_bessel'] == 3
@@ -92,7 +94,7 @@ def test_converted_multihead_model_matches_torch(
         return graphdef.apply(state)(data, compute_stress=True)[0]
 
     actual = predict(state, {key: jnp.asarray(value) for key, value in data.items()})
-    for key in ('energy', 'forces', 'stress', 'node_energy'):
+    for key in ('energy', 'forces', 'stress', 'virials', 'node_energy'):
         np.testing.assert_allclose(
             actual[key],
             expected[key].detach().cpu().numpy(),

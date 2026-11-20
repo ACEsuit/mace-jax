@@ -156,6 +156,19 @@ Additional convenience flags let you adjust common gin settings directly from th
   E0s, scaling mean/std, and average neighbor count).
 - `--r-max VALUE`: synchronise the cutoff used in both dataset construction and model definition.
   For streaming datasets, `--batch-max-edges` (or `n_edge` in gin) sets the edge cap.
+- `--embedding-specs JSON`: configure additional node or graph inputs. For example,
+  `'{"charge":{"type":"continuous","per":"graph","in_dim":1,"emb_dim":8},"spin":{"type":"categorical","per":"graph","num_classes":4,"offset":-1,"emb_dim":8}}'`
+  reads charge and spin from `Atoms.info`; node inputs use `Atoms.arrays`.
+  An optional `key` selects a different metadata key. Pass the same option to
+  `mace-jax-preprocess` to retain these inputs in HDF5. Training can also read
+  `model.embedding_specs` from gin or infer it from a Torch checkpoint; prediction
+  and the ASE calculator use the saved model specification. Missing inputs,
+  incorrect shapes, and invalid categories raise errors before model execution.
+
+Virial training uses `WeightedEnergyForcesVirialsLoss` and the `virials` labels in
+the dataset. A nonzero virial weight enables the required model derivatives,
+including when SWA switches the loss. Virials are available for molecules as well
+as periodic systems; unlike stress, they are not divided by the cell volume.
 
 ##### Equivariance acceleration backend
 
@@ -424,6 +437,12 @@ before this fix from models using MACE's `GatedEquivariantBlock`. Existing JAX
 bundles remain loadable and retain their previous normalization when a saved
 sigmoid constant is absent.
 
+Conversion also preserves each interaction's neighbor normalization, including
+models whose layers use different values. Saved configurations store these in
+`interaction_avg_num_neighbors`; older bundles without this field continue to
+use their scalar `avg_num_neighbors`. Previously converted bundles with differing
+Torch layer normalizations need to be regenerated from the original checkpoint.
+
 You can try this with one of the released foundation models (downloaded automatically):
 
 ```sh
@@ -440,6 +459,11 @@ Graphs carry periodicity flags through batching and padding: molecular stress is
 zero, while slab and bulk stress use the physical cell volume. Direct model input
 dictionaries can supply `pbc` with shape `(num_graphs, 3)`; when it is absent,
 stress retains the legacy volume-only masking used by LAMMPS inputs.
+
+Pass `compute_virials=True` to the model or gin predictor to request strain
+virials independently of stress. Stress requests also return virials. For a
+periodic cell with nonzero volume, `virials = -volume * stress`; nonperiodic
+stress is masked while its virials remain available.
 
 If you want to call the CLI helpers directly from Python (for notebooks or
 custom pipelines), the internal entrypoints are exposed in the CLI modules.

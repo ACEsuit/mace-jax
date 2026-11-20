@@ -36,6 +36,8 @@ def extract_config_mace_model(torch_model):
         extraction_model.radial_embedding = radial_copy
 
     config = torch_extract_config(extraction_model)
+    if 'error' not in config:
+        _copy_neighbor_normalizations(torch_model, config)
     if (
         'error' not in config
         and not hasattr(torch_model, 'use_edge_irreps_first')
@@ -43,6 +45,15 @@ def extract_config_mace_model(torch_model):
     ):
         config['use_edge_irreps_first'] = _infer_use_edge_irreps_first(torch_model)
     return config
+
+
+def _copy_neighbor_normalizations(torch_model, config) -> None:
+    """Record every interaction's normalization, including legacy scalar attributes."""
+    interactions = getattr(torch_model, 'interactions', None)
+    if interactions is not None:
+        config['interaction_avg_num_neighbors'] = [
+            float(block.avg_num_neighbors) for block in interactions
+        ]
 
 
 def _infer_use_edge_irreps_first(torch_model) -> bool:
@@ -179,6 +190,21 @@ def _extract_norm_consts(torch_model=None) -> dict[str, float]:
 
 
 def import_from_torch(jax_model, torch_model, variables):
+    source_blocks = getattr(torch_model, 'interactions', None)
+    target_blocks = getattr(jax_model, 'interactions', None)
+    if source_blocks is not None and target_blocks is not None:
+        source_norms = [float(block.avg_num_neighbors) for block in source_blocks]
+        target_norms = [float(block.avg_num_neighbors) for block in target_blocks]
+        # Torch buffers may round constructor values to float32. Accept that
+        # rounding while still rejecting different per-layer normalizations.
+        if len(source_norms) != len(target_norms) or any(
+            not math.isclose(source, target, rel_tol=1e-7, abs_tol=0.0)
+            for source, target in zip(source_norms, target_norms)
+        ):
+            raise ValueError(
+                'Interaction neighbor normalizations differ between Torch and JAX. '
+                'Build the target with matching interaction_avg_num_neighbors, or use convert_model.'
+            )
     torch_use_reduced_cg = getattr(torch_model, 'use_reduced_cg', None)
     jax_use_reduced_cg = getattr(jax_model, 'use_reduced_cg', None)
     if (
