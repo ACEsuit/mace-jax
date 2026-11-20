@@ -11,6 +11,7 @@ from ase.calculators.singlepoint import SinglePointCalculator
 
 from mace_jax import data, tools
 from mace_jax.cli import mace_jax_preprocess
+from mace_jax.tools.gin_model import _graph_to_data
 
 
 @pytest.mark.parametrize('energy_key', ['REF_energy', 'energy'])
@@ -112,3 +113,20 @@ def test_graph_accepts_python_scalar_energy_from_custom_xyz_key():
     )
     graph = data.graph_from_configuration(configs[0], cutoff=2.0)
     np.testing.assert_array_equal(graph.globals.energy, [-1.5])
+
+
+@pytest.mark.parametrize('pbc', [None, (False, False, False), (True, True, False)])
+def test_graph_periodicity_reaches_model_data(pbc):
+    atoms = ase.Atoms('H2', positions=[[0, 0, 0], [1, 0, 0]], cell=[4, 4, 40], pbc=pbc)
+    config = data.config_from_atoms(atoms)
+    config.pbc = pbc
+    original_cell = config.cell.copy()
+    graph = data.graph_from_configuration(config, cutoff=2.0)
+    expected = np.array([pbc if pbc is not None else (False, False, False)])
+    np.testing.assert_array_equal(graph.globals.pbc, expected)
+    np.testing.assert_array_equal(_graph_to_data(graph, num_species=1)['pbc'], expected)
+    np.testing.assert_array_equal(config.cell, original_cell)
+    if pbc is not None and any(pbc):
+        np.testing.assert_array_equal(graph.globals.cell[0], original_cell)
+    legacy = graph._replace(globals=graph.globals._replace(pbc=None))
+    assert 'pbc' not in _graph_to_data(legacy, num_species=1)

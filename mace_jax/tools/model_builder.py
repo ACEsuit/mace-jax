@@ -195,7 +195,18 @@ def _readout(name_or_cls: Any):
     if name_or_cls is None:
         return readout_classes['NonLinearReadoutBlock']
     name = name_or_cls if isinstance(name_or_cls, str) else name_or_cls.__name__
-    return readout_classes.get(name, readout_classes['NonLinearReadoutBlock'])
+    if name not in readout_classes:
+        raise ValueError(f'Unsupported readout class {name!r} in MACE-JAX config')
+    return readout_classes[name]
+
+
+def _validate_model_class(name: str) -> None:
+    if name not in ('MACE', 'ScaleShiftMACE'):
+        raise ValueError(
+            f'Unsupported model class {name!r}: MACE-JAX supports only MACE and '
+            'ScaleShiftMACE. Converting another architecture would omit its '
+            'additional model components.'
+        )
 
 
 def _build_configuration(
@@ -233,6 +244,7 @@ def _build_jax_model(
     cueq_config: object | None = None,
     rngs: nnx.Rngs | None = None,
 ):
+    _validate_model_class(config.get('torch_model_class', 'MACE'))
     if rngs is None:
         rngs = nnx.Rngs(0)
     collapse_hidden_irreps = config.get('collapse_hidden_irreps', None)

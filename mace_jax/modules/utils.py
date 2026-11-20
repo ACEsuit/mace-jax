@@ -20,9 +20,13 @@ class Outputs(NamedTuple):
     stress_mask: bool | jnp.ndarray
 
 
-def _stress_from_virials(virials: jnp.ndarray, cell: jnp.ndarray) -> jnp.ndarray:
+def _stress_from_virials(
+    virials: jnp.ndarray, cell: jnp.ndarray, pbc: jnp.ndarray | None = None
+) -> jnp.ndarray:
     volume = jnp.abs(jnp.linalg.det(cell.reshape(-1, 3, 3))).reshape(-1, 1, 1)
     valid_volume = volume > 0.0
+    if pbc is not None:
+        valid_volume &= jnp.any(jnp.asarray(pbc).reshape(-1, 3), axis=-1)[:, None, None]
     # Mask the denominator before dividing: masking an infinity afterwards still
     # leaves NaNs in reverse-mode derivatives for zero-volume cells.
     stress = -virials / jnp.where(valid_volume, volume, 1.0)
@@ -59,6 +63,7 @@ def compute_forces_and_stress(
     edge_index: jnp.ndarray,  # [2, n_edges]
     batch: jnp.ndarray,  # [n_nodes] with graph indices
     num_graphs: int,
+    pbc: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """
     JAX equivalent of the PyTorch compute_forces_virials.
@@ -70,6 +75,7 @@ def compute_forces_and_stress(
         cell: [n_graphs, 3, 3]
         num_graphs: int
         batch: [n_nodes] with graph indices
+        pbc: optional [n_graphs, 3] periodicity flags; nonperiodic stress is zero
     """
 
     # Define a scalar-valued loss = sum over graphs to mimic grad_outputs=ones_like(...)
@@ -111,7 +117,7 @@ def compute_forces_and_stress(
     virials = -grad_disp
 
     # Stress computation
-    stress = _stress_from_virials(virials, cell)
+    stress = _stress_from_virials(virials, cell, pbc)
 
     return forces, stress
 
@@ -137,7 +143,9 @@ def get_outputs(
         energy_fn: Callable that accepts positions (and optional shifts) and
             returns per-graph energies with shape `[n_graphs]`.
         data: Graph batch containing at least `positions`, `cell`, `unit_shifts`,
-            `edge_index`, `batch`, and `ptr`.
+            `edge_index`, `batch`, and `ptr`. Optional `pbc` flags suppress stress
+            for graphs without periodic directions. If absent, only zero-volume
+            cells are masked, preserving the legacy/LAMMPS input convention.
         compute_force: Whether to return forces. May be a Python bool or a JAX
             boolean scalar.
         compute_stress: Whether to return stresses. As above, can be Python or
@@ -198,7 +206,7 @@ def get_outputs(
 
         forces = -grad_pos
         virials = -grad_disp
-        stress = _stress_from_virials(virials, cell)
+        stress = _stress_from_virials(virials, cell, data.get('pbc'))
         total_energy = _ensure_energy(per_graph_energy)
         return total_energy, forces, stress
 

@@ -33,6 +33,7 @@ from mace_jax.tools.model_builder import (
     _as_irreps,
     _build_jax_model,
     _prepare_template_data,
+    _validate_model_class,
 )
 
 
@@ -135,6 +136,16 @@ def convert_model(
     equivariance_config: EquivarianceConfig | dict[str, object] | None = None,
     cueq_config: object | None = None,
 ):
+    source_class = type(torch_model).__name__
+    _validate_model_class(source_class)
+    configured_class = config.get('torch_model_class', source_class)
+    _validate_model_class(configured_class)
+    if configured_class != source_class:
+        raise ValueError(
+            f'Configured model class {configured_class!r} does not match '
+            f'Torch model class {source_class!r}.'
+        )
+    config['torch_model_class'] = source_class
     _maybe_update_hidden_irreps_from_torch(torch_model, config)
 
     jax_model = _build_jax_model(

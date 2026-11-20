@@ -76,6 +76,7 @@ def test_converted_multihead_model_matches_torch(
         'shifts': np.zeros((12, 3)),
         'unit_shifts': np.zeros((12, 3)),
         'cell': np.tile(4 * np.eye(3)[None], (2, 1, 1)),
+        'pbc': np.array([[False, False, False], [True, True, False]]),
         'batch': np.repeat(np.arange(2), 3),
         'ptr': np.array([0, 3, 6]),
         'head': np.array([0, 1]),

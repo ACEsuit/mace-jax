@@ -411,6 +411,11 @@ Performs Torch→JAX parameter conversion. It can also
 download and import pre-trained foundation models when `--torch-model` is not
 provided.
 
+The model builder supports `MACE` and `ScaleShiftMACE`; automatic Torch config
+extraction currently requires `ScaleShiftMACE`. Other model families (including
+LES, polar, dielectric, and magnetic models) and unsupported readouts raise an
+error rather than being converted to a different architecture.
+
 If `--output` is omitted the converted parameters are written to `<checkpoint>-jax.npz`.
 
 Conversion preserves the SiLU and sigmoid normalization constants stored in Torch
@@ -428,6 +433,13 @@ mace-jax-from-torch --foundation mp --model-name small
 All commands can be invoked via `python -m mace_jax.<module>` if preferred.
 
 ### Expert usage (internal APIs)
+
+Neighbor construction preserves the physical cell of partially periodic systems,
+including slab vacuum, and uses an extent-based search box for free directions.
+Graphs carry periodicity flags through batching and padding: molecular stress is
+zero, while slab and bulk stress use the physical cell volume. Direct model input
+dictionaries can supply `pbc` with shape `(num_graphs, 3)`; when it is absent,
+stress retains the legacy volume-only masking used by LAMMPS inputs.
 
 If you want to call the CLI helpers directly from Python (for notebooks or
 custom pipelines), the internal entrypoints are exposed in the CLI modules.

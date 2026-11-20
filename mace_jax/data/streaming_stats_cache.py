@@ -20,7 +20,8 @@ import pickle
 from collections.abc import Sequence
 from pathlib import Path
 
-STREAMING_STATS_CACHE_VERSION = 1
+# Version 2 uses the corrected neighbor search for tilted, partially periodic cells.
+STREAMING_STATS_CACHE_VERSION = 2
 
 
 def stats_cache_path(dataset_path: Path) -> Path:

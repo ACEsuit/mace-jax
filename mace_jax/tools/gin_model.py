@@ -318,6 +318,10 @@ def _graph_to_data(
         unit_shifts = jnp.asarray(unit_shifts, dtype=positions.dtype)
     data_dict['unit_shifts'] = unit_shifts
 
+    pbc = getattr(graph.globals, 'pbc', None)
+    if pbc is not None:
+        data_dict['pbc'] = jnp.asarray(pbc, dtype=bool).reshape(-1, 3)
+
     # Optional per-graph head information (for multi-head outputs).
     head_attr = getattr(graph.globals, 'head', None)
     if head_attr is not None:
@@ -837,6 +841,11 @@ def model(
             )
 
             data_dict = _graph_to_data(sanitized_graph, num_species=num_species_local)
+            # Geometry padding may copy a real cell into a dummy graph, but
+            # periodicity belongs to the original graphs and is false in padding.
+            pbc = getattr(graph.globals, 'pbc', None)
+            if pbc is not None:
+                data_dict['pbc'] = jnp.asarray(pbc, dtype=bool).reshape(-1, 3)
             outputs = predict_fn(
                 state_local,
                 data_dict,

@@ -474,6 +474,7 @@ class GraphGlobals(NamedTuple):
     virials_weight: np.ndarray | None = None
     dipole_weight: np.ndarray | None = None
     polarizability_weight: np.ndarray | None = None
+    pbc: np.ndarray | None = None
 
 
 def graph_from_configuration(
@@ -524,6 +525,10 @@ def graph_from_configuration(
             lambda x: np.asarray(x)[None, ...] if x is not None else None,
             GraphGlobals(
                 cell=cell,
+                pbc=np.asarray(
+                    config.pbc if config.pbc is not None else (False, False, False),
+                    dtype=bool,
+                ),
                 energy=config.energy,
                 stress=config.stress,
                 weight=np.asarray(config.weight),

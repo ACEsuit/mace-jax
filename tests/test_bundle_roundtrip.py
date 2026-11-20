@@ -42,10 +42,15 @@ def _small_config():
     }
 
 
-def test_bundle_roundtrip(tmp_path):
+@pytest.mark.parametrize('scaled', [False, True])
+def test_bundle_roundtrip(tmp_path, scaled):
     config = _small_config()
+    if scaled:
+        config.update(atomic_inter_scale=1.2, atomic_inter_shift=0.3)
     config, _, _ = model_builder._normalize_atomic_config(config)
     model = model_builder._build_jax_model(config, rngs=nnx.Rngs(0))
+    # Older native bundles infer the architecture without torch_model_class.
+    assert type(model).__name__ == ('ScaleShiftMACE' if scaled else 'MACE')
     graphdef, state = nnx.split(model)
     params_payload = state_to_serializable_dict(state)
 

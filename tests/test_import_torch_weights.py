@@ -19,6 +19,43 @@ from mace_jax.tools.import_from_torch import (
 )
 
 
+class MACE(types.SimpleNamespace):
+    """Minimal supported source-model stub for parameter-import unit tests."""
+
+
+@pytest.mark.parametrize(
+    'model_class',
+    ['MACELES', 'PolarMACE', 'AtomicDielectricMACE', 'MagneticScaleShiftMACE'],
+)
+def test_builder_rejects_unsupported_model_before_initialization(model_class):
+    with pytest.raises(ValueError, match=f'Unsupported model class {model_class!r}'):
+        model_builder._build_jax_model(
+            {'torch_model_class': model_class, 'atomic_inter_scale': 1.0}
+        )
+
+
+@pytest.mark.parametrize('configured_class', [None, 'MACE', 'ScaleShiftMACE'])
+def test_conversion_checks_actual_source_architecture(configured_class):
+    source = type('MACELES', (), {})()
+    config = {} if configured_class is None else {'torch_model_class': configured_class}
+    with pytest.raises(ValueError, match="Unsupported model class 'MACELES'"):
+        jax_from_torch.convert_model(source, config)
+
+
+@pytest.mark.parametrize('configured_class', ['PolarMACE', 'ScaleShiftMACE'])
+def test_conversion_rejects_inconsistent_architecture_config(configured_class):
+    with pytest.raises(ValueError, match='Unsupported model class|does not match'):
+        jax_from_torch.convert_model(MACE(), {'torch_model_class': configured_class})
+
+
+@pytest.mark.parametrize('as_class', [False, True])
+def test_unsupported_readout_is_not_silently_replaced(as_class):
+    name = 'GeneralNonLinearBiasReadoutBlock'
+    readout = type(name, (), {}) if as_class else name
+    with pytest.raises(ValueError, match=f'Unsupported readout class {name!r}'):
+        model_builder._readout(readout)
+
+
 def _patch_common(monkeypatch, jax_model):
     monkeypatch.setattr(
         jax_from_torch, '_build_jax_model', lambda config, **kwargs: jax_model
@@ -53,7 +90,7 @@ def test_convert_model_rejects_reduced_cg_mismatch(monkeypatch):
         import_impl=lambda torch_model, variables: variables,
     )
     _patch_common(monkeypatch, dummy_jax)
-    torch_model = types.SimpleNamespace(use_reduced_cg=False)
+    torch_model = MACE(use_reduced_cg=False)
 
     with pytest.raises(ValueError, match='use_reduced_cg'):
         jax_from_torch.convert_model(torch_model, {})
@@ -65,7 +102,7 @@ def test_convert_model_detects_unimported_parameters(monkeypatch):
 
     dummy_jax = _DummyJaxModel(use_reduced_cg=True, import_impl=_return_nan)
     _patch_common(monkeypatch, dummy_jax)
-    torch_model = types.SimpleNamespace(use_reduced_cg=True)
+    torch_model = MACE(use_reduced_cg=True)
 
     with pytest.raises(ValueError, match='still NaN'):
         jax_from_torch.convert_model(torch_model, {})
@@ -78,7 +115,7 @@ def test_convert_model_success(monkeypatch):
 
     dummy_jax = _DummyJaxModel(use_reduced_cg=True, import_impl=_populate_params)
     _patch_common(monkeypatch, dummy_jax)
-    torch_model = types.SimpleNamespace(use_reduced_cg=True)
+    torch_model = MACE(use_reduced_cg=True)
 
     graphdef, state, template = jax_from_torch.convert_model(torch_model, {'cfg': 1})
 
@@ -108,7 +145,7 @@ def test_extracts_plain_gated_block_activation_constants():
 def test_convert_model_exports_checkpoint_gate_constant(monkeypatch):
     gate_constant = 1.9
 
-    class _PlainGate(torch.nn.Module):
+    class MACE(torch.nn.Module):
         def __init__(self):
             super().__init__()
             self.use_reduced_cg = True
@@ -126,7 +163,7 @@ def test_convert_model_exports_checkpoint_gate_constant(monkeypatch):
     _patch_common(monkeypatch, dummy_jax)
     config = {}
 
-    jax_from_torch.convert_model(_PlainGate(), config)
+    jax_from_torch.convert_model(MACE(), config)
 
     assert config['normalize2mom_consts']['sigmoid'] == pytest.approx(gate_constant)
 
