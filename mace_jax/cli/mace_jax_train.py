@@ -1305,6 +1305,11 @@ def _build_predictor(model_fn, loss_fn):
     compute_stress = bool(float(stress_weight) != 0.0)
     virials_weight = getattr(loss_fn, 'virials_weight', 0.0)
     extra_flags = {'compute_virials': True} if float(virials_weight) != 0.0 else {}
+    if (
+        getattr(model_fn, 'model_config', {}).get('torch_model_class') == 'PolarMACE'
+        and float(getattr(loss_fn, 'polarizability_weight', 0.0)) != 0.0
+    ):
+        extra_flags['compute_polarizability'] = True
     predictor = jax.jit(
         lambda w, g: model_fn(
             w,

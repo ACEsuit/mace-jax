@@ -135,14 +135,14 @@ def _micro_batches(iterator):
             raise TypeError('Expected graph batches or sequences of graph batches.')
 
 
-def group_batches(iterator, group_size):
-    """Keep the final partial group, padding unused devices with zero-weight data."""
+def group_batches(iterator, group_size, *, pad_fn=empty_graph_like):
+    """Keep complete loader batches, padding unused devices with ``pad_fn``."""
     if group_size < 1:
         raise ValueError('group_size must be positive.')
     micro_batches = _micro_batches(iterator)
     while chunk := list(itertools.islice(micro_batches, group_size)):
         chunk = [_with_weights(graph) for graph in chunk]
-        chunk.extend(empty_graph_like(chunk[0]) for _ in range(group_size - len(chunk)))
+        chunk.extend(pad_fn(chunk[0]) for _ in range(group_size - len(chunk)))
         yield chunk
 
 

@@ -1498,6 +1498,8 @@ def predict_streaming(
             except Exception:  # pragma: no cover - defensive fallback
                 total_hint = 0
 
+    # Prune unused graph fields before pmap's manual region is lowered. Without
+    # this staging, JAX 0.11.2 can crash while compiling multi-device prediction.
     @partial(
         jax.pmap,
         in_axes=(None, 0),
@@ -1505,28 +1507,26 @@ def predict_streaming(
         axis_name='devices',
         devices=local_devices,
     )
+    @jax.jit
     def _predict_step(params_, graph):
         return predictor(params_, graph)
 
-    def _prepare_device_graphs(graph):
-        if local_device_count <= 1:
-            if graph.n_node.ndim == 1:
-                device_batch = jax.tree_util.tree_map(lambda x: x[None, ...], graph)
-            else:
-                device_batch = graph
-            return device_batch, [graph]
-        if graph.n_node.ndim == 1:
-            device_batch = data.prepare_sharded_batch(graph, local_device_count)
-        else:
-            if graph.n_node.shape[0] != local_device_count:
-                raise ValueError(
-                    'Expected microbatches with leading axis equal to the number of '
-                    f'local devices ({local_device_count}), got axis size '
-                    f'{graph.n_node.shape[0]}.'
-                )
-            device_batch = graph
-        device_graphs = data.split_graphs_for_devices(graph, local_device_count)
-        return device_batch, device_graphs
+    def _empty_prediction_graph(graph):
+        return graph._replace(
+            globals=graph.globals._replace(
+                graph_id=np.full_like(graph.globals.graph_id, -1)
+            )
+        )
+
+    # Keep each loader batch's padding intact. Slicing a padded batch can leave
+    # a device without a padding graph, causing its last real graph to be masked.
+    iterator = group_batches(
+        iterator, local_device_count, pad_fn=_empty_prediction_graph
+    )
+    total_hint = math.ceil(total_hint / local_device_count)
+
+    def _prepare_device_graphs(graphs):
+        return data.prepare_sharded_batch(graphs, local_device_count), graphs
 
     host_prefetch_cap = int(getattr(data_loader, '_prefetch_batches', 0) or 0)
     device_prefetch_cap = device_prefetch_batches

@@ -502,7 +502,9 @@ models and run parity tests, but not to use saved JAX bundles.
   dipole with respect to the external field. `polarizability_method='energy'`
   (CLI: `--polarizability-method energy`) differentiates the energy twice and
   also returns `dipole_from_energy`. These response definitions need not agree
-  for an arbitrary model. PolarMACE currently requires `mul_ir` layout, ordinary
+  for an arbitrary model. Training requests field-response polarizability
+  automatically when its loss weight is nonzero.
+  PolarMACE currently requires `mul_ir` layout, ordinary
   layer readouts, and no feature embeddings or pair repulsion. Its Gaussian
   backend supports angular orders 0 and 1, matching graph-longrange 0.4.4.
 - `MagneticScaleShiftMACE` uses vector magnetic moments and returns

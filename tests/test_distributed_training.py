@@ -31,6 +31,55 @@ class SquaredEnergyLoss:
         return 0.5 * (predictions['energy'] - graph.globals.energy) ** 2
 
 
+@pytest.mark.parametrize('prefetch_batches', [0, 2])
+@pytest.mark.parametrize('layout', ['individual', 'packed', 'stacked'])
+def test_streaming_prediction_keeps_all_graphs(layout, prefetch_batches):
+    loader = _Loader((2.0, 4.0, 8.0))
+    loader.graphs = [
+        graph._replace(
+            globals=graph.globals._replace(
+                graph_id=np.array([graph_id, -1]),
+                # Prediction must retain real graphs even with zero loss weight.
+                weight=np.zeros(2),
+            )
+        )
+        for graph_id, graph in zip((2, 0, 1), loader.graphs)
+    ]
+    if layout == 'packed':
+        loader.graphs = [
+            jraph.pad_with_graphs(
+                jraph.batch([jraph.unpad_with_graphs(g) for g in loader.graphs]),
+                n_node=7,
+                n_edge=1,
+                n_graph=4,
+            )
+        ]
+    elif layout == 'stacked':
+        loader.graphs = [
+            jax.tree_util.tree_map(lambda *xs: np.stack(xs), *loader.graphs[:2]),
+            loader.graphs[2],
+        ]
+
+    def predict(params, graph):
+        del params
+        mask = jraph.get_graph_padding_mask(graph)
+        return {
+            'energy': jnp.where(mask, graph.globals.energy, 0.0),
+            'forces': graph.nodes.positions,
+        }
+
+    ids, outputs = tools.predict_streaming(
+        predict,
+        {},
+        loader,
+        progress_bar=False,
+        device_prefetch_batches=prefetch_batches,
+    )
+    assert ids == [0, 1, 2]
+    np.testing.assert_array_equal(outputs['energy'], [4.0, 8.0, 2.0])
+    assert [value.shape for value in outputs['forces']] == [(2, 3)] * 3
+
+
 def _train_epoch(
     loader, *, collect_metrics=False, params=None, optimizer=None, ema_decay=None
 ):

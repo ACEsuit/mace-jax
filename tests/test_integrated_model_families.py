@@ -14,10 +14,11 @@ from e3nn_jax import Irreps
 from flax import nnx, serialization
 from mace.modules.blocks import NonLinearBiasReadoutBlock as TorchBiasReadout
 
-from mace_jax import data
+from mace_jax import data, modules
 from mace_jax.adapters.nnx.torch import init_from_torch
 from mace_jax.calculators.mace import MACEJAXCalculator
 from mace_jax.cli.mace_jax_from_torch import _serialize_for_json
+from mace_jax.cli.mace_jax_train import _build_predictor
 from mace_jax.data.utils import save_configurations_as_HDF5
 from mace_jax.modules.blocks import NonLinearBiasReadoutBlock
 from mace_jax.nnx_utils import state_to_serializable_dict
@@ -25,6 +26,7 @@ from mace_jax.tools import bundle
 from mace_jax.tools.gin_model import _export_model_config, _graph_to_data
 from mace_jax.tools.gin_model import model as gin_model
 from mace_jax.tools.model_builder import _build_jax_model
+from mace_jax.tools.train import _checked_loss
 from tests.test_les_model import les_source
 from tests.test_magnetic_model import magnetic_source
 from tests.test_model_extensions import (
@@ -246,10 +248,7 @@ def test_scf_config_roundtrip():
     assert restored.use_collinear
 
 
-@pytest.mark.parametrize(
-    'kind', ['MACELES', 'PolarMACE', 'MagneticScaleShiftMACE', 'MagneticSCFMACE']
-)
-def test_native_model_factory(kind):
+def native_family(kind):
     options = {}
     if kind == 'MACELES':
         options['les_arguments'] = {'reciprocal_max_index': 3}
@@ -259,7 +258,7 @@ def test_native_model_factory(kind):
         options.update(m_max=[2.0, 3.0], num_mag_radial_basis=2, max_m_ell=1)
         if kind == 'MagneticSCFMACE':
             options.update(use_scf=False)
-    apply, state, _ = gin_model(
+    return gin_model(
         model_class=kind,
         r_max=3.0,
         num_interactions=2,
@@ -275,6 +274,13 @@ def test_native_model_factory(kind):
         radial_MLP=[3],
         **options,
     )
+
+
+@pytest.mark.parametrize(
+    'kind', ['MACELES', 'PolarMACE', 'MagneticScaleShiftMACE', 'MagneticSCFMACE']
+)
+def test_native_model_factory(kind):
+    apply, state, _ = native_family(kind)
     output = jax.jit(lambda p, g: apply(p, g, compute_force=False))(
         state, graph_for_atoms(atoms_for_properties())
     )
@@ -282,3 +288,26 @@ def test_native_model_factory(kind):
     assert apply.model_config['torch_model_class'] == kind
     if kind.startswith('Magnetic'):
         assert np.isfinite(output['magforces']).all()
+
+
+def test_polar_training_requests_field_response():
+    apply, state, _ = native_family('PolarMACE')
+    graph = graph_for_atoms(atoms_for_properties())
+    predictor = _build_predictor(
+        apply, modules.WeightedEnergyForcesLoss(energy_weight=1.0, forces_weight=0.0)
+    )
+    assert predictor(state, graph)['polarizability'] is None
+    loss = modules.DipolePolarLoss(dipole_weight=0.0, polarizability_weight=1.0)
+    predictor = predictor.for_loss(loss)
+    output = predictor(state, graph)
+    assert output['polarizability'] is not None
+    expected = apply(state, graph, compute_force=False, compute_polarizability=True)
+    np.testing.assert_allclose(output['polarizability'], expected['polarizability'])
+    gradient = jax.grad(
+        lambda p: _checked_loss(
+            loss, graph, predictor(dict(state, params=p), graph)
+        ).sum()
+    )(state['params'])
+    leaves = jax.tree_util.tree_leaves(gradient)
+    assert all(np.isfinite(np.asarray(x)).all() for x in leaves)
+    assert any(np.any(np.asarray(x) != 0) for x in leaves)

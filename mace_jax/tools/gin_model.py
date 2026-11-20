@@ -321,6 +321,13 @@ def u_envelope(length, max_length, p: int):
     return e3nn.poly_envelope(p - 1, 2, max_length)(length)
 
 
+def _replace_graph_fields(fields, **updates):
+    """Preserve metadata in namedtuple and attribute-dict graph containers."""
+    if isinstance(fields, dict):
+        return type(fields)({**fields, **updates})
+    return fields._replace(**updates)
+
+
 @gin.configurable
 def _graph_to_data(
     graph: jraph.GraphsTuple, *, num_species: int
@@ -953,7 +960,8 @@ def model(
                     broadcast_mask = mask
                 return jnp.where(broadcast_mask, array, fill)
 
-            sanitized_nodes = graph.nodes._replace(
+            sanitized_nodes = _replace_graph_fields(
+                graph.nodes,
                 positions=_sanitize(
                     graph.nodes.positions, node_mask_bool, expand_dims=1
                 ),
@@ -964,7 +972,8 @@ def model(
                 ),
                 species=_sanitize(graph.nodes.species, node_mask_bool),
             )
-            sanitized_edges = graph.edges.__class__(
+            sanitized_edges = _replace_graph_fields(
+                graph.edges,
                 shifts=_sanitize(graph.edges.shifts, edge_mask_bool, expand_dims=1),
                 unit_shifts=(
                     _sanitize(graph.edges.unit_shifts, edge_mask_bool, expand_dims=1)
@@ -972,7 +981,8 @@ def model(
                     else None
                 ),
             )
-            sanitized_globals = graph.globals._replace(
+            sanitized_globals = _replace_graph_fields(
+                graph.globals,
                 cell=(
                     _sanitize(graph.globals.cell, graph_mask_bool, expand_dims=2)
                     if getattr(graph.globals, 'cell', None) is not None

@@ -930,7 +930,9 @@ class _TensorMACE(MACE):
             value = readout(feats)
             values.append(getattr(value, 'array', value))
             features.append(getattr(feats, 'array', feats))
-        mask = data.get('node_mask', jnp.ones(attrs.shape[0], dtype=attrs.dtype))
+        mask = jnp.asarray(
+            data.get('node_mask', jnp.ones(attrs.shape[0])), dtype=attrs.dtype
+        )
         node_out = sum(values) * mask[:, None]
         batch = data['batch']
 

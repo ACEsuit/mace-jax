@@ -129,6 +129,7 @@ def test_architecture_conversion(kwargs, runtime_devices, tmp_path):
     'kind', ['AtomicDipolesMACE', 'EnergyDipolesMACE', 'AtomicDielectricMACE']
 )
 def test_tensor_conversion(kind, runtime_devices):
+    torch.manual_seed(0)
     source = source_model(kind).to(runtime_devices['torch_device'])
     model, _ = converted(source)
     data = inputs()
@@ -153,13 +154,32 @@ def test_tensor_conversion(kind, runtime_devices):
         'dalpha_dr',
     ):
         if expected.get(key) is not None:
+            # Derivative sums amplify small cross-backend differences. Use the
+            # absolute tolerance of the independent finite-difference checks.
+            atol = 1e-7 if key in ('dmu_dr', 'dalpha_dr') else 1e-9
             np.testing.assert_allclose(
                 actual[key],
                 expected[key].detach().cpu().numpy(),
-                atol=1e-9,
+                atol=atol,
                 rtol=1e-7,
                 err_msg=key,
             )
+
+
+def test_dielectric_accepts_boolean_node_masks(runtime_devices):
+    model, _ = converted(source_model('AtomicDielectricMACE'))
+    values = _graph_to_data(graph_for_atoms(atoms_for_properties()), num_species=2)
+    expected = model(values)
+
+    def apply(data):
+        return model(data)
+
+    actual = jax.jit(apply)(
+        dict(values, node_mask=values['node_mask'].astype(bool))
+    )
+    for key in ('charges', 'dipole', 'polarizability'):
+        np.testing.assert_allclose(actual[key], expected[key], atol=1e-10)
+    np.testing.assert_allclose(actual['charges'].sum(), 1.0, atol=1e-10)
 
 
 def test_energy_derivatives(runtime_devices):
