@@ -282,6 +282,20 @@ pre-trained checkpoint used in this example.
   process deterministically, and only writes logs/checkpoints from rank 0.
   Environment variables such as `JAX_PROCESS_COUNT`, `JAX_PROCESS_INDEX` or
   Slurm launch variables can also be used; they override the CLI defaults automatically.
+
+  Training and validation use one global device mesh. Gradients and losses are
+  summed across all processes and normalized by the number of real graphs, so
+  unequal graph counts per device are handled correctly. Metric statistics are
+  reduced across the same mesh. Gradient computation, the optimizer update,
+  and EMA run in one compiled step.
+
+  Partial final device groups and exhausted processes contribute zero-weight
+  padding until every process finishes; no real batches are dropped. All
+  processes must run the same training/evaluation sequence with matching model
+  settings and fixed batch shapes (`n_node`, `n_edge`, `n_graph`) for each loader.
+  A process with an empty local shard still participates. Batch prefetching
+  stays local; distributed synchronization runs on the training thread.
+
 A typical 2-host launch (one process per host) looks like:
 
   ```sh

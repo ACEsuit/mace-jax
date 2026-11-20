@@ -28,9 +28,15 @@ import jraph
 import numpy as np
 import optax
 import tqdm
-from jax.experimental import multihost_utils
+from jax.sharding import PartitionSpec as P
 
 from mace_jax import data
+from mace_jax.tools.distributed import (
+    DeviceMesh,
+    group_batches,
+    iter_loader_batches,
+    synchronize_batches,
+)
 
 
 @gin.register
@@ -166,45 +172,6 @@ def _prefetch_to_device(iterator, capacity: int, device_put_fn: Callable[[Any], 
             return item
 
     return _Prefetched()
-
-
-def _group_batches(iterator, group_size: int, total_hint: int = 0):
-    """Group consecutive batches into fixed-size chunks.
-
-    Args:
-        iterator: Iterator yielding individual batches.
-        group_size: Number of batches per grouped chunk.
-        total_hint: Optional total batch hint to propagate.
-
-    Returns:
-        Iterator yielding lists of length `group_size`.
-    """
-    if group_size <= 1:
-        return iterator
-
-    class _Grouped:
-        """Iterator wrapper that yields fixed-size groups of batches."""
-
-        def __init__(self):
-            """Initialize the grouped iterator wrapper."""
-            self._iter = iter(iterator)
-            self.total_batches_hint = total_hint
-
-        def __iter__(self):
-            """Return self as an iterator."""
-            return self
-
-        def __next__(self):
-            """Return the next grouped chunk or stop iteration."""
-            chunk = []
-            for _ in range(group_size):
-                try:
-                    chunk.append(next(self._iter))
-                except StopIteration:
-                    raise StopIteration
-            return chunk
-
-    return _Grouped()
 
 
 @dataclasses.dataclass
@@ -380,6 +347,8 @@ def _metric_stats(delta, target, mask):
     broadcast_mask = jnp.broadcast_to(mask, delta.shape)
     mask_float = broadcast_mask.astype(delta.dtype)
     count = jnp.sum(mask_float)
+    delta = jnp.where(broadcast_mask > 0, delta, 0.0)
+    target = jnp.where(broadcast_mask > 0, target, 0.0)
     abs_delta = jnp.abs(delta)
     abs_target = jnp.abs(target)
     sum_abs_delta = jnp.sum(abs_delta * mask_float)
@@ -494,7 +463,7 @@ def _compute_eval_batch_metrics(
     atom_counts = jnp.maximum(jnp.asarray(graph.n_node), 1.0)
 
     per_graph_loss = _checked_loss(loss_fn, graph, pred_outputs)
-    loss = jnp.sum(per_graph_loss * graph_mask)
+    loss = jnp.sum(jnp.where(graph_mask > 0, per_graph_loss, 0.0))
 
     result = {
         'loss': loss,
@@ -673,8 +642,22 @@ def _padding_amounts(graph) -> tuple[int, int, int, int, int, int]:
     return node_cap, edge_cap, graph_cap, pad_nodes, pad_edges, pad_graphs
 
 
+def _device_batches(iterator, device_mesh, prefetch_capacity):
+    """Prefetch local batches, then synchronize processes on the training thread."""
+    def prepare(graphs):
+        padding = _padding_amounts(graphs)
+        return device_mesh.prepare_local_batch(graphs), padding
+
+    groups = group_batches(iterator, device_mesh.local_device_count)
+    if prefetch_capacity > 0:
+        batches = _prefetch_to_device(groups, prefetch_capacity, prepare)
+    else:
+        batches = map(prepare, groups)
+    return synchronize_batches(batches, device_mesh.local_device_count)
+
+
 def _psum_metrics(tree):
-    """Sum metric trees across devices for pmap evaluation."""
+    """Sum metric trees across the global device mesh."""
     return jax.tree_util.tree_map(
         lambda x: jax.lax.psum(x, 'devices') if x is not None else None,
         tree,
@@ -778,36 +761,12 @@ def train(
         int(head_idx): name for name, head_idx in zip(head_names, head_indices)
     }
 
-    local_devices = jax.local_devices()
-    local_device_count = max(1, len(local_devices))
-
-    def _prepare_graph_for_devices(graph: jraph.GraphsTuple):
-        """Ensure `graph` has a leading axis matching local device count.
-
-        Args:
-            graph: Batch graph or list of per-device microbatches.
-
-        Returns:
-            GraphsTuple with leading device axis suitable for pmap.
-        """
-
-        if local_device_count == 1:
-            if graph.n_node.ndim == 1:
-                return jax.tree_util.tree_map(lambda x: x[None, ...], graph)
-            return graph
-
-        if isinstance(graph, Sequence) and not isinstance(graph, jraph.GraphsTuple):
-            return data.prepare_sharded_batch(graph, local_device_count)
-
-        if graph.n_node.ndim == 1:
-            return data.prepare_sharded_batch(graph, local_device_count)
-
-        if graph.n_node.shape[0] != local_device_count:
-            raise ValueError(
-                'Expected microbatches with leading axis equal to the number of local '
-                f'devices ({local_device_count}), got axis size {graph.n_node.shape[0]}.'
-            )
-        return graph
+    device_mesh = DeviceMesh()
+    local_device_count = device_mesh.local_device_count
+    params, optimizer_state, ema_params = device_mesh.replicate(
+        (params, optimizer_state, ema_params), broadcast=True
+    )
+    eval_params = ema_params
 
     def _make_update_fn(current_loss_fn):
         """Compile one loss stage while keeping optimizer/EMA state as inputs."""
@@ -816,13 +775,6 @@ def train(
                 current_loss_fn, metric_targets=metrics_required_targets
             )
 
-        @partial(
-            jax.pmap,
-            in_axes=(None, 0),
-            out_axes=None,
-            axis_name='devices',
-            devices=local_devices,
-        )
         def grad_fn(params, graph: jraph.GraphsTuple):
             """Compute per-device loss and gradients for a sharded batch."""
             # graph is assumed to be padded by jraph.pad_with_graphs
@@ -881,12 +833,13 @@ def train(
                 batch_metrics = None
                 head_metrics = ()
             loss = jax.lax.psum(loss, 'devices')
-            grad = jax.tree_util.tree_map(lambda g: jax.lax.psum(g, 'devices'), grad)
+            grad = jax.tree_util.tree_map(
+                lambda g: jax.lax.psum(jnp.where(jnp.any(mask), g, 0.0), 'devices'),
+                grad,
+            )
             num_graphs = jax.lax.psum(jnp.sum(mask), 'devices')
             return num_graphs, loss, grad, batch_metrics, head_metrics
 
-        # jit-of-pmap is not recommended but so far it seems faster
-        @jax.jit
         def update_fn(
             params,
             optimizer_state,
@@ -895,9 +848,11 @@ def train(
             graph: jraph.GraphsTuple,
         ) -> tuple[float, Any, Any, Any, jnp.ndarray, dict | None, tuple]:
             """Apply one optimizer step and update EMA parameters."""
+            graph = jax.tree_util.tree_map(lambda x: x[0], graph)
             n, loss, grad, batch_metrics, head_metrics = grad_fn(params, graph)
-            loss = loss / n
-            grad = jax.tree_util.tree_map(lambda x: x / n, grad)
+            denominator = jnp.maximum(n, 1.0)
+            loss = loss / denominator
+            grad = jax.tree_util.tree_map(lambda x: x / denominator, grad)
             if lr_scale_by_graphs:
                 grad = jax.tree_util.tree_map(lambda g: g * n, grad)
             grad = _sanitize_grads(grad)
@@ -909,17 +864,26 @@ def train(
                 clip_coef = jnp.minimum(1.0, max_grad_norm / (grad_norm + 1e-12))
                 grad = jax.tree_util.tree_map(lambda g: g * clip_coef, grad)
 
-            updates, optimizer_state = gradient_transform.update(
-                grad, optimizer_state, params
-            )
-            params = optax.apply_updates(params, updates)
-            if ema_decay is not None:
-                decay = jnp.minimum(ema_decay, (1 + num_updates) / (10 + num_updates))
-                ema_params = jax.tree_util.tree_map(
-                    lambda x, y: x * decay + y * (1 - decay), ema_params, params
+            def apply_update(_):
+                updates, new_optimizer_state = gradient_transform.update(
+                    grad, optimizer_state, params
                 )
-            else:
-                ema_params = params
+                new_params = optax.apply_updates(params, updates)
+                if ema_decay is not None:
+                    decay = jnp.minimum(ema_decay, (1 + num_updates) / (10 + num_updates))
+                    new_ema_params = jax.tree_util.tree_map(
+                        lambda x, y: x * decay + y * (1 - decay), ema_params, new_params
+                    )
+                else:
+                    new_ema_params = new_params
+                return new_params, new_optimizer_state, new_ema_params
+
+            params, optimizer_state, ema_params = jax.lax.cond(
+                n > 0,
+                apply_update,
+                lambda _: (params, optimizer_state, ema_params),
+                operand=None,
+            )
             return (
                 loss,
                 params,
@@ -930,7 +894,9 @@ def train(
                 head_metrics,
             )
 
-        return update_fn
+        return device_mesh.compile(
+            update_fn, (P(), P(), P(), P(), P('devices'))
+        )
 
     current_loss_fn = metrics_loss_fn if loss_fn_getter is None else loss_fn_getter()
     update_fn = _make_update_fn(current_loss_fn)
@@ -938,39 +904,6 @@ def train(
     process_index = getattr(jax, 'process_index', lambda: 0)()
     is_primary = process_index == 0
     process_count = getattr(jax, 'process_count', lambda: 1)()
-
-    def _allreduce_array(arr: np.ndarray) -> np.ndarray:
-        if process_count <= 1:
-            return arr
-        gathered = multihost_utils.process_allgather(arr)
-        return np.sum(np.asarray(gathered), axis=0)
-
-    def _allreduce_scalar(value: float) -> float:
-        if process_count <= 1:
-            return float(value)
-        arr = np.asarray(value, dtype=np.float64)
-        return float(_allreduce_array(arr))
-
-    def _allreduce_accumulators(accumulators: dict[str, _MetricAccumulator]) -> None:
-        if process_count <= 1:
-            return
-        for acc in accumulators.values():
-            packed = np.array(
-                [
-                    acc.count,
-                    acc.sum_abs_delta,
-                    acc.sum_abs_target,
-                    acc.sum_sq_delta,
-                    acc.sum_sq_target,
-                ],
-                dtype=np.float64,
-            )
-            reduced = _allreduce_array(packed)
-            acc.count = float(reduced[0])
-            acc.sum_abs_delta = float(reduced[1])
-            acc.sum_abs_target = float(reduced[2])
-            acc.sum_sq_delta = float(reduced[3])
-            acc.sum_sq_target = float(reduced[4])
 
     def _resolve_lr(step: int) -> float | None:
         """Return the current learning rate for a given step if available."""
@@ -1000,7 +933,8 @@ def train(
 
     def _epoch_batches(epoch: int):
         """Build an epoch batch iterator and total batch count."""
-        iterator = train_loader.iter_batches(
+        iterator = iter_loader_batches(
+            train_loader,
             epoch=epoch,
             seed=data_seed,
             process_count=process_count,
@@ -1014,15 +948,12 @@ def train(
                     total_batches = int(approx_length())
                 except Exception:  # pragma: no cover - defensive fallback
                     total_batches = 0
-        if not total_batches:
+        if not total_batches and process_count == 1:
             raise ValueError(
                 'Training loader did not provide a total batch count; ensure it '
                 'implements iter_batches() with a total_batches_hint or approx_length().'
             )
-        if local_device_count > 1:
-            total_batches = total_batches // local_device_count
-            iterator = _group_batches(iterator, local_device_count, total_batches)
-        return iterator, total_batches
+        return iterator, math.ceil(total_batches / local_device_count)
 
     initial_eval = eval_params
     if schedule_free_eval_fn is not None:
@@ -1037,10 +968,6 @@ def train(
                 current_loss_fn = next_loss_fn
                 update_fn = _make_update_fn(current_loss_fn)
         epoch_batches_iter, effective_steps = _epoch_batches(epoch)
-        if effective_steps <= 0:
-            raise ValueError(
-                'iter_batches() produced no data; reduce process_count or provide more data.'
-            )
         if is_primary:
             lr_value = _resolve_lr(num_updates)
             if lr_value is not None:
@@ -1052,21 +979,9 @@ def train(
         if device_prefetch_cap is None:
             device_prefetch_cap = max(host_prefetch_cap, 2)
         device_prefetch_cap = int(device_prefetch_cap or 0)
-        device_prefetch_active = device_prefetch_cap > 0
-        if device_prefetch_active:
-            source_iter = epoch_batches_iter
-
-            def _device_put(graph):
-                """Prepare/pad and move graphs to device while preserving stats."""
-                padding = _padding_amounts(graph)
-                graph = _prepare_graph_for_devices(graph)
-                if local_device_count <= 1:
-                    graph = jax.device_put(graph)
-                return graph, padding
-
-            epoch_batches_iter = _prefetch_to_device(
-                source_iter, device_prefetch_cap, _device_put
-            )
+        epoch_batches_iter = _device_batches(
+            epoch_batches_iter, device_mesh, device_prefetch_cap
+        )
         p_bar = tqdm.tqdm(
             total=effective_steps,
             desc='train',
@@ -1095,27 +1010,16 @@ def train(
             head_graph_counts: dict[int, float] = {
                 int(head_idx): 0.0 for head_idx in head_indices
             }
-        for item in epoch_batches_iter:
-            if device_prefetch_active:
-                graph, padding = item
-                node_cap, edge_cap, graph_cap, pad_nodes, pad_edges, pad_graphs = (
-                    padding
-                )
-            else:
-                graph = item
-                node_cap, edge_cap, graph_cap, pad_nodes, pad_edges, pad_graphs = (
-                    _padding_amounts(graph)
-                )
+        for graph, padding in epoch_batches_iter:
+            node_cap, edge_cap, graph_cap, pad_nodes, pad_edges, pad_graphs = padding
             padding_stats['node_cap'] += node_cap
             padding_stats['edge_cap'] += edge_cap
             padding_stats['graph_cap'] += graph_cap
             padding_stats['pad_nodes'] += pad_nodes
             padding_stats['pad_edges'] += pad_edges
             padding_stats['pad_graphs'] += pad_graphs
-            if not device_prefetch_active:
-                graph = _prepare_graph_for_devices(graph)
-            num_updates += 1
-            num_updates_value = jnp.asarray(num_updates, dtype=jnp.int32)
+            graph = device_mesh.global_batch(graph)
+            num_updates_value = jnp.asarray(num_updates + 1, dtype=jnp.int32)
             (
                 loss,
                 params,
@@ -1127,36 +1031,20 @@ def train(
             ) = update_fn(params, optimizer_state, ema_params, num_updates_value, graph)
             loss = float(loss)
             n_graphs_value = float(n_graphs)
+            if n_graphs_value > 0:
+                num_updates += 1
             if is_primary and n_graphs_value == 0.0:
                 logging.warning(
-                    'Batch %s contains no valid graphs; gradients are zero.',
-                    num_updates,
+                    'Batch %s contains no valid graphs; skipping optimizer update.',
+                    batches_in_epoch + 1,
                 )
             if metrics_enabled:
-                batch_metrics = data.unreplicate_from_local_devices(batch_metrics)
-
-                def _squeeze(value):
-                    if value is None:
-                        return None
-                    arr = np.asarray(value)
-                    if arr.ndim == 0:
-                        return value
-                    if arr.shape[0] == 1:
-                        return arr[0]
-                    return value
-
-                batch_metrics = jax.tree_util.tree_map(
-                    _squeeze, batch_metrics, is_leaf=lambda x: x is None
-                )
+                batch_metrics, head_metrics = jax.device_get((batch_metrics, head_metrics))
                 train_total_loss += float(batch_metrics['loss'])
                 train_num_graphs += float(batch_metrics['graph_count'])
                 _update_metric_accumulators(metric_accumulators, batch_metrics)
 
                 if head_metrics:
-                    head_metrics = data.unreplicate_from_local_devices(head_metrics)
-                    head_metrics = jax.tree_util.tree_map(
-                        _squeeze, head_metrics, is_leaf=lambda x: x is None
-                    )
                     for head_idx, per_head_metrics in zip(head_indices, head_metrics):
                         head_loss_totals[int(head_idx)] += float(
                             per_head_metrics['loss']
@@ -1184,7 +1072,7 @@ def train(
                         padding_stats['pad_nodes'] / batches_in_epoch,
                         100.0 * padding_stats['pad_nodes'] / padding_stats['node_cap'],
                         padding_stats['pad_edges'] / batches_in_epoch,
-                        100.0 * padding_stats['pad_edges'] / padding_stats['edge_cap'],
+                        100.0 * padding_stats['pad_edges'] / max(padding_stats['edge_cap'], 1),
                         padding_stats['pad_graphs'] / batches_in_epoch,
                         100.0
                         * padding_stats['pad_graphs']
@@ -1196,7 +1084,7 @@ def train(
                     'Epoch %s padding: nodes=%.6f%% edges=%.6f%% graphs=%.2f%%',
                     epoch + 1,
                     100.0 * padding_stats['pad_nodes'] / padding_stats['node_cap'],
-                    100.0 * padding_stats['pad_edges'] / padding_stats['edge_cap'],
+                    100.0 * padding_stats['pad_edges'] / max(padding_stats['edge_cap'], 1),
                     100.0 * padding_stats['pad_graphs'] / padding_stats['graph_cap'],
                 )
         if batches_in_epoch <= 0:
@@ -1231,19 +1119,6 @@ def train(
                 )
                 train_metrics = {}
             else:
-                if process_count > 1:
-                    train_total_loss = _allreduce_scalar(train_total_loss)
-                    train_num_graphs = _allreduce_scalar(train_num_graphs)
-                    _allreduce_accumulators(metric_accumulators)
-                    if head_metric_accumulators:
-                        for head_idx, head_acc in head_metric_accumulators.items():
-                            head_loss_totals[head_idx] = _allreduce_scalar(
-                                head_loss_totals.get(head_idx, 0.0)
-                            )
-                            head_graph_counts[head_idx] = _allreduce_scalar(
-                                head_graph_counts.get(head_idx, 0.0)
-                            )
-                            _allreduce_accumulators({head_idx: head_acc})
                 avg_loss = train_total_loss / train_num_graphs
                 train_metrics = _init_metrics_payload(
                     avg_loss, time.time() - train_metrics_start
@@ -1271,6 +1146,7 @@ def train(
 
 def _eval_step(predictor, metrics_fn, params_, graph):
     """Run the predictor and compute per-batch metric stats on devices."""
+    graph = jax.tree_util.tree_map(lambda x: x[0], graph)
     output = predictor(params_, graph)
     pred_graph, pred_outputs = _prepare_pred_graph(graph, output)
     batch_metrics = metrics_fn(graph, pred_graph, pred_outputs, None)
@@ -1280,12 +1156,8 @@ def _eval_step(predictor, metrics_fn, params_, graph):
 def _make_eval_step(predictor: Callable, loss_fn: Any) -> Callable:
     """Build a reusable mapped evaluation step for one predictor and loss."""
     metrics_fn = _make_eval_batch_metrics(loss_fn)
-    return jax.pmap(
-        partial(_eval_step, predictor, metrics_fn),
-        in_axes=(None, 0),
-        out_axes=0,
-        axis_name='devices',
-        devices=jax.local_devices(),
+    return DeviceMesh().compile(
+        partial(_eval_step, predictor, metrics_fn), (P(), P('devices'))
     )
 
 
@@ -1337,12 +1209,14 @@ def evaluate(
         'graph_cap': 0,
     }
 
-    local_devices = jax.local_devices()
-    local_device_count = max(1, len(local_devices))
+    device_mesh = DeviceMesh()
+    local_device_count = device_mesh.local_device_count
+    params = device_mesh.replicate(params)
     process_index = getattr(jax, 'process_index', lambda: 0)()
     process_count = getattr(jax, 'process_count', lambda: 1)()
     is_primary = process_index == 0
-    iterator = data_loader.iter_batches(
+    iterator = iter_loader_batches(
+        data_loader,
         epoch=0,
         seed=None,
         process_count=process_count,
@@ -1356,40 +1230,22 @@ def evaluate(
                 total_hint = int(approx_length())
             except Exception:  # pragma: no cover - defensive fallback
                 total_hint = 0
-    if not total_hint:
+    if not total_hint and process_count == 1:
         raise ValueError(
             'Evaluation loader did not provide a total batch count; ensure it '
             'implements iter_batches() with a total_batches_hint or approx_length().'
         )
 
-    def _prepare_graph_for_devices(graph: jraph.GraphsTuple):
-        """Prepare a graph batch for multi-device evaluation."""
-        if local_device_count == 1:
-            if graph.n_node.ndim == 1:
-                return jax.tree_util.tree_map(lambda x: x[None, ...], graph)
-            return graph
-        if isinstance(graph, Sequence) and not isinstance(graph, jraph.GraphsTuple):
-            return data.prepare_sharded_batch(graph, local_device_count)
-        if graph.n_node.ndim == 1:
-            return data.prepare_sharded_batch(graph, local_device_count)
-        if graph.n_node.shape[0] != local_device_count:
-            raise ValueError(
-                'Expected microbatches with leading axis equal to the number of local '
-                f'devices ({local_device_count}), got axis size {graph.n_node.shape[0]}.'
-            )
-        return graph
+    total_hint = math.ceil(total_hint / local_device_count)
 
     def _process_batch(
         ref_graph: jraph.GraphsTuple,
         *,
+        padding: tuple[int, int, int, int, int, int],
         p_bar=None,
-        prepared: bool = False,
-        padding: tuple[int, int, int, int, int, int] | None = None,
     ) -> None:
         """Update loss/metric accumulators from a single batch."""
         nonlocal total_loss, num_graphs
-        if padding is None:
-            padding = _padding_amounts(ref_graph)
         node_cap, edge_cap, graph_cap, pad_nodes, pad_edges, pad_graphs = padding
         padding_stats['node_cap'] += node_cap
         padding_stats['edge_cap'] += edge_cap
@@ -1398,23 +1254,9 @@ def evaluate(
         padding_stats['pad_edges'] += pad_edges
         padding_stats['pad_graphs'] += pad_graphs
 
-        device_graph = ref_graph if prepared else _prepare_graph_for_devices(ref_graph)
+        device_graph = device_mesh.global_batch(ref_graph)
         batch_metrics = eval_step(params, device_graph)
-        batch_metrics = data.unreplicate_from_local_devices(batch_metrics)
-
-        def _squeeze(value):
-            if value is None:
-                return None
-            arr = np.asarray(value)
-            if arr.ndim == 0:
-                return value
-            if arr.shape[0] == 1:
-                return arr[0]
-            return value
-
-        batch_metrics = jax.tree_util.tree_map(
-            _squeeze, batch_metrics, is_leaf=lambda x: x is None
-        )
+        batch_metrics = jax.device_get(batch_metrics)
         total_loss += float(batch_metrics['loss'])
         num_graphs += float(batch_metrics['graph_count'])
         _update_metric_accumulators(metric_accumulators, batch_metrics)
@@ -1423,27 +1265,12 @@ def evaluate(
 
     start_time = time.time()
 
-    eval_iterator = iterator
     host_prefetch_cap = int(getattr(data_loader, '_prefetch_batches', 0) or 0)
     device_prefetch_cap = device_prefetch_batches
     if device_prefetch_cap is None:
         device_prefetch_cap = max(host_prefetch_cap, 2)
     device_prefetch_cap = int(device_prefetch_cap or 0)
-    device_prefetch_active = device_prefetch_cap > 0
-    if device_prefetch_active:
-        source_iter = eval_iterator
-
-        def _device_put(graph):
-            """Prepare/pad and move graphs to device while preserving stats."""
-            padding = _padding_amounts(graph)
-            graph = _prepare_graph_for_devices(graph)
-            if local_device_count <= 1:
-                graph = jax.device_put(graph)
-            return graph, padding
-
-        eval_iterator = _prefetch_to_device(
-            source_iter, device_prefetch_cap, _device_put
-        )
+    eval_iterator = _device_batches(iterator, device_mesh, device_prefetch_cap)
 
     p_bar = tqdm.tqdm(
         eval_iterator,
@@ -1454,12 +1281,8 @@ def evaluate(
     )
 
     batches_seen = 0
-    for item in p_bar:
-        if device_prefetch_active:
-            ref_graph, padding = item
-            _process_batch(ref_graph, p_bar=p_bar, prepared=True, padding=padding)
-        else:
-            _process_batch(item, p_bar=p_bar)
+    for ref_graph, padding in p_bar:
+        _process_batch(ref_graph, p_bar=p_bar, padding=padding)
         batches_seen += 1
     if p_bar.total is not None and p_bar.n != p_bar.total:
         p_bar.total = p_bar.n
@@ -1479,7 +1302,7 @@ def evaluate(
                 padding_stats['pad_nodes'] / batches_seen,
                 100.0 * padding_stats['pad_nodes'] / padding_stats['node_cap'],
                 padding_stats['pad_edges'] / batches_seen,
-                100.0 * padding_stats['pad_edges'] / padding_stats['edge_cap'],
+                100.0 * padding_stats['pad_edges'] / max(padding_stats['edge_cap'], 1),
                 padding_stats['pad_graphs'] / batches_seen,
                 100.0 * padding_stats['pad_graphs'] / padding_stats['graph_cap'],
             )
@@ -1488,7 +1311,7 @@ def evaluate(
                 '%s padding: nodes=%.6f%% edges=%.6f%% graphs=%.2f%%',
                 name,
                 100.0 * padding_stats['pad_nodes'] / padding_stats['node_cap'],
-                100.0 * padding_stats['pad_edges'] / padding_stats['edge_cap'],
+                100.0 * padding_stats['pad_edges'] / max(padding_stats['edge_cap'], 1),
                 100.0 * padding_stats['pad_graphs'] / padding_stats['graph_cap'],
             )
 

@@ -7,6 +7,7 @@ from jax import lax
 from jax.errors import TracerBoolConversionError
 
 from mace_jax.tools.dtype import default_dtype
+from mace_jax.tools.utils import safe_norm
 
 
 class Outputs(NamedTuple):
@@ -286,7 +287,8 @@ def get_edge_vectors_and_lengths(
     vectors = positions[receiver] - positions[sender] + shifts  # [n_edges, 3]
 
     # lengths (keep last dim)
-    lengths = jnp.linalg.norm(vectors, axis=-1, keepdims=True)  # [n_edges, 1]
+    # Padding introduces zero-length edges; their force derivatives must stay finite.
+    lengths = safe_norm(vectors, axis=-1, keepdims=True)  # [n_edges, 1]
 
     if normalize:
         vectors = vectors / (lengths + eps)
@@ -338,7 +340,7 @@ def prepare_graph(
         else:
             n_ghosts = int(natoms) if natoms else 0
         vectors = jnp.asarray(data['vectors'], dtype=default_dtype())
-        lengths = jnp.linalg.norm(vectors, axis=-1, keepdims=True)
+        lengths = safe_norm(vectors, axis=-1, keepdims=True)
         num_graphs = 2  # match torch behaviour: real and ghost graph
 
         positions = jnp.zeros((n_real, 3), dtype=vectors.dtype)

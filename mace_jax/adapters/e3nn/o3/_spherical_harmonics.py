@@ -11,6 +11,7 @@ from e3nn_jax import Irreps, spherical_harmonics
 from flax import nnx
 
 from mace_jax.adapters.nnx.torch import nxx_auto_import_from_torch
+from mace_jax.tools.utils import safe_norm
 
 
 @nxx_auto_import_from_torch(allow_missing_mapper=True)
@@ -84,7 +85,7 @@ class SphericalHarmonics(nnx.Module):
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
         """Compute spherical harmonics for input vectors x [*, 3]."""
         if self.normalize:
-            x = x / (jnp.linalg.norm(x, axis=-1, keepdims=True) + 1e-9)
+            x = x / (safe_norm(x, axis=-1, keepdims=True) + 1e-9)
 
         sh = spherical_harmonics(
             self._irreps_out, x, normalize=False, normalization='component'

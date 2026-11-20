@@ -1127,6 +1127,9 @@ def train(
         """Return True if the loader has graph data to iterate over."""
         if loader is None:
             return False
+        if process_count > 1:
+            # Empty local shards must still participate in global evaluation.
+            return True
         graphs = getattr(loader, 'graphs', None)
         if graphs is None:
             return True
@@ -1387,15 +1390,7 @@ def train(
             metrics_['loss'] = loss_
             _log_metrics(metrics_, mode, epoch, head_name=head_name)
 
-            synced_loss = loss_
-            if process_count > 1:
-                loss_value = 0.0 if loss_ is None else float(loss_)
-                synced = multihost_utils.broadcast_one_to_all(
-                    jnp.array(loss_value, dtype=jnp.float32),
-                    is_source=is_primary,
-                )
-                synced_loss = float(np.asarray(synced))
-            return synced_loss
+            return loss_
 
         evaluate_now = _should_run_eval(epoch, last_epoch)
 
