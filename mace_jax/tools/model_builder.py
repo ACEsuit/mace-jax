@@ -12,7 +12,13 @@ from flax import nnx
 from mace_jax.adapters.nnx import resolve_gate_callable
 from mace_jax.data.utils import Configuration, graph_from_configuration
 from mace_jax.modules import interaction_classes, readout_classes
-from mace_jax.modules.models import MACE, ScaleShiftMACE
+from mace_jax.modules.models import (
+    MACE,
+    AtomicDielectricMACE,
+    AtomicDipolesMACE,
+    EnergyDipolesMACE,
+    ScaleShiftMACE,
+)
 from mace_jax.modules.wrapper_ops import (
     EquivarianceConfig,
     resolve_equivariance_config,
@@ -24,10 +30,18 @@ def _normalize_atomic_config(
     config: dict[str, Any],
     *,
     dtype: np.dtype = np.float32,
-) -> tuple[dict[str, Any], tuple[int, ...], np.ndarray]:
+) -> tuple[dict[str, Any], tuple[int, ...], np.ndarray | None]:
     atomic_numbers = tuple(int(z) for z in config.get('atomic_numbers', []))
     if not atomic_numbers:
         raise ValueError('Config is missing atomic_numbers.')
+    if config.get('torch_model_class') in ('AtomicDipolesMACE', 'AtomicDielectricMACE'):
+        if config.get('atomic_energies') is not None:
+            raise ValueError('Dipole/dielectric models require atomic_energies=None.')
+        return (
+            dict(config, atomic_numbers=list(atomic_numbers), atomic_energies=None),
+            atomic_numbers,
+            None,
+        )
     if 'atomic_energies' not in config:
         raise ValueError('Config is missing atomic_energies.')
     atomic_energies = np.asarray(config.get('atomic_energies'), dtype=dtype)
@@ -201,10 +215,15 @@ def _readout(name_or_cls: Any):
 
 
 def _validate_model_class(name: str) -> None:
-    if name not in ('MACE', 'ScaleShiftMACE'):
+    if name not in (
+        'MACE',
+        'ScaleShiftMACE',
+        'AtomicDipolesMACE',
+        'EnergyDipolesMACE',
+        'AtomicDielectricMACE',
+    ):
         raise ValueError(
-            f'Unsupported model class {name!r}: MACE-JAX supports only MACE and '
-            'ScaleShiftMACE. Converting another architecture would omit its '
+            f'Unsupported model class {name!r}: converting this architecture would omit its '
             'additional model components.'
         )
 
@@ -282,19 +301,16 @@ def _build_jax_model(
         equivariance_config = resolve_equivariance_config(equivariance_config)
     elif cueq_config is not None:
         equivariance_config = resolve_equivariance_config(cueq_config=cueq_config)
-    elif (
-        config.get('cueq_config') is not None
-        or config.get('oeq_config') is not None
-    ):
+    elif config.get('cueq_config') is not None or config.get('oeq_config') is not None:
         equivariance_config = resolve_equivariance_config(
             cueq_config=config.get('cueq_config'),
             openeq_config=config.get('oeq_config'),
         )
-    elif config.get("cue_conv_fusion"):
+    elif config.get('cue_conv_fusion'):
         equivariance_config = EquivarianceConfig(
-            backend="cueq",
+            backend='cueq',
             optimize_channelwise=True,
-            conv_fusion=bool(config["cue_conv_fusion"]),
+            conv_fusion=bool(config['cue_conv_fusion']),
         )
     config, atomic_numbers, atomic_energies = _normalize_atomic_config(
         config,
@@ -328,6 +344,7 @@ def _build_jax_model(
         use_agnostic_product=config.get('use_agnostic_product', False),
         use_last_readout_only=config.get('use_last_readout_only', False),
         use_embedding_readout=config.get('use_embedding_readout', False),
+        keep_last_layer_irreps=config.get('keep_last_layer_irreps', False),
         collapse_hidden_irreps=(
             True if collapse_hidden_irreps is None else bool(collapse_hidden_irreps)
         ),
@@ -352,6 +369,18 @@ def _build_jax_model(
         common_kwargs['apply_cutoff'] = bool(config['apply_cutoff'])
 
     torch_class = config.get('torch_model_class', 'MACE')
+    tensor_classes = dict(
+        AtomicDipolesMACE=AtomicDipolesMACE,
+        EnergyDipolesMACE=EnergyDipolesMACE,
+        AtomicDielectricMACE=AtomicDielectricMACE,
+    )
+    if torch_class in tensor_classes:
+        if torch_class == 'AtomicDielectricMACE':
+            common_kwargs.update(
+                use_polarizability=config.get('use_polarizability', True),
+                means_stds=config.get('means_stds'),
+            )
+        return tensor_classes[torch_class](rngs=rngs, **common_kwargs)
     if torch_class == 'ScaleShiftMACE' or 'atomic_inter_scale' in config:
         return ScaleShiftMACE(
             atomic_inter_scale=np.asarray(config.get('atomic_inter_scale', 1.0)),

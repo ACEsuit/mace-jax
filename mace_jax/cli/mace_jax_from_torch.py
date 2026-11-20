@@ -27,6 +27,7 @@ from mace_jax.nnx_utils import state_to_serializable_dict
 from mace_jax.tools.foundation_models import load_foundation_torch_model
 from mace_jax.tools.import_from_torch import (
     _copy_neighbor_normalizations,
+    _copy_product_metadata,
     extract_config_mace_model,
     import_from_torch,
 )
@@ -148,6 +149,7 @@ def convert_model(
         )
     config['torch_model_class'] = source_class
     _copy_neighbor_normalizations(torch_model, config)
+    _copy_product_metadata(torch_model, config)
     _maybe_update_hidden_irreps_from_torch(torch_model, config)
 
     jax_model = _build_jax_model(

@@ -7,6 +7,7 @@ from jax import lax
 from jax.errors import TracerBoolConversionError
 
 from mace_jax.tools.dtype import default_dtype
+from mace_jax.tools.scatter import scatter_sum
 from mace_jax.tools.utils import safe_norm
 
 
@@ -446,20 +447,54 @@ def prepare_graph(
     )
 
 
-def add_output_interface(cls=None):
+def get_atomic_virials_stresses(
+    edge_forces, edge_index, vectors, num_atoms, batch, cell, pbc=None
+):
+    """Split symmetric edge virials equally between their endpoints.
+
+    Like Torch MACE, public edge forces are +dE/d(vector). Atomic virials
+    sum to the strain virial; stresses use the full graph volume.
     """
-    Decorator that injects a __call__ method into a class that already defines
-    __call_energy__(self, data, training=False) -> dict with at least 'energy'
-    and possibly other intermediate values.
+    edge_virials = jnp.einsum('ei,ej->eij', edge_forces, vectors)
+    atomic = (
+        sum(
+            scatter_sum(edge_virials, index=ends, dim=0, dim_size=num_atoms)
+            for ends in edge_index
+        )
+        / 2
+    )
+    virials = -(atomic + jnp.swapaxes(atomic, -1, -2)) / 2
+    stress = _stress_from_virials(
+        virials,
+        cell.reshape(-1, 3, 3)[batch],
+        None if pbc is None else jnp.asarray(pbc).reshape(-1, 3)[batch],
+    )
+    return virials, stress
+
+
+def add_output_interface(cls=None):
+    """Add optional derivatives to a model's raw property dictionary.
+
+    Energy models default to returning forces; electric-only models do not.
+    Hessians have shape [3*N, N, 3], with H[i*3+a,j,b] = d²E/dR[i,a]dR[j,b].
+    Dielectric derivatives are [3,N,3] and [9,N,3]; their leading index selects
+    the flattened property component. Graphs are independent, so summing graph
+    properties before differentiating gives each atom's own graph derivative.
+    The new derivative flags must be static under JIT. Energy/force/strain flags
+    retain their existing support for traced booleans.
     """
 
     def wrap(cls):
         def __call__(
             self,
             data: dict[str, jnp.ndarray],
-            compute_force: bool = True,
+            compute_force: bool | None = None,
             compute_stress: bool = False,
             compute_virials: bool = False,
+            compute_hessian: bool = False,
+            compute_edge_forces: bool = False,
+            compute_atomic_stresses: bool = False,
+            compute_dielectric_derivatives: bool = False,
             **model_kwargs,
         ) -> dict[str, jnp.ndarray | None]:
             raw_out = self._energy_fn(
@@ -467,7 +502,90 @@ def add_output_interface(cls=None):
                 **model_kwargs,
             )
 
-            energy_arr = raw_out['energy'] if isinstance(raw_out, dict) else raw_out
+            has_energy = not isinstance(raw_out, dict) or 'energy' in raw_out
+            if compute_force is None:
+                compute_force = has_energy
+            if not has_energy and (
+                compute_force
+                or compute_stress
+                or compute_virials
+                or compute_hessian
+                or compute_edge_forces
+                or compute_atomic_stresses
+            ):
+                raise ValueError(
+                    'Energy derivatives require an energy-producing model.'
+                )
+            energy_arr = raw_out.get('energy') if isinstance(raw_out, dict) else raw_out
+
+            def energy_fn(positions, shifts=None):
+                new_data = dict(data, positions=positions)
+                if shifts is not None:
+                    new_data['shifts'] = shifts
+                out = self._energy_fn(new_data, **model_kwargs)
+                return out['energy'] if isinstance(out, dict) else out
+
+            def extra_outputs(result):
+                # These potentially large outputs are opt-in static flags, so
+                # ordinary force training does not trace their derivative graphs.
+                result.update(
+                    hessian=None,
+                    edge_forces=None,
+                    atomic_virials=None,
+                    atomic_stresses=None,
+                )
+                if compute_hessian:
+                    hessian = jax.jacfwd(jax.grad(lambda pos: jnp.sum(energy_fn(pos))))(
+                        data['positions']
+                    )
+                    n = data['positions'].shape[0]
+                    result['hessian'] = hessian.reshape(3 * n, n, 3)
+                if compute_edge_forces or compute_atomic_stresses:
+                    edge_forces = jax.grad(
+                        lambda shifts: jnp.sum(
+                            energy_fn(data['positions'], shifts=shifts)
+                        )
+                    )(data['shifts'])
+                    result['edge_forces'] = edge_forces
+                    if compute_atomic_stresses:
+                        vectors, _ = get_edge_vectors_and_lengths(
+                            data['positions'], data['edge_index'], data['shifts']
+                        )
+                        result['atomic_virials'], result['atomic_stresses'] = (
+                            get_atomic_virials_stresses(
+                                edge_forces,
+                                data['edge_index'],
+                                vectors,
+                                data['positions'].shape[0],
+                                data['batch'],
+                                data['cell'],
+                                data.get('pbc'),
+                            )
+                        )
+                if compute_dielectric_derivatives:
+                    if result.get('dipole') is None:
+                        raise ValueError(
+                            'Dielectric derivatives require dipole outputs.'
+                        )
+                    for key, derivative in (
+                        ('dipole', 'dmu_dr'),
+                        ('polarizability', 'dalpha_dr'),
+                    ):
+                        result[derivative] = None
+                        if result.get(key) is not None:
+
+                            def property_sum(pos):
+                                out = self._energy_fn(
+                                    dict(data, positions=pos), **model_kwargs
+                                )
+                                return (
+                                    out[key].reshape(out[key].shape[0], -1).sum(axis=0)
+                                )
+
+                            result[derivative] = jax.jacrev(property_sum)(
+                                data['positions']
+                            )
+                return result
 
             # The energy-only path already has every model output in raw_out.
             # Calling get_outputs would evaluate _energy_fn a second time only
@@ -480,7 +598,7 @@ def add_output_interface(cls=None):
                 )
             except TracerBoolConversionError:
                 energy_only = False
-            if energy_only:
+            if energy_only or not has_energy:
                 result = (
                     dict(raw_out)
                     if isinstance(raw_out, dict)
@@ -488,27 +606,17 @@ def add_output_interface(cls=None):
                 )
                 result.update(
                     {
-                        'energy': jnp.atleast_1d(jnp.asarray(energy_arr)),
+                        'energy': (
+                            jnp.atleast_1d(jnp.asarray(energy_arr))
+                            if has_energy
+                            else None
+                        ),
                         'forces': None,
                         'stress': None,
                         'virials': None,
                     }
                 )
-                return result
-
-            def energy_fn(positions, shifts=None):
-                # Replace the positions in `data` with `pos` before recomputing
-                new_data = dict(data)
-                new_data['positions'] = positions
-
-                if shifts is not None:
-                    new_data['shifts'] = shifts
-
-                out = self._energy_fn(
-                    new_data,
-                    **model_kwargs,
-                )
-                return out['energy'] if isinstance(out, dict) else out
+                return extra_outputs(result)
 
             outputs = get_outputs(
                 energy_fn=energy_fn,
@@ -552,7 +660,7 @@ def add_output_interface(cls=None):
                         'virials': outputs.virials if virials_flag else None,
                     }
                 )
-            return result
+            return extra_outputs(result)
 
         # Move __call__ to _energy_fn
         setattr(cls, '_energy_fn', getattr(cls, '__call__'))

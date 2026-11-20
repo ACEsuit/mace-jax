@@ -49,9 +49,52 @@ class MACEJAXCalculator(Calculator):
             else getattr(model, 'model_config', {}).get('embedding_specs')
         )
         self._embedding_feature_values = None
+        self._charge_inputs = None
+        self.model_class = getattr(model, 'model_config', {}).get(
+            'torch_model_class', 'MACE'
+        )
+        self.has_energy = self.model_class not in (
+            'AtomicDipolesMACE',
+            'AtomicDielectricMACE',
+        )
+        self.implemented_properties = (
+            list(type(self).implemented_properties) if self.has_energy else []
+        )
+        if self.has_energy:
+            self.implemented_properties += ['stresses', 'hessian', 'atomic_virials']
+        if self.model_class in (
+            'AtomicDipolesMACE',
+            'EnergyDipolesMACE',
+            'AtomicDielectricMACE',
+        ):
+            self.implemented_properties += ['dipole', 'atomic_dipoles', 'dmu_dr']
+        if self.model_class == 'AtomicDielectricMACE':
+            self.implemented_properties += [
+                'charges',
+                'polarizability',
+                'polarizability_sh',
+                'dalpha_dr',
+            ]
         self.params = stop_grad(params)
+
+        def predict(w, g, atomic=False, hessian=False, dielectric=False):
+            flags = {}
+            if atomic:
+                flags['compute_atomic_stresses'] = True
+            if hessian:
+                flags['compute_hessian'] = True
+            if dielectric:
+                flags['compute_dielectric_derivatives'] = True
+            return self.model(
+                w,
+                g,
+                compute_force=self.has_energy,
+                compute_stress=self.has_energy,
+                **flags,
+            )
+
         self.predictor = jax.jit(
-            lambda w, g: self.model(w, g, compute_force=True, compute_stress=True)
+            predict, static_argnames=('atomic', 'hessian', 'dielectric')
         )
 
         self.r_max = r_max
@@ -78,7 +121,32 @@ class MACEJAXCalculator(Calculator):
                 for name in (old or {})
             ):
                 changes.append('embedding_features')
+        if self._charge_inputs is not None:
+            current = self._get_charge_inputs(atoms)
+            if any(
+                not np.array_equal(old, new)
+                for old, new in zip(self._charge_inputs, current)
+            ):
+                changes.append('charge_inputs')
         return changes
+
+    @staticmethod
+    def _get_charge_inputs(atoms):
+        charges = np.array(
+            atoms.arrays.get(
+                'charges', atoms.info.get('charges', atoms.get_initial_charges())
+            ),
+            copy=True,
+        )
+        return charges, np.array(
+            atoms.info.get('total_charge', charges.sum()), copy=True
+        )
+
+    def get_hessian(self, atoms=None):
+        return self.get_property('hessian', atoms)
+
+    def get_atomic_virials(self, atoms=None):
+        return self.get_property('atomic_virials', atoms)
 
     # pylint: disable=dangerous-default-value
     def calculate(self, atoms=None, properties=None, system_changes=all_changes):
@@ -95,6 +163,7 @@ class MACEJAXCalculator(Calculator):
         # prepare data
         # ASE's copy has no calculator attached. Reading labels from the input
         # atoms would otherwise call back into this calculator recursively.
+        self._charge_inputs = self._get_charge_inputs(self.atoms)
         config = data.config_from_atoms(
             self.atoms.copy(), embedding_specs=self.embedding_specs
         )
@@ -122,26 +191,68 @@ class MACEJAXCalculator(Calculator):
             n_edge=self.min_n_edge,
             n_graph=2,
         )
-        # predict + extract data
-        out = self.predictor(self.params, graph)
-        energy = np.array(jax.lax.stop_gradient(out['energy']))[0]
-        forces = np.array(jax.lax.stop_gradient(out['forces']))[:-1, :]
-
-        # store results
-        E = energy * self.energy_units_to_eV
-        self.results = {
-            'energy': E,
-            'free_energy': E,
-            # force has units eng / len:
-            'forces': forces * (self.energy_units_to_eV / self.length_units_to_A),
-        }
-
-        # even though compute_stress is True, stress can be none if pbc is False
-        # not sure if correct ASE thing is to have no dict key, or dict key with value None
-        if out['stress'] is not None:
-            stress = np.array(jax.lax.stop_gradient(out['stress']))[:3, :3]
-            # stress has units eng / len^3:
-            self.results['stress'] = (
-                stress * (self.energy_units_to_eV / self.length_units_to_A**3)
-            )[0]
-            self.results['stress'] = full_3x3_to_voigt_6_stress(self.results['stress'])
+        properties = properties or self.implemented_properties[:1]
+        out = self.predictor(
+            self.params,
+            graph,
+            atomic=any(key in properties for key in ('stresses', 'atomic_virials')),
+            hessian='hessian' in properties,
+            dielectric=any(key in properties for key in ('dmu_dr', 'dalpha_dr')),
+        )
+        out = jax.device_get(out)
+        n_atoms = len(self.atoms)
+        self.results = {}
+        if out.get('energy') is not None:
+            self.results['energy'] = float(out['energy'][0]) * self.energy_units_to_eV
+            self.results['free_energy'] = self.results['energy']
+        if out.get('forces') is not None:
+            self.results['forces'] = (
+                np.asarray(out['forces'])[:n_atoms]
+                * self.energy_units_to_eV
+                / self.length_units_to_A
+            )
+        if out.get('stress') is not None:
+            stress = (
+                np.asarray(out['stress'])[0]
+                * self.energy_units_to_eV
+                / self.length_units_to_A**3
+            )
+            self.results['stress'] = full_3x3_to_voigt_6_stress(stress)
+        if out.get('atomic_stresses') is not None:
+            stress = (
+                np.asarray(out['atomic_stresses'])[:n_atoms]
+                * self.energy_units_to_eV
+                / self.length_units_to_A**3
+            )
+            self.results['stresses'] = full_3x3_to_voigt_6_stress(stress)
+        if out.get('atomic_virials') is not None:
+            self.results['atomic_virials'] = (
+                np.asarray(out['atomic_virials'])[:n_atoms] * self.energy_units_to_eV
+            )
+        if out.get('hessian') is not None:
+            self.results['hessian'] = (
+                np.asarray(out['hessian'])[: 3 * n_atoms, :n_atoms]
+                * self.energy_units_to_eV
+                / self.length_units_to_A**2
+            )
+        # ASE dipoles use e Angstrom, including for legacy Debye readouts.
+        dipole_factor = self.length_units_to_A
+        if self.model_class in ('AtomicDipolesMACE', 'EnergyDipolesMACE'):
+            dipole_factor /= 299792458.0 * 1.602176634e-19 / 1e-11
+        for key in ('dipole', 'polarizability', 'polarizability_sh'):
+            if out.get(key) is not None:
+                factor = dipole_factor if key == 'dipole' else self.length_units_to_A**3
+                self.results[key] = np.asarray(out[key])[0] * factor
+        for key in ('charges', 'atomic_dipoles'):
+            if out.get(key) is not None:
+                self.results[key] = np.asarray(out[key])[:n_atoms] * (
+                    dipole_factor if key == 'atomic_dipoles' else 1.0
+                )
+        for key in ('dmu_dr', 'dalpha_dr'):
+            if out.get(key) is not None:
+                factor = (
+                    dipole_factor / self.length_units_to_A
+                    if key == 'dmu_dr'
+                    else self.length_units_to_A**2
+                )
+                self.results[key] = np.asarray(out[key])[:, :n_atoms] * factor

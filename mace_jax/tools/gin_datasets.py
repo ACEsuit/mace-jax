@@ -149,6 +149,8 @@ def _graph_from_dataset_entry(
         remap_stress=spec.remap_stress,
         head_name=spec.head_name,
         embedding_specs=spec.embedding_specs,
+        dipole_key=spec.dipole_key,
+        polarizability_key=spec.polarizability_key,
     )
     if spec.weight != 1.0:
         conf.weight *= float(spec.weight)
@@ -1085,6 +1087,9 @@ def _resolve_atomic_energies(
         (atomic_energies_dict, atomic_energies_array).
     """
     if isinstance(atomic_energies_override, str):
+        if atomic_energies_override.lower() == 'zero':
+            zeroes = {int(z): 0.0 for z in atomic_numbers}
+            return zeroes, _atomic_energies_to_array(zeroes, z_table)
         if atomic_energies_override.lower() == 'average':
             atomic_energies_override = None
         else:
@@ -1196,7 +1201,10 @@ def _build_streaming_train_loader(
     total_batches = 0
     per_dataset_batches: list[int | None] = []
 
-    collect_metadata = not isinstance(atomic_energies_override, dict)
+    collect_metadata = (
+        not isinstance(atomic_energies_override, dict)
+        and atomic_energies_override != 'zero'
+    )
 
     node_percentile = _normalize_node_percentile(node_percentile)
     if stream_stats_workers is None:
@@ -1488,6 +1496,8 @@ def _build_eval_streaming_loader(
 def datasets(
     *,
     embedding_specs: dict | None = None,
+    dipole_key: str = 'dipole',
+    polarizability_key: str = 'polarizability',
     r_max: float | None = None,
     train_path: str,
     config_type_weights: dict = None,
@@ -1628,6 +1638,25 @@ def datasets(
         test_specs = [
             replace(spec, embedding_specs=embedding_specs) for spec in test_specs
         ]
+
+    def property_keys(specs):
+        return [
+            replace(spec, dipole_key=dipole_key, polarizability_key=polarizability_key)
+            for spec in specs
+        ]
+
+    dataset_specs = property_keys(dataset_specs)
+    valid_specs = property_keys(valid_specs)
+    test_specs = property_keys(test_specs)
+    try:
+        model_class = gin.query_parameter('mace_jax.tools.gin_model.model.model_class')
+    except ValueError:
+        model_class = None
+    if atomic_energies_override is None and model_class in (
+        'AtomicDipolesMACE',
+        'AtomicDielectricMACE',
+    ):
+        atomic_energies_override = 'zero'
 
     train_loader, atomic_energies_dict, r_max = _build_streaming_train_loader(
         dataset_specs=dataset_specs,

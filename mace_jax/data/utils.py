@@ -52,6 +52,8 @@ class Configuration:
     head: str = 'Default'
     node_features: dict[str, np.ndarray] | None = None
     graph_features: dict[str, np.ndarray] | None = None
+    charges: np.ndarray | None = None
+    total_charge: float = 0.0
 
 
 Configurations = list[Configuration]
@@ -104,6 +106,7 @@ def config_from_atoms(
     dipole_key: str = 'dipole',
     polarizability_key: str = 'polarizability',
     embedding_specs: dict | None = None,
+    charges_key: str = 'charges',
 ) -> Configuration:
     """Convert ase.Atoms to Configuration"""
     if config_type_weights is None:
@@ -151,10 +154,15 @@ def config_from_atoms(
     virials = atoms.info.get(virials_key, None)
     if virials is not None:
         virials = _normalize_stress(virials)
-    dipole = atoms.info.get(dipole_key, None)
+    # ASE's extxyz reader puts standard observables in a SinglePointCalculator.
+    # Read cached values directly without asking a calculator to run.
+    cached_results = getattr(atoms.calc, 'results', {})
+    dipole = atoms.info.get(dipole_key, cached_results.get(dipole_key))
     if dipole is not None:
         dipole = np.asarray(dipole)
-    polarizability = atoms.info.get(polarizability_key, None)
+    polarizability = atoms.info.get(
+        polarizability_key, cached_results.get(polarizability_key)
+    )
     if polarizability is not None:
         polarizability = np.asarray(polarizability)
 
@@ -186,6 +194,20 @@ def config_from_atoms(
     )
     head = head_name if head_name is not None else atoms.info.get('head', 'Default')
     node_features, graph_features = extract_features(atoms, embedding_specs)
+    charges = np.asarray(
+        atoms.arrays.get(
+            charges_key,
+            atoms.info.get(
+                charges_key, cached_results.get(charges_key, atoms.get_initial_charges())
+            ),
+        ),
+        dtype=float,
+    )
+    if charges.shape != (len(atoms),) or not np.isfinite(charges).all():
+        raise ValueError('charges must be a finite array with one value per atom.')
+    total_charge = float(atoms.info.get('total_charge', charges.sum()))
+    if not np.isfinite(total_charge):
+        raise ValueError('total_charge must be finite.')
     return Configuration(
         atomic_numbers=atomic_numbers,
         positions=atoms.get_positions(),
@@ -208,6 +230,8 @@ def config_from_atoms(
         head=head,
         node_features=node_features,
         graph_features=graph_features,
+        charges=charges,
+        total_charge=total_charge,
     )
 
 
@@ -237,6 +261,7 @@ def load_from_xyz(
     head_name: str | None = None,
     no_data_ok: bool = False,
     embedding_specs: dict | None = None,
+    charges_key: str = 'charges',
 ) -> tuple[dict[int, float], Configurations]:
     if num_configs is None:
         atoms_list = ase.io.read(file_or_path, format='extxyz', index=':')
@@ -289,6 +314,7 @@ def load_from_xyz(
             virials_key=virials_key,
             dipole_key=dipole_key,
             polarizability_key=polarizability_key,
+            charges_key=charges_key,
         )
         for atoms in atoms_list
     ]
@@ -432,6 +458,9 @@ def save_configurations_as_HDF5(configurations: Configurations, _, h5_file) -> N
                 for name, value in values.items():
                     features_group[name] = value
         properties_subgrp = subgroup.create_group('properties')
+        properties_subgrp['total_charge'] = config.total_charge
+        if config.charges is not None:
+            properties_subgrp['charges'] = config.charges
         if config.energy is not None:
             properties_subgrp['energy'] = write_value(config.energy)
         if config.forces is not None:
@@ -464,7 +493,9 @@ def write_value(value):
 
 
 GraphNodes = namedtuple(
-    'Nodes', ['positions', 'forces', 'species', 'features'], defaults=[None]
+    'Nodes',
+    ['positions', 'forces', 'species', 'features', 'charges'],
+    defaults=[None, None],
 )
 # Multiprocessing pickle support expects the class to be exported under its __name__.
 Nodes = GraphNodes
@@ -493,6 +524,7 @@ class GraphGlobals(NamedTuple):
     polarizability_weight: np.ndarray | None = None
     pbc: np.ndarray | None = None
     features: dict[str, np.ndarray] | None = None
+    total_charge: np.ndarray | None = None
 
 
 def graph_from_configuration(
@@ -538,6 +570,11 @@ def graph_from_configuration(
             forces=config.forces,
             species=species,
             features=config.node_features,
+            charges=(
+                np.zeros(len(config.positions))
+                if config.charges is None
+                else config.charges
+            ),
         ),
         edges=GraphEdges(shifts=shifts, unit_shifts=unit_shifts),
         globals=jax.tree_util.tree_map(
@@ -545,6 +582,7 @@ def graph_from_configuration(
             GraphGlobals(
                 cell=cell,
                 features=config.graph_features,
+                total_charge=np.asarray(config.total_charge),
                 pbc=np.asarray(
                     config.pbc if config.pbc is not None else (False, False, False),
                     dtype=bool,

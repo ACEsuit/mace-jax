@@ -324,7 +324,7 @@ class NonLinearDipoleReadoutBlock(nnx.Module):
                 if ir.l > 0 and ir in self.irreps_out
             ]
         )
-        irreps_gates = Irreps([(mul, Irreps('0e')[0][1]) for mul, _ in irreps_gated])
+        irreps_gates = Irreps([(mul, '0e') for mul, _ in irreps_gated])
 
         self.equivariant_nonlin = nn.Gate(
             irreps_scalars=irreps_scalars,

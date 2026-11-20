@@ -36,7 +36,13 @@ from .loss import (
     WeightedHuberEnergyForcesStressLoss,
     uber_loss,
 )
-from .models import MACE, ScaleShiftMACE
+from .models import (
+    MACE,
+    AtomicDielectricMACE,
+    AtomicDipolesMACE,
+    EnergyDipolesMACE,
+    ScaleShiftMACE,
+)
 
 __all__ = [
     'AtomicEnergiesBlock',
@@ -65,6 +71,9 @@ __all__ = [
     'uber_loss',
     'MACE',
     'ScaleShiftMACE',
+    'AtomicDipolesMACE',
+    'EnergyDipolesMACE',
+    'AtomicDielectricMACE',
 ]
 
 # Optional: dict-layout experimental model. Import lazily to avoid hard failures
@@ -91,6 +100,8 @@ readout_classes: dict[str, type[LinearReadoutBlock]] = {
     'NonLinearDipoleReadoutBlock': NonLinearDipoleReadoutBlock,
     'NonLinearReadoutBlock': NonLinearReadoutBlock,
     'NonLinearBiasReadoutBlock': NonLinearBiasReadoutBlock,
+    'LinearDipolePolarReadoutBlock': LinearDipolePolarReadoutBlock,
+    'NonLinearDipolePolarReadoutBlock': NonLinearDipolePolarReadoutBlock,
 }
 
 gate_dict: dict[str, Callable | None] = {

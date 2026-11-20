@@ -78,6 +78,8 @@ class StreamingDatasetSpec:
     remap_stress: np.ndarray | None = None
     weight: float = 1.0
     embedding_specs: dict | None = None
+    dipole_key: str = 'dipole'
+    polarizability_key: str = 'polarizability'
 
 
 def _niggli_reduce_inplace(atoms):
@@ -116,6 +118,8 @@ def _atoms_to_graph(
         remap_stress=spec.remap_stress,
         head_name=spec.head_name,
         embedding_specs=spec.embedding_specs,
+        dipole_key=spec.dipole_key,
+        polarizability_key=spec.polarizability_key,
     )
     if spec.weight != 1.0:
         conf.weight *= float(spec.weight)

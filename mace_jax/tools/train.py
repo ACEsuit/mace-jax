@@ -1330,11 +1330,21 @@ _GRAPH_OUTPUT_KEYS = {
     'dipole',
     'polarizability',
     'polar',
+    'polarizability_sh',
+    'contributions',
+    'displacement',
+    'interaction_energy',
 }
 _NODE_OUTPUT_KEYS = {
     'forces',
+    'charges',
+    'atomic_dipoles',
+    'atomic_virials',
+    'atomic_stresses',
+    'node_energy',
+    'node_feats',
 }
-_EDGE_OUTPUT_KEYS: set[str] = set()
+_EDGE_OUTPUT_KEYS: set[str] = {'edge_forces'}
 _SKIP_OUTPUT_KEYS = {
     'lammps_natoms',
 }
@@ -1389,6 +1399,16 @@ def _split_prediction_outputs(
             continue
         arr = np.asarray(value)
         if arr.ndim == 0:
+            continue
+        if key in ('hessian', 'dmu_dr', 'dalpha_dr'):
+            starts = np.concatenate(([0], np.cumsum(n_node)))
+            chunks = [
+                arr[3 * start : 3 * end, start:end]
+                if key == 'hessian'
+                else arr[:, start:end]
+                for start, end in zip(starts[:-1], starts[1:])
+            ]
+            per_graph_outputs[key] = _filter_by_mask(chunks, valid_mask)
             continue
         if key in _NODE_OUTPUT_KEYS:
             chunks = _split_by_counts(arr, n_node)

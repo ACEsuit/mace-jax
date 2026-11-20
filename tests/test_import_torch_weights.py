@@ -26,7 +26,7 @@ class MACE(types.SimpleNamespace):
 
 @pytest.mark.parametrize(
     'model_class',
-    ['MACELES', 'PolarMACE', 'AtomicDielectricMACE', 'MagneticScaleShiftMACE'],
+    ['MACELES', 'PolarMACE', 'MagneticMACE', 'MagneticScaleShiftMACE'],
 )
 def test_builder_rejects_unsupported_model_before_initialization(model_class):
     with pytest.raises(ValueError, match=f'Unsupported model class {model_class!r}'):

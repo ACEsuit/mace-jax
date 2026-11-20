@@ -104,6 +104,7 @@ def _export_model_config(mace_module: modules.MACE) -> dict:
     """Build a config dict compatible with tools.model_builder._build_jax_model."""
     equivariance_config = getattr(mace_module, 'equivariance_config', None)
     config = {
+        'torch_model_class': type(mace_module).__name__,
         'r_max': float(mace_module.r_max),
         'num_bessel': int(mace_module.num_bessel),
         'num_polynomial_cutoff': int(mace_module.num_polynomial_cutoff),
@@ -114,9 +115,9 @@ def _export_model_config(mace_module: modules.MACE) -> dict:
         'hidden_irreps': str(mace_module.hidden_irreps),
         'MLP_irreps': str(mace_module.MLP_irreps),
         'atomic_numbers': [int(z) for z in mace_module.atomic_numbers],
-        'atomic_energies': np.asarray(
-            mace_module.atomic_energies, dtype=float
-        ).tolist(),
+        'atomic_energies': None
+        if mace_module.atomic_energies is None
+        else np.asarray(mace_module.atomic_energies, dtype=float).tolist(),
         'avg_num_neighbors': float(mace_module.avg_num_neighbors),
         'interaction_avg_num_neighbors': [
             float(block.avg_num_neighbors) for block in mace_module.interactions
@@ -149,6 +150,9 @@ def _export_model_config(mace_module: modules.MACE) -> dict:
         'collapse_hidden_irreps': bool(
             getattr(mace_module, 'collapse_hidden_irreps', True)
         ),
+        'keep_last_layer_irreps': bool(
+            getattr(mace_module, 'keep_last_layer_irreps', False)
+        ),
         'readout_cls': _stringify_callable(getattr(mace_module, 'readout_cls', None)),
         'gate': _stringify_callable(getattr(mace_module, 'gate', None)),
         'apply_cutoff': bool(getattr(mace_module, 'apply_cutoff', True)),
@@ -159,6 +163,24 @@ def _export_model_config(mace_module: modules.MACE) -> dict:
         'heads': _serialize_config_value(getattr(mace_module, 'heads', None)),
     }
     normalize2mom_consts = getattr(mace_module, '_normalize2mom_consts', None)
+    if isinstance(mace_module, modules.AtomicDielectricMACE):
+        config['use_polarizability'] = mace_module.use_polarizability
+        config['means_stds'] = {
+            name: np.asarray(getattr(mace_module, name)[...]).tolist()
+            for name in (
+                'dipole_mean',
+                'dipole_std',
+                'polarizability_mean',
+                'polarizability_std',
+            )
+        }
+    if isinstance(mace_module, modules.ScaleShiftMACE):
+        config['atomic_inter_scale'] = _serialize_config_value(
+            mace_module.atomic_inter_scale
+        )
+        config['atomic_inter_shift'] = _serialize_config_value(
+            mace_module.atomic_inter_shift
+        )
     if normalize2mom_consts is not None:
         config['normalize2mom_consts'] = {
             str(k): float(v) for k, v in normalize2mom_consts.items()
@@ -315,6 +337,7 @@ def _graph_to_data(
         'batch': batch,
         'ptr': ptr,
         'cell': cell,
+        'node_mask': node_mask,
     }
 
     unit_shifts = getattr(graph.edges, 'unit_shifts', None)
@@ -332,6 +355,19 @@ def _graph_to_data(
     head_attr = getattr(graph.globals, 'head', None)
     if head_attr is not None:
         data_dict['head'] = jnp.asarray(head_attr, dtype=jnp.int32).reshape(-1)
+
+    charges = getattr(graph.nodes, 'charges', None)
+    total_charge = getattr(graph.globals, 'total_charge', None)
+    data_dict['charges'] = (
+        jnp.zeros(positions.shape[0], dtype=positions.dtype)
+        if charges is None
+        else jnp.asarray(charges, dtype=positions.dtype) * node_mask
+    )
+    data_dict['total_charge'] = (
+        jnp.zeros(graph.n_node.shape, dtype=positions.dtype)
+        if total_charge is None
+        else jnp.asarray(total_charge, dtype=positions.dtype).reshape(-1)
+    )
 
     for container, mask in (
         (graph.nodes, jraph.get_node_padding_mask(graph)),
@@ -380,6 +416,7 @@ def model(
     torch_param_dtype: str | None = None,
     equivariance_config=None,
     cueq_config=None,
+    model_class: str = 'MACE',
     **kwargs,
 ):
     """Construct a MACE model and return an apply function plus initial params.
@@ -553,17 +590,24 @@ def model(
             parameters,
             graph: jraph.GraphsTuple,
             *,
-            compute_force: bool = True,
+            compute_force: bool | None = None,
             compute_stress: bool = False,
             compute_virials: bool = False,
+            **output_flags,
         ) -> dict[str, jnp.ndarray]:
             """Apply the converted Torch model to a `GraphsTuple` input."""
             data_dict = _graph_to_data(graph, num_species=num_species_local)
+            if compute_force is None:
+                compute_force = config['torch_model_class'] not in (
+                    'AtomicDipolesMACE',
+                    'AtomicDielectricMACE',
+                )
             extra_flags = (
                 {'compute_virials': compute_virials}
                 if compute_virials is not False
                 else {}
             )
+            extra_flags.update(output_flags)
             if torch_head is not None:
                 head_names = config.get('heads') or []
                 if torch_head not in head_names:
@@ -651,13 +695,20 @@ def model(
     else:
         logging.info(f'Use the average min neighbor distance: {avg_r_min:.3f}')
 
+    tensor_only = model_class in ('AtomicDipolesMACE', 'AtomicDielectricMACE')
+    if tensor_only:
+        atomic_energies = 'zero'
+        if scaling is not None:
+            raise ValueError(
+                'Energy scaling is not applicable to dipole/dielectric models.'
+            )
     if atomic_energies is None:
         if atomic_energies_dict is None or len(atomic_energies_dict) == 0:
             atomic_energies = 'average'
         else:
             atomic_energies = 'isolated_atom'
 
-    if atomic_energies == 'average':
+    if isinstance(atomic_energies, str) and atomic_energies == 'average':
         atomic_energies_dict = data.compute_average_E0s(train_graphs, z_table)
         logging.info(
             f'Computed average Atomic Energies using least squares: {atomic_energies_dict}'
@@ -665,14 +716,14 @@ def model(
         atomic_energies = np.array(
             [atomic_energies_dict.get(z, 0.0) for z in range(num_species)]
         )
-    elif atomic_energies == 'isolated_atom':
+    elif isinstance(atomic_energies, str) and atomic_energies == 'isolated_atom':
         logging.info(
             f'Using atomic energies from isolated atoms in the dataset: {atomic_energies_dict}'
         )
         atomic_energies = np.array(
             [atomic_energies_dict.get(z, 0.0) for z in range(num_species)]
         )
-    elif atomic_energies == 'zero':
+    elif isinstance(atomic_energies, str) and atomic_energies == 'zero':
         logging.info('Not using atomic energies')
         atomic_energies = np.zeros(num_species)
     elif isinstance(atomic_energies, np.ndarray):
@@ -747,7 +798,7 @@ def model(
         'atomic_numbers',
         tuple(z_table.zs) if z_table is not None else tuple(range(num_species)),
     )
-    kwargs.setdefault('atomic_energies', atomic_energies)
+    kwargs.setdefault('atomic_energies', None if tensor_only else atomic_energies)
 
     num_species_bound = kwargs.pop('num_species', None)
     if num_species_bound is None:
@@ -788,11 +839,14 @@ def model(
             params,
             graph: jraph.GraphsTuple,
             *,
-            compute_force: bool = True,
+            compute_force: bool | None = None,
             compute_stress: bool = False,
             compute_virials: bool = False,
+            **output_flags,
         ) -> dict[str, jnp.ndarray]:
             """Apply the MACE module to a (possibly padded) graph."""
+            if compute_force is None:
+                compute_force = not tensor_only
             e3nn.config('path_normalization', path_normalization)
             e3nn.config('gradient_normalization', gradient_normalization)
 
@@ -897,6 +951,7 @@ def model(
                 data_dict,
                 compute_force=compute_force,
                 compute_stress=compute_stress,
+                **output_flags,
                 **(
                     {'compute_virials': compute_virials}
                     if compute_virials is not False
@@ -954,17 +1009,81 @@ def model(
                 )
                 virials = virial_scale * virials * graph_mask[:, None, None]
 
-            return {
+            result = {
                 'energy': energy,
                 'forces': forces,
                 'stress': stress,
                 'virials': virials,
             }
+            # Electric observables keep their own physical units. Only energy
+            # derivatives follow the optional energy normalization above.
+            for key in (
+                'dipole',
+                'polarizability',
+                'polarizability_sh',
+                'charges',
+                'atomic_dipoles',
+                'dmu_dr',
+                'dalpha_dr',
+                'hessian',
+                'edge_forces',
+                'atomic_virials',
+                'atomic_stresses',
+            ):
+                value = outputs.get(key)
+                if value is None:
+                    result[key] = None
+                    continue
+                if key in ('dmu_dr', 'dalpha_dr'):
+                    value = value * node_mask[None, :, None]
+                elif key == 'hessian':
+                    node_scale = jnp.broadcast_to(std_graph, graph.n_node.shape)[
+                        data_dict['batch']
+                    ]
+                    value = (
+                        value
+                        * jnp.repeat(node_scale * node_mask, 3)[:, None, None]
+                        * node_mask[None, :, None]
+                    )
+                else:
+                    if key == 'edge_forces':
+                        mask = edge_mask
+                        scale = jnp.broadcast_to(std_graph, graph.n_node.shape)[
+                            data_dict['batch'][graph.senders]
+                        ]
+                    elif key in (
+                        'charges',
+                        'atomic_dipoles',
+                        'atomic_virials',
+                        'atomic_stresses',
+                    ):
+                        mask = node_mask
+                        scale = jnp.broadcast_to(std_graph, graph.n_node.shape)[
+                            data_dict['batch']
+                        ]
+                    else:
+                        mask = graph_mask
+                        scale = 1.0
+                    if key in ('edge_forces', 'atomic_virials', 'atomic_stresses'):
+                        value = value * jnp.asarray(scale).reshape(
+                            (-1,) + (1,) * (value.ndim - 1)
+                        )
+                    value = value * mask.reshape(mask.shape + (1,) * (value.ndim - 1))
+                result[key] = value
+            return result
 
         return apply_fn
 
     rngs = nnx.Rngs(initialize_seed or 0)
-    mace_module = modules.MACE(rngs=rngs, **kwargs)
+    if model_class not in (
+        'MACE',
+        'ScaleShiftMACE',
+        'AtomicDipolesMACE',
+        'EnergyDipolesMACE',
+        'AtomicDielectricMACE',
+    ):
+        raise ValueError(f'Unsupported model class {model_class!r}')
+    mace_module = getattr(modules, model_class)(rngs=rngs, **kwargs)
     if isinstance(mace_module, nnx.Module):
         graphdef, state = nnx.split(mace_module)
         params_state, config_state, rest_state = nnx.split_state(

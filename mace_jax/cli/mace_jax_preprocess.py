@@ -169,6 +169,7 @@ def _collect_configs(
     polarizability_key: str,
     extract_atomic_energies: bool,
     embedding_specs: dict | None = None,
+    charges_key: str = 'charges',
 ) -> tuple[dict[int, float], data.Configurations]:
     atomic_energies_values: dict[int, list[float]] = {}
     configs: data.Configurations = []
@@ -184,6 +185,7 @@ def _collect_configs(
             polarizability_key=polarizability_key,
             extract_atomic_energies=extract_atomic_energies,
             embedding_specs=embedding_specs,
+            charges_key=charges_key,
         )
         configs.extend(new_configs)
         for z, value in ae_dict.items():
@@ -246,6 +248,7 @@ def run(args: argparse.Namespace) -> None:
         virials_key=args.virials_key,
         dipole_key=args.dipole_key,
         polarizability_key=args.polarizability_key,
+        charges_key=args.charges_key,
         extract_atomic_energies=True,
         embedding_specs=getattr(args, 'embedding_specs', None),
     )
@@ -261,6 +264,7 @@ def run(args: argparse.Namespace) -> None:
             virials_key=args.virials_key,
             dipole_key=args.dipole_key,
             polarizability_key=args.polarizability_key,
+            charges_key=args.charges_key,
             extract_atomic_energies=False,
             embedding_specs=getattr(args, 'embedding_specs', None),
         )
@@ -285,6 +289,7 @@ def run(args: argparse.Namespace) -> None:
             virials_key=args.virials_key,
             dipole_key=args.dipole_key,
             polarizability_key=args.polarizability_key,
+            charges_key=args.charges_key,
             extract_atomic_energies=False,
             embedding_specs=getattr(args, 'embedding_specs', None),
         )

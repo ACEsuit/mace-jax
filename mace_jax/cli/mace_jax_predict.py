@@ -116,7 +116,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action='store_false',
         help='Disable force predictions.',
     )
-    parser.set_defaults(compute_forces=True)
+    parser.set_defaults(compute_forces=None)
+    parser.add_argument('--compute-hessian', action='store_true')
+    parser.add_argument('--compute-atomic-stresses', action='store_true')
+    parser.add_argument('--compute-edge-forces', action='store_true')
+    parser.add_argument('--compute-dielectric-derivatives', action='store_true')
     parser.add_argument(
         '--compute-stress',
         dest='compute_stress',
@@ -262,18 +266,53 @@ def _build_predictor(
     graphdef,
     *,
     model_config: dict[str, Any],
-    compute_forces: bool,
+    compute_forces: bool | None,
     compute_stress: bool,
     full_outputs: bool,
+    compute_hessian: bool = False,
+    compute_atomic_stresses: bool = False,
+    compute_edge_forces: bool = False,
+    compute_dielectric_derivatives: bool = False,
 ):
-    atomic_numbers = model_config.get('atomic_numbers') or []
-    num_species = int(len(atomic_numbers))
+    atomic_numbers = model_config.get('atomic_numbers')
+    num_species = len(atomic_numbers) if atomic_numbers is not None else 0
     if num_species <= 0:
         raise ValueError('Model config is missing atomic_numbers for prediction.')
+    if compute_forces is None:
+        compute_forces = model_config.get('torch_model_class') not in (
+            'AtomicDipolesMACE',
+            'AtomicDielectricMACE',
+        )
+    extra_flags = {
+        name: True
+        for name, enabled in dict(
+            compute_hessian=compute_hessian,
+            compute_atomic_stresses=compute_atomic_stresses,
+            compute_edge_forces=compute_edge_forces,
+            compute_dielectric_derivatives=compute_dielectric_derivatives,
+        ).items()
+        if enabled
+    }
 
     keep_keys: set[str] | None = None
     if not full_outputs:
-        keep_keys = {'energy', 'dipole', 'polarizability', 'polar'}
+        keep_keys = {
+            'energy',
+            'dipole',
+            'atomic_dipoles',
+            'charges',
+            'polarizability',
+            'polarizability_sh',
+            'polar',
+        }
+        if compute_hessian:
+            keep_keys.add('hessian')
+        if compute_atomic_stresses:
+            keep_keys.update(('atomic_virials', 'atomic_stresses'))
+        if compute_edge_forces:
+            keep_keys.add('edge_forces')
+        if compute_dielectric_derivatives:
+            keep_keys.update(('dmu_dr', 'dalpha_dr'))
         if compute_forces:
             keep_keys.add('forces')
         if compute_stress:
@@ -285,6 +324,7 @@ def _build_predictor(
             compute_force=compute_forces,
             compute_stress=compute_stress,
             compute_node_feats=full_outputs,
+            **extra_flags,
         )
         if full_outputs:
             return outputs
@@ -538,6 +578,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         compute_forces=args.compute_forces,
         compute_stress=args.compute_stress,
         full_outputs=bool(args.full_outputs),
+        compute_hessian=args.compute_hessian,
+        compute_atomic_stresses=args.compute_atomic_stresses,
+        compute_edge_forces=args.compute_edge_forces,
+        compute_dielectric_derivatives=args.compute_dielectric_derivatives,
     )
 
     inputs = [Path(path).expanduser() for path in args.inputs]

@@ -424,10 +424,10 @@ Performs Torch→JAX parameter conversion. It can also
 download and import pre-trained foundation models when `--torch-model` is not
 provided.
 
-The model builder supports `MACE` and `ScaleShiftMACE`; automatic Torch config
-extraction currently requires `ScaleShiftMACE`. Other model families (including
-LES, polar, dielectric, and magnetic models) and unsupported readouts raise an
-error rather than being converted to a different architecture.
+The model builder and automatic Torch conversion support `MACE`,
+`ScaleShiftMACE`, `AtomicDipolesMACE`, `EnergyDipolesMACE`, and
+`AtomicDielectricMACE`. LES, PolarMACE, magnetic models, and unsupported readouts
+raise an error rather than being converted to a different architecture.
 
 If `--output` is omitted the converted parameters are written to `<checkpoint>-jax.npz`.
 
@@ -442,6 +442,64 @@ models whose layers use different values. Saved configurations store these in
 `interaction_avg_num_neighbors`; older bundles without this field continue to
 use their scalar `avg_num_neighbors`. Previously converted bundles with differing
 Torch layer normalizations need to be regenerated from the original checkpoint.
+
+Conversion preserves correlation orders separately for every interaction and
+`keep_last_layer_irreps`, including models that retain vectors/tensors in the
+final layer. Legacy scalar `correlation` configurations remain supported.
+
+##### Electric property models
+
+Set `model.model_class` in gin, or pass `--model`, to select an electric model.
+Use `--loss dipole_single` for `AtomicDipolesMACE`, `--loss energy_forces_dipole`
+for `EnergyDipolesMACE`, or `--loss dipole_polar` for `AtomicDielectricMACE`.
+These models currently support one head. Dipole models require `1o` hidden
+features; dielectric models should also include `2e` features for anisotropic
+polarizability. For example, the model/loss portion of a dielectric training
+configuration can contain:
+
+```gin
+model.model_class = "AtomicDielectricMACE"
+model.hidden_irreps = "32x0e + 32x1o + 32x2e"
+model.MLP_irreps = "16x0e + 16x1o + 16x2e"
+loss.loss_cls = @mace_jax.modules.loss.DipolePolarLoss
+loss.dipole_weight = 1.0
+loss.polarizability_weight = 1.0
+train.log_errors = "DipolePolarRMSE"
+```
+
+Keep the usual dataset, radial-basis, optimizer, and run settings. Electric-only
+models do not require energy labels or energy scaling. Remove energy/force loss
+weight bindings inherited from an energy-training configuration. Training label
+keys can be set with `--dipole-key` and `--polarizability-key`.
+
+XYZ/ASE and HDF5 inputs preserve per-atom `charges` and graph `total_charge`.
+ASE initial charges are used when `charges` is absent; absent `total_charge`
+defaults to their sum (zero if no charges are supplied). The dielectric model
+predicts charges constrained to this total. Legacy dipole and energy/dipole
+model outputs and training labels use **Debye**, while dielectric model dipoles
+use **e Angstrom**. The ASE calculator converts legacy dipoles to e Angstrom.
+Polarizabilities use Angstrom cubed. `polarizability_sh` contains the six
+irreducible components; `polarizability` is a symmetric 3-by-3 tensor.
+
+##### Hessians and local stresses
+
+Energy models accept `compute_hessian=True`, `compute_edge_forces=True`, and
+`compute_atomic_stresses=True`. Hessians have shape `[3*N, N, 3]`; the corresponding
+matrix is `hessian.reshape(3*N, 3*N)`. Electric models accept
+`compute_dielectric_derivatives=True`, returning `dmu_dr` with shape `[3,N,3]`
+and, for dielectric models, `dalpha_dr` with shape `[9,N,3]`. Use these flags as
+static arguments or close over them when applying `jax.jit`.
+
+The prediction CLI exposes the same options as `--compute-hessian`,
+`--compute-edge-forces`, `--compute-atomic-stresses`, and
+`--compute-dielectric-derivatives`, splitting the results by configuration.
+Hessians require quadratic storage in atom count; request them only when needed.
+
+With `MACEJAXCalculator`, use `calc.get_hessian(atoms)`,
+`calc.get_atomic_virials(atoms)`, or `atoms.get_stresses()`. Atomic virials sum to
+the total virial. Atomic stresses use the full configuration volume, sum to the
+total stress, and vanish for nonperiodic or zero-volume cells. Public
+`edge_forces` follow Torch MACE's sign convention, `+dE/d(edge_vector)`.
 
 You can try this with one of the released foundation models (downloaded automatically):
 

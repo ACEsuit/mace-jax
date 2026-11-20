@@ -59,6 +59,8 @@ _LOSS_FACTORIES = {
     'virials': modules.WeightedEnergyForcesVirialsLoss,
     'dipole': modules.WeightedEnergyForcesDipoleLoss,
     'energy_forces_dipole': modules.WeightedEnergyForcesDipoleLoss,
+    'dipole_single': modules.DipoleSingleLoss,
+    'dipole_polar': modules.DipolePolarLoss,
     'l1l2': modules.WeightedEnergyForcesL1L2Loss,
     'l1l2energyforces': modules.WeightedEnergyForcesL1L2Loss,
 }
@@ -728,6 +730,21 @@ def _apply_run_options(args: argparse.Namespace) -> None:
 
 
 def _apply_dataset_options(args: argparse.Namespace) -> None:
+    _bind_if_not_none(
+        'mace_jax.tools.gin_model.model.model_class', getattr(args, 'model_class', None)
+    )
+    for key in ('dipole_key', 'polarizability_key'):
+        _bind_if_not_none(
+            f'mace_jax.tools.gin_datasets.datasets.{key}', getattr(args, key, None)
+        )
+    if getattr(args, 'model_class', None) in (
+        'AtomicDipolesMACE',
+        'AtomicDielectricMACE',
+    ):
+        gin.bind_parameter(
+            'mace_jax.tools.gin_datasets.datasets.atomic_energies_override', 'zero'
+        )
+
     def _log_primary(message: str, *values) -> None:
         process_index = args.process_index
         if process_index is None:
@@ -1082,12 +1099,32 @@ def _apply_loss_options(args: argparse.Namespace) -> None:
     if not loss_choice and not configured_weights:
         return
     factory = _LOSS_FACTORIES.get(loss_choice, modules.WeightedEnergyForcesStressLoss)
+    if not loss_choice:
+        try:
+            factory = gin.query_parameter('loss.loss_cls')
+        except ValueError:
+            pass
     gin.bind_parameter('loss.loss_cls', factory)
     for param_name, value in configured_weights.items():
         gin.bind_parameter(f'loss.{param_name}', value)
     if args.log_errors is None and loss_choice in ('l1l2', 'l1l2energyforces'):
         gin.bind_parameter(
             'mace_jax.tools.gin_functions.train.log_errors', 'PerAtomMAE'
+        )
+    if args.log_errors is None and loss_choice in (
+        'dipole_single',
+        'dipole_polar',
+        'energy_forces_dipole',
+        'dipole',
+    ):
+        gin.bind_parameter(
+            'mace_jax.tools.gin_functions.train.log_errors',
+            {
+                'dipole_single': 'DipoleRMSE',
+                'dipole_polar': 'DipolePolarRMSE',
+                'energy_forces_dipole': 'EnergyDipoleRMSE',
+                'dipole': 'EnergyDipoleRMSE',
+            }[loss_choice],
         )
 
 
@@ -1116,6 +1153,10 @@ def _resolve_swa_loss_factory(
     if not requested and not stage_loss_kwargs:
         return None
     key = requested or getattr(args, 'loss', None)
+    if not key:
+        return gin.get_bindings('loss').get(
+            'loss_cls', modules.WeightedEnergyForcesStressLoss
+        )
     return _LOSS_FACTORIES.get(key, modules.WeightedEnergyForcesStressLoss)
 
 

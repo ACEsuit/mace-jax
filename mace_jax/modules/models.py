@@ -5,7 +5,7 @@ from typing import Any
 
 import jax.numpy as jnp
 import numpy as np
-from e3nn_jax import Irrep, Irreps
+from e3nn_jax import Irrep, Irreps, reduced_tensor_product_basis
 from flax import nnx
 
 from mace_jax.adapters.e3nn.math import (
@@ -29,8 +29,12 @@ from .blocks import (
     AtomicEnergiesBlock,
     EquivariantProductBasisBlock,
     InteractionBlock,
+    LinearDipolePolarReadoutBlock,
+    LinearDipoleReadoutBlock,
     LinearNodeEmbeddingBlock,
     LinearReadoutBlock,
+    NonLinearDipolePolarReadoutBlock,
+    NonLinearDipoleReadoutBlock,
     NonLinearReadoutBlock,
     RadialEmbeddingBlock,
     ScaleShiftBlock,
@@ -122,7 +126,7 @@ class MACE(nnx.Module):
         max_ell: int,
         interaction_cls: type[InteractionBlock],
         interaction_cls_first: type[InteractionBlock],
-        atomic_energies: np.ndarray,
+        atomic_energies: np.ndarray | None,
         atomic_numbers: tuple[int, ...],
         num_interactions: int = 3,
         num_elements: int = 1,
@@ -140,6 +144,7 @@ class MACE(nnx.Module):
         use_last_readout_only: bool = False,
         use_embedding_readout: bool = False,
         collapse_hidden_irreps: bool = True,
+        keep_last_layer_irreps: bool = False,
         distance_transform: str = 'None',
         edge_irreps: Irreps | None = None,
         radial_MLP: Sequence[int] | None = None,
@@ -192,6 +197,7 @@ class MACE(nnx.Module):
         self.use_last_readout_only = use_last_readout_only
         self.use_embedding_readout = use_embedding_readout
         self.collapse_hidden_irreps = collapse_hidden_irreps
+        self.keep_last_layer_irreps = keep_last_layer_irreps
         self.distance_transform = distance_transform
         self.edge_irreps = edge_irreps
         self.radial_MLP = radial_MLP
@@ -214,7 +220,11 @@ class MACE(nnx.Module):
         self._correlation = correlation
 
         self._atomic_numbers = jnp.asarray(self.atomic_numbers, dtype=jnp.int32)
-        self._atomic_energies = jnp.asarray(self.atomic_energies, dtype=default_dtype())
+        self._atomic_energies = (
+            None
+            if atomic_energies is None
+            else jnp.asarray(atomic_energies, dtype=default_dtype())
+        )
 
         hidden_irreps = (
             self.hidden_irreps
@@ -228,11 +238,7 @@ class MACE(nnx.Module):
         )
         self._hidden_irreps = hidden_irreps
         self._mlp_irreps = mlp_irreps
-        hidden_irreps_out = (
-            Irreps(str(hidden_irreps[0]))
-            if self.num_interactions == 1 and self.collapse_hidden_irreps
-            else hidden_irreps
-        )
+        hidden_irreps_out = self._layer_irreps(0)
 
         consts = _prepare_normalize2mom_consts(normalize2mom_consts)
         self._normalize2mom_consts = consts
@@ -313,12 +319,13 @@ class MACE(nnx.Module):
         radial_mlp = (
             list(self.radial_MLP) if self.radial_MLP is not None else [64, 64, 64]
         )
-        self.atomic_energies_fn = AtomicEnergiesBlock(self._atomic_energies, rngs=rngs)
+        if self._atomic_energies is not None:
+            self.atomic_energies_fn = AtomicEnergiesBlock(
+                self._atomic_energies, rngs=rngs
+            )
         edge_irreps_first = None
         if self.use_edge_irreps_first and self.edge_irreps is not None:
-            edge_irreps_first = Irreps(
-                f'{self.edge_irreps.count(Irrep(0, 1))}x0e'
-            )
+            edge_irreps_first = Irreps(f'{self.edge_irreps.count(Irrep(0, 1))}x0e')
 
         interactions: list[InteractionBlock] = []
         products: list[EquivariantProductBasisBlock] = []
@@ -354,20 +361,10 @@ class MACE(nnx.Module):
         products.append(product_first)
 
         if not self.use_last_readout_only:
-            readouts.append(
-                LinearReadoutBlock(
-                    hidden_irreps_out,
-                    Irreps(f'{len(self._heads)}x0e'),
-                    self.equivariance_config,
-                    rngs=rngs,
-                )
-            )
+            readouts.append(self._make_readout(0, hidden_irreps_out, rngs))
 
         for idx in range(self.num_interactions - 1):
-            if idx == self.num_interactions - 2:
-                hidden_irreps_out = Irreps(str(hidden_irreps[0]))
-            else:
-                hidden_irreps_out = hidden_irreps
+            hidden_irreps_out = self._layer_irreps(idx + 1)
 
             interaction = self.interaction_cls(
                 node_attrs_irreps=node_attr_irreps,
@@ -397,31 +394,38 @@ class MACE(nnx.Module):
             )
             products.append(product)
 
-            if idx == self.num_interactions - 2:
-                readouts.append(
-                    self.readout_cls(
-                        hidden_irreps_out,
-                        (len(self._heads) * mlp_irreps).simplify(),
-                        self.gate,
-                        Irreps(f'{len(self._heads)}x0e'),
-                        len(self._heads),
-                        self.equivariance_config,
-                        rngs=rngs,
-                    )
-                )
-            elif not self.use_last_readout_only:
-                readouts.append(
-                    LinearReadoutBlock(
-                        hidden_irreps,
-                        Irreps(f'{len(self._heads)}x0e'),
-                        self.equivariance_config,
-                        rngs=rngs,
-                    )
-                )
+            if idx == self.num_interactions - 2 or not self.use_last_readout_only:
+                readouts.append(self._make_readout(idx + 1, hidden_irreps_out, rngs))
 
         self.interactions = nnx.List(interactions)
         self.products = nnx.List(products)
         self.readouts = nnx.List(readouts)
+
+    def _layer_irreps(self, layer):
+        collapse = (
+            layer == self.num_interactions - 1
+            and not self.keep_last_layer_irreps
+            and (self.num_interactions > 1 or self.collapse_hidden_irreps)
+        )
+        return Irreps(str(self._hidden_irreps[0])) if collapse else self._hidden_irreps
+
+    def _make_readout(self, layer, irreps, rngs):
+        if layer == self.num_interactions - 1 and layer > 0:
+            return self.readout_cls(
+                irreps,
+                (len(self._heads) * self._mlp_irreps).simplify(),
+                self.gate,
+                Irreps(f'{len(self._heads)}x0e'),
+                len(self._heads),
+                self.equivariance_config,
+                rngs=rngs,
+            )
+        return LinearReadoutBlock(
+            irreps,
+            Irreps(f'{len(self._heads)}x0e'),
+            self.equivariance_config,
+            rngs=rngs,
+        )
 
     def __call__(
         self,
@@ -804,3 +808,219 @@ class ScaleShiftMACE(MACE):
             'displacement': ctx.displacement,
             'lammps_natoms': ctx.interaction_kwargs.lammps_natoms,
         }
+
+
+class _TensorMACE(MACE):
+    """Shared interaction stack for Torch-compatible electric property models."""
+
+    tensor_kind = 'dipole'
+
+    def __init__(self, *, atomic_energies=None, rngs, **kwargs):
+        if self.tensor_kind == 'energy_dipole' and atomic_energies is None:
+            raise ValueError('EnergyDipolesMACE requires atomic_energies.')
+        if self.tensor_kind != 'energy_dipole' and atomic_energies is not None:
+            raise ValueError('Dipole/dielectric models require atomic_energies=None.')
+        if len(kwargs.get('heads') or ['Default']) != 1:
+            raise ValueError('Electric property models currently support one head.')
+        for flag in (
+            'pair_repulsion',
+            'use_last_readout_only',
+            'use_embedding_readout',
+        ):
+            if kwargs.get(flag, False):
+                raise ValueError(
+                    f'{flag} is not supported by electric property models.'
+                )
+        kwargs.setdefault('use_reduced_cg', False)
+        super().__init__(atomic_energies=atomic_energies, rngs=rngs, **kwargs)
+        if not self._hidden_irreps.count(Irrep('1o')):
+            raise ValueError('Dipole predictions require 1o hidden irreps.')
+
+    def _layer_irreps(self, layer):
+        if (
+            layer != self.num_interactions - 1
+            or layer == 0
+            or self.tensor_kind == 'dielectric'
+        ):
+            return self._hidden_irreps
+        allowed = ('1o',) if self.tensor_kind == 'dipole' else ('0e', '1o')
+        return Irreps(
+            [(mul, ir) for mul, ir in self._hidden_irreps if str(ir) in allowed]
+        )
+
+    def _make_readout(self, layer, irreps, rngs):
+        nonlinear = layer > 0 and layer == self.num_interactions - 1
+        if self.tensor_kind == 'dielectric':
+            cls = (
+                NonLinearDipolePolarReadoutBlock
+                if nonlinear
+                else LinearDipolePolarReadoutBlock
+            )
+            options = dict(use_polarizability=True)
+        else:
+            cls = NonLinearDipoleReadoutBlock if nonlinear else LinearDipoleReadoutBlock
+            options = dict(dipole_only=self.tensor_kind == 'dipole')
+        if nonlinear:
+            options.update(MLP_irreps=self._mlp_irreps, gate=self.gate)
+        return cls(
+            irreps, equivariance_config=self.equivariance_config, rngs=rngs, **options
+        )
+
+    def _tensor_outputs(self, data, *, compute_node_feats=True):
+        ctx = prepare_graph(data)
+        attrs = data['node_attrs']
+        feats = self.node_embedding(attrs)
+        if self._embedding_specs:
+            feats += self.joint_embedding(
+                data['batch'], {name: data[name] for name in self._embedding_names}
+            )
+        edge_attrs = self.spherical_harmonics(ctx.vectors)
+        edge_feats, cutoff = self.radial_embedding(
+            ctx.lengths,
+            attrs,
+            data['edge_index'],
+            self._atomic_numbers,
+            node_attrs_index=data.get('node_attrs_index'),
+        )
+        values, features = [], []
+        for interaction, product, readout in zip(
+            self.interactions, self.products, self.readouts
+        ):
+            feats, sc = interaction(
+                node_attrs=attrs,
+                node_feats=feats,
+                edge_attrs=edge_attrs,
+                edge_feats=edge_feats,
+                edge_index=data['edge_index'],
+                cutoff=cutoff,
+            )
+            feats = product(
+                node_feats=feats,
+                sc=sc,
+                node_attrs=attrs,
+                node_attrs_index=data.get('node_attrs_index'),
+            )
+            value = readout(feats)
+            values.append(getattr(value, 'array', value))
+            features.append(getattr(feats, 'array', feats))
+        mask = data.get('node_mask', jnp.ones(attrs.shape[0], dtype=attrs.dtype))
+        node_out = sum(values) * mask[:, None]
+        batch = data['batch']
+
+        def pool(x):
+            return scatter_sum(x, index=batch, dim=0, dim_size=ctx.num_graphs)
+
+        result = {
+            'node_feats': jnp.concatenate(features, axis=-1)
+            if compute_node_feats
+            else None,
+            'dmu_dr': None,
+            'dalpha_dr': None,
+        }
+        if self.tensor_kind == 'dielectric':
+            counts = pool(mask)
+            total_charge = jnp.asarray(
+                data.get('total_charge', jnp.zeros(ctx.num_graphs))
+            ).reshape(-1)
+            excess = (pool(node_out[:, 0]) - total_charge) / jnp.maximum(counts, 1)
+            charges = (node_out[:, 0] - excess[batch]) * mask
+            dipoles = node_out[:, 2:5]
+            polar_sh = pool(
+                jnp.concatenate((node_out[:, 1:2], node_out[:, 5:]), axis=-1)
+            )
+            result.update(
+                charges=charges,
+                polarizability_sh=polar_sh,
+                polarizability=jnp.einsum(
+                    'aij,ba->bij', self.change_of_basis[...], polar_sh
+                ),
+            )
+            baseline = pool(charges[:, None] * data['positions'])
+        else:
+            dipoles = node_out if self.tensor_kind == 'dipole' else node_out[:, 1:]
+            charges = jnp.asarray(
+                data.get('charges', jnp.zeros(attrs.shape[0]))
+            ).reshape(-1)
+            # Legacy AtomicDipoles/EnergyDipoles outputs are in Debye. The
+            # dielectric model instead uses e Angstrom, as in Torch MACE.
+            baseline = pool(charges[:, None] * data['positions'] * mask[:, None]) * (
+                299792458.0 * 1.602176634e-19 / 1e-11
+            )
+        result.update(dipole=pool(dipoles) + baseline, atomic_dipoles=dipoles)
+        if self.tensor_kind == 'energy_dipole':
+            node_e0 = self.atomic_energies_fn(attrs)[
+                ctx.num_atoms_arange, ctx.node_heads
+            ]
+            # Include learned readouts in node energies as well as graph energies.
+            # Upstream EnergyDipolesMACE currently returns only E0 at node level.
+            node_terms = (
+                jnp.stack([node_e0] + [v[:, 0] for v in values], axis=-1)
+                * mask[:, None]
+            )
+            contributions = pool(node_terms)
+            result.update(
+                energy=contributions.sum(axis=-1),
+                contributions=contributions,
+                node_energy=node_terms.sum(axis=-1),
+                displacement=ctx.displacement,
+            )
+        return result
+
+
+@nxx_auto_import_from_torch(allow_missing_mapper=True)
+@add_output_interface
+class AtomicDipolesMACE(_TensorMACE):
+    """Predict atomic and total dipoles in Debye, including fixed charges."""
+
+    def __call__(self, data, *, compute_node_feats=True):
+        return self._tensor_outputs(data, compute_node_feats=compute_node_feats)
+
+
+@nxx_auto_import_from_torch(allow_missing_mapper=True)
+@add_output_interface
+class EnergyDipolesMACE(_TensorMACE):
+    """Joint energy and dipole model, with differentiable energy outputs."""
+
+    tensor_kind = 'energy_dipole'
+
+    def __call__(self, data, *, compute_node_feats=True):
+        return self._tensor_outputs(data, compute_node_feats=compute_node_feats)
+
+
+@nxx_auto_import_from_torch(allow_missing_mapper=True)
+@add_output_interface
+class AtomicDielectricMACE(_TensorMACE):
+    """Charge-conserving dipoles (e Angstrom) and symmetric polarizabilities."""
+
+    tensor_kind = 'dielectric'
+
+    def __init__(self, *, use_polarizability=True, means_stds=None, rngs, **kwargs):
+        if not use_polarizability:
+            raise ValueError('AtomicDielectricMACE requires use_polarizability=True.')
+        self.use_polarizability = True
+        super().__init__(rngs=rngs, **kwargs)
+        basis = reduced_tensor_product_basis('ij=ji', i=Irreps('1o')).array
+        self.change_of_basis = ConfigVar(
+            jnp.asarray(basis.transpose(2, 0, 1), dtype=default_dtype())
+        )
+        # Upstream checkpoints carry these statistics but do not apply them in
+        # forward(). Preserve them for round trips without altering predictions.
+        for name, shape, value in (
+            ('dipole_mean', (3,), 0.0),
+            ('dipole_std', (3,), 1.0),
+            ('polarizability_mean', (3, 3), 0.0),
+            ('polarizability_std', (3, 3), 1.0),
+        ):
+            setattr(
+                self,
+                name,
+                ConfigVar(
+                    jnp.asarray(
+                        (means_stds or {}).get(name, np.full(shape, value)),
+                        dtype=default_dtype(),
+                    )
+                ),
+            )
+
+    def __call__(self, data, *, compute_node_feats=True):
+        return self._tensor_outputs(data, compute_node_feats=compute_node_feats)

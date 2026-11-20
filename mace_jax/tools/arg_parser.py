@@ -18,6 +18,20 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument('--name', help='Run name used in log files.', default=None)
     parser.add_argument(
+        '--model',
+        dest='model_class',
+        default=None,
+        choices=[
+            'MACE',
+            'ScaleShiftMACE',
+            'AtomicDipolesMACE',
+            'EnergyDipolesMACE',
+            'AtomicDielectricMACE',
+        ],
+    )
+    parser.add_argument('--dipole-key', '--dipole_key', default=None)
+    parser.add_argument('--polarizability-key', '--polarizability_key', default=None)
+    parser.add_argument(
         '--embedding-specs',
         '--embedding_specs',
         type=json.loads,
@@ -611,7 +625,7 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
             'DipolePolarRMSE',
             'EnergyDipoleRMSE',
         ],
-        default='PerAtomRMSE',
+        default=None,
         help='Select which error summary to log each interval.',
     )
     parser.add_argument(
@@ -657,6 +671,8 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
             'virials',
             'dipole',
             'energy_forces_dipole',
+            'dipole_single',
+            'dipole_polar',
             'l1l2',
             'l1l2energyforces',
         ],
@@ -775,6 +791,8 @@ def build_cli_arg_parser() -> argparse.ArgumentParser:
             'virials',
             'dipole',
             'energy_forces_dipole',
+            'dipole_single',
+            'dipole_polar',
             'l1l2',
         ],
         default=None,

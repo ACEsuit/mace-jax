@@ -17,6 +17,13 @@ def extract_config_mace_model(torch_model):
     Chebyshev bases. Supply that size on shallow module copies so extraction
     works without changing the source model or copying its parameter tensors.
     """
+    if type(torch_model).__name__ in (
+        'MACE',
+        'AtomicDipolesMACE',
+        'EnergyDipolesMACE',
+        'AtomicDielectricMACE',
+    ):
+        return _extract_unscaled_config(torch_model)
     from mace.tools.scripts_utils import (  # noqa: PLC0415
         extract_config_mace_model as torch_extract_config,
     )
@@ -38,6 +45,7 @@ def extract_config_mace_model(torch_model):
     config = torch_extract_config(extraction_model)
     if 'error' not in config:
         _copy_neighbor_normalizations(torch_model, config)
+        _copy_product_metadata(torch_model, config)
     if (
         'error' not in config
         and not hasattr(torch_model, 'use_edge_irreps_first')
@@ -45,6 +53,119 @@ def extract_config_mace_model(torch_model):
     ):
         config['use_edge_irreps_first'] = _infer_use_edge_irreps_first(torch_model)
     return config
+
+
+def _extract_unscaled_config(model):
+    """Extract actual layers, including tensor readouts unsupported upstream."""
+    from mace.tools.scripts_utils import extract_radial_MLP  # noqa: PLC0415
+
+    readout = model.readouts[-1]
+    gate = None
+    for module in readout.modules():
+        if hasattr(module, '_act_scalar') or hasattr(module, '_act_gate'):
+            gate = getattr(module, '_act_scalar', None) or getattr(
+                module, '_act_gate', None
+            )
+        if hasattr(module, 'acts'):
+            for act in module.acts:
+                if hasattr(act, 'f'):
+                    gate = act.f
+                    break
+        if gate is not None:
+            break
+    radial = model.radial_embedding
+    basis_name = type(radial.bessel_fn).__name__
+    transform = getattr(radial, 'distance_transform', None)
+    heads = getattr(model, 'heads', ['Default'])
+    config = dict(
+        torch_model_class=type(model).__name__,
+        r_max=float(model.r_max),
+        num_bessel=radial.out_dim,
+        num_polynomial_cutoff=int(radial.cutoff_fn.p),
+        max_ell=model.spherical_harmonics._lmax,
+        interaction_cls=type(model.interactions[-1]),
+        interaction_cls_first=type(model.interactions[0]),
+        num_interactions=len(model.interactions),
+        num_elements=len(model.atomic_numbers),
+        hidden_irreps=str(model.products[0].linear.irreps_out),
+        MLP_irreps=str(getattr(readout, 'hidden_irreps', '1x0e')),
+        atomic_numbers=model.atomic_numbers.detach().cpu().numpy(),
+        atomic_energies=(
+            model.atomic_energies_fn.atomic_energies.detach().cpu().numpy()
+            if hasattr(model, 'atomic_energies_fn')
+            else None
+        ),
+        avg_num_neighbors=float(model.interactions[0].avg_num_neighbors),
+        gate=gate,
+        heads=heads,
+        radial_MLP=extract_radial_MLP(model),
+        radial_type={
+            'BesselBasis': 'bessel',
+            'GaussianBasis': 'gaussian',
+            'ChebychevBasis': 'chebyshev',
+        }.get(basis_name, basis_name),
+        distance_transform=(
+            {'AgnesiTransform': 'Agnesi', 'SoftTransform': 'Soft'}.get(
+                type(transform).__name__, None
+            )
+        ),
+        readout_cls=type(readout),
+        use_reduced_cg=getattr(model, 'use_reduced_cg', False),
+        use_so3=getattr(model, 'use_so3', False),
+        use_agnostic_product=getattr(model, 'use_agnostic_product', False),
+        use_last_readout_only=getattr(model, 'use_last_readout_only', False),
+        use_embedding_readout=hasattr(model, 'embedding_readout'),
+        embedding_specs=getattr(model, 'embedding_specs', None),
+        edge_irreps=getattr(model, 'edge_irreps', None),
+        use_edge_irreps_first=getattr(model, 'use_edge_irreps_first', False),
+        apply_cutoff=getattr(model, 'apply_cutoff', True),
+        pair_repulsion=hasattr(model, 'pair_repulsion_fn'),
+    )
+    if type(model).__name__ == 'MACE':
+        from e3nn import o3  # noqa: PLC0415
+
+        config['MLP_irreps'] = str(
+            o3.Irreps(
+                [(mul // len(heads), ir) for mul, ir in o3.Irreps(config['MLP_irreps'])]
+            )
+        )
+    if type(model).__name__ == 'AtomicDielectricMACE':
+        config['use_polarizability'] = bool(model.use_polarizability)
+        config['means_stds'] = {
+            name: getattr(model, name).detach().cpu().numpy()
+            for name in (
+                'dipole_mean',
+                'dipole_std',
+                'polarizability_mean',
+                'polarizability_std',
+            )
+        }
+    _copy_neighbor_normalizations(model, config)
+    _copy_product_metadata(model, config)
+    return config
+
+
+def _copy_product_metadata(torch_model, config) -> None:
+    """Recover layer-specific product orders and the final representation."""
+    products = getattr(torch_model, 'products', None)
+    if not products:
+        return
+    orders = []
+    for product in products:
+        contraction = product.symmetric_contractions
+        if hasattr(contraction, 'contraction_degree'):
+            order = int(contraction.contraction_degree)
+        else:
+            order = len(contraction.contractions[0].weights) + 1
+        orders.append(order)
+    config['correlation'] = orders if len(set(orders)) > 1 else orders[0]
+    if type(torch_model).__name__ in ('MACE', 'ScaleShiftMACE'):
+        from e3nn import o3  # noqa: PLC0415
+
+        final = o3.Irreps(str(products[-1].linear.irreps_out))
+        config['keep_last_layer_irreps'] = bool(
+            getattr(torch_model, 'keep_last_layer_irreps', False)
+        ) or any(ir != o3.Irrep('0e') for _, ir in final)
 
 
 def _copy_neighbor_normalizations(torch_model, config) -> None:

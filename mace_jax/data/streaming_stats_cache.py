@@ -20,8 +20,8 @@ import pickle
 from collections.abc import Sequence
 from pathlib import Path
 
-# Version 2 uses the corrected neighbor search for tilted, partially periodic cells.
-STREAMING_STATS_CACHE_VERSION = 2
+# Version 3 adds charges and electric-property keys to cached graphs and metadata.
+STREAMING_STATS_CACHE_VERSION = 3
 
 
 def stats_cache_path(dataset_path: Path) -> Path:
@@ -75,6 +75,8 @@ def spec_fingerprint(
         'energy_key': spec.energy_key,
         'forces_key': spec.forces_key,
         'stress_key': spec.stress_key,
+        'dipole_key': spec.dipole_key,
+        'polarizability_key': spec.polarizability_key,
         'prefactor_stress': float(spec.prefactor_stress),
         'weight': float(spec.weight),
         'config_type_weights': normalized_config_type_weights(spec.config_type_weights),
